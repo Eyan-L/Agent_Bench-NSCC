@@ -1,0 +1,8 @@
+[
+  {"dir": "/path/to/trace/code_agent_trace_new/agent1", "tag": "code", "name": "code1"},
+  {"dir": "/path/to/trace/code_agent_trace_new/agent2", "tag": "code", "name": "code2"},
+  {"dir": "/path/to/trace/doc_agent_trace/agent1", "tag": "doc", "name": "doc1"},
+  {"dir": "/path/to/synthetic_trace/synthetic_search", "tag": "synthetic_search", "name": "syn_search1"},
+  {"dir": "/path/to/synthetic_trace/synthetic_code_agent1", "tag": "synthetic_code", "name": "syn_code1"},
+  {"dir": "/path/to/synthetic_trace/synthetic_doc_agent1", "tag": "synthetic_doc", "name": "syn_doc1"}
+]

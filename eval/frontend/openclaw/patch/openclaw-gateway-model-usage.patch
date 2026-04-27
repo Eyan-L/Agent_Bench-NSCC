@@ -1,0 +1,48 @@
+--- dist/server-plugin-bootstrap-CHUNK.js	2026-04-24 02:14:37.984015102 +0000
++++ dist/server-plugin-bootstrap-CHUNK.js	2026-04-24 08:08:49.537089975 +0000
+@@ -176,6 +176,10 @@
+ import { randomBytes, randomUUID } from "node:crypto";
+ import { CURRENT_SESSION_VERSION, SessionManager } from "@mariozechner/pi-coding-agent";
+ import chokidar from "chokidar";
++/* OC_PATCH_GATEWAY_AGENT_USAGE_BEGIN */
++import { n as __ocGwEmitDiagnosticEvent, r as __ocGwIsDiagnosticsEnabled } from "./diagnostic-events-DU0Yv8MX.js";
++import { r as __ocGwHasNonzeroUsage } from "./usage-CqPmLqIM.js";
++/* OC_PATCH_GATEWAY_AGENT_USAGE_END */
+ //#region src/gateway/control-plane-audit.ts
+ function normalizePart$1(value, fallback) {
+ 	if (typeof value !== "string") return fallback;
+@@ -591,6 +595,34 @@
+ 			summary: "completed",
+ 			result
+ 		};
++		/* OC_PATCH_GATEWAY_AGENT_USAGE_BEGIN */
++		try {
++		    const __ocAgentMeta = result?.meta?.agentMeta;
++		    const __ocU = __ocAgentMeta?.usage;
++		    const __ocCfg = (typeof params?.context?.cfg === "object" && params.context.cfg) || (typeof params?.cfg === "object" && params.cfg) || {};
++		    if (__ocGwIsDiagnosticsEnabled(__ocCfg) && __ocGwHasNonzeroUsage(__ocU)) {
++		        const __ocInput = __ocU.input ?? 0;
++		        const __ocOutput = __ocU.output ?? 0;
++		        const __ocCacheRead = __ocU.cacheRead ?? 0;
++		        const __ocCacheWrite = __ocU.cacheWrite ?? 0;
++		        const __ocPromptTokens = __ocInput + __ocCacheRead + __ocCacheWrite;
++		        const __ocTotal = __ocU.total ?? (__ocPromptTokens + __ocOutput);
++		        __ocGwEmitDiagnosticEvent({
++		            type: "model.usage",
++		            sessionKey: params?.ingressOpts?.sessionKey ?? __ocAgentMeta?.sessionKey ?? "gateway:agent",
++		            sessionId: __ocAgentMeta?.sessionId,
++		            channel: params?.ingressOpts?.channel ?? "gateway",
++		            provider: __ocAgentMeta?.provider,
++		            model: __ocAgentMeta?.model,
++		            usage: { input: __ocInput, output: __ocOutput, cacheRead: __ocCacheRead, cacheWrite: __ocCacheWrite, promptTokens: __ocPromptTokens, total: __ocTotal },
++		            lastCallUsage: __ocAgentMeta?.lastCallUsage,
++		            durationMs: result?.meta?.durationMs
++		        });
++		    }
++		} catch (__ocErr) {
++		    try { console.error("oc-eval gateway model.usage emit failed: " + (__ocErr && __ocErr.message || __ocErr)); } catch (_) {}
++		}
++		/* OC_PATCH_GATEWAY_AGENT_USAGE_END */
+ 		setGatewayDedupeEntry({
+ 			dedupe: params.context.dedupe,
+ 			key: `agent:${params.idempotencyKey}`,

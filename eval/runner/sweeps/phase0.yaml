@@ -1,0 +1,49 @@
+sweep_name: "phase0_sanity"
+plan_version: "v1.0"
+
+model:
+  name: "Qwen/Qwen3.6-35B-A3B"
+  endpoint: "http://localhost:8000/v1"
+  temperature: 0.0
+  max_tokens: 4096
+
+serving_configs:
+  - config_id: "vllm-default"
+    preset: "default"
+    max_num_seqs: 128
+    enable_prefix_caching: true
+    additional_flags: {}
+
+conditions:
+  # - condition_id: "ar_issue_only"
+  #   condition_type: "ar_issue_only"
+  #   description: "AR baseline: issue text only, single-shot"
+    
+  # - condition_id: "ar_static_context"
+  #   condition_type: "ar_static_context"
+  #   description: "AR baseline: issue + offline static context"
+    
+  - condition_id: "openclaw_agent"
+    condition_type: "openclaw_agent"
+    description: "OpenClaw code agent: full trajectory"
+    agent:
+      max_steps: 500
+      max_time_seconds: 1800
+      retry_limit: 10
+
+seeds: [42]
+
+instances:
+  - "astropy__astropy-12907"
+
+repo_mapping:
+  "astropy__astropy-12907":
+    repo_id: "astropy/astropy"
+    base_commit: "d16bfe05a744909de4b27f5875fe0d4ed41ce607"
+
+container_image: "swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest"
+wall_clock_budget_seconds: 1800
+output_dir: "data/runs/phase0"
+
+parallel_limit_gpu: 1
+parallel_limit_cpu_cores: 8

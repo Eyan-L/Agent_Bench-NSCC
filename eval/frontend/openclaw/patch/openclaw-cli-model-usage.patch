@@ -1,0 +1,46 @@
+--- dist/agent-command-CHUNK.js	2026-04-24 02:14:34.895958685 +0000
++++ dist/agent-command-CHUNK.js	2026-04-24 08:02:48.731294045 +0000
+@@ -31,6 +31,10 @@
+ import { t as clearSessionAuthProfileOverride } from "./session-override-DjycqYZO.js";
+ import { n as applyVerboseOverride } from "./level-overrides-DokoW8_5.js";
+ import { n as prependInternalEventContext, t as persistSessionEntry$1 } from "./attempt-execution.shared-D208HO4M.js";
++/* OC_PATCH_MODEL_USAGE_BEGIN */
++import { n as __ocEmitDiagnosticEvent, r as __ocIsDiagnosticsEnabled } from "./diagnostic-events-DU0Yv8MX.js";
++import { r as __ocHasNonzeroUsage } from "./usage-CqPmLqIM.js";
++/* OC_PATCH_MODEL_USAGE_END */
+ //#region src/agents/agent-runtime-config.ts
+ async function resolveAgentRuntimeConfig(runtime, params) {
+ 	const loadedRaw = loadConfig();
+@@ -719,6 +723,32 @@
+ 					}
+ 				});
+ 			}
++			/* OC_PATCH_MODEL_USAGE_BEGIN */
++			try {
++			    const __ocUsage = result?.meta?.agentMeta?.usage;
++			    if (__ocIsDiagnosticsEnabled(cfg) && __ocHasNonzeroUsage(__ocUsage)) {
++			        const __ocInput = __ocUsage.input ?? 0;
++			        const __ocOutput = __ocUsage.output ?? 0;
++			        const __ocCacheRead = __ocUsage.cacheRead ?? 0;
++			        const __ocCacheWrite = __ocUsage.cacheWrite ?? 0;
++			        const __ocPromptTokens = __ocInput + __ocCacheRead + __ocCacheWrite;
++			        const __ocTotal = __ocUsage.total ?? (__ocPromptTokens + __ocOutput);
++			        __ocEmitDiagnosticEvent({
++			            type: "model.usage",
++			            sessionKey: sessionKey ?? sessionId,
++			            sessionId,
++			            channel: messageChannel ?? "cli",
++			            provider: fallbackProvider ?? provider,
++			            model: fallbackModel ?? model,
++			            usage: { input: __ocInput, output: __ocOutput, cacheRead: __ocCacheRead, cacheWrite: __ocCacheWrite, promptTokens: __ocPromptTokens, total: __ocTotal },
++			            lastCallUsage: result?.meta?.agentMeta?.lastCallUsage,
++			            durationMs: Date.now() - startedAt
++			        });
++			    }
++			} catch (__ocErr) {
++			    try { console.error("oc-eval model.usage emit failed: " + (__ocErr && __ocErr.message || __ocErr)); } catch (_) {}
++			}
++			/* OC_PATCH_MODEL_USAGE_END */
+ 			break;
+ 		} catch (err) {
+ 			if (err instanceof LiveSessionModelSwitchError) {

@@ -1,0 +1,10 @@
+upstream_repo: https://github.com/openclaw/openclaw
+upstream_version: 2026.4.22
+upstream_commit: 00bd2cf
+upstream_tag: v2026.4.22
+applied_date: 2026-04-27
+notes: |
+  Detected from active install at $HOME/.npm-global/lib/node_modules/openclaw
+  (OpenClaw 2026.4.22 (00bd2cf)).
+  CHUNK-hashed bundle filenames resolved at apply time via target_glob in
+  MANIFEST.yaml.

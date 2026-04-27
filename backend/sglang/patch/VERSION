@@ -1,0 +1,7 @@
+upstream_repo: https://github.com/sgl-project/sglang
+upstream_commit: TODO
+upstream_tag: TODO
+applied_date: 2026-04-27
+notes: |
+  Patch lifted from Agent_Bench/sglang_patch (Singularity overlay).
+  See SOURCE_MANIFEST.md for per-file mapping.

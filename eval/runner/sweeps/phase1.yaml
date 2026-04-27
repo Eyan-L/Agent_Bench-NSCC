@@ -1,0 +1,72 @@
+sweep_name: "phase1_verified_mini"
+plan_version: "v1.0"
+
+model:
+  name: "claude-sonnet-4.6"
+  endpoint: "anthropic://claude-sonnet-4.6"
+  temperature: 0.0
+  max_tokens: 4096
+
+serving_configs:
+  - config_id: "vllm-default"
+    preset: "default"
+    max_num_seqs: 128
+    enable_prefix_caching: true
+    additional_flags: {}
+
+conditions:
+  - condition_id: "ar_issue_only"
+    condition_type: "ar_issue_only"
+    description: "AR baseline: issue text only"
+    
+  - condition_id: "ar_static_context"
+    condition_type: "ar_static_context"
+    description: "AR baseline: issue + static context"
+    
+  - condition_id: "openclaw_agent"
+    condition_type: "openclaw_agent"
+    description: "OpenClaw code agent"
+    agent:
+      max_steps: 500
+      max_time_seconds: 1800
+      retry_limit: 10
+      tool_profile: "code-agent-minimal"
+      allowed_tools:
+        - "Read"
+        - "Write"
+        - "Edit"
+        - "Bash"
+        - "Glob"
+        - "Grep"
+  
+  - condition_id: "openclaw_no_retry"
+    condition_type: "ablation_no_retry"
+    description: "OpenClaw ablation: no retry (attempt cap = 1)"
+    agent:
+      max_steps: 500
+      max_time_seconds: 1800
+      retry_limit: 1
+      tool_profile: "code-agent-minimal"
+      allowed_tools:
+        - "Read"
+        - "Write"
+        - "Edit"
+        - "Bash"
+        - "Glob"
+        - "Grep"
+
+seeds: [42, 43, 44]
+
+# Verified-mini instance list (placeholder - replace with actual IDs)
+instances:
+  # TODO: Fill in actual SWE-bench Verified-mini instance IDs
+
+repo_mapping:
+  # TODO: Fill in actual repo mappings
+
+container_image: "swebench/swe-bench:latest"
+wall_clock_budget_seconds: 1800
+output_dir: "data/runs/phase1"
+
+parallel_limit_gpu: 1
+parallel_limit_cpu_cores: 8

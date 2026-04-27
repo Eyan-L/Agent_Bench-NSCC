@@ -1,0 +1,26 @@
+--- dist/extensions/diagnostics-otel/index.js.oc-orig	2026-04-24 02:14:37.201000797 +0000
++++ dist/extensions/diagnostics-otel/index.js	2026-04-24 09:16:19.234111869 +0000
+@@ -54366,6 +54366,23 @@
+ 			unsubscribe = onDiagnosticEvent((evt) => {
+ 				try {
+ 					switch (evt.type) {
++						/* OC_PATCH_TOOL_CALL_HANDLER_BEGIN */
++						case "tool.call": {
++							try {
++								if (!tracesEnabled) return;
++								const attrs = {
++									"openclaw.tool.name": evt.toolName ?? "unknown",
++									"openclaw.tool.callId": evt.toolCallId ?? "",
++									"openclaw.tool.isError": !!evt.isError,
++									"openclaw.runId": evt.runId ?? "",
++									"openclaw.sessionKey": evt.sessionKey ?? "",
++									"openclaw.sessionId": evt.sessionId ?? ""
++								};
++								spanWithDuration("openclaw.tool.call", attrs, evt.durationMs).end();
++							} catch (__e) { ctx.logger.warn?.("diagnostics-otel: tool.call handler failed: " + (__e && __e.message || __e)); }
++							return;
++						}
++						/* OC_PATCH_TOOL_CALL_HANDLER_END */
+ 						case "model.usage":
+ 							recordModelUsage(evt);
+ 							return;

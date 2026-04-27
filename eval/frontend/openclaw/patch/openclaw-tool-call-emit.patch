@@ -1,0 +1,38 @@
+--- dist/selection-CHUNK.js	2026-04-24 02:14:37.965014755 +0000
++++ dist/selection-CHUNK.js	2026-04-24 09:16:19.162111091 +0000
+@@ -116,6 +116,9 @@
+ import crypto, { randomUUID } from "node:crypto";
+ import { DefaultResourceLoader, SessionManager, createAgentSession, estimateTokens } from "@mariozechner/pi-coding-agent";
+ import { createAssistantMessageEventStream } from "@mariozechner/pi-ai";
++/* OC_PATCH_TOOL_CALL_BEGIN */
++import { n as __ocToolEmitDiagnosticEvent } from "./diagnostic-events-DU0Yv8MX.js";
++/* OC_PATCH_TOOL_CALL_END */
+ //#region src/trajectory/metadata.ts
+ function toSortedUniqueStrings(values) {
+ 	if (!values || values.length === 0) return;
+@@ -2428,6 +2431,25 @@
+ 		}
+ 	});
+ 	const endedAt = Date.now();
++	/* OC_PATCH_TOOL_CALL_BEGIN */
++	try {
++	    const __ocStartedAt = startData?.startTime;
++	    __ocToolEmitDiagnosticEvent({
++	        type: "tool.call",
++	        toolName,
++	        toolCallId,
++	        runId,
++	        sessionKey: ctx?.params?.sessionKey,
++	        sessionId: ctx?.params?.sessionId,
++	        isError: !!isToolError,
++	        startedAt: __ocStartedAt,
++	        endedAt,
++	        durationMs: typeof __ocStartedAt === "number" ? (endedAt - __ocStartedAt) : undefined
++	    });
++	} catch (__ocErr) {
++	    try { console.error("oc-eval tool.call emit failed: " + (__ocErr && __ocErr.message || __ocErr)); } catch (_) {}
++	}
++	/* OC_PATCH_TOOL_CALL_END */
+ 	emitTrackedItemEvent(ctx, {
+ 		itemId: buildToolItemId(toolCallId),
+ 		phase: "end",

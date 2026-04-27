@@ -1,0 +1,21 @@
+# Per-file patch manifest. Fill summaries when reconciling vs upstream.
+# See VERSION for upstream pin.
+patches:
+  - file: sglang/srt/managers/scheduler.py
+    upstream_path: python/sglang/srt/managers/scheduler.py
+    summary: TODO
+  - file: sglang/srt/managers/scheduler_metrics_mixin.py
+    upstream_path: python/sglang/srt/managers/scheduler_metrics_mixin.py
+    summary: TODO
+  - file: sglang/srt/entrypoints/openai/serving_chat.py
+    upstream_path: python/sglang/srt/entrypoints/openai/serving_chat.py
+    summary: TODO
+  - file: sglang/srt/entrypoints/openai/serving_completions.py
+    upstream_path: python/sglang/srt/entrypoints/openai/serving_completions.py
+    summary: TODO
+  - file: sglang/srt/mem_cache/hiradix_cache.py
+    upstream_path: python/sglang/srt/mem_cache/hiradix_cache.py
+    summary: TODO
+  - file: sglang/srt/metrics/collector.py
+    upstream_path: python/sglang/srt/metrics/collector.py
+    summary: TODO

@@ -1,0 +1,28 @@
+# Thresholds for trace pipeline self-tests (tests/trace/test_trace_pipeline.py).
+# Replaces hardcoded values from the original validate_instrumentation.py.
+rollup_tolerance_ms: 5.0
+ttft_tolerance_ms: 50.0
+telemetry_coverage_min: 0.70    # ResourceCollector ticks at fixed interval;
+                                # first sample lands ~interval after start so
+                                # boundary loss is intrinsic, not a defect.
+crash_recovery_timeout_s: 10.0
+
+# Synthetic timing knobs for the TTFT fake-stream check.
+fake_stream:
+  first_token_delay_s: 0.080
+  inter_token_s: 0.010
+  n_tokens: 5
+
+# Synthetic durations for rollup check.
+rollup_check:
+  step_durations_s: [0.050, 0.100]
+  expected_total_ms: 150.0
+
+# Telemetry coverage check.
+coverage_check:
+  step_duration_s: 1.0
+  collector_interval_s: 0.1
+
+# Crash recovery check.
+crash_check:
+  pre_crash_sleep_s: 0.05
