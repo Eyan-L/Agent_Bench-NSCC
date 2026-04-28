@@ -20,12 +20,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
@@ -35,9 +38,37 @@ logger = logging.getLogger(__name__)
 # Host paths — override via env if your OpenClaw lives elsewhere.
 # ----------------------------------------------------------------------
 HOST_NODE_BIN = os.environ.get("OC_HOST_NODE", "/usr/local/bin/node")
-HOST_OPENCLAW_PKG = os.environ.get(
-    "OC_HOST_OPENCLAW", "/usr/local/lib/node_modules/openclaw"
-)
+
+
+def _autodetect_openclaw_pkg() -> str:
+    """Find the openclaw package dir. Prefers a user-level npm install whose
+    `dist/extensions/*/node_modules` are already populated — required because
+    we mount the package read-only, so OpenClaw cannot npm-install plugin
+    runtime deps at startup. Falls back to the system path with a clear error
+    surface in the constructor below.
+    """
+    env = os.environ.get("OC_HOST_OPENCLAW")
+    if env:
+        return env
+    # Resolve `openclaw` on PATH → its package dir is two levels up from
+    # bin/openclaw (typically <prefix>/bin/openclaw → <prefix>/lib/node_modules/openclaw).
+    bin_path = shutil.which("openclaw")
+    if bin_path:
+        real = os.path.realpath(bin_path)
+        # `openclaw.mjs` lives at <pkg>/openclaw.mjs; bin link points to it.
+        if os.path.basename(real) in ("openclaw.mjs", "openclaw"):
+            cand = os.path.dirname(real)
+            if os.path.exists(os.path.join(cand, "dist", "extensions")):
+                return cand
+        # npm-style: <prefix>/bin/openclaw → <prefix>/lib/node_modules/openclaw
+        prefix = os.path.dirname(os.path.dirname(bin_path))
+        cand = os.path.join(prefix, "lib", "node_modules", "openclaw")
+        if os.path.isdir(cand):
+            return cand
+    return "/usr/local/lib/node_modules/openclaw"
+
+
+HOST_OPENCLAW_PKG = _autodetect_openclaw_pkg()
 
 # Per-container Gateway port range. Avoids 18789 (host's other gateway) and
 # leaves headroom for sidecars (Gateway picks port+2 for the browser plugin
@@ -83,6 +114,28 @@ def _pick_free_gateway_port(attempts: int = 25) -> int:
     )
 
 
+def _kill_pgrp(pid: int) -> None:
+    """SIGTERM then SIGKILL the process group rooted at pid."""
+    try:
+        pgid = os.getpgid(pid)
+    except ProcessLookupError:
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    for _ in range(20):
+        time.sleep(0.1)
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+
+
 def _release_gateway_port(port: int) -> None:
     with _GATEWAY_PORT_LOCK:
         _GATEWAY_PORTS_INUSE.discard(port)
@@ -116,6 +169,22 @@ class SWEBenchHarness:
         ]:
             if not Path(path).exists():
                 raise FileNotFoundError(f"{label} not found at {path}")
+
+        # The package is mounted read-only, so OpenClaw cannot install
+        # plugin runtime deps at startup. Require them to be pre-populated
+        # in the host package — fail fast with a clear remedy instead of
+        # letting the agent crash inside the container with cryptic ENOENT.
+        ext_root = Path(HOST_OPENCLAW_PKG) / "dist" / "extensions"
+        sentinel = ext_root / "diagnostics-otel" / "node_modules"
+        if not sentinel.exists():
+            raise RuntimeError(
+                f"OpenClaw plugin runtime deps not installed at {ext_root}.\n"
+                "The package is mounted read-only into eval containers, so "
+                "OpenClaw cannot npm-install plugins at startup. Use a host "
+                "openclaw whose extensions/*/node_modules are already populated "
+                "(e.g. a user-level `npm i -g openclaw` install), and set "
+                "OC_HOST_OPENCLAW to point at it."
+            )
 
         r = subprocess.run(
             ["docker", "version", "--format", "{{.Server.Version}}"],
@@ -535,6 +604,7 @@ class SWEBenchHarness:
         container_id: Optional[str] = None,
         workspace_root: Optional[str] = None,
         gateway_port: Optional[int] = None,
+        **_extra,  # ignore host-mode kwargs (gateway_pid, host_state_dir)
     ):
         if gateway_port is not None:
             _release_gateway_port(gateway_port)
@@ -545,6 +615,365 @@ class SWEBenchHarness:
                        capture_output=True, check=False)
         subprocess.run(["docker", "rm", "-f", container_id],
                        capture_output=True, check=False)
+
+
+# ----------------------------------------------------------------------
+# HostHarness — no-docker variant.
+#
+# Runs the agent directly on the host. The repo is cloned into a temporary
+# workspace (no SWE-bench task image needed). Scoring is intentionally
+# deferred — emits a `predictions.json` plus a verdict with status=DEFERRED
+# so a docker-equipped machine can later run `swebench.harness.run_evaluation`
+# against the predictions and produce the real verdict.
+#
+# Use case: cloud nodes without docker. Trade-off: no isolation, no per-image
+# Python env, no scoring locally.
+# ----------------------------------------------------------------------
+
+
+class HostHarness:
+    """Host-side harness. Same surface as SWEBenchHarness but no docker.
+
+    Per run we:
+      1. Clone the repo into a host workspace dir.
+      2. Stand up a per-run OPENCLAW_STATE_DIR (copied from openclaw_state/
+         in the repo, with the swebench agent's `workspace` rewritten to
+         point at the cloned dir).
+      3. Start `openclaw gateway run` as a background process bound to a
+         loopback port so the agent can route via gateway (matches docker
+         mode — needed for OTel span emission, since OpenClaw --local does
+         not emit OTel).
+
+    Spans go to OTEL_EXPORTER_OTLP_ENDPOINT (default http://localhost:4318
+    from openclaw.json). If no collector is reachable they're silently
+    dropped — agent still runs, just no OTel artifacts. Run `otelcol-contrib`
+    natively on the host (no docker required) if you want spans.
+    """
+
+    # Match "[gateway] ready (...)" tolerant of ANSI color codes inserted
+    # by openclaw between the bracket and the word "ready".
+    _GATEWAY_READY_RE = re.compile(r"\[gateway\][^\n]{0,40}ready", re.IGNORECASE)
+    _GATEWAY_READY_TIMEOUT_SECONDS = 180
+
+    def __init__(self, swebench_root: Path, workspace_base: Optional[Path] = None):
+        # swebench_root retained for API parity (driver passes it). It's not
+        # required for host-mode agent execution; it is needed only if you
+        # later run scoring on a docker-equipped machine.
+        self.swebench_root = Path(swebench_root) if swebench_root else None
+        self.workspace_base = Path(
+            workspace_base or os.environ.get(
+                "OC_HOST_WORKSPACE_BASE",
+                os.path.expanduser("~/.cache/oc-eval/workspaces"),
+            )
+        )
+        self.workspace_base.mkdir(parents=True, exist_ok=True)
+        # Per-run state dirs live under the workspace base so they're easy to
+        # clean en masse. The directory itself is small (kBs).
+        self.state_base = self.workspace_base.parent / "states"
+        self.state_base.mkdir(parents=True, exist_ok=True)
+
+        if not shutil.which("openclaw"):
+            raise RuntimeError(
+                "openclaw not on PATH. Install (`npm i -g openclaw`) or set OC_BIN."
+            )
+        if not shutil.which("git"):
+            raise RuntimeError("git not on PATH.")
+
+    # ------------------------------------------------------------------
+
+    def prepare_environment(
+        self,
+        instance_id: str,
+        repo_id: str,
+        base_commit: str,
+        container_image: Optional[str] = None,  # ignored
+        workspace_root: Optional[str] = None,    # ignored — we pick our own
+        run_id: Optional[str] = None,
+    ) -> Dict:
+        ws = self.workspace_base / (run_id or instance_id)
+        if ws.exists():
+            shutil.rmtree(ws)
+        ws.mkdir(parents=True)
+
+        logger.info("Cloning %s @ %s into %s", repo_id, base_commit[:12], ws)
+        # Local repo cache to avoid re-cloning for every run of the same repo.
+        cache = self.workspace_base.parent / "repo-cache" / repo_id.replace("/", "__")
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        if not cache.exists():
+            r = subprocess.run(
+                ["git", "clone", "--bare", f"https://github.com/{repo_id}.git", str(cache)],
+                capture_output=True, text=True, timeout=600,
+            )
+            if r.returncode != 0:
+                raise RuntimeError(f"git clone failed for {repo_id}: {r.stderr[-400:]}")
+
+        # Working tree at base_commit. Use clone --reference to share objects.
+        r = subprocess.run(
+            ["git", "clone", "--reference", str(cache),
+             f"https://github.com/{repo_id}.git", str(ws)],
+            capture_output=True, text=True, timeout=600,
+        )
+        if r.returncode != 0:
+            raise RuntimeError(f"git clone (working tree) failed: {r.stderr[-400:]}")
+        r = subprocess.run(
+            ["git", "-C", str(ws), "checkout", "-q", base_commit],
+            capture_output=True, text=True, timeout=120,
+        )
+        if r.returncode != 0:
+            raise RuntimeError(f"git checkout {base_commit} failed: {r.stderr[-400:]}")
+
+        logger.info("  host workspace ready at %s", ws)
+
+        # Per-run state dir: copy openclaw_state and rewrite the swebench
+        # agent's workspace to our cloned dir.
+        kit_root = os.environ.get("KIT_ROOT", os.getcwd())
+        src_state = (
+            os.environ.get("OC_HOST_STATE_TEMPLATE")
+            or os.path.join(kit_root, "openclaw_state")
+        )
+        if not os.path.isdir(src_state):
+            raise FileNotFoundError(
+                f"openclaw_state template not found at {src_state} "
+                "(set OC_HOST_STATE_TEMPLATE or place an openclaw_state/ dir at KIT_ROOT)."
+            )
+        state_dir = self.state_base / (run_id or instance_id)
+        if state_dir.exists():
+            shutil.rmtree(state_dir)
+        shutil.copytree(src_state, state_dir)
+        cfg_path = state_dir / "openclaw.json"
+        with open(cfg_path) as fh:
+            cfg = json.load(fh)
+        for a in cfg.get("agents", {}).get("list", []):
+            if a.get("id") == "swebench":
+                a["workspace"] = str(ws)
+                # tools.exec.host=node would route execs through a paired
+                # node host (started by `openclaw node run`), but that node
+                # process has no diagnostics-otel plugin loaded so ALL spans
+                # disappear. Route exec through the gateway process itself —
+                # tool.call spans flow correctly, at the cost of native
+                # model.usage emission (which we synthesize from agentMeta
+                # in openclaw_agent.py).
+                tools = a.setdefault("tools", {})
+                exec_cfg = tools.setdefault("exec", {})
+                exec_cfg["host"] = "gateway"
+        with open(cfg_path, "w") as fh:
+            json.dump(cfg, fh, indent=2)
+
+        # Start a host gateway so the agent emits OTel + uses the patched
+        # gateway-side dispatcher (matches docker mode behavior).
+        gw = self._start_host_gateway(state_dir, run_id)
+
+        return {
+            # Sentinel: container_id=None signals host mode to conditions.
+            "container_id": None,
+            "container_name": f"host-{instance_id}",
+            "workspace_root": str(ws),
+            "host_state_dir": str(state_dir),
+            "gateway_port": gw["port"],
+            "gateway_token": gw["token"],
+            "gateway_url": f"ws://127.0.0.1:{gw['port']}",
+            "gateway_pid": gw["pid"],
+            "gateway_log": gw["log_path"],
+            "node_pid": gw.get("node_pid"),
+            "node_log": gw.get("node_log_path"),
+        }
+
+    # ------------------------------------------------------------------
+
+    def _start_host_gateway(
+        self, state_dir: Path, run_id: Optional[str],
+    ) -> Dict:
+        port = _pick_free_gateway_port()
+        token = secrets.token_hex(24)
+        log_path = state_dir / "openclaw_gateway.log"
+
+        env = os.environ.copy()
+        env["OPENCLAW_STATE_DIR"] = str(state_dir)
+        env["OPENCLAW_GATEWAY_TOKEN"] = token
+        env["OPENCLAW_GATEWAY_PORT"] = str(port)
+        if run_id:
+            env["OTEL_RESOURCE_ATTRIBUTES"] = f"oc.run_id={run_id}"
+
+        log_fh = open(log_path, "w")
+        proc = subprocess.Popen(
+            ["openclaw", "gateway", "run",
+             "--port", str(port),
+             "--auth", "token",
+             "--bind", "loopback"],
+            stdout=log_fh, stderr=subprocess.STDOUT,
+            env=env,
+            preexec_fn=os.setsid if os.name == "posix" else None,
+        )
+
+        # Poll log for readiness marker.
+        deadline = time.time() + self._GATEWAY_READY_TIMEOUT_SECONDS
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                _release_gateway_port(port)
+                tail = log_path.read_text()[-1000:]
+                raise RuntimeError(
+                    f"host gateway exited (rc={proc.returncode}) before ready. "
+                    f"Last log:\n{tail}"
+                )
+            try:
+                if self._GATEWAY_READY_RE.search(log_path.read_text()):
+                    logger.info(
+                        "  host gateway ready on port %d (pid=%d)", port, proc.pid
+                    )
+                    return {"pid": proc.pid, "port": port, "token": token,
+                            "log_path": str(log_path),
+                            "node_pid": None, "node_log_path": None}
+            except OSError:
+                pass
+            time.sleep(1)
+
+        # Timed out — kill and report.
+        _kill_pgrp(proc.pid)
+        _release_gateway_port(port)
+        tail = log_path.read_text()[-1500:]
+        raise RuntimeError(
+            f"host gateway did not become ready in {self._GATEWAY_READY_TIMEOUT_SECONDS}s.\n"
+            f"Last log:\n{tail}"
+        )
+
+    def _start_host_node(
+        self, state_dir: Path, gateway_port: int, gateway_token: str,
+    ) -> Dict:
+        """Spawn `openclaw node run` so tools.exec.host=node has a paired node.
+
+        Without a paired node host the agent's exec calls fail with
+        "requires a paired node (none available)". The node host registers
+        with the gateway over WebSocket and auto-pairs (gateway logs
+        `device pairing auto-approved`). We poll for the pair line and
+        return the pid so cleanup can stop it.
+        """
+        log_path = state_dir / "openclaw_node.log"
+        env = os.environ.copy()
+        env["OPENCLAW_STATE_DIR"] = str(state_dir)
+        env["OPENCLAW_GATEWAY_TOKEN"] = gateway_token
+
+        log_fh = open(log_path, "w")
+        proc = subprocess.Popen(
+            ["openclaw", "node", "run",
+             "--host", "127.0.0.1",
+             "--port", str(gateway_port)],
+            stdout=log_fh, stderr=subprocess.STDOUT,
+            env=env,
+            preexec_fn=os.setsid if os.name == "posix" else None,
+        )
+
+        # Poll the *gateway* log for the auto-approve line — that's our signal
+        # the node has paired and exec.host=node will resolve.
+        gw_log = state_dir / "openclaw_gateway.log"
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                tail = log_path.read_text()[-800:]
+                raise RuntimeError(
+                    f"host node exited (rc={proc.returncode}) before pairing. "
+                    f"Last log:\n{tail}"
+                )
+            try:
+                if "device pairing auto-approved" in gw_log.read_text():
+                    logger.info("  host node paired (pid=%d)", proc.pid)
+                    return {"pid": proc.pid, "log_path": str(log_path)}
+            except OSError:
+                pass
+            time.sleep(0.5)
+
+        _kill_pgrp(proc.pid)
+        tail = log_path.read_text()[-1000:]
+        raise RuntimeError(
+            f"host node did not pair in 60s. Last log:\n{tail}"
+        )
+
+    # ------------------------------------------------------------------
+
+    def run_tests(
+        self,
+        container_id: Optional[str],
+        instance_id: str,
+        workspace_root: str,
+        timeout_seconds: int,
+        patch: Optional[str] = None,
+        run_id: Optional[str] = None,
+    ) -> Dict:
+        """Defer scoring. Persist predictions.json next to the run dir so a
+        docker-equipped machine can score later via:
+
+            python -m swebench.harness.run_evaluation \\
+              --predictions_path predictions.json \\
+              --instance_ids <id> --run_id <id>
+
+        run_dir is the parent of `workspace_root` only when called from the
+        driver — we don't have it here directly, so we write predictions.json
+        to the workspace_root parent (same dir level as the run output).
+        """
+        if patch is None:
+            patch = ""
+
+        if not patch.strip():
+            return {
+                "status": "DEFERRED",
+                "test_pass_rate": 0.0,
+                "passed": 0, "failed": 0,
+                "error_message": "host mode: empty patch — nothing to score",
+                "evaluation_dir": None,
+            }
+
+        # Drop predictions.json beside the workspace (driver writes verdict.json
+        # under run_dir; we just keep the predictions blob colocated).
+        pred_path = Path(workspace_root).parent / f"predictions-{instance_id}.json"
+        pred_path.write_text(json.dumps([{
+            "instance_id": instance_id,
+            "model_name_or_path": "oc-eval",
+            "model_patch": patch,
+        }], indent=2))
+
+        return {
+            "status": "DEFERRED",
+            "test_pass_rate": 0.0,
+            "passed": 0, "failed": 0,
+            "error_message": (
+                f"host mode: scoring deferred. predictions written to {pred_path}. "
+                "Score on a docker host with `python -m swebench.harness.run_evaluation`."
+            ),
+            "evaluation_dir": None,
+            "predictions_path": str(pred_path),
+        }
+
+    # ------------------------------------------------------------------
+
+    def cleanup(
+        self,
+        container_id: Optional[str] = None,
+        workspace_root: Optional[str] = None,
+        gateway_port: Optional[int] = None,
+        gateway_pid: Optional[int] = None,
+        host_state_dir: Optional[str] = None,
+        node_pid: Optional[int] = None,
+        **_extra,
+    ):
+        # Stop node host before gateway; otherwise gateway shutdown leaves it
+        # spinning trying to reconnect.
+        if node_pid:
+            logger.info("Stopping host node pid=%d", node_pid)
+            _kill_pgrp(node_pid)
+        # Stop the gateway so it can flush OTel before we tear state.
+        if gateway_pid:
+            logger.info("Stopping host gateway pid=%d", gateway_pid)
+            _kill_pgrp(gateway_pid)
+        if gateway_port is not None:
+            _release_gateway_port(gateway_port)
+
+        keep = os.environ.get("OC_HOST_KEEP_WORKSPACE", "0") == "1"
+        if keep:
+            logger.info("Keeping host workspace + state (OC_HOST_KEEP_WORKSPACE=1)")
+            return
+        if host_state_dir and Path(host_state_dir).exists():
+            shutil.rmtree(host_state_dir, ignore_errors=True)
+        if workspace_root and Path(workspace_root).exists():
+            shutil.rmtree(workspace_root, ignore_errors=True)
 
 
 # ----------------------------------------------------------------------

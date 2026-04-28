@@ -9,7 +9,7 @@ End-to-end pipeline **works** for 3 conditions against SWE-bench Verified instan
 - `ar_static_context` — baseline + BM25, FAIL (same root cause)
 - `openclaw_agent` — full trajectory, **PASS** (correctly fixes the bug)
 
-Project root: `/home/wenyan/czlu/github/agentic_workflow`
+Project root: `<repo-root>`
 
 ## What's in place
 
@@ -26,7 +26,7 @@ Project root: `/home/wenyan/czlu/github/agentic_workflow`
   unless thinking is disabled
 - OpenClaw agent uses thinking=off via agent config
 
-### OpenClaw (installed at `/home/wenyan/.npm-global/lib/node_modules/openclaw`)
+### OpenClaw (installed at `<npm-prefix>/lib/node_modules/openclaw`)
 - Config: `~/.openclaw/openclaw.json` (also mounted from
   `<project>/openclaw_state/openclaw.json` into container)
 - Agent profile at `<project>/openclaw_state/agents/swebench/*.md` — 6 minimal
@@ -83,7 +83,7 @@ Current `openclaw_agent` run in `--local` mode:
 ## Open questions to investigate BEFORE writing harness code
 
 ```bash
-OC=/home/wenyan/.npm-global/bin/openclaw
+OC="$(command -v openclaw)"
 
 # 1. Gateway subcommand surface
 $OC gateway --help 2>&1
@@ -282,7 +282,7 @@ file, it's not done. Wrap it in a script and commit.
 ## How to verify
 
 ```bash
-cd /home/wenyan/czlu/github/agentic_workflow
+cd <repo-root>
 rm -rf data/runs/phase0/
 : > /tmp/otel/otel-traces.jsonl
 make run-phase0

@@ -13,7 +13,11 @@
 
 set -euo pipefail
 
-OC="${OC_BIN:-$(command -v openclaw || echo /home/wenyan/.npm-global/bin/openclaw)}"
+OC="${OC_BIN:-$(command -v openclaw || true)}"
+if [[ -z "$OC" ]]; then
+    echo "ERROR: openclaw not found on PATH. Set OC_BIN=/path/to/openclaw." >&2
+    exit 1
+fi
 VLLM_BASE="${VLLM_BASE:-http://localhost:8000/v1}"
 VLLM_MODEL="${VLLM_MODEL:-Qwen/Qwen3.6-35B-A3B}"
 OC_AGENT_ID="${OC_AGENT_ID:-swebench}"

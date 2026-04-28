@@ -22,7 +22,7 @@ import subprocess
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from ._llm_client import call_llm, extract_patch
 
@@ -58,6 +58,7 @@ class ARStaticContextCondition:
         seed: int,
         workspace_root: str,
         container_id: str,
+        env_info: Optional[Dict] = None,
     ) -> Dict:
         logger.info("Running AR-static-context for %s", instance_data["instance_id"])
 

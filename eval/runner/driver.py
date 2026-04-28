@@ -12,7 +12,7 @@ from typing import List
 
 from eval.runner.config import load_sweep_config, RunConfig
 from eval.runner.manifest import RunManifest, get_manifest_path, load_or_create_manifest
-from eval.runner.harness import SWEBenchHarness, validate_fairness_constraints
+from eval.runner.harness import SWEBenchHarness, HostHarness, validate_fairness_constraints
 from eval.runner.conditions.code_agent.ar_issue_only import ARIssueOnlyCondition
 from eval.runner.conditions.code_agent.ar_static_context import ARStaticContextCondition
 from eval.runner.conditions.code_agent.openclaw_agent import OpenClawAgentCondition
@@ -86,8 +86,9 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             )
             result = condition.run(
                 instance_data, run_dir, run_config.seed,
-                workspace_root=run_config.workspace_root,
-                container_id=container_id
+                workspace_root=env_info["workspace_root"],
+                container_id=container_id,
+                env_info=env_info
             )
         
         elif condition_type == "openclaw_agent":
@@ -97,8 +98,9 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             )
             result = condition.run(
                 instance_data, run_dir, run_config.seed,
-                workspace_root=run_config.workspace_root,
-                container_id=container_id
+                workspace_root=env_info["workspace_root"],
+                container_id=container_id,
+                env_info=env_info
             )
         
         elif condition_type == "ablation_no_retry":
@@ -108,8 +110,9 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             )
             result = condition.run(
                 instance_data, run_dir, run_config.seed,
-                workspace_root=run_config.workspace_root,
-                container_id=container_id
+                workspace_root=env_info["workspace_root"],
+                container_id=container_id,
+                env_info=env_info
             )
         
         else:
@@ -126,7 +129,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             verdict = harness.run_tests(
                 container_id=container_id,
                 instance_id=run_config.instance_id,
-                workspace_root=run_config.workspace_root,
+                workspace_root=env_info["workspace_root"],
                 timeout_seconds=run_config.wall_clock_budget_seconds,
                 patch=patch_path.read_text(),
                 run_id=run_id,
@@ -168,7 +171,11 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         try:
             harness.cleanup(
                 container_id,
+                workspace_root=env_info.get("workspace_root") if env_info else None,
                 gateway_port=env_info.get("gateway_port") if env_info else None,
+                gateway_pid=env_info.get("gateway_pid") if env_info else None,
+                node_pid=env_info.get("node_pid") if env_info else None,
+                host_state_dir=env_info.get("host_state_dir") if env_info else None,
             )
         except Exception:
             pass
@@ -207,9 +214,15 @@ def run_sweep(sweep_config_path: Path, swebench_root: Path,
     with open(instance_data_path) as f:
         instances = {inst["instance_id"]: inst for inst in json.load(f)}
 
-    # Initialize harness (thread-safe — only does subprocess.run + os.path
-    # checks; no shared mutable state)
-    harness = SWEBenchHarness(swebench_root)
+    # Initialize harness. HARNESS_BACKEND=host runs the agent on the host
+    # (no docker, no per-image Python env, no local scoring — predictions are
+    # written to disk for later docker-side scoring).
+    backend = os.environ.get("HARNESS_BACKEND", "docker").lower()
+    if backend == "host":
+        logger.info("Using HostHarness (no docker; scoring deferred).")
+        harness = HostHarness(swebench_root)
+    else:
+        harness = SWEBenchHarness(swebench_root)
 
     completed = 0
     failed = 0
@@ -232,7 +245,7 @@ def run_sweep(sweep_config_path: Path, swebench_root: Path,
     for manifest in results_iter:
         if manifest is None:
             failed += 1
-        elif manifest.status in ("PASS", "FAIL", "TIMEOUT"):
+        elif manifest.status in ("PASS", "FAIL", "TIMEOUT", "DEFERRED"):
             completed += 1
         elif manifest.status == "ERROR":
             failed += 1

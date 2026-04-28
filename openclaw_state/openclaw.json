@@ -1,0 +1,83 @@
+{
+  "gateway": {
+    "mode": "local",
+    "bind": "loopback",
+    "auth": {
+      "mode": "token",
+      "token": {
+        "source": "env",
+        "provider": "env",
+        "id": "OPENCLAW_GATEWAY_TOKEN"
+      }
+    }
+  },
+  "plugins": {
+    "enabled": true,
+    "entries": {
+      "diagnostics-otel": {
+        "enabled": true
+      }
+    }
+  },
+  "diagnostics": {
+    "enabled": true,
+    "otel": {
+      "enabled": true,
+      "endpoint": "http://localhost:4318",
+      "protocol": "http/protobuf",
+      "serviceName": "agent-bench-openclaw",
+      "traces": true,
+      "metrics": true,
+      "logs": true,
+      "sampleRate": 1,
+      "flushIntervalMs": 20
+    },
+    "cacheTrace": {
+      "enabled": true,
+      "includeMessages": true,
+      "includePrompt": true,
+      "includeSystem": true
+    }
+  },
+  "models": {
+    "providers": {
+      "vllm": {
+        "baseUrl": "http://localhost:8000/v1",
+        "apiKey": "sk-dummy",
+        "models": [
+          {
+            "id": "Qwen/Qwen3.6-35B-A3B",
+            "name": "Qwen 3.6 35B A3B"
+          }
+        ]
+      }
+    }
+  },
+  "meta": {
+    "lastTouchedVersion": "2026.4.22",
+    "lastTouchedAt": "2026-04-24T02:56:36.082Z"
+  },
+  "agents": {
+    "list": [
+      {
+        "id": "swebench",
+        "default": true,
+        "name": "swebench-coder",
+        "workspace": "/testbed",
+        "tools": {
+          "profile": "coding",
+          "exec": {
+            "host": "node",
+            "security": "full"
+          }
+        }
+      }
+    ],
+    "defaults": {
+      "params": {
+        "provider": "vllm",
+        "model": "Qwen/Qwen3.6-35B-A3B"
+      }
+    }
+  }
+}

@@ -30,7 +30,9 @@ import json
 import logging
 import os
 import shlex
+import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -87,8 +89,10 @@ class OpenClawAgentCondition:
         run_dir: Path,
         seed: int,
         workspace_root: str,
-        container_id: str,
+        container_id: Optional[str],
+        env_info: Optional[Dict] = None,
     ) -> Dict:
+        self._env_info = env_info or {}
         instance_id = instance_data["instance_id"]
         logger.info("Running OpenClaw agent for %s", instance_id)
 
@@ -112,6 +116,7 @@ class OpenClawAgentCondition:
         step_start_ns = time.time_ns()
         payload, err = self._invoke_agent(
             container_id=container_id,
+            workspace_root=workspace_root,
             session_id=run_dir.name,
             message=message,
             timeout_seconds=self.agent_config.max_time_seconds,
@@ -124,14 +129,15 @@ class OpenClawAgentCondition:
         # final spans hit the collector before we slice the trace file.
         # We don't care about the next agent run reusing this container —
         # the harness rebuilds per run.
-        try:
-            subprocess.run(
-                ["docker", "exec", container_id,
-                 "pkill", "-TERM", "-f", "openclaw-gateway"],
-                capture_output=True, timeout=10,
-            )
-        except Exception as e:
-            logger.warning("gateway SIGTERM failed: %s", e)
+        if container_id is not None:
+            try:
+                subprocess.run(
+                    ["docker", "exec", container_id,
+                     "pkill", "-TERM", "-f", "openclaw-gateway"],
+                    capture_output=True, timeout=10,
+                )
+            except Exception as e:
+                logger.warning("gateway SIGTERM failed: %s", e)
         time.sleep(_OTEL_FLUSH_WAIT_SECONDS)
         spans_path = self._snapshot_otel_spans(
             otel_trace_file, pre_offset, run_dir, expected_run_id=run_dir.name,
@@ -139,6 +145,21 @@ class OpenClawAgentCondition:
 
         prompt_tokens, completion_tokens = self._parse_usage(payload)
         response_text = self._parse_text(payload)
+
+        # The OpenClaw OCSB patch is *supposed* to emit `openclaw.model.usage`
+        # spans via the gateway's diagnostic-events bus, but on this build the
+        # patch is silent for direct CLI→gateway agent calls (gateway-side
+        # `agentCommandFromIngress` patch path doesn't fire in this code
+        # path). Synthesize an equivalent span from agentMeta.usage so
+        # downstream analysis sees a uniform shape regardless of which
+        # OpenClaw version produced the trajectory.
+        if spans_path is not None:
+            self._maybe_synthesize_model_usage_span(
+                spans_path, payload,
+                run_id=run_dir.name,
+                start_ns=step_start_ns,
+                end_ns=step_end_ns,
+            )
 
         # 3. Log the run as a single LLM_INFER step.
         #    We note the subtype so downstream analysis can flag that this
@@ -185,6 +206,13 @@ class OpenClawAgentCondition:
             (run_dir / "openclaw_stderr.log").write_text(self._last_stderr)
         if getattr(self, "_last_stdout", None):
             (run_dir / "openclaw_stdout.log").write_text(self._last_stdout)
+
+        # 3c. Pull per-session conversation trace + cache trace out of the
+        # container. session-id == run_dir.name; OpenClaw writes
+        # <id>.jsonl (raw turns) + <id>.trajectory.jsonl (structured trace)
+        # under /root/.openclaw/agents/swebench/sessions/. cache-trace.jsonl
+        # (enabled via diagnostics.cacheTrace) lands under .openclaw/logs/.
+        self._archive_session_artifacts(container_id, run_dir, run_dir.name)
 
         # 4. Collect the patch from the container. The agent edited files in
         #    /testbed directly (workspace=/testbed, tools.exec.host=node),
@@ -267,8 +295,21 @@ class OpenClawAgentCondition:
                     for sp in ss.get("spans", []) or []:
                         start = int(sp.get("startTimeUnixNano", 0))
                         end = int(sp.get("endTimeUnixNano", 0))
+                        from datetime import datetime, timezone
+                        start_iso = (
+                            datetime.fromtimestamp(start / 1e9, tz=timezone.utc).isoformat()
+                            if start else None
+                        )
+                        end_iso = (
+                            datetime.fromtimestamp(end / 1e9, tz=timezone.utc).isoformat()
+                            if end else None
+                        )
                         spans.append({
                             "name": sp.get("name"),
+                            "start_unix_nano": start,
+                            "end_unix_nano": end,
+                            "start_iso": start_iso,
+                            "end_iso": end_iso,
                             "duration_ms": (end - start) / 1e6 if end and start else 0,
                             "attrs": _otlp_attrs(sp.get("attributes")),
                             "resource": res_attrs,
@@ -299,36 +340,60 @@ class OpenClawAgentCondition:
 
     def _invoke_agent(
         self,
-        container_id: str,
+        container_id: Optional[str],
+        workspace_root: str,
         session_id: str,
         message: str,
         timeout_seconds: int,
     ) -> Tuple[Optional[Dict], str]:
-        """Run `openclaw agent ... --json` against the in-container Gateway.
+        """Run `openclaw agent ... --json`.
 
-        Gateway endpoint + token are written into /tmp/oc_gateway_env by
-        eval/frontend/openclaw/gateway_up.sh during prepare_environment. We source
-        that file inside the container so OPENCLAW_GATEWAY_URL/_TOKEN are
-        visible to the CLI. We do NOT pass --local — gateway mode is what
-        avoids the "[tools] exec failed: gateway closed" fallback and what
-        makes the patched server-side dispatcher emit model.usage spans.
+        Two modes:
+          - container_id given → in-container via Gateway (sources
+            /tmp/oc_gateway_env so OPENCLAW_GATEWAY_URL/_TOKEN reach the CLI).
+          - container_id is None → host mode (--local), cwd=workspace_root.
+            No gateway, no docker. OTel still emits if collector is up.
 
         Returns (parsed_json_or_none, error_message).
         """
-        # shlex.quote `message` defends against agent prompts containing
-        # quotes, backticks, $, etc. that would otherwise break out of the
-        # `bash -c` wrapper. timeout_seconds and session_id are int/uuid-ish
-        # so they don't need quoting but we run them through quote anyway.
-        inner = (
-            "source /tmp/oc_gateway_env && "
-            "openclaw agent "
-            f"--agent swebench "
-            f"--session-id {shlex.quote(session_id)} "
-            f"--message {shlex.quote(message)} "
-            f"--timeout {int(timeout_seconds)} "
-            "--json"
-        )
-        argv = ["docker", "exec", container_id, "bash", "-lc", inner]
+        if container_id is None:
+            # Host mode: gateway + state dir come from HostHarness via
+            # env_info (set in run()). Drop --local so OTel + the patched
+            # gateway-side dispatcher are active, matching docker mode.
+            ei = getattr(self, "_env_info", {}) or {}
+            state_dir = ei.get("host_state_dir")
+            gateway_url = ei.get("gateway_url")
+            gateway_token = ei.get("gateway_token")
+            if not (state_dir and gateway_url and gateway_token):
+                return None, (
+                    "host mode but env_info missing host_state_dir / "
+                    "gateway_url / gateway_token (HostHarness setup failed?)"
+                )
+            argv = [
+                "openclaw", "agent",
+                "--agent", "swebench",
+                "--session-id", session_id,
+                "--message", message,
+                "--timeout", str(int(timeout_seconds)),
+                "--json",
+            ]
+            env = os.environ.copy()
+            env["OPENCLAW_STATE_DIR"] = state_dir
+            env["OPENCLAW_GATEWAY_URL"] = gateway_url
+            env["OPENCLAW_GATEWAY_TOKEN"] = gateway_token
+            run_kwargs = {"cwd": workspace_root, "env": env}
+        else:
+            inner = (
+                "source /tmp/oc_gateway_env && "
+                "openclaw agent "
+                f"--agent swebench "
+                f"--session-id {shlex.quote(session_id)} "
+                f"--message {shlex.quote(message)} "
+                f"--timeout {int(timeout_seconds)} "
+                "--json"
+            )
+            argv = ["docker", "exec", container_id, "bash", "-lc", inner]
+            run_kwargs = {}
 
         # Give OpenClaw a margin above its own timeout so we get its error
         # output instead of a docker-level kill.
@@ -340,6 +405,7 @@ class OpenClawAgentCondition:
                 capture_output=True,
                 text=True,
                 timeout=subprocess_timeout,
+                **run_kwargs,
             )
         except subprocess.TimeoutExpired:
             return None, "openclaw agent wall-clock timeout (subprocess)"
@@ -348,6 +414,8 @@ class OpenClawAgentCondition:
         stderr = proc.stderr or ""
 
         if proc.returncode != 0:
+            self._last_stdout = stdout
+            self._last_stderr = stderr
             tail = stderr[-500:] or stdout[-500:]
             return None, f"openclaw exit {proc.returncode}: {tail}"
 
@@ -385,23 +453,23 @@ class OpenClawAgentCondition:
         Fall back to the last parseable object if nothing looks like a
         final result.
         """
+        # Use json.JSONDecoder.raw_decode at every `{` position. raw_decode
+        # is string-aware (won't be tripped by `{`/`}` inside string literals,
+        # which happen when the agent's stderr embeds Python code blocks).
         candidates = []
-        depth = 0
-        start = -1
-        for i, ch in enumerate(text):
-            if ch == "{":
-                if depth == 0:
-                    start = i
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0 and start >= 0:
-                    try:
-                        obj = json.loads(text[start:i + 1])
-                        candidates.append(obj)
-                    except json.JSONDecodeError:
-                        pass
-                    start = -1
+        decoder = json.JSONDecoder()
+        i = 0
+        n = len(text)
+        while True:
+            pos = text.find("{", i)
+            if pos < 0:
+                break
+            try:
+                obj, end = decoder.raw_decode(text, pos)
+                candidates.append(obj)
+                i = end
+            except json.JSONDecodeError:
+                i = pos + 1
 
         if not candidates:
             return None
@@ -475,9 +543,25 @@ class OpenClawAgentCondition:
     )
     _OC_SCAFFOLD_DIRS = ".openclaw memory sessions"
 
-    def _collect_patch(self, container_id: str, workspace_root: str) -> str:
+    def _collect_patch(self, container_id: Optional[str], workspace_root: str) -> str:
         ws = workspace_root
-        # Strip OpenClaw scaffolding.
+        if container_id is None:
+            # Host mode: run git directly in the workspace dir.
+            for f in self._OC_SCAFFOLD_FILES.split():
+                try:
+                    os.remove(os.path.join(ws, f))
+                except FileNotFoundError:
+                    pass
+            for d in self._OC_SCAFFOLD_DIRS.split():
+                shutil.rmtree(os.path.join(ws, d), ignore_errors=True)
+            subprocess.run(["git", "-C", ws, "add", "-A"], capture_output=True)
+            r = subprocess.run(
+                ["git", "-C", ws, "diff", "--cached"],
+                capture_output=True, text=True,
+            )
+            return r.stdout if r.returncode == 0 else ""
+
+        # Docker mode.
         self._exec(
             container_id,
             ["bash", "-c",
@@ -485,18 +569,126 @@ class OpenClawAgentCondition:
              f"rm -rf {self._OC_SCAFFOLD_DIRS}"],
             check=False,
         )
-        # Stage + diff only the real changes.
-        self._exec(
-            container_id,
-            ["git", "-C", ws, "add", "-A"],
-            check=False,
-        )
-        r = self._exec(
-            container_id,
-            ["git", "-C", ws, "diff", "--cached"],
-            check=False,
-        )
+        self._exec(container_id, ["git", "-C", ws, "add", "-A"], check=False)
+        r = self._exec(container_id, ["git", "-C", ws, "diff", "--cached"], check=False)
         return r.stdout if r.returncode == 0 else ""
+
+    # ------------------------------------------------------------------
+    # Synthetic model.usage span (works around silent OCSB patch)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _maybe_synthesize_model_usage_span(
+        spans_path: Path,
+        payload: Optional[Dict],
+        run_id: str,
+        start_ns: int,
+        end_ns: int,
+    ) -> None:
+        """Append a synthesized openclaw.model.usage span if the captured
+        OTel stream didn't already include one for this run.
+
+        Attribute names match what diagnostics-otel would have produced via
+        `recordModelUsage` (see openclaw/dist/extensions/diagnostics-otel/
+        index.js around line 54247) so downstream consumers don't need a
+        separate code path.
+        """
+        if payload is None:
+            return
+        meta = (payload.get("result") or {}).get("meta") or payload.get("meta") or {}
+        am = meta.get("agentMeta") or {}
+        usage = am.get("usage") or {}
+        if not any(usage.get(k) for k in ("input", "output", "cacheRead", "cacheWrite", "total")):
+            return
+
+        try:
+            existing = [json.loads(l) for l in open(spans_path) if l.strip()]
+        except (OSError, json.JSONDecodeError):
+            existing = []
+        if any(s.get("name") == "openclaw.model.usage" for s in existing):
+            return
+
+        duration_ms = float(meta.get("durationMs") or ((end_ns - start_ns) / 1e6))
+        from datetime import datetime, timezone
+        attrs = {
+            "openclaw.provider": am.get("provider") or "unknown",
+            "openclaw.model": am.get("model") or "unknown",
+            "openclaw.sessionKey": am.get("sessionKey") or "",
+            "openclaw.sessionId": am.get("sessionId") or "",
+            "openclaw.tokens.input": int(usage.get("input") or 0),
+            "openclaw.tokens.output": int(usage.get("output") or 0),
+            "openclaw.tokens.cache_read": int(usage.get("cacheRead") or 0),
+            "openclaw.tokens.cache_write": int(usage.get("cacheWrite") or 0),
+            "openclaw.tokens.total": int(usage.get("total") or 0),
+        }
+        span = {
+            "name": "openclaw.model.usage",
+            "start_unix_nano": start_ns,
+            "end_unix_nano": end_ns,
+            "start_iso": datetime.fromtimestamp(start_ns / 1e9, tz=timezone.utc).isoformat(),
+            "end_iso": datetime.fromtimestamp(end_ns / 1e9, tz=timezone.utc).isoformat(),
+            "duration_ms": duration_ms,
+            "attrs": attrs,
+            "resource": {"oc.run_id": run_id, "service.name": "agent-bench-openclaw"},
+            "synthesized": True,
+        }
+        with open(spans_path, "a") as fh:
+            fh.write(json.dumps(span, ensure_ascii=False) + "\n")
+        logger.info("  synthesized model.usage span (input=%d output=%d)",
+                    attrs["openclaw.tokens.input"], attrs["openclaw.tokens.output"])
+
+    # ------------------------------------------------------------------
+    # Session / cache trace archival
+    # ------------------------------------------------------------------
+
+    def _archive_session_artifacts(
+        self, container_id: Optional[str], run_dir: Path, session_id: str,
+    ) -> None:
+        """Copy the per-session trajectory + cache trace out of the container.
+
+        OpenClaw assigns its own UUID for session files (the --session-id we
+        pass is just a session *key* hint); rather than guess the file name,
+        we copy the entire sessions/ dir for this agent. Each container is
+        fresh so the dir contains exactly this run's artifacts.
+
+        Pulled into run_dir/conversation/:
+          sessions/                         — raw + trajectory jsonl (UUID-named)
+          cache-trace.jsonl                 — if diagnostics.cacheTrace.enabled
+        """
+        out_dir = run_dir / "conversation"
+        out_dir.mkdir(exist_ok=True)
+
+        if container_id is None:
+            # Host mode: per-run state dir lives in env_info (set by HostHarness).
+            ei = getattr(self, "_env_info", {}) or {}
+            state = Path(ei.get("host_state_dir") or os.environ.get(
+                "OPENCLAW_STATE_DIR", os.path.expanduser("~/.openclaw")
+            ))
+            for src, dst in [
+                (state / "agents/swebench/sessions", out_dir / "sessions"),
+                (state / "logs/cache-trace.jsonl", out_dir / "cache-trace.jsonl"),
+            ]:
+                if not src.exists():
+                    continue
+                try:
+                    if src.is_dir():
+                        shutil.copytree(src, dst, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(src, dst)
+                except Exception as e:
+                    logger.debug("host session archive skipped %s: %s", src, e)
+            return
+
+        for src, dst in [
+            ("/root/.openclaw/agents/swebench/sessions", "sessions"),
+            ("/root/.openclaw/logs/cache-trace.jsonl", "cache-trace.jsonl"),
+        ]:
+            r = subprocess.run(
+                ["docker", "cp", f"{container_id}:{src}", str(out_dir / dst)],
+                capture_output=True, text=True,
+            )
+            if r.returncode != 0:
+                logger.debug("session archive skipped %s: %s", src, r.stderr.strip())
 
     # ------------------------------------------------------------------
     # Helper
