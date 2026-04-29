@@ -113,20 +113,19 @@ if [[ "$STAGE_SWEBENCH" == "1" ]]; then
     fi
     # Avoid `pip install -e` (some clusters ship pip < 21.3 that can't read
     # pyproject.toml-only packages). Instead: put the checkout on PYTHONPATH
-    # and only pip install the runtime deps we actually use.
+    # and only install the four module-level deps the scoring path actually
+    # imports (unidiff/datasets/python-dotenv/requests). The other swebench
+    # deps (ghapi/GitPython/rich/tenacity/tqdm/...) are needed by code paths
+    # we don't touch, so we don't pay for them.
     export PYTHONPATH="$SWEBENCH_ROOT:${PYTHONPATH:-}"
     LOG_PREFIX "  PYTHONPATH prefixed with $SWEBENCH_ROOT"
 
-    # Only the deps we actually touch from harness/scoring paths
-    # (unidiff for diff parsing, datasets for instance lookup, etc.).
-    SWEBENCH_RUNTIME_DEPS=(unidiff datasets ghapi GitPython rich tenacity tqdm
-                           requests beautifulsoup4 chardet python-dotenv)
+    SWEBENCH_RUNTIME_DEPS=(unidiff datasets python-dotenv requests)
     if ! python3 -c "from swebench.harness.test_spec.test_spec import make_test_spec; from swebench.harness.grading import get_eval_report" 2>/dev/null; then
-        LOG_PREFIX "  installing swebench runtime deps to user site"
+        LOG_PREFIX "  installing minimal swebench scoring deps: ${SWEBENCH_RUNTIME_DEPS[*]}"
         python3 -m pip install --user --upgrade "${SWEBENCH_RUNTIME_DEPS[@]}" \
             >/tmp/pip-deps.log 2>&1 \
             || { LOG_PREFIX "FATAL: pip install runtime deps failed; tail:"; tail -30 /tmp/pip-deps.log; exit 1; }
-        # Re-check.
         python3 -c "from swebench.harness.test_spec.test_spec import make_test_spec; from swebench.harness.grading import get_eval_report" \
             || { LOG_PREFIX "FATAL: swebench still not importable after deps install"; exit 1; }
     else
