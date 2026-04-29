@@ -11,3 +11,4 @@ openclaw_state/logs/
 openclaw_state/agents/*/sessions/
 openclaw_state/agents/*/memory/
 openclaw_state/agents/main/
+logs/*

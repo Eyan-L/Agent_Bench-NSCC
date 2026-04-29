@@ -41,7 +41,7 @@ set -uo pipefail   # not -e; we want stage failures to log + continue cleanup
 USER_NAME="${USER:-$(whoami)}"
 SCRATCH="/scratch/users/ntu/$USER_NAME"
 HOME="/home/users/ntu/${USER_NAME}"
-PBS_O_WORKDIR=${SCRATCH}/github
+PBS_O_WORKDIR=${SCRATCH}/github/Agent_Bench
 KIT_ROOT="${KIT_ROOT:-${PBS_O_WORKDIR:-$HOME/Agent_Bench}}"
 # SWEBENCH_ROOT only needs to point at *some* directory — driver uses it
 # for an existence check before delegating import work to PYTHONPATH.
