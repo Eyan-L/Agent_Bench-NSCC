@@ -8,9 +8,10 @@
 # End-to-end benchmark on the cluster (no docker).
 #
 # Stages (each can be skipped via env flag):
+#   0. STAGE_SWEBENCH=1  — git clone SWE-bench + pip install -e (idempotent)
 #   1. STAGE_PULL=1      — pull SWE-bench instance .sif images via pull_images.sh
 #   2. STAGE_VLLM=1      — start vLLM singularity, serve Qwen3.6
-#   3. STAGE_OC_CHECK=1  — verify OpenClaw npm install (no install in this script)
+#   3. STAGE_OC_CHECK=1  — pull alpine/openclaw sif + bake patch overlay
 #   4. STAGE_RUN=1       — invoke eval/runner/driver with the sweep
 #   5. STAGE_CLEANUP=1   — kill vLLM, free ports
 #
@@ -61,11 +62,15 @@ VLLM_GPU_UTIL="${VLLM_GPU_UTIL:-0.90}"
 
 OC_PULL_PARALLEL="${OC_PULL_PARALLEL:-2}"
 
+STAGE_SWEBENCH="${STAGE_SWEBENCH:-1}"
 STAGE_PULL="${STAGE_PULL:-1}"
 STAGE_VLLM="${STAGE_VLLM:-1}"
 STAGE_OC_CHECK="${STAGE_OC_CHECK:-1}"
 STAGE_RUN="${STAGE_RUN:-1}"
 STAGE_CLEANUP="${STAGE_CLEANUP:-1}"
+
+SWEBENCH_REPO_URL="${SWEBENCH_REPO_URL:-https://github.com/SWE-bench/SWE-bench.git}"
+SWEBENCH_REF="${SWEBENCH_REF:-main}"
 
 mkdir -p "$KIT_ROOT/logs" "$SIF_DIR" "$SINGULARITY_CACHE"
 cd "$KIT_ROOT"
@@ -91,6 +96,29 @@ module load nodejs 2>/dev/null || true
 module load python/3.12 2>/dev/null || module load python 2>/dev/null || true
 command -v python3 >/dev/null 2>&1 || { LOG_PREFIX "FATAL: python3 not found"; exit 1; }
 command -v node    >/dev/null 2>&1 || { LOG_PREFIX "FATAL: node not found"; exit 1; }
+
+# ============================================================================
+# Stage 0: ensure SWE-bench checkout + python install
+# ============================================================================
+if [[ "$STAGE_SWEBENCH" == "1" ]]; then
+    LOG_PREFIX "==== STAGE 0: SWE-bench checkout + pip install ===="
+    if [[ ! -d "$SWEBENCH_ROOT/.git" ]]; then
+        LOG_PREFIX "  cloning $SWEBENCH_REPO_URL ($SWEBENCH_REF) -> $SWEBENCH_ROOT"
+        git clone --depth 1 --branch "$SWEBENCH_REF" \
+            "$SWEBENCH_REPO_URL" "$SWEBENCH_ROOT" \
+            || { LOG_PREFIX "FATAL: clone failed"; exit 1; }
+    else
+        LOG_PREFIX "  $SWEBENCH_ROOT already a git checkout; skipping clone"
+    fi
+    # pip install editable into user site-packages — idempotent.
+    if ! python3 -c "import swebench" 2>/dev/null; then
+        LOG_PREFIX "  pip install -e $SWEBENCH_ROOT (--user)"
+        python3 -m pip install --user -e "$SWEBENCH_ROOT" \
+            || { LOG_PREFIX "FATAL: pip install failed"; exit 1; }
+    else
+        LOG_PREFIX "  swebench already importable; skipping pip install"
+    fi
+fi
 
 # ============================================================================
 # Stage 1: pull instance .sif images
