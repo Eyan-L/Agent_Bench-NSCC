@@ -120,7 +120,11 @@ if [[ "$STAGE_SWEBENCH" == "1" ]]; then
     export PYTHONPATH="$SWEBENCH_ROOT:${PYTHONPATH:-}"
     LOG_PREFIX "  PYTHONPATH prefixed with $SWEBENCH_ROOT"
 
-    SWEBENCH_RUNTIME_DEPS=(unidiff datasets python-dotenv requests beautifulsoup4)
+    SWEBENCH_RUNTIME_DEPS=(
+        unidiff datasets python-dotenv requests
+        beautifulsoup4 chardet
+        ghapi GitPython rich tenacity tqdm
+    )
     if ! python3 -c "from swebench.harness.test_spec.test_spec import make_test_spec; from swebench.harness.grading import get_eval_report" 2>/dev/null; then
         LOG_PREFIX "  installing minimal swebench scoring deps: ${SWEBENCH_RUNTIME_DEPS[*]}"
         python3 -m pip install --user --upgrade "${SWEBENCH_RUNTIME_DEPS[@]}" \
