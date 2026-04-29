@@ -94,7 +94,7 @@ export SINGULARITY_CACHEDIR="$SINGULARITY_CACHE"
 
 # Node + python from modules where available; else fall back to PATH.
 # module load nodejs 2>/dev/null || true
-module load python/3.12 2>/dev/null || module load python 2>/dev/null || true
+module load python/3.12.1-gcc11 2>/dev/null || module load python 2>/dev/null || true
 command -v python3 >/dev/null 2>&1 || { LOG_PREFIX "FATAL: python3 not found"; exit 1; }
 # command -v node    >/dev/null 2>&1 || { LOG_PREFIX "FATAL: node not found"; exit 1; }
 
