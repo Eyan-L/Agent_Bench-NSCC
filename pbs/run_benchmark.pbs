@@ -3,7 +3,7 @@
 #PBS -l walltime=24:00:00
 #PBS -j oe
 #PBS -N oc_swebench_bench
-#PBS -o ./logs/oc_swebench_bench.log
+#PBS -o /scratch/users/ntu/chengzh2/logs/oc_swebench_bench.log
 #
 # End-to-end benchmark on the cluster (no docker).
 #
@@ -38,7 +38,8 @@ set -uo pipefail   # not -e; we want stage failures to log + continue cleanup
 # ---- Resolve paths ---------------------------------------------------------
 USER_NAME="${USER:-$(whoami)}"
 SCRATCH="/scratch/users/ntu/$USER_NAME"
-
+HOME="/home/users/ntu/${USER_NAME}"
+PBS_O_WORKDIR=${SCRATCH}/github
 KIT_ROOT="${KIT_ROOT:-${PBS_O_WORKDIR:-$HOME/Agent_Bench}}"
 SWEBENCH_ROOT="${SWEBENCH_ROOT:-$HOME/SWE-bench}"
 DATASET="${DATASET:-$KIT_ROOT/data/swebench/verified.json}"
@@ -92,10 +93,10 @@ command -v singularity >/dev/null 2>&1 || { LOG_PREFIX "FATAL: singularity not f
 export SINGULARITY_CACHEDIR="$SINGULARITY_CACHE"
 
 # Node + python from modules where available; else fall back to PATH.
-module load nodejs 2>/dev/null || true
+# module load nodejs 2>/dev/null || true
 module load python/3.12 2>/dev/null || module load python 2>/dev/null || true
 command -v python3 >/dev/null 2>&1 || { LOG_PREFIX "FATAL: python3 not found"; exit 1; }
-command -v node    >/dev/null 2>&1 || { LOG_PREFIX "FATAL: node not found"; exit 1; }
+# command -v node    >/dev/null 2>&1 || { LOG_PREFIX "FATAL: node not found"; exit 1; }
 
 # ============================================================================
 # Stage 0: ensure SWE-bench checkout + python install
