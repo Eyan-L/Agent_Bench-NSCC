@@ -113,8 +113,17 @@ if [[ "$STAGE_SWEBENCH" == "1" ]]; then
     fi
     # pip install editable into user site-packages — idempotent.
     if ! python3 -c "import swebench" 2>/dev/null; then
-        LOG_PREFIX "  pip install -e $SWEBENCH_ROOT (--user)"
-        python3 -m pip install --user -e "$SWEBENCH_ROOT" \
+        # SWE-bench is pyproject.toml-only (no setup.py); pip < 21.3 fails
+        # with "setup.py not found". Upgrade pip in user-site once so
+        # PEP-517 builds work.
+        py_pip_ver="$(python3 -m pip --version 2>/dev/null | awk '{print $2}')"
+        LOG_PREFIX "  current pip = ${py_pip_ver:-unknown}"
+        python3 -m pip install --user --upgrade 'pip>=23' setuptools wheel \
+            >/tmp/pip-upgrade.log 2>&1 \
+            || { LOG_PREFIX "WARN: pip upgrade failed; tail:"; tail -20 /tmp/pip-upgrade.log; }
+
+        LOG_PREFIX "  pip install -e $SWEBENCH_ROOT (--user --use-pep517)"
+        python3 -m pip install --user --use-pep517 -e "$SWEBENCH_ROOT" \
             || { LOG_PREFIX "FATAL: pip install failed"; exit 1; }
     else
         LOG_PREFIX "  swebench already importable; skipping pip install"
