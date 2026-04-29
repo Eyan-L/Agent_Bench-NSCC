@@ -20,7 +20,7 @@ _check_eval_inputs:
 
 .PHONY: help serve eval stress analyze report test clean \
         run_phase0 run_phase1 run_phase2 _check_eval_inputs \
-        otel-up-host otel-down-host
+        otel-up-host otel-down-host scoring-server
 
 help:
 	@echo "Targets:"
@@ -71,6 +71,14 @@ otel-up-host:
 
 otel-down-host:
 	bash eval/otel/host_down.sh
+
+# Self-hosted SWE-bench scoring server (run on a docker host).
+# Clients set OC_SCORING_URL=http://<this-host>:8765 to use it.
+SCORING_PORT ?= 8765
+scoring-server: _check_eval_inputs
+	python -m eval.scoring_server.main \
+	  --swebench-root $(SWEBENCH_ROOT) \
+	  --host 0.0.0.0 --port $(SCORING_PORT)
 
 stress:
 	./stress/loadgen-bin $(STRESS_ARGS)

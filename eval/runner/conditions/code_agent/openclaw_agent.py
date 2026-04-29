@@ -381,6 +381,15 @@ class OpenClawAgentCondition:
             env["OPENCLAW_STATE_DIR"] = state_dir
             env["OPENCLAW_GATEWAY_URL"] = gateway_url
             env["OPENCLAW_GATEWAY_TOKEN"] = gateway_token
+            # Optional: wrap in `singularity exec $OC_OC_SIF ...` so OC runs
+            # inside the alpine/openclaw container. Workspace + state are
+            # bound at the same paths used by the env vars above.
+            from eval.runner.harness import _wrap_oc_in_singularity
+            binds = [
+                (workspace_root, workspace_root),
+                (state_dir, state_dir),
+            ]
+            argv, env = _wrap_oc_in_singularity(argv, env, binds)
             run_kwargs = {"cwd": workspace_root, "env": env}
         else:
             inner = (

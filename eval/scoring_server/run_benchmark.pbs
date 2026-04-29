@@ -1,0 +1,238 @@
+#!/bin/bash
+#PBS -l select=1:ncpus=32:ngpus=2:mem=128gb
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -N oc_swebench_bench
+#PBS -o ./logs/oc_swebench_bench.log
+#
+# End-to-end benchmark on the cluster (no docker).
+#
+# Stages (each can be skipped via env flag):
+#   1. STAGE_PULL=1      — pull SWE-bench instance .sif images via pull_images.sh
+#   2. STAGE_VLLM=1      — start vLLM singularity, serve Qwen3.6
+#   3. STAGE_OC_CHECK=1  — verify OpenClaw npm install (no install in this script)
+#   4. STAGE_RUN=1       — invoke eval/runner/driver with the sweep
+#   5. STAGE_CLEANUP=1   — kill vLLM, free ports
+#
+# Env (override via `qsub -v K1=V1,K2=V2 ...`):
+#   KIT_ROOT       — repo root (default: $PBS_O_WORKDIR or $HOME/Agent_Bench)
+#   SWEBENCH_ROOT  — SWE-bench clone (default: $HOME/SWE-bench)
+#   DATASET        — instance JSON (default: $KIT_ROOT/data/swebench/verified.json)
+#   SWEEP          — sweep yaml (default: $KIT_ROOT/eval/runner/sweeps/phase1.yaml)
+#   OC_PKG         — host openclaw npm pkg (default: /scratch/users/ntu/chengzh2/openclaw)
+#   SIF_DIR        — instance .sif dir (default: /scratch/users/ntu/$USER/swebench)
+#   VLLM_SIF       — vllm sif path (default: /scratch/users/ntu/$USER/sif_images/vllm_openai.sif)
+#   VLLM_MODEL     — model id (default: Qwen/Qwen3.6-35B-A3B)
+#   VLLM_PORT      — vllm port (default: 8000)
+#   VLLM_TP        — tensor parallel (default: 2 = ngpus)
+#   STAGE_*        — set to 0 to skip a stage
+#
+# Submit:
+#   qsub eval/scoring_server/run_benchmark.pbs
+#   qsub -v STAGE_PULL=0,SWEEP=$KIT_ROOT/eval/runner/sweeps/phase0.yaml \
+#        eval/scoring_server/run_benchmark.pbs
+
+set -uo pipefail   # not -e; we want stage failures to log + continue cleanup
+
+# ---- Resolve paths ---------------------------------------------------------
+USER_NAME="${USER:-$(whoami)}"
+SCRATCH="/scratch/users/ntu/$USER_NAME"
+
+KIT_ROOT="${KIT_ROOT:-${PBS_O_WORKDIR:-$HOME/Agent_Bench}}"
+SWEBENCH_ROOT="${SWEBENCH_ROOT:-$HOME/SWE-bench}"
+DATASET="${DATASET:-$KIT_ROOT/data/swebench/verified.json}"
+SWEEP="${SWEEP:-$KIT_ROOT/eval/runner/sweeps/phase1.yaml}"
+
+OC_PKG="${OC_PKG:-/scratch/users/ntu/chengzh2/openclaw}"
+SIF_DIR="${SIF_DIR:-$SCRATCH/swebench}"
+SINGULARITY_CACHE="${SINGULARITY_CACHE:-$SCRATCH/.singularity}"
+
+OC_RUNTIME_SIF="${OC_RUNTIME_SIF:-$SCRATCH/sif_images/oc_runtime.sif}"
+OC_RUNTIME_DOCKER="${OC_RUNTIME_DOCKER:-docker://alpine/openclaw:main}"
+
+VLLM_SIF="${VLLM_SIF:-$SCRATCH/sif_images/vllm_openai.sif}"
+VLLM_MODEL="${VLLM_MODEL:-Qwen/Qwen3.6-35B-A3B}"
+VLLM_PORT="${VLLM_PORT:-8000}"
+VLLM_TP="${VLLM_TP:-2}"
+VLLM_MAX_LEN="${VLLM_MAX_LEN:-131072}"
+VLLM_GPU_UTIL="${VLLM_GPU_UTIL:-0.90}"
+
+OC_PULL_PARALLEL="${OC_PULL_PARALLEL:-2}"
+
+STAGE_PULL="${STAGE_PULL:-1}"
+STAGE_VLLM="${STAGE_VLLM:-1}"
+STAGE_OC_CHECK="${STAGE_OC_CHECK:-1}"
+STAGE_RUN="${STAGE_RUN:-1}"
+STAGE_CLEANUP="${STAGE_CLEANUP:-1}"
+
+mkdir -p "$KIT_ROOT/logs" "$SIF_DIR" "$SINGULARITY_CACHE"
+cd "$KIT_ROOT"
+
+LOG_PREFIX() { echo "[$(date -u +%FT%TZ)] $*"; }
+
+LOG_PREFIX "kit_root      = $KIT_ROOT"
+LOG_PREFIX "swebench_root = $SWEBENCH_ROOT"
+LOG_PREFIX "sweep         = $SWEEP"
+LOG_PREFIX "dataset       = $DATASET"
+LOG_PREFIX "oc_pkg        = $OC_PKG"
+LOG_PREFIX "sif_dir       = $SIF_DIR"
+LOG_PREFIX "vllm_sif      = $VLLM_SIF"
+LOG_PREFIX "stages: pull=$STAGE_PULL vllm=$STAGE_VLLM oc=$STAGE_OC_CHECK run=$STAGE_RUN cleanup=$STAGE_CLEANUP"
+
+# ---- Modules ---------------------------------------------------------------
+module load singularity 2>/dev/null || LOG_PREFIX "WARN: 'module load singularity' failed; assuming binary on PATH"
+command -v singularity >/dev/null 2>&1 || { LOG_PREFIX "FATAL: singularity not found"; exit 1; }
+export SINGULARITY_CACHEDIR="$SINGULARITY_CACHE"
+
+# Node + python from modules where available; else fall back to PATH.
+module load nodejs 2>/dev/null || true
+module load python/3.12 2>/dev/null || module load python 2>/dev/null || true
+command -v python3 >/dev/null 2>&1 || { LOG_PREFIX "FATAL: python3 not found"; exit 1; }
+command -v node    >/dev/null 2>&1 || { LOG_PREFIX "FATAL: node not found"; exit 1; }
+
+# ============================================================================
+# Stage 1: pull instance .sif images
+# ============================================================================
+if [[ "$STAGE_PULL" == "1" ]]; then
+    LOG_PREFIX "==== STAGE 1: pull instance .sif images ===="
+    if [[ ! -f "$DATASET" ]]; then
+        LOG_PREFIX "ERROR: dataset not found at $DATASET — skipping pull"
+    else
+        # Only pull instances that this sweep actually uses, not all 500.
+        sweep_instances() {
+            python3 - <<PY
+import sys, yaml
+y = yaml.safe_load(open("$SWEEP"))
+for i in y.get("instances") or []:
+    print(i)
+PY
+        }
+        TMP_LIST="$SIF_DIR/.sweep_instances.txt"
+        sweep_instances > "$TMP_LIST"
+        LOG_PREFIX "  pulling $(wc -l < "$TMP_LIST") instances from $SWEEP"
+        OC_SIF_DIR="$SIF_DIR" bash "$KIT_ROOT/eval/scoring_server/pull_images.sh" \
+            --instances "$TMP_LIST" \
+            --dir "$SIF_DIR" \
+            --parallel "$OC_PULL_PARALLEL" \
+            || LOG_PREFIX "WARN: some pulls failed (see $SIF_DIR/*.pull.log)"
+    fi
+fi
+
+# ============================================================================
+# Stage 2: vLLM singularity
+# ============================================================================
+VLLM_LOG="$KIT_ROOT/logs/vllm.log"
+VLLM_PID=""
+if [[ "$STAGE_VLLM" == "1" ]]; then
+    LOG_PREFIX "==== STAGE 2: start vLLM singularity ===="
+    if [[ ! -f "$VLLM_SIF" ]]; then
+        LOG_PREFIX "FATAL: vLLM sif not found at $VLLM_SIF (pre-pull it)"
+        exit 2
+    fi
+    : > "$VLLM_LOG"
+    singularity exec --nv \
+        --bind "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+        "$VLLM_SIF" \
+        vllm serve "$VLLM_MODEL" \
+            --host 0.0.0.0 --port "$VLLM_PORT" \
+            --tensor-parallel-size "$VLLM_TP" \
+            --max-model-len "$VLLM_MAX_LEN" \
+            --gpu-memory-utilization "$VLLM_GPU_UTIL" \
+            --reasoning-parser qwen3 \
+            --enable-auto-tool-choice \
+            --tool-call-parser qwen3_coder \
+            --trust-remote-code \
+            --max-num-seqs 128 \
+            --enable-prefix-caching \
+        > "$VLLM_LOG" 2>&1 &
+    VLLM_PID=$!
+    LOG_PREFIX "  vllm pid=$VLLM_PID, log=$VLLM_LOG"
+
+    # Poll for ready
+    DEADLINE=$(( $(date +%s) + 1800 ))
+    until curl -fsS "http://127.0.0.1:$VLLM_PORT/v1/models" >/dev/null 2>&1; do
+        if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+            LOG_PREFIX "FATAL: vllm exited; tail of log:"
+            tail -50 "$VLLM_LOG"
+            exit 3
+        fi
+        if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+            LOG_PREFIX "FATAL: vllm not ready after 1800s"
+            tail -50 "$VLLM_LOG"
+            kill "$VLLM_PID" 2>/dev/null || true
+            exit 3
+        fi
+        sleep 10
+    done
+    LOG_PREFIX "  vllm ready on http://127.0.0.1:$VLLM_PORT"
+fi
+
+# ============================================================================
+# Stage 3: pull OC runtime sif (alpine/openclaw)
+# ============================================================================
+if [[ "$STAGE_OC_CHECK" == "1" ]]; then
+    LOG_PREFIX "==== STAGE 3: ensure OC runtime sif ===="
+    mkdir -p "$(dirname "$OC_RUNTIME_SIF")"
+    if [[ ! -f "$OC_RUNTIME_SIF" ]]; then
+        LOG_PREFIX "  pulling $OC_RUNTIME_DOCKER -> $OC_RUNTIME_SIF"
+        singularity pull --dir "$(dirname "$OC_RUNTIME_SIF")" \
+            --name "$(basename "$OC_RUNTIME_SIF")" "$OC_RUNTIME_DOCKER"
+    else
+        LOG_PREFIX "  oc runtime sif already present at $OC_RUNTIME_SIF"
+    fi
+fi
+
+# Wire HostHarness/openclaw_agent to use singularity wrappers.
+# - OC_OC_SIF       : wrap `openclaw gateway/agent` calls in singularity exec
+# - OC_SCORING_SIF_DIR : per-instance .sif used by HostHarness.run_tests
+export OC_OC_SIF="$OC_RUNTIME_SIF"
+export OC_SCORING_SIF_DIR="$SIF_DIR"
+# Make `openclaw` resolvable on PATH for shutil.which() in harness checks.
+# We use the binary inside the sif via singularity exec, but shutil.which
+# still needs *some* openclaw on PATH or we short-circuit out. Drop a shim.
+mkdir -p "$KIT_ROOT/.bin"
+cat > "$KIT_ROOT/.bin/openclaw" <<EOF
+#!/usr/bin/env bash
+exec singularity exec "$OC_RUNTIME_SIF" openclaw "\$@"
+EOF
+chmod +x "$KIT_ROOT/.bin/openclaw"
+export PATH="$KIT_ROOT/.bin:$PATH"
+
+# ============================================================================
+# Stage 4: run benchmark
+# ============================================================================
+RUN_RC=0
+if [[ "$STAGE_RUN" == "1" ]]; then
+    LOG_PREFIX "==== STAGE 4: run benchmark ===="
+    export KIT_ROOT
+    export HARNESS_BACKEND=host
+    export OC_HOST_WORKSPACE_BASE="$SCRATCH/oc-eval/workspaces"
+    mkdir -p "$OC_HOST_WORKSPACE_BASE"
+
+    python3 -m eval.runner.driver \
+        --sweep "$SWEEP" \
+        --swebench-root "$SWEBENCH_ROOT" \
+        --instance-data "$DATASET" \
+        2>&1 | tee -a "$KIT_ROOT/logs/run.log"
+    RUN_RC=${PIPESTATUS[0]}
+    LOG_PREFIX "  driver exit rc=$RUN_RC"
+fi
+
+# ============================================================================
+# Stage 5: cleanup
+# ============================================================================
+if [[ "$STAGE_CLEANUP" == "1" ]]; then
+    LOG_PREFIX "==== STAGE 5: cleanup ===="
+    if [[ -n "$VLLM_PID" ]] && kill -0 "$VLLM_PID" 2>/dev/null; then
+        LOG_PREFIX "  stopping vllm pid=$VLLM_PID"
+        kill -TERM "$VLLM_PID" 2>/dev/null || true
+        for _ in {1..30}; do
+            sleep 1
+            kill -0 "$VLLM_PID" 2>/dev/null || break
+        done
+        kill -KILL "$VLLM_PID" 2>/dev/null || true
+    fi
+fi
+
+LOG_PREFIX "==== done; rc=$RUN_RC ===="
+exit $RUN_RC

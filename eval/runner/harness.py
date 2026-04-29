@@ -114,6 +114,36 @@ def _pick_free_gateway_port(attempts: int = 25) -> int:
     )
 
 
+def _wrap_oc_in_singularity(
+    argv: List[str], env: Dict, binds: List,
+) -> tuple:
+    """If OC_OC_SIF env set, prefix the openclaw command with `singularity
+    exec --bind <pairs> $OC_OC_SIF`. Returns (argv, env) ready for Popen.
+
+    `binds` is a list of (src, dst) path pairs. Use src==dst when possible
+    so absolute paths in the env (OPENCLAW_STATE_DIR etc) resolve identically
+    inside the container.
+
+    OPENCLAW_*, OTEL_*, OC_HOST_* env vars are forwarded into the container
+    via the SINGULARITYENV_ prefix.
+    """
+    sif = os.environ.get("OC_OC_SIF")
+    if not sif:
+        return argv, env
+
+    bind_args: List[str] = []
+    for src, dst in binds:
+        if src and dst:
+            bind_args += ["--bind", f"{src}:{dst}"]
+
+    new_argv = ["singularity", "exec"] + bind_args + [sif] + argv
+    new_env = dict(env)
+    for k in list(new_env.keys()):
+        if k.startswith(("OPENCLAW_", "OTEL_", "OC_HOST_")):
+            new_env[f"SINGULARITYENV_{k}"] = new_env[k]
+    return new_argv, new_env
+
+
 def _kill_pgrp(pid: int) -> None:
     """SIGTERM then SIGKILL the process group rooted at pid."""
     try:
@@ -443,6 +473,7 @@ class SWEBenchHarness:
         timeout_seconds: int,
         patch: Optional[str] = None,
         run_id: Optional[str] = None,
+        **_kw,
     ) -> Dict:
         logger.info("Scoring %s", instance_id)
 
@@ -795,11 +826,16 @@ class HostHarness:
             env["OTEL_RESOURCE_ATTRIBUTES"] = f"oc.run_id={run_id}"
 
         log_fh = open(log_path, "w")
+        argv = ["openclaw", "gateway", "run",
+                "--port", str(port),
+                "--auth", "token",
+                "--bind", "loopback"]
+        # Bind workspace + state dir into the container so the gateway sees
+        # the same paths the host harness wrote.
+        binds = [(str(state_dir), str(state_dir))]
+        argv, env = _wrap_oc_in_singularity(argv, env, binds)
         proc = subprocess.Popen(
-            ["openclaw", "gateway", "run",
-             "--port", str(port),
-             "--auth", "token",
-             "--bind", "loopback"],
+            argv,
             stdout=log_fh, stderr=subprocess.STDOUT,
             env=env,
             preexec_fn=os.setsid if os.name == "posix" else None,
@@ -897,49 +933,244 @@ class HostHarness:
         timeout_seconds: int,
         patch: Optional[str] = None,
         run_id: Optional[str] = None,
+        instance_data: Optional[Dict] = None,
     ) -> Dict:
-        """Defer scoring. Persist predictions.json next to the run dir so a
-        docker-equipped machine can score later via:
+        """Score the patch. Three back-ends, picked by env (in order):
 
-            python -m swebench.harness.run_evaluation \\
-              --predictions_path predictions.json \\
-              --instance_ids <id> --run_id <id>
-
-        run_dir is the parent of `workspace_root` only when called from the
-        driver — we don't have it here directly, so we write predictions.json
-        to the workspace_root parent (same dir level as the run output).
+        1. `OC_SCORING_SIF_DIR` set → run pytest inside a per-instance
+           Singularity .sif (`<dir>/<instance_id>.sif`). No docker, no
+           server. Best fit for HPC clusters where docker is unavailable.
+        2. `OC_SCORING_URL` set → POST to a self-hosted scoring server
+           (eval/scoring_server/main.py on a docker host).
+        3. Otherwise defer: drop predictions.json next to the workspace.
         """
         if patch is None:
             patch = ""
 
         if not patch.strip():
             return {
-                "status": "DEFERRED",
+                "status": "FAIL",
                 "test_pass_rate": 0.0,
                 "passed": 0, "failed": 0,
-                "error_message": "host mode: empty patch — nothing to score",
+                "error_message": "empty patch — nothing to score",
                 "evaluation_dir": None,
             }
 
-        # Drop predictions.json beside the workspace (driver writes verdict.json
-        # under run_dir; we just keep the predictions blob colocated).
+        sif_dir = os.environ.get("OC_SCORING_SIF_DIR")
+        if sif_dir:
+            return self._score_via_singularity(
+                Path(sif_dir), instance_id, instance_data,
+                workspace_root, timeout_seconds, run_id,
+            )
+
+        scoring_url = os.environ.get("OC_SCORING_URL")
+        if scoring_url:
+            return self._score_via_server(
+                scoring_url, instance_id, patch, timeout_seconds,
+            )
+
+        # No scoring backend → defer.
         pred_path = Path(workspace_root).parent / f"predictions-{instance_id}.json"
         pred_path.write_text(json.dumps([{
             "instance_id": instance_id,
             "model_name_or_path": "oc-eval",
             "model_patch": patch,
         }], indent=2))
-
         return {
             "status": "DEFERRED",
             "test_pass_rate": 0.0,
             "passed": 0, "failed": 0,
             "error_message": (
                 f"host mode: scoring deferred. predictions written to {pred_path}. "
-                "Score on a docker host with `python -m swebench.harness.run_evaluation`."
+                "Set OC_SCORING_URL to a scoring server, or score manually with "
+                "`python -m swebench.harness.run_evaluation`."
             ),
             "evaluation_dir": None,
             "predictions_path": str(pred_path),
+        }
+
+    def _score_via_singularity(
+        self,
+        sif_dir: Path,
+        instance_id: str,
+        instance_data: Optional[Dict],
+        workspace_root: str,
+        timeout_seconds: int,
+        run_id: Optional[str],
+    ) -> Dict:
+        """Score by `singularity exec`-ing the per-instance SWE-bench image.
+
+        Reuses swebench's official scoring path: builds the same eval_script
+        the docker harness would run, executes it inside the .sif with the
+        host workspace bound at /testbed, captures the test log, and parses
+        it through `swebench.harness.grading.get_eval_report` so the verdict
+        shape is identical to docker mode.
+        """
+        if instance_data is None:
+            return {
+                "status": "ERROR", "test_pass_rate": 0.0,
+                "passed": 0, "failed": 0,
+                "error_message": "singularity scoring needs instance_data dict",
+                "evaluation_dir": None,
+            }
+        sif_path = sif_dir / f"{instance_id}.sif"
+        if not sif_path.exists():
+            return {
+                "status": "ERROR", "test_pass_rate": 0.0,
+                "passed": 0, "failed": 0,
+                "error_message": f"sif missing: {sif_path}. Pull with eval/scoring_server/pull_images.sh",
+                "evaluation_dir": None,
+            }
+        if not shutil.which("singularity"):
+            return {
+                "status": "ERROR", "test_pass_rate": 0.0,
+                "passed": 0, "failed": 0,
+                "error_message": "singularity not on PATH",
+                "evaluation_dir": None,
+            }
+
+        try:
+            from swebench.harness.test_spec.test_spec import make_test_spec
+            from swebench.harness.grading import get_eval_report
+        except ImportError as e:
+            return {
+                "status": "ERROR", "test_pass_rate": 0.0,
+                "passed": 0, "failed": 0,
+                "error_message": f"swebench not importable: {e}",
+                "evaluation_dir": None,
+            }
+
+        spec = make_test_spec(instance_data)
+        eval_dir = Path(workspace_root).parent / f"eval-{instance_id}"
+        eval_dir.mkdir(parents=True, exist_ok=True)
+        script_path = eval_dir / "eval.sh"
+        script_path.write_text(spec.eval_script)
+        log_path = eval_dir / "test_output.txt"
+
+        # Bind host workspace at /testbed (matches the path the eval_script
+        # was generated for). The .sif image already has /testbed populated
+        # at base_commit; binding our workspace shadows it with our edits.
+        cmd = [
+            "singularity", "exec",
+            "--bind", f"{workspace_root}:/testbed",
+            "--bind", f"{script_path}:/oc_eval.sh:ro",
+            str(sif_path),
+            "bash", "/oc_eval.sh",
+        ]
+        logger.info("singularity scoring %s via %s", instance_id, sif_path.name)
+        with open(log_path, "wb") as fh:
+            try:
+                proc = subprocess.run(
+                    cmd, stdout=fh, stderr=subprocess.STDOUT,
+                    timeout=timeout_seconds + 600,
+                )
+            except subprocess.TimeoutExpired:
+                return {
+                    "status": "TIMEOUT", "test_pass_rate": 0.0,
+                    "passed": 0, "failed": 0,
+                    "error_message": f"singularity exec timed out for {instance_id}",
+                    "evaluation_dir": str(eval_dir),
+                }
+
+        prediction = {
+            "instance_id": instance_id,
+            "model_name_or_path": "oc-eval",
+            "model_patch": "<applied-in-workspace>",
+        }
+        try:
+            report_map = get_eval_report(
+                spec, prediction, str(log_path), include_tests_status=True,
+            )
+        except Exception as e:
+            return {
+                "status": "ERROR", "test_pass_rate": 0.0,
+                "passed": 0, "failed": 0,
+                "error_message": f"get_eval_report failed: {e} (rc={proc.returncode})",
+                "evaluation_dir": str(eval_dir),
+            }
+        inst = report_map.get(instance_id, {})
+        resolved = inst.get("resolved", False)
+        ts = inst.get("tests_status", {}) or {}
+        f2p = ts.get("FAIL_TO_PASS", {"success": [], "failure": []})
+        p2p = ts.get("PASS_TO_PASS", {"success": [], "failure": []})
+        passed = len(f2p.get("success", [])) + len(p2p.get("success", []))
+        failed = len(f2p.get("failure", [])) + len(p2p.get("failure", []))
+        total = passed + failed
+        return {
+            "status": "PASS" if resolved else "FAIL",
+            "test_pass_rate": passed / total if total else 0.0,
+            "passed": passed,
+            "failed": failed,
+            "evaluation_dir": str(eval_dir),
+            "raw_report_path": str(log_path),
+        }
+
+    @staticmethod
+    def _score_via_server(
+        base_url: str, instance_id: str, patch: str, timeout_seconds: int,
+    ) -> Dict:
+        """POST to scoring server, poll for verdict."""
+        import urllib.request
+        import urllib.error
+
+        base_url = base_url.rstrip("/")
+        body = json.dumps({
+            "instance_id": instance_id,
+            "model_patch": patch,
+            "model_name_or_path": "oc-eval",
+            "timeout_seconds": timeout_seconds,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{base_url}/v1/submit",
+            data=body, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                state = json.loads(r.read())
+        except urllib.error.URLError as e:
+            return {
+                "status": "ERROR",
+                "test_pass_rate": 0.0, "passed": 0, "failed": 0,
+                "error_message": f"scoring submit failed: {e}",
+                "evaluation_dir": None,
+            }
+        sid = state["submission_id"]
+        logger.info("scoring submitted %s -> sid=%s", instance_id, sid)
+
+        # Poll. Server-side timeout already enforced via run_evaluation;
+        # client-side wait gives some slack.
+        deadline = time.time() + timeout_seconds + 900
+        while time.time() < deadline:
+            time.sleep(5)
+            try:
+                with urllib.request.urlopen(
+                    f"{base_url}/v1/submission/{sid}", timeout=30,
+                ) as r:
+                    state = json.loads(r.read())
+            except urllib.error.URLError as e:
+                logger.warning("poll failed (%s); retrying", e)
+                continue
+            status = state.get("status")
+            if status == "done":
+                return state.get("verdict") or {
+                    "status": "ERROR", "test_pass_rate": 0.0,
+                    "passed": 0, "failed": 0,
+                    "error_message": "server returned done with no verdict",
+                    "evaluation_dir": None,
+                }
+            if status == "failed":
+                return {
+                    "status": "ERROR", "test_pass_rate": 0.0,
+                    "passed": 0, "failed": 0,
+                    "error_message": f"scoring server failed: {state.get('error')}",
+                    "evaluation_dir": None,
+                }
+        return {
+            "status": "TIMEOUT", "test_pass_rate": 0.0,
+            "passed": 0, "failed": 0,
+            "error_message": f"scoring server poll timed out (sid={sid})",
+            "evaluation_dir": None,
         }
 
     # ------------------------------------------------------------------
@@ -984,18 +1215,29 @@ def validate_fairness_constraints(run_configs: List):
     instance_sets: Dict[str, set] = {}
     model_families: Dict[str, set] = {}
     serving_endpoints: Dict[str, set] = {}
-    repo_commits: Dict[str, set] = {}
-    container_images: Dict[str, set] = {}
-    wall_budgets: Dict[str, set] = {}
+
+    # Per-instance state: same instance must look identical across all
+    # conditions (same repo+commit, same container image, same wall budget).
+    # Multi-instance sweeps are fine — different instances naturally span
+    # multiple repos.
+    repo_commits_per_instance: Dict[str, set] = {}
+    container_images_per_instance: Dict[str, set] = {}
+    wall_budgets_per_instance: Dict[str, set] = {}
 
     for cfg in run_configs:
         sweep_key = cfg.condition.condition_id
         instance_sets.setdefault(sweep_key, set()).add(cfg.instance_id)
         model_families.setdefault(sweep_key, set()).add(cfg.condition.model.name)
         serving_endpoints.setdefault(sweep_key, set()).add(cfg.condition.model.endpoint)
-        repo_commits.setdefault(sweep_key, set()).add((cfg.repo_id, cfg.base_commit))
-        container_images.setdefault(sweep_key, set()).add(cfg.container_image)
-        wall_budgets.setdefault(sweep_key, set()).add(cfg.wall_clock_budget_seconds)
+        repo_commits_per_instance.setdefault(cfg.instance_id, set()).add(
+            (cfg.repo_id, cfg.base_commit)
+        )
+        container_images_per_instance.setdefault(cfg.instance_id, set()).add(
+            cfg.container_image
+        )
+        wall_budgets_per_instance.setdefault(cfg.instance_id, set()).add(
+            cfg.wall_clock_budget_seconds
+        )
 
     all_instance_sets = list(instance_sets.values())
     if len(set(frozenset(s) for s in all_instance_sets)) > 1:
@@ -1007,14 +1249,14 @@ def validate_fairness_constraints(run_configs: List):
     for k, v in serving_endpoints.items():
         if len(v) > 1:
             raise ValueError(f"FAIRNESS VIOLATION: endpoints in {k}: {v}")
-    for k, v in repo_commits.items():
+    for inst, v in repo_commits_per_instance.items():
         if len(v) > 1:
-            raise ValueError(f"FAIRNESS VIOLATION: commits in {k}: {v}")
-    for k, v in container_images.items():
+            raise ValueError(f"FAIRNESS VIOLATION: commits for {inst}: {v}")
+    for inst, v in container_images_per_instance.items():
         if len(v) > 1:
-            raise ValueError(f"FAIRNESS VIOLATION: images in {k}: {v}")
-    for k, v in wall_budgets.items():
+            raise ValueError(f"FAIRNESS VIOLATION: images for {inst}: {v}")
+    for inst, v in wall_budgets_per_instance.items():
         if len(v) > 1:
-            raise ValueError(f"FAIRNESS VIOLATION: budgets in {k}: {v}")
+            raise ValueError(f"FAIRNESS VIOLATION: budgets for {inst}: {v}")
 
     logger.info("Fairness constraints validated across all runs.")

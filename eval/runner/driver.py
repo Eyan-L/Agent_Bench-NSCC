@@ -133,6 +133,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 timeout_seconds=run_config.wall_clock_budget_seconds,
                 patch=patch_path.read_text(),
                 run_id=run_id,
+                instance_data=instance_data,
             )
         else:
             verdict = {

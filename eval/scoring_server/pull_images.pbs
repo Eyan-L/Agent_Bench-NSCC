@@ -1,0 +1,62 @@
+#!/bin/bash
+#PBS -l select=1:ncpus=16:mem=64gb
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -N pull_swebench_sif
+#PBS -o ./logs/pull_swebench_sif.log
+#
+# Pull every SWE-bench Verified instance image as a Singularity .sif into
+# the user's scratch space. Idempotent: skips images already on disk.
+#
+# Adjust:
+#   walltime — full Verified (500 images, ~1-3GB each) on a single connection
+#              easily takes 12-24h. Bump if you hit the limit.
+#   PARALLEL — concurrent pulls. Docker Hub throttles anonymous pulls
+#              (~100 req / 6h per IP). Keep low to avoid bans.
+#   DATASET  — path to verified.json (or any swe-bench dataset JSON).
+#
+# Run:
+#   qsub eval/scoring_server/pull_images.pbs
+
+set -euo pipefail
+
+scratch_dir="/scratch/users/ntu/$USER"
+KIT_ROOT="${KIT_ROOT:-$HOME/Agent_Bench}"
+DATASET="${OC_DATASET:-$KIT_ROOT/data/swebench/verified.json}"
+PARALLEL="${OC_PULL_PARALLEL:-2}"
+
+SIF_DIR="$scratch_dir/sif_images/swebench"
+CACHE_DIR="$scratch_dir/.singularity"
+
+mkdir -p "$SIF_DIR" "$CACHE_DIR" "$(dirname "$KIT_ROOT/logs/pull_swebench_sif.log")"
+
+# Switch to the kit root so relative script paths resolve.
+cd "$KIT_ROOT"
+
+module load singularity
+export SINGULARITY_CACHEDIR="$CACHE_DIR"
+export OC_SIF_DIR="$SIF_DIR"
+
+if [ ! -f "$DATASET" ]; then
+    echo "ERROR: dataset JSON not found: $DATASET" >&2
+    echo "Set OC_DATASET=/path/to/verified.json or place it at the default path." >&2
+    exit 1
+fi
+
+echo "[pull-pbs] kit_root=$KIT_ROOT"
+echo "[pull-pbs] dataset =$DATASET"
+echo "[pull-pbs] sif_dir =$SIF_DIR"
+echo "[pull-pbs] cache   =$CACHE_DIR"
+echo "[pull-pbs] parallel=$PARALLEL"
+echo "[pull-pbs] starting at $(date -u +%FT%TZ)"
+
+bash "$KIT_ROOT/eval/scoring_server/pull_images.sh" \
+    --dataset "$DATASET" \
+    --dir "$SIF_DIR" \
+    --parallel "$PARALLEL"
+
+rc=$?
+echo "[pull-pbs] finished at $(date -u +%FT%TZ) rc=$rc"
+df -h "$SIF_DIR" || true
+du -sh "$SIF_DIR" || true
+exit $rc
