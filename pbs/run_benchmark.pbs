@@ -28,9 +28,9 @@
 #   STAGE_*        — set to 0 to skip a stage
 #
 # Submit:
-#   qsub eval/scoring_server/run_benchmark.pbs
+#   qsub pbs/run_benchmark.pbs
 #   qsub -v STAGE_PULL=0,SWEEP=$KIT_ROOT/eval/runner/sweeps/phase0.yaml \
-#        eval/scoring_server/run_benchmark.pbs
+#        pbs/run_benchmark.pbs
 
 set -uo pipefail   # not -e; we want stage failures to log + continue cleanup
 
@@ -110,7 +110,7 @@ PY
         TMP_LIST="$SIF_DIR/.sweep_instances.txt"
         sweep_instances > "$TMP_LIST"
         LOG_PREFIX "  pulling $(wc -l < "$TMP_LIST") instances from $SWEEP"
-        OC_SIF_DIR="$SIF_DIR" bash "$KIT_ROOT/eval/scoring_server/pull_images.sh" \
+        OC_SIF_DIR="$SIF_DIR" bash "$KIT_ROOT/pbs/pull_images.sh" \
             --instances "$TMP_LIST" \
             --dir "$SIF_DIR" \
             --parallel "$OC_PULL_PARALLEL" \

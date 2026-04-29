@@ -1018,7 +1018,7 @@ class HostHarness:
             return {
                 "status": "ERROR", "test_pass_rate": 0.0,
                 "passed": 0, "failed": 0,
-                "error_message": f"sif missing: {sif_path}. Pull with eval/scoring_server/pull_images.sh",
+                "error_message": f"sif missing: {sif_path}. Pull with pbs/pull_images.sh",
                 "evaluation_dir": None,
             }
         if not shutil.which("singularity"):
