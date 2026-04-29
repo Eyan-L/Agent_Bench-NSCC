@@ -225,12 +225,21 @@ if [[ "$STAGE_VLLM" == "1" ]]; then
         exit 2
     fi
     : > "$VLLM_LOG"
-    # --cleanenv: do NOT inherit parent env. The harness exports
-    # PYTHONPATH=$OC_PYLIB which contains a newer huggingface-hub than
-    # the vLLM container expects; without cleanenv that leak shadows the
-    # container's own dist-packages and transformers' version check fails.
-    singularity exec --nv --cleanenv \
-        --bind "$scratch/models:/home/users/ntu/$USER_NAME/.cache/huggingface" \
+    mkdir -p "$SCRATCH/.cache/huggingface"
+    # --containall: full isolation (= --contain --cleanenv --no-home).
+    # Without this, singularity bind-mounts $HOME by default; the host's
+    # ~/.local/lib/python3.12/site-packages is then auto-added to sys.path
+    # by the container's python and shadows the container's own packages
+    # (transformers' version check failed because host's huggingface-hub
+    # 1.12 was picked up over the container's bundled <1.0).
+    # Explicit binds for dirs the model server needs:
+    #   /hf-cache : HF model + tokenizer cache (reused across runs)
+    #   /logs     : log dir
+    SINGULARITYENV_HF_HOME=/hf-cache \
+    SINGULARITYENV_HUGGINGFACE_HUB_CACHE=/hf-cache \
+    singularity exec --nv --containall \
+        --bind "$SCRATCH/.cache/huggingface:/hf-cache" \
+        --bind "$KIT_ROOT/logs:/logs" \
         "$VLLM_SIF" \
         vllm serve "$VLLM_MODEL" \
             --host 0.0.0.0 --port "$VLLM_PORT" \
