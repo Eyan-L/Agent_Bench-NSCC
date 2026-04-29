@@ -73,6 +73,12 @@ STAGE_CLEANUP="${STAGE_CLEANUP:-1}"
 SWEBENCH_REPO_URL="${SWEBENCH_REPO_URL:-https://github.com/SWE-bench/SWE-bench.git}"
 SWEBENCH_REF="${SWEBENCH_REF:-main}"
 
+# Persistent pip cache. Single dir holds every package pulled in by stage 0 so
+# subsequent jobs skip download. Located on scratch so it's cluster-shared
+# and big.
+OC_PYLIB="${OC_PYLIB:-$SCRATCH/pylib}"
+OC_PIP_CACHE="${OC_PIP_CACHE:-$SCRATCH/.pip-cache}"
+
 mkdir -p "$KIT_ROOT/logs" "$SIF_DIR" "$SINGULARITY_CACHE"
 cd "$KIT_ROOT"
 
@@ -102,39 +108,30 @@ command -v python3 >/dev/null 2>&1 || { LOG_PREFIX "FATAL: python3 not found"; e
 # Stage 0: ensure SWE-bench checkout + python install
 # ============================================================================
 if [[ "$STAGE_SWEBENCH" == "1" ]]; then
-    LOG_PREFIX "==== STAGE 0: SWE-bench checkout + pip install ===="
-    if [[ ! -d "$SWEBENCH_ROOT/.git" ]]; then
-        LOG_PREFIX "  cloning $SWEBENCH_REPO_URL ($SWEBENCH_REF) -> $SWEBENCH_ROOT"
-        git clone --depth 1 --branch "$SWEBENCH_REF" \
-            "$SWEBENCH_REPO_URL" "$SWEBENCH_ROOT" \
-            || { LOG_PREFIX "FATAL: clone failed"; exit 1; }
-    else
-        LOG_PREFIX "  $SWEBENCH_ROOT already a git checkout; skipping clone"
-    fi
-    # Avoid `pip install -e` (some clusters ship pip < 21.3 that can't read
-    # pyproject.toml-only packages). Instead: put the checkout on PYTHONPATH
-    # and only install the four module-level deps the scoring path actually
-    # imports (unidiff/datasets/python-dotenv/requests). The other swebench
-    # deps (ghapi/GitPython/rich/tenacity/tqdm/...) are needed by code paths
-    # we don't touch, so we don't pay for them.
-    export PYTHONPATH="$SWEBENCH_ROOT:${PYTHONPATH:-}"
-    LOG_PREFIX "  PYTHONPATH prefixed with $SWEBENCH_ROOT"
+    LOG_PREFIX "==== STAGE 0: pip install swebench into shared lib cache ===="
+    mkdir -p "$OC_PYLIB" "$OC_PIP_CACHE"
+    export PYTHONPATH="$OC_PYLIB:${PYTHONPATH:-}"
+    LOG_PREFIX "  PYTHONPATH prefixed with $OC_PYLIB"
+    LOG_PREFIX "  pip cache dir   = $OC_PIP_CACHE"
 
-    SWEBENCH_RUNTIME_DEPS=(
-        unidiff datasets python-dotenv requests
-        beautifulsoup4 chardet
-        ghapi GitPython rich tenacity tqdm
-    )
     if ! python3 -c "from swebench.harness.test_spec.test_spec import make_test_spec; from swebench.harness.grading import get_eval_report" 2>/dev/null; then
-        LOG_PREFIX "  installing minimal swebench scoring deps: ${SWEBENCH_RUNTIME_DEPS[*]}"
-        python3 -m pip install --user --upgrade "${SWEBENCH_RUNTIME_DEPS[@]}" \
-            >/tmp/pip-deps.log 2>&1 \
-            || { LOG_PREFIX "FATAL: pip install runtime deps failed; tail:"; tail -30 /tmp/pip-deps.log; exit 1; }
+        LOG_PREFIX "  pip install --target $OC_PYLIB swebench (cached at $OC_PIP_CACHE)"
+        python3 -m pip install \
+            --target "$OC_PYLIB" \
+            --cache-dir "$OC_PIP_CACHE" \
+            --upgrade \
+            swebench \
+            >/tmp/pip-swebench.log 2>&1 \
+            || { LOG_PREFIX "FATAL: pip install swebench failed; tail:"; tail -40 /tmp/pip-swebench.log; exit 1; }
         python3 -c "from swebench.harness.test_spec.test_spec import make_test_spec; from swebench.harness.grading import get_eval_report" \
-            || { LOG_PREFIX "FATAL: swebench still not importable after deps install"; exit 1; }
+            || { LOG_PREFIX "FATAL: swebench still not importable"; exit 1; }
+        LOG_PREFIX "  swebench install OK"
     else
-        LOG_PREFIX "  swebench scoring helpers already importable; skipping deps install"
+        LOG_PREFIX "  swebench already importable from $OC_PYLIB; skipping install"
     fi
+    # Driver still passes a SWEBENCH_ROOT around for legacy reasons; point it
+    # at the installed package dir so any directory-existence check succeeds.
+    SWEBENCH_ROOT="$OC_PYLIB"
 fi
 
 # ============================================================================
