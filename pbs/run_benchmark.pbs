@@ -8,7 +8,8 @@
 # End-to-end benchmark on the cluster (no docker).
 #
 # Stages (each can be skipped via env flag):
-#   0. STAGE_SWEBENCH=1  — git clone SWE-bench + pip install -e (idempotent)
+#   0. STAGE_SWEBENCH=1  — pip install swebench into a persistent scratch
+#                          lib cache ($OC_PYLIB), idempotent
 #   1. STAGE_PULL=1      — pull SWE-bench instance .sif images via pull_images.sh
 #   2. STAGE_VLLM=1      — start vLLM singularity, serve Qwen3.6
 #   3. STAGE_OC_CHECK=1  — pull alpine/openclaw sif + bake patch overlay
@@ -17,7 +18,8 @@
 #
 # Env (override via `qsub -v K1=V1,K2=V2 ...`):
 #   KIT_ROOT       — repo root (default: $PBS_O_WORKDIR or $HOME/Agent_Bench)
-#   SWEBENCH_ROOT  — SWE-bench clone (default: $HOME/SWE-bench)
+#   OC_PYLIB       — pip --target dir for swebench + deps (default: $SCRATCH/pylib)
+#   OC_PIP_CACHE   — pip wheel cache (default: $SCRATCH/.pip-cache)
 #   DATASET        — instance JSON (default: $KIT_ROOT/data/swebench/verified.json)
 #   SWEEP          — sweep yaml (default: $KIT_ROOT/eval/runner/sweeps/phase1.yaml)
 #   OC_PKG         — host openclaw npm pkg (default: /scratch/users/ntu/chengzh2/openclaw)
@@ -41,7 +43,11 @@ SCRATCH="/scratch/users/ntu/$USER_NAME"
 HOME="/home/users/ntu/${USER_NAME}"
 PBS_O_WORKDIR=${SCRATCH}/github
 KIT_ROOT="${KIT_ROOT:-${PBS_O_WORKDIR:-$HOME/Agent_Bench}}"
-SWEBENCH_ROOT="${SWEBENCH_ROOT:-$HOME/SWE-bench}"
+# SWEBENCH_ROOT only needs to point at *some* directory — driver uses it
+# for an existence check before delegating import work to PYTHONPATH.
+# Stage 0 sets it to $OC_PYLIB; we pre-bind it here for the case where
+# stage 0 is skipped.
+SWEBENCH_ROOT="${SWEBENCH_ROOT:-$SCRATCH/pylib}"
 DATASET="${DATASET:-$KIT_ROOT/data/swebench/verified.json}"
 SWEEP="${SWEEP:-$KIT_ROOT/eval/runner/sweeps/phase1.yaml}"
 
@@ -69,9 +75,6 @@ STAGE_VLLM="${STAGE_VLLM:-1}"
 STAGE_OC_CHECK="${STAGE_OC_CHECK:-1}"
 STAGE_RUN="${STAGE_RUN:-1}"
 STAGE_CLEANUP="${STAGE_CLEANUP:-1}"
-
-SWEBENCH_REPO_URL="${SWEBENCH_REPO_URL:-https://github.com/SWE-bench/SWE-bench.git}"
-SWEBENCH_REF="${SWEBENCH_REF:-main}"
 
 # Persistent pip cache. Single dir holds every package pulled in by stage 0 so
 # subsequent jobs skip download. Located on scratch so it's cluster-shared
