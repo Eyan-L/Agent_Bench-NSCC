@@ -225,7 +225,11 @@ if [[ "$STAGE_VLLM" == "1" ]]; then
         exit 2
     fi
     : > "$VLLM_LOG"
-    singularity exec --nv \
+    # --cleanenv: do NOT inherit parent env. The harness exports
+    # PYTHONPATH=$OC_PYLIB which contains a newer huggingface-hub than
+    # the vLLM container expects; without cleanenv that leak shadows the
+    # container's own dist-packages and transformers' version check fails.
+    singularity exec --nv --cleanenv \
         --bind "$scratch/models:/home/users/ntu/$USER_NAME/.cache/huggingface" \
         "$VLLM_SIF" \
         vllm serve "$VLLM_MODEL" \
