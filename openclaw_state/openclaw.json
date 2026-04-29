@@ -11,14 +11,6 @@
       }
     }
   },
-  "plugins": {
-    "enabled": true,
-    "entries": {
-      "diagnostics-otel": {
-        "enabled": true
-      }
-    }
-  },
   "diagnostics": {
     "enabled": true,
     "otel": {
@@ -53,12 +45,15 @@
       }
     }
   },
-  "meta": {
-    "lastTouchedVersion": "2026.4.22",
-    "lastTouchedAt": "2026-04-24T02:56:36.082Z"
+  "tools": {
+    "exec": {
+      "host": "node",
+      "security": "full"
+    }
   },
   "agents": {
     "defaults": {
+      "workspace": "/testbed",
       "model": {
         "primary": "vllm/Qwen/Qwen3.6-35B-A3B"
       }
@@ -67,15 +62,7 @@
       {
         "id": "swebench",
         "default": true,
-        "name": "swebench-coder",
-        "workspace": "/testbed",
-        "tools": {
-          "profile": "coding",
-          "exec": {
-            "host": "node",
-            "security": "full"
-          }
-        }
+        "name": "swebench-coder"
       }
     ]
   }

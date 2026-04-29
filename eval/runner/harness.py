@@ -783,19 +783,15 @@ class HostHarness:
         cfg_path = state_dir / "openclaw.json"
         with open(cfg_path) as fh:
             cfg = json.load(fh)
-        for a in cfg.get("agents", {}).get("list", []):
-            if a.get("id") == "swebench":
-                a["workspace"] = str(ws)
-                # tools.exec.host=node would route execs through a paired
-                # node host (started by `openclaw node run`), but that node
-                # process has no diagnostics-otel plugin loaded so ALL spans
-                # disappear. Route exec through the gateway process itself —
-                # tool.call spans flow correctly, at the cost of native
-                # model.usage emission (which we synthesize from agentMeta
-                # in openclaw_agent.py).
-                tools = a.setdefault("tools", {})
-                exec_cfg = tools.setdefault("exec", {})
-                exec_cfg["host"] = "gateway"
+        # New OC schema: workspace + tools live at top level (or under
+        # agents.defaults), not on each agent.list item.
+        cfg.setdefault("agents", {}).setdefault("defaults", {})["workspace"] = str(ws)
+        # tools.exec.host=node would route execs through a paired node host;
+        # gateway-routed exec keeps tool.call spans flowing without needing
+        # a separate node process.
+        tools = cfg.setdefault("tools", {})
+        exec_cfg = tools.setdefault("exec", {})
+        exec_cfg["host"] = "gateway"
         with open(cfg_path, "w") as fh:
             json.dump(cfg, fh, indent=2)
 
