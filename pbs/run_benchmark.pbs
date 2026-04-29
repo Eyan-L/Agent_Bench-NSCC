@@ -1,5 +1,5 @@
 #!/bin/bash
-#PBS -l select=1:ncpus=32:ngpus=2:mem=128gb
+#PBS -l select=1:ncpus=32:mem=128gb
 #PBS -l walltime=24:00:00
 #PBS -j oe
 #PBS -N oc_swebench_bench
@@ -226,7 +226,7 @@ if [[ "$STAGE_VLLM" == "1" ]]; then
     fi
     : > "$VLLM_LOG"
     singularity exec --nv \
-        --bind "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+        --bind "$scratch/models:/home/users/ntu/$USER_NAME/.cache/huggingface" \
         "$VLLM_SIF" \
         vllm serve "$VLLM_MODEL" \
             --host 0.0.0.0 --port "$VLLM_PORT" \
