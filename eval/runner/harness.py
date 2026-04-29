@@ -136,7 +136,16 @@ def _wrap_oc_in_singularity(
         if src and dst:
             bind_args += ["--bind", f"{src}:{dst}"]
 
-    new_argv = ["singularity", "exec"] + bind_args + [sif] + argv
+    overlay = os.environ.get("OC_OC_OVERLAY")
+    overlay_args: List[str] = []
+    if overlay:
+        # `:ro` keeps the patched layer immutable across concurrent runs
+        # (read-only overlays can be shared safely).
+        overlay_args = ["--overlay", f"{overlay}:ro"]
+
+    new_argv = (
+        ["singularity", "exec"] + overlay_args + bind_args + [sif] + argv
+    )
     new_env = dict(env)
     for k in list(new_env.keys()):
         if k.startswith(("OPENCLAW_", "OTEL_", "OC_HOST_")):

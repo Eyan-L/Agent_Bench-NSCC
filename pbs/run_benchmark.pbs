@@ -49,6 +49,8 @@ SINGULARITY_CACHE="${SINGULARITY_CACHE:-$SCRATCH/.singularity}"
 
 OC_RUNTIME_SIF="${OC_RUNTIME_SIF:-$SCRATCH/sif_images/oc_runtime.sif}"
 OC_RUNTIME_DOCKER="${OC_RUNTIME_DOCKER:-docker://alpine/openclaw:main}"
+OC_RUNTIME_OVERLAY="${OC_RUNTIME_OVERLAY:-$SCRATCH/sif_images/oc_runtime_patches.img}"
+OC_INSIDE_PKG="${OC_INSIDE_PKG:-/usr/local/lib/node_modules/openclaw}"
 
 VLLM_SIF="${VLLM_SIF:-$SCRATCH/sif_images/vllm_openai.sif}"
 VLLM_MODEL="${VLLM_MODEL:-Qwen/Qwen3.6-35B-A3B}"
@@ -171,7 +173,7 @@ fi
 # Stage 3: pull OC runtime sif (alpine/openclaw)
 # ============================================================================
 if [[ "$STAGE_OC_CHECK" == "1" ]]; then
-    LOG_PREFIX "==== STAGE 3: ensure OC runtime sif ===="
+    LOG_PREFIX "==== STAGE 3: ensure OC runtime sif + patch overlay ===="
     mkdir -p "$(dirname "$OC_RUNTIME_SIF")"
     if [[ ! -f "$OC_RUNTIME_SIF" ]]; then
         LOG_PREFIX "  pulling $OC_RUNTIME_DOCKER -> $OC_RUNTIME_SIF"
@@ -180,12 +182,24 @@ if [[ "$STAGE_OC_CHECK" == "1" ]]; then
     else
         LOG_PREFIX "  oc runtime sif already present at $OC_RUNTIME_SIF"
     fi
+
+    # Bake eval/frontend/openclaw/patch/*.patch into a Singularity overlay,
+    # one-time per host. Subsequent execs mount it read-only.
+    LOG_PREFIX "  building OC patch overlay at $OC_RUNTIME_OVERLAY"
+    bash "$KIT_ROOT/pbs/build_oc_overlay.sh" \
+        --sif "$OC_RUNTIME_SIF" \
+        --overlay "$OC_RUNTIME_OVERLAY" \
+        --kit-root "$KIT_ROOT" \
+        --inside-pkg "$OC_INSIDE_PKG" \
+        || { LOG_PREFIX "FATAL: build_oc_overlay.sh failed"; exit 4; }
 fi
 
 # Wire HostHarness/openclaw_agent to use singularity wrappers.
-# - OC_OC_SIF       : wrap `openclaw gateway/agent` calls in singularity exec
+# - OC_OC_SIF          : wrap `openclaw gateway/agent` calls in singularity exec
+# - OC_OC_OVERLAY      : read-only overlay carrying the patched dist/*.js
 # - OC_SCORING_SIF_DIR : per-instance .sif used by HostHarness.run_tests
 export OC_OC_SIF="$OC_RUNTIME_SIF"
+export OC_OC_OVERLAY="$OC_RUNTIME_OVERLAY"
 export OC_SCORING_SIF_DIR="$SIF_DIR"
 # Make `openclaw` resolvable on PATH for shutil.which() in harness checks.
 # We use the binary inside the sif via singularity exec, but shutil.which
@@ -193,7 +207,8 @@ export OC_SCORING_SIF_DIR="$SIF_DIR"
 mkdir -p "$KIT_ROOT/.bin"
 cat > "$KIT_ROOT/.bin/openclaw" <<EOF
 #!/usr/bin/env bash
-exec singularity exec "$OC_RUNTIME_SIF" openclaw "\$@"
+exec singularity exec --overlay "$OC_RUNTIME_OVERLAY:ro" \\
+    "$OC_RUNTIME_SIF" openclaw "\$@"
 EOF
 chmod +x "$KIT_ROOT/.bin/openclaw"
 export PATH="$KIT_ROOT/.bin:$PATH"
