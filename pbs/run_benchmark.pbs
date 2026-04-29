@@ -121,6 +121,7 @@ LOG_PREFIX "dataset       = $DATASET"
 LOG_PREFIX "oc_pkg        = $OC_PKG"
 LOG_PREFIX "sif_dir       = $SIF_DIR"
 LOG_PREFIX "vllm_sif      = $VLLM_SIF"
+LOG_PREFIX "vllm profile  = $VLLM_PROFILE  device=$VLLM_DEVICE  model=$VLLM_MODEL  tp=$VLLM_TP  max_len=$VLLM_MAX_LEN"
 LOG_PREFIX "stages: pull=$STAGE_PULL vllm=$STAGE_VLLM oc=$STAGE_OC_CHECK run=$STAGE_RUN cleanup=$STAGE_CLEANUP"
 
 # ---- Modules ---------------------------------------------------------------
@@ -282,6 +283,11 @@ if [[ "$STAGE_VLLM" == "1" ]]; then
 
     SING_GPU_FLAG=()
     [[ "$VLLM_DEVICE" == "cuda" ]] && SING_GPU_FLAG=(--nv)
+
+    LOG_PREFIX "  vllm device  = $VLLM_DEVICE"
+    LOG_PREFIX "  vllm model   = $VLLM_MODEL"
+    LOG_PREFIX "  vllm flags   = ${VLLM_SERVE_FLAGS[*]}"
+    LOG_PREFIX "  --nv passed  = $([[ ${#SING_GPU_FLAG[@]} -gt 0 ]] && echo yes || echo no)"
 
     # --containall: full isolation (= --contain --cleanenv --no-home).
     # Without this, singularity bind-mounts $HOME by default; the host's
