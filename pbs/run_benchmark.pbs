@@ -135,6 +135,54 @@ if [[ "$STAGE_SWEBENCH" == "1" ]]; then
     # Driver still passes a SWEBENCH_ROOT around for legacy reasons; point it
     # at the installed package dir so any directory-existence check succeeds.
     SWEBENCH_ROOT="$OC_PYLIB"
+
+    # Materialize $DATASET as a slim JSON containing only the instances the
+    # sweep actually uses. Source of truth = the sweep yaml's `instances:`
+    # list. Pulls full instance dicts (problem_statement / test_patch /
+    # FAIL_TO_PASS / ...) from princeton-nlp/SWE-bench_Verified on HF.
+    LOG_PREFIX "  building $DATASET from $SWEEP ids (HF SWE-bench_Verified)"
+    mkdir -p "$(dirname "$DATASET")"
+    OC_SWEEP="$SWEEP" OC_DATASET_OUT="$DATASET" \
+    python3 - <<'PY' || { LOG_PREFIX "FATAL: dataset materialize failed"; exit 1; }
+import json, os, sys
+import yaml
+from datasets import load_dataset
+
+sweep_path = os.environ["OC_SWEEP"]
+out_path   = os.environ["OC_DATASET_OUT"]
+
+with open(sweep_path) as fh:
+    sweep = yaml.safe_load(fh)
+ids = list(sweep.get("instances") or [])
+if not ids:
+    print(f"sweep {sweep_path} has no instances", file=sys.stderr); sys.exit(1)
+
+want = set(ids)
+existing = []
+if os.path.exists(out_path):
+    try:
+        existing = json.load(open(out_path))
+        have = {d.get("instance_id") for d in existing}
+        if want.issubset(have):
+            print(f"  dataset already covers all {len(ids)} ids; skip"); sys.exit(0)
+    except Exception:
+        pass
+
+hf_name  = os.environ.get("OC_HF_DATASET", "princeton-nlp/SWE-bench_Verified")
+hf_split = os.environ.get("OC_HF_SPLIT", "test")
+ds = load_dataset(hf_name, split=hf_split)
+filt = [dict(r) for r in ds if r["instance_id"] in want]
+missing = want - {d["instance_id"] for d in filt}
+if missing:
+    print(f"WARN: {len(missing)} ids not in HF dataset: {sorted(missing)[:5]}...", file=sys.stderr)
+
+# Merge with any pre-existing file so multi-sweep prefetches accumulate.
+keep_by_id = {d["instance_id"]: d for d in existing}
+keep_by_id.update({d["instance_id"]: d for d in filt})
+with open(out_path, "w") as fh:
+    json.dump(list(keep_by_id.values()), fh)
+print(f"  wrote {len(filt)} (total {len(keep_by_id)}) instances -> {out_path}")
+PY
 fi
 
 # ============================================================================
