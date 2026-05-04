@@ -7,4 +7,4 @@ notes: |
   Detected from active install at $HOME/.npm-global/lib/node_modules/openclaw
   (OpenClaw 2026.4.22 (00bd2cf)).
   CHUNK-hashed bundle filenames resolved at apply time via target_glob in
-  MANIFEST.yaml.
+  MANIFEST.json.

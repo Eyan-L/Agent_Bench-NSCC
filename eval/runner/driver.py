@@ -12,7 +12,9 @@ from typing import List
 
 from eval.runner.config import load_sweep_config, RunConfig
 from eval.runner.manifest import RunManifest, get_manifest_path, load_or_create_manifest
-from eval.runner.harness import SWEBenchHarness, HostHarness, validate_fairness_constraints
+from eval.runner.harness import (
+    SWEBenchHarness, HostHarness, SingularityHarness, validate_fairness_constraints,
+)
 from eval.runner.conditions.code_agent.ar_issue_only import ARIssueOnlyCondition
 from eval.runner.conditions.code_agent.ar_static_context import ARStaticContextCondition
 from eval.runner.conditions.code_agent.openclaw_agent import OpenClawAgentCondition
@@ -215,15 +217,23 @@ def run_sweep(sweep_config_path: Path, swebench_root: Path,
     with open(instance_data_path) as f:
         instances = {inst["instance_id"]: inst for inst in json.load(f)}
 
-    # Initialize harness. HARNESS_BACKEND=host runs the agent on the host
-    # (no docker, no per-image Python env, no local scoring — predictions are
-    # written to disk for later docker-side scoring).
+    # Initialize harness. HARNESS_BACKEND selects the execution backend:
+    #   docker      (default) — SWEBenchHarness; per-task SWE-bench image
+    #   host                  — HostHarness;     run agent on the host
+    #   singularity           — SingularityHarness; openclaw inside an OC sif
     backend = os.environ.get("HARNESS_BACKEND", "docker").lower()
     if backend == "host":
         logger.info("Using HostHarness (no docker; scoring deferred).")
         harness = HostHarness(swebench_root)
-    else:
+    elif backend == "singularity":
+        logger.info("Using SingularityHarness (openclaw inside OC runtime sif).")
+        harness = SingularityHarness(swebench_root)
+    elif backend == "docker":
         harness = SWEBenchHarness(swebench_root)
+    else:
+        raise ValueError(
+            f"Unknown HARNESS_BACKEND={backend!r}; expected docker|host|singularity"
+        )
 
     completed = 0
     failed = 0

@@ -114,33 +114,29 @@ def _pick_free_gateway_port(attempts: int = 25) -> int:
     )
 
 
-def _wrap_oc_in_singularity(
-    argv: List[str], env: Dict, binds: List,
+def wrap_singularity_argv(
+    argv: List[str], env: Dict, binds: List, sif: str, overlay: Optional[str] = None,
 ) -> tuple:
-    """If OC_OC_SIF env set, prefix the openclaw command with `singularity
-    exec --bind <pairs> $OC_OC_SIF`. Returns (argv, env) ready for Popen.
+    """Prefix `argv` with `singularity exec [--overlay <ov>:ro] --bind ... <sif>`.
 
-    `binds` is a list of (src, dst) path pairs. Use src==dst when possible
-    so absolute paths in the env (OPENCLAW_STATE_DIR etc) resolve identically
+    Caller-supplied `sif` and `overlay` (no env-var sniffing) so call sites
+    that already know they're on the singularity backend can wrap explicitly.
+
+    `binds` is a list of (src, dst) path pairs. Use src==dst when possible so
+    absolute paths in env vars (OPENCLAW_STATE_DIR etc) resolve identically
     inside the container.
 
     OPENCLAW_*, OTEL_*, OC_HOST_* env vars are forwarded into the container
     via the SINGULARITYENV_ prefix.
     """
-    sif = os.environ.get("OC_OC_SIF")
-    if not sif:
-        return argv, env
-
     bind_args: List[str] = []
     for src, dst in binds:
         if src and dst:
             bind_args += ["--bind", f"{src}:{dst}"]
 
-    overlay = os.environ.get("OC_OC_OVERLAY")
     overlay_args: List[str] = []
     if overlay:
-        # `:ro` keeps the patched layer immutable across concurrent runs
-        # (read-only overlays can be shared safely).
+        # `:ro` keeps the patched layer immutable across concurrent runs.
         overlay_args = ["--overlay", f"{overlay}:ro"]
 
     new_argv = (
@@ -383,6 +379,7 @@ class SWEBenchHarness:
         return {
             "container_id": container_id,
             "container_name": container_name,
+            "backend": "docker",
             "workspace_root": workspace_root,
             "gateway_port": gateway_port,
             "gateway_token": gateway_token,
@@ -695,6 +692,10 @@ class HostHarness:
     _GATEWAY_READY_RE = re.compile(r"\[gateway\][^\n]{0,40}ready", re.IGNORECASE)
     _GATEWAY_READY_TIMEOUT_SECONDS = 180
 
+    # Identifies the backend in the env_info dict returned by prepare_environment.
+    # Conditions branch on this instead of sniffing OC_OC_SIF env vars.
+    backend_id = "host"
+
     def __init__(self, swebench_root: Path, workspace_base: Optional[Path] = None):
         # swebench_root retained for API parity (driver passes it). It's not
         # required for host-mode agent execution; it is needed only if you
@@ -800,9 +801,10 @@ class HostHarness:
         gw = self._start_host_gateway(state_dir, run_id)
 
         return {
-            # Sentinel: container_id=None signals host mode to conditions.
+            # Sentinel: container_id=None signals non-docker mode to conditions.
             "container_id": None,
-            "container_name": f"host-{instance_id}",
+            "container_name": f"{self.backend_id}-{instance_id}",
+            "backend": self.backend_id,
             "workspace_root": str(ws),
             "host_state_dir": str(state_dir),
             "gateway_port": gw["port"],
@@ -812,7 +814,21 @@ class HostHarness:
             "gateway_log": gw["log_path"],
             "node_pid": gw.get("node_pid"),
             "node_log": gw.get("node_log_path"),
+            **self._extra_env_info(str(ws), str(state_dir)),
         }
+
+    # ------------------------------------------------------------------
+    # Hooks for backend variants (overridden by SingularityHarness).
+
+    def _wrap_gateway_argv(
+        self, argv: List[str], env: Dict, state_dir: Path,
+    ) -> tuple:
+        """Default host-mode: no wrapping. Overridden in SingularityHarness."""
+        return argv, env
+
+    def _extra_env_info(self, workspace_root: str, state_dir: str) -> Dict:
+        """Backend-specific keys to merge into env_info. Default: none."""
+        return {}
 
     # ------------------------------------------------------------------
 
@@ -835,10 +851,7 @@ class HostHarness:
                 "--port", str(port),
                 "--auth", "token",
                 "--bind", "loopback"]
-        # Bind workspace + state dir into the container so the gateway sees
-        # the same paths the host harness wrote.
-        binds = [(str(state_dir), str(state_dir))]
-        argv, env = _wrap_oc_in_singularity(argv, env, binds)
+        argv, env = self._wrap_gateway_argv(argv, env, state_dir)
         proc = subprocess.Popen(
             argv,
             stdout=log_fh, stderr=subprocess.STDOUT,
@@ -853,13 +866,14 @@ class HostHarness:
                 _release_gateway_port(port)
                 tail = log_path.read_text()[-1000:]
                 raise RuntimeError(
-                    f"host gateway exited (rc={proc.returncode}) before ready. "
+                    f"{self.backend_id} gateway exited (rc={proc.returncode}) before ready. "
                     f"Last log:\n{tail}"
                 )
             try:
                 if self._GATEWAY_READY_RE.search(log_path.read_text()):
                     logger.info(
-                        "  host gateway ready on port %d (pid=%d)", port, proc.pid
+                        "  %s gateway ready on port %d (pid=%d)",
+                        self.backend_id, port, proc.pid,
                     )
                     return {"pid": proc.pid, "port": port, "token": token,
                             "log_path": str(log_path),
@@ -873,8 +887,8 @@ class HostHarness:
         _release_gateway_port(port)
         tail = log_path.read_text()[-1500:]
         raise RuntimeError(
-            f"host gateway did not become ready in {self._GATEWAY_READY_TIMEOUT_SECONDS}s.\n"
-            f"Last log:\n{tail}"
+            f"{self.backend_id} gateway did not become ready in "
+            f"{self._GATEWAY_READY_TIMEOUT_SECONDS}s.\nLast log:\n{tail}"
         )
 
     def _start_host_node(
@@ -911,12 +925,12 @@ class HostHarness:
             if proc.poll() is not None:
                 tail = log_path.read_text()[-800:]
                 raise RuntimeError(
-                    f"host node exited (rc={proc.returncode}) before pairing. "
+                    f"{self.backend_id} node exited (rc={proc.returncode}) before pairing. "
                     f"Last log:\n{tail}"
                 )
             try:
                 if "device pairing auto-approved" in gw_log.read_text():
-                    logger.info("  host node paired (pid=%d)", proc.pid)
+                    logger.info("  %s node paired (pid=%d)", self.backend_id, proc.pid)
                     return {"pid": proc.pid, "log_path": str(log_path)}
             except OSError:
                 pass
@@ -925,7 +939,7 @@ class HostHarness:
         _kill_pgrp(proc.pid)
         tail = log_path.read_text()[-1000:]
         raise RuntimeError(
-            f"host node did not pair in 60s. Last log:\n{tail}"
+            f"{self.backend_id} node did not pair in 60s. Last log:\n{tail}"
         )
 
     # ------------------------------------------------------------------
@@ -1193,14 +1207,31 @@ class HostHarness:
         # Stop node host before gateway; otherwise gateway shutdown leaves it
         # spinning trying to reconnect.
         if node_pid:
-            logger.info("Stopping host node pid=%d", node_pid)
+            logger.info("Stopping %s node pid=%d", self.backend_id, node_pid)
             _kill_pgrp(node_pid)
         # Stop the gateway so it can flush OTel before we tear state.
         if gateway_pid:
-            logger.info("Stopping host gateway pid=%d", gateway_pid)
+            logger.info("Stopping %s gateway pid=%d", self.backend_id, gateway_pid)
             _kill_pgrp(gateway_pid)
         if gateway_port is not None:
             _release_gateway_port(gateway_port)
+
+        # Persist gateway/node logs out of the per-run state dir so they
+        # survive cleanup. Lives under $OC_LOG_DIR/runs/<state-dir-name>/;
+        # default $OC_LOG_DIR is $KIT_ROOT/logs (set by the PBS driver).
+        if host_state_dir and Path(host_state_dir).exists():
+            try:
+                log_root = Path(
+                    os.environ.get("OC_LOG_DIR")
+                    or os.path.join(os.environ.get("KIT_ROOT", os.getcwd()), "logs")
+                ) / "runs" / Path(host_state_dir).name
+                log_root.mkdir(parents=True, exist_ok=True)
+                for name in ("openclaw_gateway.log", "openclaw_node.log"):
+                    src = Path(host_state_dir) / name
+                    if src.exists():
+                        shutil.copy2(src, log_root / name)
+            except OSError as e:
+                logger.debug("log archive skipped: %s", e)
 
         keep = os.environ.get("OC_HOST_KEEP_WORKSPACE", "0") == "1"
         if keep:
@@ -1210,6 +1241,126 @@ class HostHarness:
             shutil.rmtree(host_state_dir, ignore_errors=True)
         if workspace_root and Path(workspace_root).exists():
             shutil.rmtree(workspace_root, ignore_errors=True)
+
+
+# ----------------------------------------------------------------------
+# SingularityHarness — runs OpenClaw inside an OC runtime .sif.
+#
+# The host has no openclaw installed; openclaw lives inside an alpine/openclaw
+# Singularity image (OC_OC_SIF). Patches (eval/frontend/openclaw/patch/*) live
+# in a read-only overlay (OC_OC_OVERLAY). Every `openclaw` invocation is
+# wrapped in `singularity exec`. Per-run workspace + state still live on the
+# host (so git, scoring sif, etc. operate on plain files).
+#
+# Use case: HPC clusters where docker is unavailable but singularity is.
+# ----------------------------------------------------------------------
+
+
+class SingularityHarness(HostHarness):
+    """Singularity-backed variant of HostHarness.
+
+    Differences from HostHarness:
+      - Does not require host `openclaw` on PATH; instead requires a runtime
+        sif at OC_OC_SIF (and optional patch overlay at OC_OC_OVERLAY).
+      - Gateway/agent invocations run via `singularity exec` with the sif and
+        overlay supplied by this harness — not via env-var sniffing.
+      - env_info advertises backend="singularity" and the sif/overlay paths so
+        conditions can wrap their own `openclaw` calls (e.g. `agent run`).
+    """
+
+    backend_id = "singularity"
+
+    def __init__(self, swebench_root: Path, workspace_base: Optional[Path] = None):
+        sif = os.environ.get("OC_OC_SIF")
+        if not sif:
+            raise RuntimeError(
+                "SingularityHarness requires OC_OC_SIF "
+                "(path to OpenClaw runtime .sif)."
+            )
+        if not Path(sif).exists():
+            raise FileNotFoundError(f"OC_OC_SIF does not exist: {sif}")
+        overlay = os.environ.get("OC_OC_OVERLAY") or None
+        if overlay and not Path(overlay).exists():
+            raise FileNotFoundError(f"OC_OC_OVERLAY does not exist: {overlay}")
+
+        if not shutil.which("singularity"):
+            raise RuntimeError("singularity not on PATH")
+        if not shutil.which("git"):
+            raise RuntimeError("git not on PATH.")
+
+        # Don't call HostHarness.__init__ — it requires host `openclaw`. Mirror
+        # only the bits we need (workspace + state base dirs, swebench_root).
+        self.swebench_root = Path(swebench_root) if swebench_root else None
+        self.workspace_base = Path(
+            workspace_base or os.environ.get(
+                "OC_HOST_WORKSPACE_BASE",
+                os.path.expanduser("~/.cache/oc-eval/workspaces"),
+            )
+        )
+        self.workspace_base.mkdir(parents=True, exist_ok=True)
+        self.state_base = self.workspace_base.parent / "states"
+        self.state_base.mkdir(parents=True, exist_ok=True)
+
+        self._sif = sif
+        self._overlay = overlay
+
+        # Heads-up if the plugin cache looks empty — first-run npm install
+        # against npmjs.org will hang offline (typical for HPC compute nodes).
+        cache = Path(self._plugin_cache_dir())
+        warm = any(cache.rglob("package.json"))
+        if not warm:
+            logger.warning(
+                "OpenClaw plugin cache at %s is empty. "
+                "On HPC compute nodes the gateway will hang on npm install. "
+                "Run pbs/warm_oc_plugins.sh on a network-equipped node first.",
+                cache,
+            )
+
+    def _plugin_cache_dir(self) -> str:
+        """Shared plugin runtime deps cache.
+
+        OpenClaw's gateway npm-installs plugin runtime deps (acpx, browser, ...)
+        into OPENCLAW_STATE_DIR/plugin-runtime-deps on first start. With per-run
+        state dirs that cache would be cold every time *and* HPC compute nodes
+        typically have no internet — startup hangs on ECONNRESET. Bind a single
+        shared host dir over the per-run path so the cache survives across runs
+        and can be pre-populated once on a network-equipped node.
+        """
+        cache = os.environ.get(
+            "OC_PLUGIN_CACHE",
+            os.path.expanduser("~/.cache/oc-eval/openclaw-plugin-deps"),
+        )
+        os.makedirs(cache, exist_ok=True)
+        return cache
+
+    def _bind_plugin_cache(self, state_dir: Path) -> tuple:
+        """Mkdir the bind target inside state_dir; return (host_cache, target)."""
+        target = state_dir / "plugin-runtime-deps"
+        target.mkdir(parents=True, exist_ok=True)
+        return self._plugin_cache_dir(), str(target)
+
+    def _wrap_gateway_argv(
+        self, argv: List[str], env: Dict, state_dir: Path,
+    ) -> tuple:
+        # Bind state_dir so OPENCLAW_STATE_DIR resolves inside the container,
+        # workspace_base (parent of all per-run workspaces) so
+        # agents.defaults.workspace in openclaw.json references a real path,
+        # and a shared plugin cache so the gateway doesn't try to npm-install
+        # plugin runtime deps on every run (and so it works offline once warmed).
+        cache_src, cache_dst = self._bind_plugin_cache(state_dir)
+        binds = [
+            (str(state_dir), str(state_dir)),
+            (str(self.workspace_base), str(self.workspace_base)),
+            (cache_src, cache_dst),
+        ]
+        return wrap_singularity_argv(argv, env, binds, self._sif, self._overlay)
+
+    def _extra_env_info(self, workspace_root: str, state_dir: str) -> Dict:
+        return {
+            "singularity_sif": self._sif,
+            "singularity_overlay": self._overlay,
+            "plugin_cache_dir": self._plugin_cache_dir(),
+        }
 
 
 # ----------------------------------------------------------------------

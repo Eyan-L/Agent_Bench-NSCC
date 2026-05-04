@@ -9,8 +9,8 @@ pin in `patch/VERSION`.
 
 ## Layout
 
-- `patch/` — `.patch` files + `MANIFEST.yaml` + `VERSION` (upstream pin)
-- `apply_patch.py` — apply patches per `patch/MANIFEST.yaml` (modes: runtime/baked/skip).
+- `patch/` — `.patch` files + `MANIFEST.json` + `VERSION` (upstream pin)
+- `apply_patch.py` — apply patches per `patch/MANIFEST.json` (modes: runtime/baked/skip).
   Subcommands: `apply` (default), `status`, `restore`. Driver shells out to
   `patch -p1` and validates with `node --check`.
 - `configure.sh` — generate per-run OpenClaw config

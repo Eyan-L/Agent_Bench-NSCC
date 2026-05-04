@@ -1,9 +1,15 @@
 #!/bin/bash
-#PBS -l select=1:ncpus=32:mem=128gb
+# bench profile (Qwen3.6-35B-A3B, tp=2) needs 2 GPUs. For the test profile
+# (Qwen2.5-0.5B, tp=1) override at qsub time:
+#   qsub -l select=1:ncpus=16:ngpus=1:mem=64gb -v VLLM_PROFILE=test pbs/run_benchmark.pbs
+#PBS -l select=1:ncpus=1:ngpus=1:mem=64gb
 #PBS -l walltime=24:00:00
+#PBS -q normal
 #PBS -j oe
 #PBS -N oc_swebench_bench
-#PBS -o /scratch/users/ntu/chengzh2/logs/oc_swebench_bench.log
+# All logs land under $KIT_ROOT/logs/. PBS directives can't read shell vars, so
+# the absolute path is hard-coded; edit this line if your KIT_ROOT differs.
+#PBS -o /scratch/users/ntu/chengzh2/github/Agent_Bench/logs/pbs.log
 #
 # End-to-end benchmark on the cluster (no docker).
 #
@@ -60,17 +66,19 @@ OC_RUNTIME_DOCKER="${OC_RUNTIME_DOCKER:-docker://alpine/openclaw:main}"
 OC_RUNTIME_OVERLAY="${OC_RUNTIME_OVERLAY:-$SCRATCH/sif_images/oc_runtime_patches.img}"
 OC_INSIDE_PKG="${OC_INSIDE_PKG:-/usr/local/lib/node_modules/openclaw}"
 
-VLLM_SIF="${VLLM_SIF:-$SCRATCH/sif_images/vllm_openai.sif}"
-
 # VLLM_PROFILE = test | bench
-#   test  : CPU device + small model. Smoke-tests the full pipeline
-#           (PBS / singularity / OC / scoring) without burning a GPU node.
+#   test  : small model (Qwen2.5-0.5B-Instruct), single GPU (or cpu). Smokes
+#           the full pipeline (PBS / singularity / OC / scoring) cheaply.
+#           CPU smoke run:
+#             qsub -l select=1:ncpus=8:mem=32gb \
+#                  -v VLLM_PROFILE=test,VLLM_DEVICE=cpu \
+#                  pbs/run_benchmark.pbs
 #   bench : production GPU run; the Qwen3.6-35B-A3B defaults below.
 # Individual VLLM_* env vars still override profile-set defaults.
 VLLM_PROFILE="${VLLM_PROFILE:-bench}"
 case "$VLLM_PROFILE" in
     test)
-        VLLM_DEVICE_DEFAULT=cpu
+        VLLM_DEVICE_DEFAULT=cuda
         VLLM_MODEL_DEFAULT="Qwen/Qwen2.5-0.5B-Instruct"
         VLLM_TP_DEFAULT=1
         VLLM_MAX_LEN_DEFAULT=8192
@@ -89,10 +97,31 @@ esac
 
 VLLM_DEVICE="${VLLM_DEVICE:-$VLLM_DEVICE_DEFAULT}"
 VLLM_MODEL="${VLLM_MODEL:-$VLLM_MODEL_DEFAULT}"
+
+# vllm sif path is device-dependent. The GPU image (vllm/vllm-openai) needs a
+# CUDA driver matching its built-in CUDA toolkit; the CPU image
+# (vllm/vllm-openai-cpu, also published by upstream) is independent. Override
+# explicitly via VLLM_SIF if you have a custom build.
+if [[ "$VLLM_DEVICE" == "cpu" ]]; then
+    VLLM_SIF="${VLLM_SIF:-$SCRATCH/sif_images/vllm_openai_cpu.sif}"
+    VLLM_DOCKER_DEFAULT="docker://vllm/vllm-openai-cpu:latest"
+else
+    VLLM_SIF="${VLLM_SIF:-$SCRATCH/sif_images/vllm_openai.sif}"
+    VLLM_DOCKER_DEFAULT="docker://vllm/vllm-openai:latest"
+fi
+VLLM_DOCKER="${VLLM_DOCKER:-$VLLM_DOCKER_DEFAULT}"
 VLLM_TP="${VLLM_TP:-$VLLM_TP_DEFAULT}"
 VLLM_MAX_LEN="${VLLM_MAX_LEN:-$VLLM_MAX_LEN_DEFAULT}"
 VLLM_PORT="${VLLM_PORT:-8000}"
-VLLM_GPU_UTIL="${VLLM_GPU_UTIL:-0.90}"
+# `--gpu-memory-utilization` is overloaded: on the CPU image it caps CPU RAM
+# (default 0.92 trips OOM on small nodes since it includes other processes'
+# allocations). Use a conservative default for cpu; bench profile keeps 0.90
+# on GPU.
+if [[ "$VLLM_DEVICE" == "cpu" ]]; then
+    VLLM_GPU_UTIL="${VLLM_GPU_UTIL:-0.5}"
+else
+    VLLM_GPU_UTIL="${VLLM_GPU_UTIL:-0.90}"
+fi
 
 OC_PULL_PARALLEL="${OC_PULL_PARALLEL:-2}"
 
@@ -109,7 +138,9 @@ STAGE_CLEANUP="${STAGE_CLEANUP:-1}"
 OC_PYLIB="${OC_PYLIB:-$SCRATCH/pylib}"
 OC_PIP_CACHE="${OC_PIP_CACHE:-$SCRATCH/.pip-cache}"
 
-mkdir -p "$KIT_ROOT/logs" "$SIF_DIR" "$SINGULARITY_CACHE"
+LOG_DIR="${OC_LOG_DIR:-$KIT_ROOT/logs}"
+export OC_LOG_DIR="$LOG_DIR"
+mkdir -p "$LOG_DIR" "$SIF_DIR" "$SINGULARITY_CACHE"
 cd "$KIT_ROOT"
 
 LOG_PREFIX() { echo "[$(date -u +%FT%TZ)] $*"; }
@@ -152,8 +183,8 @@ if [[ "$STAGE_SWEBENCH" == "1" ]]; then
             --cache-dir "$OC_PIP_CACHE" \
             --upgrade \
             swebench \
-            >/tmp/pip-swebench.log 2>&1 \
-            || { LOG_PREFIX "FATAL: pip install swebench failed; tail:"; tail -40 /tmp/pip-swebench.log; exit 1; }
+            >"$LOG_DIR/pip-swebench.log" 2>&1 \
+            || { LOG_PREFIX "FATAL: pip install swebench failed; tail:"; tail -40 "$LOG_DIR/pip-swebench.log"; exit 1; }
         python3 -c "from swebench.harness.test_spec.test_spec import make_test_spec; from swebench.harness.grading import get_eval_report" \
             || { LOG_PREFIX "FATAL: swebench still not importable"; exit 1; }
         LOG_PREFIX "  swebench install OK"
@@ -244,29 +275,98 @@ fi
 # ============================================================================
 # Stage 2: vLLM singularity
 # ============================================================================
-VLLM_LOG="$KIT_ROOT/logs/vllm.log"
+VLLM_LOG="$LOG_DIR/vllm.log"
 VLLM_PID=""
 if [[ "$STAGE_VLLM" == "1" ]]; then
     LOG_PREFIX "==== STAGE 2: start vLLM singularity (profile=$VLLM_PROFILE, device=$VLLM_DEVICE) ===="
+    LOG_PREFIX "  vllm sif    = $VLLM_SIF"
+    LOG_PREFIX "  vllm docker = $VLLM_DOCKER"
     if [[ ! -f "$VLLM_SIF" ]]; then
-        LOG_PREFIX "FATAL: vLLM sif not found at $VLLM_SIF (pre-pull it)"
-        exit 2
+        LOG_PREFIX "  vllm sif not found; pulling $VLLM_DOCKER"
+        mkdir -p "$(dirname "$VLLM_SIF")"
+        if ! singularity pull "$VLLM_SIF" "$VLLM_DOCKER" >>"$LOG_DIR/vllm-pull.log" 2>&1; then
+            LOG_PREFIX "FATAL: singularity pull failed; tail of $LOG_DIR/vllm-pull.log:"
+            tail -30 "$LOG_DIR/vllm-pull.log"
+            exit 2
+        fi
+        LOG_PREFIX "  pulled vllm sif → $VLLM_SIF"
     fi
     : > "$VLLM_LOG"
-    mkdir -p "$SCRATCH/.cache/huggingface"
+    # Redirect every "throwaway" cache + tmp dir from /tmp (small tmpfs on HPC
+    # compute nodes) to scratch. Pre-create every subdir vllm/torch/HF will
+    # touch — `--containall` later strips host binds, so any path that isn't
+    # explicitly bound (or pre-created under a bound parent) blows up at
+    # runtime ("Read-only file system" / FileNotFoundError).
+    OC_TMPDIR="${OC_TMPDIR:-$SCRATCH/.tmp/$PBS_JOBID}"
+    mkdir -p \
+        "$OC_TMPDIR" \
+        "$SCRATCH/.cache/huggingface" \
+        "$SCRATCH/.cache/torchinductor" \
+        "$SCRATCH/.cache/vllm" \
+        "$SCRATCH/.cache/vllm/modelinfos"
+    export TMPDIR="$OC_TMPDIR"
+    export SINGULARITYENV_TMPDIR="$OC_TMPDIR"
+    export SINGULARITYENV_TORCHINDUCTOR_CACHE_DIR="$SCRATCH/.cache/torchinductor"
+    export SINGULARITYENV_HF_HOME="$SCRATCH/.cache/huggingface"
+    export SINGULARITYENV_HUGGINGFACE_HUB_CACHE="$SCRATCH/.cache/huggingface"
+    export SINGULARITYENV_XDG_CACHE_HOME="$SCRATCH/.cache"
+    export SINGULARITYENV_VLLM_CACHE_ROOT="$SCRATCH/.cache/vllm"
+    LOG_PREFIX "  TMPDIR              = $OC_TMPDIR"
+    LOG_PREFIX "  XDG_CACHE_HOME      = $SCRATCH/.cache"
+
+    # CPU profile sanity check: vllm reserves 1 core internally; ncpus=1
+    # leaves 0 for workers and trips libgomp `OMP_NUM_THREADS="0"`. Need ≥2.
+    if [[ "$VLLM_DEVICE" == "cpu" ]]; then
+        AVAILABLE_CPUS="$(nproc 2>/dev/null || echo 1)"
+        if (( AVAILABLE_CPUS < 2 )); then
+            LOG_PREFIX "FATAL: CPU profile needs at least 2 CPUs (saw $AVAILABLE_CPUS)."
+            LOG_PREFIX "  Resubmit with: -l select=1:ncpus=8:mem=32gb (or more)"
+            exit 2
+        fi
+        LOG_PREFIX "  cpu count    = $AVAILABLE_CPUS"
+    fi
+
+    # CUDA driver visibility: singularity's --nv only works if libcuda.so.1
+    # and friends are visible on the host. On HPC nodes that means loading
+    # the cluster's cuda module before launching the container. Default to
+    # cuda/12.2.2 (matches vllm-openai image's CUDA 12.x build); override
+    # with OC_CUDA_MODULE=cuda/<version> if your cluster names it differently.
+    # NB: the cluster's `cuda` (no version) default is 11.6.2 which is too
+    # old for recent vllm.
+    if [[ "$VLLM_DEVICE" == "cuda" ]]; then
+        OC_CUDA_MODULE="${OC_CUDA_MODULE:-cuda/12.2.2}"
+        if module load "$OC_CUDA_MODULE" 2>/dev/null; then
+            LOG_PREFIX "  module load $OC_CUDA_MODULE  ok"
+        else
+            LOG_PREFIX "  WARN: module load $OC_CUDA_MODULE failed; relying on host cuda"
+        fi
+        if ! command -v nvidia-smi >/dev/null 2>&1 \
+                || ! nvidia-smi -L >/dev/null 2>&1; then
+            LOG_PREFIX "FATAL: no GPU visible on this node."
+            LOG_PREFIX "  - Is the PBS job requesting a GPU? (e.g. -l select=1:ncpus=8:ngpus=1)"
+            LOG_PREFIX "  - Is the cuda module loaded? (set OC_CUDA_MODULE=<your-module>)"
+            LOG_PREFIX "  - Override with VLLM_DEVICE=cpu to force CPU."
+            exit 2
+        fi
+        LOG_PREFIX "  nvidia-smi   = $(nvidia-smi -L | head -1)"
+    fi
 
     # Build the vllm-serve flag list per profile.
+    # Recent vllm dropped `--device` entirely — GPU images auto-detect cuda,
+    # CPU images (vllm-openai-cpu) are CPU-only builds. Device choice now
+    # drives sif selection + singularity --nv only.
+    # `--gpu-memory-utilization` is accepted by both images (overloaded to
+    # mean CPU-RAM utilization on the CPU build).
     VLLM_SERVE_FLAGS=(
         --host 0.0.0.0 --port "$VLLM_PORT"
         --tensor-parallel-size "$VLLM_TP"
         --max-model-len "$VLLM_MAX_LEN"
         --trust-remote-code
         --enable-prefix-caching
-        --device "$VLLM_DEVICE"
+        --gpu-memory-utilization "$VLLM_GPU_UTIL"
     )
     if [[ "$VLLM_PROFILE" == "bench" ]]; then
         VLLM_SERVE_FLAGS+=(
-            --gpu-memory-utilization "$VLLM_GPU_UTIL"
             --reasoning-parser qwen3
             --enable-auto-tool-choice
             --tool-call-parser qwen3_coder
@@ -295,10 +395,12 @@ if [[ "$STAGE_VLLM" == "1" ]]; then
     # by the container's python and shadows the container's own packages
     # (transformers' version check failed because host's huggingface-hub
     # 1.12 was picked up over the container's bundled <1.0).
-    SINGULARITYENV_HF_HOME=/hf-cache \
-    SINGULARITYENV_HUGGINGFACE_HUB_CACHE=/hf-cache \
+    # Bind the scratch cache root and the per-job tmpdir as the same paths
+    # they have on the host so SINGULARITYENV_{TMPDIR,XDG_CACHE_HOME,HF_HOME,
+    # TORCHINDUCTOR_CACHE_DIR,VLLM_CACHE_ROOT} resolve to real, writable dirs.
     singularity exec "${SING_GPU_FLAG[@]}" --containall \
-        --bind "$SCRATCH/.cache/huggingface:/hf-cache" \
+        --bind "$SCRATCH/.cache:$SCRATCH/.cache:rw" \
+        --bind "$OC_TMPDIR:$OC_TMPDIR:rw" \
         --bind "$KIT_ROOT/logs:/logs" \
         "$VLLM_SIF" \
         vllm serve "$VLLM_MODEL" "${VLLM_SERVE_FLAGS[@]}" \
@@ -350,24 +452,54 @@ if [[ "$STAGE_OC_CHECK" == "1" ]]; then
         || { LOG_PREFIX "FATAL: build_oc_overlay.sh failed"; exit 4; }
 fi
 
-# Wire HostHarness/openclaw_agent to use singularity wrappers.
-# - OC_OC_SIF          : wrap `openclaw gateway/agent` calls in singularity exec
+# Wire SingularityHarness: openclaw runs inside the OC runtime sif.
+# - OC_OC_SIF          : OC runtime image (alpine/openclaw)
 # - OC_OC_OVERLAY      : read-only overlay carrying the patched dist/*.js
-# - OC_SCORING_SIF_DIR : per-instance .sif used by HostHarness.run_tests
+# - OC_SCORING_SIF_DIR : per-instance SWE-bench .sif used by run_tests
+# - OC_PLUGIN_CACHE    : shared host dir bound at <state>/plugin-runtime-deps;
+#                       must be pre-populated on a network-equipped node — HPC
+#                       compute nodes cannot reach npmjs.org (see
+#                       pbs/warm_oc_plugins.sh).
 export OC_OC_SIF="$OC_RUNTIME_SIF"
 export OC_OC_OVERLAY="$OC_RUNTIME_OVERLAY"
 export OC_SCORING_SIF_DIR="$SIF_DIR"
-# Make `openclaw` resolvable on PATH for shutil.which() in harness checks.
-# We use the binary inside the sif via singularity exec, but shutil.which
-# still needs *some* openclaw on PATH or we short-circuit out. Drop a shim.
-mkdir -p "$KIT_ROOT/.bin"
-cat > "$KIT_ROOT/.bin/openclaw" <<EOF
-#!/usr/bin/env bash
-exec singularity exec --overlay "$OC_RUNTIME_OVERLAY:ro" \\
-    "$OC_RUNTIME_SIF" openclaw "\$@"
-EOF
-chmod +x "$KIT_ROOT/.bin/openclaw"
-export PATH="$KIT_ROOT/.bin:$PATH"
+: "${OC_PLUGIN_CACHE:=$SCRATCH/oc-eval/plugin-cache}"
+export OC_PLUGIN_CACHE
+mkdir -p "$OC_PLUGIN_CACHE"
+
+# Direct egress to registry.npmjs.org is blocked from this cluster; route the
+# in-sif npm at the Taobao mirror (npmmirror.com is the official successor of
+# registry.npm.taobao.org). Override via OC_NPM_MIRROR if needed.
+NPM_MIRROR_URL="${OC_NPM_MIRROR:-https://registry.npmmirror.com}"
+LOG_PREFIX "  using npm registry mirror: $NPM_MIRROR_URL"
+export SINGULARITYENV_NPM_CONFIG_REGISTRY="$NPM_MIRROR_URL"
+# Cluster IPv6 egress is unreliable; Node 18+ honours this hint.
+export SINGULARITYENV_NODE_OPTIONS="--dns-result-order=ipv4first"
+
+# Stage 3.5: ensure plugin cache is warm. If empty (first run on this host),
+# attempt to populate it via warm_oc_plugins.sh — this requires network and
+# only succeeds on the login node. On compute nodes a cold cache is fatal.
+if ! find "$OC_PLUGIN_CACHE" -mindepth 2 -name package.json -print -quit | grep -q .; then
+    LOG_PREFIX "  plugin cache cold at $OC_PLUGIN_CACHE; warming..."
+    if bash "$KIT_ROOT/pbs/warm_oc_plugins.sh" \
+            --sif "$OC_OC_SIF" \
+            --overlay "$OC_OC_OVERLAY" \
+            --cache "$OC_PLUGIN_CACHE" \
+            --state-template "$KIT_ROOT/openclaw_state"; then
+        LOG_PREFIX "  plugin cache warmed"
+    else
+        LOG_PREFIX "FATAL: plugin cache warm failed."
+        LOG_PREFIX "  Compute node likely has no npm egress (this run probed ipv4=$NPM_IPV4_OK ipv6=$NPM_IPV6_OK)."
+        LOG_PREFIX "  Run on a node with internet access (e.g. login node):"
+        LOG_PREFIX "    bash $KIT_ROOT/pbs/warm_oc_plugins.sh \\"
+        LOG_PREFIX "        --sif $OC_OC_SIF --overlay $OC_OC_OVERLAY \\"
+        LOG_PREFIX "        --cache $OC_PLUGIN_CACHE \\"
+        LOG_PREFIX "        --state-template $KIT_ROOT/openclaw_state"
+        exit 5
+    fi
+else
+    LOG_PREFIX "  plugin cache already warm at $OC_PLUGIN_CACHE"
+fi
 
 # ============================================================================
 # Stage 4: run benchmark
@@ -376,7 +508,7 @@ RUN_RC=0
 if [[ "$STAGE_RUN" == "1" ]]; then
     LOG_PREFIX "==== STAGE 4: run benchmark ===="
     export KIT_ROOT
-    export HARNESS_BACKEND=host
+    export HARNESS_BACKEND=singularity
     export OC_HOST_WORKSPACE_BASE="$SCRATCH/oc-eval/workspaces"
     mkdir -p "$OC_HOST_WORKSPACE_BASE"
 
@@ -384,7 +516,7 @@ if [[ "$STAGE_RUN" == "1" ]]; then
         --sweep "$SWEEP" \
         --swebench-root "$SWEBENCH_ROOT" \
         --instance-data "$DATASET" \
-        2>&1 | tee -a "$KIT_ROOT/logs/run.log"
+        2>&1 | tee -a "$LOG_DIR/run.log"
     RUN_RC=${PIPESTATUS[0]}
     LOG_PREFIX "  driver exit rc=$RUN_RC"
 fi

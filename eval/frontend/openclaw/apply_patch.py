@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply OpenClaw patches declaratively from MANIFEST.yaml.
+"""Apply OpenClaw patches declaratively from MANIFEST.json.
 
 Source of truth: the .patch unified diffs under patch/. This script is a thin
 driver that resolves content-hashed bundle filenames, checks idempotency
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
 import shutil
 import subprocess
@@ -27,10 +28,8 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-import yaml
-
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_MANIFEST = SCRIPT_DIR / "patch" / "MANIFEST.yaml"
+DEFAULT_MANIFEST = SCRIPT_DIR / "patch" / "MANIFEST.json"
 
 
 def load_oc_root() -> Path:
@@ -189,7 +188,7 @@ def main() -> int:
     args = ap.parse_args()
     cmd = args.cmd or "apply"
 
-    manifest = yaml.safe_load(Path(args.manifest).read_text())
+    manifest = json.loads(Path(args.manifest).read_text())
     oc_root = load_oc_root()
     patch_dir = Path(args.manifest).resolve().parent
     mode = os.environ.get("OC_PATCH_MODE", "runtime")

@@ -127,7 +127,7 @@ bench-platform/
 │   ├── runner/{driver.py, harness.py, config.py, fairness_check.py, manifest.py,
 │   │           conditions/{_base.py, code_agent/, doc_analysis/, websearch/, ablations/}}
 │   ├── frontend/openclaw/{apply_patch.py, configure.sh, gateway_*.sh, defaults.env,
-│   │                       patch/{VERSION, MANIFEST.yaml, *.patch}}
+│   │                       patch/{VERSION, MANIFEST.json, *.patch}}
 │   ├── trace/{schema, logger, writers, telemetry, llm_wrapper, align,
 │   │           openclaw_hooks, otel/{otel_collector_*.sh, otel_query.py, otel_reset_traces.sh}}
 │   ├── analysis/, report/

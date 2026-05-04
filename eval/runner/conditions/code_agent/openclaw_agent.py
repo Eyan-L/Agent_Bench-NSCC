@@ -32,6 +32,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -58,7 +59,64 @@ _OTEL_TRACE_FILE_DEFAULT = os.environ.get(
 # is configured with flushIntervalMs=20 in openclaw.json; 1.5s is generous.
 _OTEL_FLUSH_WAIT_SECONDS = float(os.environ.get("OC_OTEL_FLUSH_WAIT_SECONDS", "1.5"))
 
+_UTIL_SAMPLER_SCRIPT = Path(__file__).resolve().parents[4] / "scripts" / "util_sampler.py"
+
 logger = logging.getLogger(__name__)
+
+
+class _UtilSampler:
+    """Spawn scripts/util_sampler.py as a sidecar around the OC request.
+
+    Toggle off via OC_UTIL_SAMPLE=0; tune cadence via OC_UTIL_SAMPLE_INTERVAL
+    (seconds, default 1.0). Output lands at <run_dir>/util.jsonl.
+    """
+
+    def __init__(self, run_dir: Path):
+        self.run_dir = run_dir
+        self.proc: Optional[subprocess.Popen] = None
+        self.enabled = (
+            os.environ.get("OC_UTIL_SAMPLE", "1") != "0"
+            and _UTIL_SAMPLER_SCRIPT.exists()
+        )
+        try:
+            self.interval = float(os.environ.get("OC_UTIL_SAMPLE_INTERVAL", "1.0"))
+        except ValueError:
+            self.interval = 1.0
+
+    def __enter__(self) -> "_UtilSampler":
+        if not self.enabled:
+            return self
+        out_path = self.run_dir / "util.jsonl"
+        try:
+            self.proc = subprocess.Popen(
+                [sys.executable, str(_UTIL_SAMPLER_SCRIPT),
+                 "--output", str(out_path),
+                 "--interval", str(self.interval)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            logger.info("  util sampler pid=%s -> %s (interval=%.2fs)",
+                        self.proc.pid, out_path.name, self.interval)
+        except Exception as e:
+            logger.warning("util sampler launch failed: %s", e)
+            self.proc = None
+        return self
+
+    def __exit__(self, *exc) -> None:
+        proc = self.proc
+        if proc is None:
+            return
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+        except Exception as e:
+            logger.warning("util sampler stop failed: %s", e)
 
 
 # ------------------------------------------------------------------
@@ -113,15 +171,16 @@ class OpenClawAgentCondition:
         except FileNotFoundError:
             pre_offset = 0
 
-        step_start_ns = time.time_ns()
-        payload, err = self._invoke_agent(
-            container_id=container_id,
-            workspace_root=workspace_root,
-            session_id=run_dir.name,
-            message=message,
-            timeout_seconds=self.agent_config.max_time_seconds,
-        )
-        step_end_ns = time.time_ns()
+        with _UtilSampler(run_dir):
+            step_start_ns = time.time_ns()
+            payload, err = self._invoke_agent(
+                container_id=container_id,
+                workspace_root=workspace_root,
+                session_id=run_dir.name,
+                message=message,
+                timeout_seconds=self.agent_config.max_time_seconds,
+            )
+            step_end_ns = time.time_ns()
 
         # diagnostics-otel uses BatchSpanProcessor under the hood. Spans
         # only flush on `sdk.shutdown()`, which runs when the gateway
@@ -357,17 +416,18 @@ class OpenClawAgentCondition:
         Returns (parsed_json_or_none, error_message).
         """
         if container_id is None:
-            # Host mode: gateway + state dir come from HostHarness via
-            # env_info (set in run()). Drop --local so OTel + the patched
-            # gateway-side dispatcher are active, matching docker mode.
+            # Host or singularity mode: gateway + state dir come from the
+            # harness via env_info (set in run()). Drop --local so OTel + the
+            # patched gateway-side dispatcher are active, matching docker mode.
             ei = getattr(self, "_env_info", {}) or {}
+            backend = ei.get("backend", "host")
             state_dir = ei.get("host_state_dir")
             gateway_url = ei.get("gateway_url")
             gateway_token = ei.get("gateway_token")
             if not (state_dir and gateway_url and gateway_token):
                 return None, (
-                    "host mode but env_info missing host_state_dir / "
-                    "gateway_url / gateway_token (HostHarness setup failed?)"
+                    f"{backend} mode but env_info missing host_state_dir / "
+                    "gateway_url / gateway_token (harness setup failed?)"
                 )
             argv = [
                 "openclaw", "agent",
@@ -381,15 +441,26 @@ class OpenClawAgentCondition:
             env["OPENCLAW_STATE_DIR"] = state_dir
             env["OPENCLAW_GATEWAY_URL"] = gateway_url
             env["OPENCLAW_GATEWAY_TOKEN"] = gateway_token
-            # Optional: wrap in `singularity exec $OC_OC_SIF ...` so OC runs
-            # inside the alpine/openclaw container. Workspace + state are
-            # bound at the same paths used by the env vars above.
-            from eval.runner.harness import _wrap_oc_in_singularity
-            binds = [
-                (workspace_root, workspace_root),
-                (state_dir, state_dir),
-            ]
-            argv, env = _wrap_oc_in_singularity(argv, env, binds)
+            if backend == "singularity":
+                # Run openclaw inside the OC runtime sif. The harness already
+                # validated that sif/overlay exist.
+                from eval.runner.harness import wrap_singularity_argv
+                binds = [
+                    (workspace_root, workspace_root),
+                    (state_dir, state_dir),
+                ]
+                # Plugin cache bind mirrors the gateway's so the agent process
+                # sees the same pre-installed plugin runtime deps (acpx,
+                # browser, …). Without this, OpenClaw would try to npm-install
+                # them again per run — fatal on HPC compute nodes (no internet).
+                plugin_cache = ei.get("plugin_cache_dir")
+                if plugin_cache:
+                    binds.append((plugin_cache, f"{state_dir}/plugin-runtime-deps"))
+                argv, env = wrap_singularity_argv(
+                    argv, env, binds,
+                    sif=ei["singularity_sif"],
+                    overlay=ei.get("singularity_overlay"),
+                )
             run_kwargs = {"cwd": workspace_root, "env": env}
         else:
             inner = (

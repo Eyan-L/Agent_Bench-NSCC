@@ -83,12 +83,6 @@ singularity exec \
     "$SIF" \
     bash -c "
         set -e
-        # apply_patch.py imports PyYAML; alpine/openclaw doesn't ship it.
-        # Install into the overlay rw layer once so subsequent ro mounts
-        # see it too.
-        if ! python3 -c 'import yaml' 2>/dev/null; then
-            python3 -m pip install --no-cache-dir --root-user-action=ignore PyYAML
-        fi
         cd /oc-patches
         export OC_HOST_OPENCLAW='$INSIDE_PKG'
         export OC_PATCH_MODE=runtime
