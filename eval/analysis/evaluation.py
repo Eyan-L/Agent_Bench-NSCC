@@ -7,7 +7,9 @@ Includes ranking-alignment test (core RQ3 probe).
 
 import pandas as pd
 import numpy as np
-from scipy.stats import spearmanr
+# scipy is only needed by ranking_alignment_test; importing it lazily lets
+# compute_evaluation_metrics run on lean envs (e.g. minimal plotting boxes)
+# that haven't installed scipy.
 
 
 def compute_evaluation_metrics(
@@ -171,6 +173,7 @@ def ranking_alignment_test(
             - p_value: float
             - aligned: bool (rho > 0.7 and p < 0.05)
     """
+    from scipy.stats import spearmanr  # local import — only needed here
     results = []
 
     for metric_name, task_metric in [

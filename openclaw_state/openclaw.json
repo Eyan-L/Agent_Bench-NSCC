@@ -49,13 +49,18 @@
     "exec": {
       "host": "node",
       "security": "full"
-    }
+    },
+    "alsoAllow": ["sessions_spawn", "sessions_yield", "subagents"]
   },
   "agents": {
     "defaults": {
       "workspace": "/testbed",
       "model": {
         "primary": "vllm/Qwen/Qwen3.6-35B-A3B"
+      },
+      "subagents": {
+        "maxConcurrent": 4,
+        "runTimeoutSeconds": 600
       }
     },
     "list": [

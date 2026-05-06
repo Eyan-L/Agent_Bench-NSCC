@@ -9,7 +9,10 @@ from pathlib import Path
 from typing import Tuple, Dict, Any, Optional
 
 import pandas as pd
-import pyarrow.parquet as pq
+# pyarrow is reached transitively through pd.read_parquet — no need to import
+# it directly. Keeping it at module level forced every importer of load_run /
+# load_manifest to have pyarrow installed even when the run has no
+# telemetry.parquet file (the common case for util.jsonl-based runs).
 
 
 def load_run(

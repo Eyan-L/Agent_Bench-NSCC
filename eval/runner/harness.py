@@ -240,6 +240,7 @@ class SWEBenchHarness:
         container_image: str,
         workspace_root: str = "/testbed",
         run_id: Optional[str] = None,
+        instance_data: Optional[Dict] = None,  # ignored; TB harness uses it
     ) -> Dict:
         logger.info("Preparing container for %s (image=%s)", instance_id, container_image)
 
@@ -730,6 +731,7 @@ class HostHarness:
         container_image: Optional[str] = None,  # ignored
         workspace_root: Optional[str] = None,    # ignored — we pick our own
         run_id: Optional[str] = None,
+        instance_data: Optional[Dict] = None,    # ignored; TB harness uses it
     ) -> Dict:
         ws = self.workspace_base / (run_id or instance_id)
         if ws.exists():

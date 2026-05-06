@@ -1,8 +1,8 @@
 #!/bin/bash
-# bench profile (Qwen3.6-35B-A3B, tp=2) needs 2 GPUs. For the test profile
+# bench profile (Qwen3.6-35B-A3B, tp=4) needs 4 GPUs. For the test profile
 # (Qwen2.5-0.5B, tp=1) override at qsub time:
-#   qsub -l select=1:ncpus=16:ngpus=1:mem=64gb -v VLLM_PROFILE=test pbs/run_benchmark.pbs
-#PBS -l select=1:ncpus=1:ngpus=1:mem=64gb
+#   qsub -l select=1:ncpus=16:ngpus=4:mem=64gb -v VLLM_PROFILE=test pbs/run_benchmark.pbs
+#PBS -l select=1:ncpus=1:ngpus=4:mem=64gb
 #PBS -l walltime=24:00:00
 #PBS -q normal
 #PBS -j oe
@@ -19,8 +19,11 @@
 #   1. STAGE_PULL=1      — pull SWE-bench instance .sif images via pull_images.sh
 #   2. STAGE_VLLM=1      — start vLLM singularity, serve Qwen3.6
 #   3. STAGE_OC_CHECK=1  — pull alpine/openclaw sif + bake patch overlay
+#   3.5 STAGE_OTEL=1     — start local OTel collector that writes
+#                          $OC_OTEL_DATA_DIR/otel-traces.jsonl, the file
+#                          openclaw_agent.py slices into spans.jsonl
 #   4. STAGE_RUN=1       — invoke eval/runner/driver with the sweep
-#   5. STAGE_CLEANUP=1   — kill vLLM, free ports
+#   5. STAGE_CLEANUP=1   — kill vLLM + OTel collector, free ports
 #
 # Env (override via `qsub -v K1=V1,K2=V2 ...`):
 #   KIT_ROOT       — repo root (default: $PBS_O_WORKDIR or $HOME/Agent_Bench)
@@ -86,8 +89,11 @@ case "$VLLM_PROFILE" in
     bench)
         VLLM_DEVICE_DEFAULT=cuda
         VLLM_MODEL_DEFAULT="Qwen/Qwen3.6-35B-A3B"
-        VLLM_TP_DEFAULT=2
-        VLLM_MAX_LEN_DEFAULT=131072
+        VLLM_TP_DEFAULT=4
+        # 2× A100-40GB: weights take ~33 GiB/GPU, leaving ~3 GiB headroom.
+        # 131072 needs ~1.3 GiB per concurrent seq for KV — won't fit even one.
+        # 32768 keeps ~8 full-length seqs in KV; covers the SWE-bench tail.
+        VLLM_MAX_LEN_DEFAULT=32768
         ;;
     *)
         echo "FATAL: VLLM_PROFILE=$VLLM_PROFILE — must be 'test' or 'bench'" >&2
@@ -106,7 +112,7 @@ if [[ "$VLLM_DEVICE" == "cpu" ]]; then
     VLLM_SIF="${VLLM_SIF:-$SCRATCH/sif_images/vllm_openai_cpu.sif}"
     VLLM_DOCKER_DEFAULT="docker://vllm/vllm-openai-cpu:latest"
 else
-    VLLM_SIF="${VLLM_SIF:-$SCRATCH/sif_images/vllm_openai.sif}"
+    VLLM_SIF="${VLLM_SIF:-$SCRATCH/sif_images/vllm_openai_cu128.sif}"
     VLLM_DOCKER_DEFAULT="docker://vllm/vllm-openai:latest"
 fi
 VLLM_DOCKER="${VLLM_DOCKER:-$VLLM_DOCKER_DEFAULT}"
@@ -120,7 +126,9 @@ VLLM_PORT="${VLLM_PORT:-8000}"
 if [[ "$VLLM_DEVICE" == "cpu" ]]; then
     VLLM_GPU_UTIL="${VLLM_GPU_UTIL:-0.5}"
 else
-    VLLM_GPU_UTIL="${VLLM_GPU_UTIL:-0.90}"
+    # 0.93 just barely covers cudagraph capture overhead on 2× A100-40GB
+    # (vllm warns at 0.9 that effective KV mem drops by 0.0228 due to graphs).
+    VLLM_GPU_UTIL="${VLLM_GPU_UTIL:-0.93}"
 fi
 
 OC_PULL_PARALLEL="${OC_PULL_PARALLEL:-2}"
@@ -129,8 +137,19 @@ STAGE_SWEBENCH="${STAGE_SWEBENCH:-1}"
 STAGE_PULL="${STAGE_PULL:-1}"
 STAGE_VLLM="${STAGE_VLLM:-1}"
 STAGE_OC_CHECK="${STAGE_OC_CHECK:-1}"
+STAGE_OTEL="${STAGE_OTEL:-1}"
 STAGE_RUN="${STAGE_RUN:-1}"
 STAGE_CLEANUP="${STAGE_CLEANUP:-1}"
+
+# OTel collector — local sidecar that catches OC gateway spans and writes
+# them to $OC_OTEL_DATA_DIR/otel-traces.jsonl, which openclaw_agent.py
+# slices into per-run spans.jsonl files. See pbs/otel_collector.sh for the
+# full set of OC_OTEL_* env knobs.
+OC_OTEL_DATA_DIR="${OC_OTEL_DATA_DIR:-$SCRATCH/oc-eval/otel}"
+export OC_OTEL_DATA_DIR
+# Tell openclaw_agent.py where to read the trace file from. Default in code
+# is /tmp/otel/otel-traces.jsonl which doesn't survive HPC tmpfs limits.
+export OC_OTEL_TRACE_FILE="${OC_OTEL_TRACE_FILE:-$OC_OTEL_DATA_DIR/otel-traces.jsonl}"
 
 # Persistent pip cache. Single dir holds every package pulled in by stage 0 so
 # subsequent jobs skip download. Located on scratch so it's cluster-shared
@@ -140,7 +159,7 @@ OC_PIP_CACHE="${OC_PIP_CACHE:-$SCRATCH/.pip-cache}"
 
 LOG_DIR="${OC_LOG_DIR:-$KIT_ROOT/logs}"
 export OC_LOG_DIR="$LOG_DIR"
-mkdir -p "$LOG_DIR" "$SIF_DIR" "$SINGULARITY_CACHE"
+mkdir -p "$LOG_DIR" "$SIF_DIR" "$SINGULARITY_CACHE" "$OC_OTEL_DATA_DIR"
 cd "$KIT_ROOT"
 
 LOG_PREFIX() { echo "[$(date -u +%FT%TZ)] $*"; }
@@ -153,7 +172,7 @@ LOG_PREFIX "oc_pkg        = $OC_PKG"
 LOG_PREFIX "sif_dir       = $SIF_DIR"
 LOG_PREFIX "vllm_sif      = $VLLM_SIF"
 LOG_PREFIX "vllm profile  = $VLLM_PROFILE  device=$VLLM_DEVICE  model=$VLLM_MODEL  tp=$VLLM_TP  max_len=$VLLM_MAX_LEN"
-LOG_PREFIX "stages: pull=$STAGE_PULL vllm=$STAGE_VLLM oc=$STAGE_OC_CHECK run=$STAGE_RUN cleanup=$STAGE_CLEANUP"
+LOG_PREFIX "stages: pull=$STAGE_PULL vllm=$STAGE_VLLM oc=$STAGE_OC_CHECK otel=$STAGE_OTEL run=$STAGE_RUN cleanup=$STAGE_CLEANUP"
 
 # ---- Modules ---------------------------------------------------------------
 module load singularity 2>/dev/null || LOG_PREFIX "WARN: 'module load singularity' failed; assuming binary on PATH"
@@ -302,15 +321,27 @@ if [[ "$STAGE_VLLM" == "1" ]]; then
         "$OC_TMPDIR" \
         "$SCRATCH/.cache/huggingface" \
         "$SCRATCH/.cache/torchinductor" \
+        "$SCRATCH/.cache/triton" \
         "$SCRATCH/.cache/vllm" \
         "$SCRATCH/.cache/vllm/modelinfos"
-    export TMPDIR="$OC_TMPDIR"
+    # Don't `export TMPDIR` on the host — singularity (without --containall)
+    # leaks the host TMPDIR into the OC gateway container in stage 4, where
+    # $SCRATCH/.tmp/$PBS_JOBID isn't bound and node's os.tmpdir() crashes
+    # with ENOENT. SINGULARITYENV_TMPDIR is enough to point vllm at scratch
+    # while leaving the host-side TMPDIR at its default (/tmp) for stage 4.
     export SINGULARITYENV_TMPDIR="$OC_TMPDIR"
     export SINGULARITYENV_TORCHINDUCTOR_CACHE_DIR="$SCRATCH/.cache/torchinductor"
     export SINGULARITYENV_HF_HOME="$SCRATCH/.cache/huggingface"
     export SINGULARITYENV_HUGGINGFACE_HUB_CACHE="$SCRATCH/.cache/huggingface"
     export SINGULARITYENV_XDG_CACHE_HOME="$SCRATCH/.cache"
     export SINGULARITYENV_VLLM_CACHE_ROOT="$SCRATCH/.cache/vllm"
+    # Triton's cache manager ignores XDG_CACHE_HOME — it uses $TRITON_CACHE_DIR,
+    # falling back to $HOME/.triton/cache. With --containall, $HOME points at
+    # the container's tiny overlay (no scratch bind), so kernel compiles bomb
+    # with `OSError: [Errno 28] No space left on device` partway through MoE
+    # autotune. Force the cache + base dir onto bound scratch.
+    export SINGULARITYENV_TRITON_CACHE_DIR="$SCRATCH/.cache/triton"
+    export SINGULARITYENV_TRITON_HOME="$SCRATCH/.cache/triton"
     LOG_PREFIX "  TMPDIR              = $OC_TMPDIR"
     LOG_PREFIX "  XDG_CACHE_HOME      = $SCRATCH/.cache"
 
@@ -408,6 +439,20 @@ if [[ "$STAGE_VLLM" == "1" ]]; then
     VLLM_PID=$!
     LOG_PREFIX "  vllm pid=$VLLM_PID, log=$VLLM_LOG"
 
+    # Now that vllm has forked (it inherited these via the export), strip the
+    # vllm-specific SINGULARITYENV_* vars from the parent shell so they don't
+    # leak into stage 4's `singularity exec` for the OC gateway. The OC sif
+    # only binds state_dir / workspace_base / plugin-cache, so a SINGULARITYENV_
+    # TMPDIR pointing at $SCRATCH/.tmp/<jobid> makes node's os.tmpdir() resolve
+    # to a path that doesn't exist inside the container — gateway then crashes
+    # with `ENOENT, mkdir '/scratch/users/ntu/<user>/.tmp'`.
+    unset SINGULARITYENV_TMPDIR \
+          SINGULARITYENV_TORCHINDUCTOR_CACHE_DIR \
+          SINGULARITYENV_HF_HOME \
+          SINGULARITYENV_HUGGINGFACE_HUB_CACHE \
+          SINGULARITYENV_XDG_CACHE_HOME \
+          SINGULARITYENV_VLLM_CACHE_ROOT
+
     # Poll for ready
     DEADLINE=$(( $(date +%s) + 1800 ))
     until curl -fsS "http://127.0.0.1:$VLLM_PORT/v1/models" >/dev/null 2>&1; do
@@ -502,6 +547,23 @@ else
 fi
 
 # ============================================================================
+# Stage 3.5: start local OTel collector (optional but the only way spans.jsonl
+# files get produced — the OC gateway emits OTLP/HTTP to 127.0.0.1:$OC_OTEL_PORT
+# and openclaw_agent.py slices the resulting trace file into per-run jsonl).
+# Best-effort: a failure here only loses telemetry, not the run itself.
+# ============================================================================
+if [[ "$STAGE_OTEL" == "1" ]]; then
+    LOG_PREFIX "==== STAGE 3.5: start OTel collector ===="
+    if bash "$KIT_ROOT/pbs/otel_collector.sh" start; then
+        LOG_PREFIX "  OTel collector ready at 127.0.0.1:${OC_OTEL_PORT:-4318}"
+        LOG_PREFIX "  trace file -> $OC_OTEL_TRACE_FILE"
+    else
+        LOG_PREFIX "  WARN: OTel collector failed to start; spans.jsonl will be missing"
+        LOG_PREFIX "        (run continues — OC agent works without telemetry)"
+    fi
+fi
+
+# ============================================================================
 # Stage 4: run benchmark
 # ============================================================================
 RUN_RC=0
@@ -526,6 +588,13 @@ fi
 # ============================================================================
 if [[ "$STAGE_CLEANUP" == "1" ]]; then
     LOG_PREFIX "==== STAGE 5: cleanup ===="
+    # Stop OTel first so the file exporter flushes its remaining batches
+    # while the agent's last spans are still being written. Order matters —
+    # SIGTERM on otelcol triggers a graceful flush; SIGKILL would lose the
+    # tail of the trace file.
+    if [[ "$STAGE_OTEL" == "1" ]]; then
+        bash "$KIT_ROOT/pbs/otel_collector.sh" stop || true
+    fi
     if [[ -n "$VLLM_PID" ]] && kill -0 "$VLLM_PID" 2>/dev/null; then
         LOG_PREFIX "  stopping vllm pid=$VLLM_PID"
         kill -TERM "$VLLM_PID" 2>/dev/null || true

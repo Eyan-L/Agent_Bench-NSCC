@@ -1,0 +1,46 @@
+#!/bin/bash
+#PBS -N dev_env
+#PBS -l select=1:ncpus=1:ngpus=1:mem=64gb
+#PBS -l walltime=5:00:00
+#PBS -j oe
+cd $PBS_O_WORKDIR
+export CUDA_VISIBLE_DEVICES=0
+module load singularity
+
+IMG=/scratch/users/ntu/chengzh2/sglang_dev_chengzhi.sif
+INST=mydev
+LOG=/scratch/users/ntu/chengzh2/workspace/vscode_tunnel.log
+
+# 需要先下载 code 放到 workspace 下，workspace 可以替换任意的挂载路径。
+# curl -Lk 'https://code.visualstudio.com/sha/download?build=stable&os=cli-alpine-x64' --output vscode_cli.tar.gz
+# tar -xf vscode_cli.tar.gz
+exec > >(stdbuf -oL -eL tee -a "$LOG") 2>&1
+
+echo "[1] start instance..."
+singularity instance start --nv \
+  -B /scratch/users/ntu/chengzh2/models/:/home/users/ntu/chengzh2/.cache/huggingface \
+  -B /scratch/users/ntu/chengzh2/github/sglang:/sgl-workspace/sglang \
+  -B /scratch/users/ntu/chengzh2/workspace:/workspace \
+  $IMG $INST
+
+echo "[2] confirm instance ready..."
+singularity instance list | grep -q "$INST"
+
+echo "[3] check code cli..."
+singularity exec --nv instance://$INST bash -lc "which code || echo 'NO_CODE_IN_PATH'"
+
+echo "[4] smoke test exec..."
+singularity exec --nv instance://$INST /bin/echo "HELLO_FROM_INSTANCE"
+
+echo "[5] start code tunnel (realtime)..."
+
+singularity exec --nv instance://$INST bash --noprofile --norc <<'EOF' >> /scratch/users/ntu/chengzh2/workspace/vscode_tunnel.log 2>&1
+set -euxo pipefail
+cd /workspace
+echo "=== tunnel start at $(date)"
+./code tunnel --accept-server-license-terms
+EOF
+
+# 打开 workspace 下面的log 文件，找到
+# To grant access to the server, please log into https://github.com/login/device and use code  ... ...
+sleep 18000

@@ -20,6 +20,11 @@ from eval.runner.conditions.code_agent.ar_static_context import ARStaticContextC
 from eval.runner.conditions.code_agent.openclaw_agent import OpenClawAgentCondition
 from eval.runner.conditions.ablations.no_retry import NoRetryAblation
 
+# Terminal-Bench integration is optional: the import is lazy in run_sweep so a
+# pure SWE-bench environment never has to install the TB-side deps (tomllib is
+# stdlib on 3.11+, but the eval/benchmarks/ tree may be absent in older
+# checkouts).
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -59,7 +64,9 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
     container_id = None
     env_info = None
     try:
-        # Prepare environment
+        # Prepare environment. Passing instance_data lets benchmark-specific
+        # harnesses (e.g. TerminalBenchHarness) read task.toml-derived fields
+        # without re-loading the dataset; SWE-bench harnesses ignore the kwarg.
         env_info = harness.prepare_environment(
             instance_id=run_config.instance_id,
             repo_id=run_config.repo_id,
@@ -67,6 +74,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             container_image=run_config.container_image,
             workspace_root=run_config.workspace_root,
             run_id=run_id,
+            instance_data=instance_data,
         )
         
         container_id = env_info["container_id"]
@@ -116,7 +124,24 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 container_id=container_id,
                 env_info=env_info
             )
-        
+
+        elif condition_type == "tb_react":
+            # Terminal-Bench ReAct loop. Lives under eval/benchmarks/ so the
+            # SWE-bench code path stays unchanged.
+            from eval.benchmarks.terminal_bench.condition import (
+                TerminalBenchReactCondition,
+            )
+            condition = TerminalBenchReactCondition(
+                model_config=run_config.condition.model,
+                agent_config=run_config.condition.agent,
+            )
+            result = condition.run(
+                instance_data, run_dir, run_config.seed,
+                workspace_root=env_info["workspace_root"],
+                container_id=container_id,
+                env_info=env_info
+            )
+
         else:
             raise ValueError(f"Unknown condition type: {condition_type}")
         
@@ -125,15 +150,19 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         # not apply" and "tests fail" cleanly, and the verdicts it produces
         # carry richer signal (resolved, patch_successfully_applied,
         # tests_status.FAIL_TO_PASS/PASS_TO_PASS) than our binary verdict.
+        # Terminal-Bench has no patch artifact — agent's effects live in the
+        # task container — so we skip the patch-presence gate for it.
         patch_path = Path(result["patch_path"])
+        benchmark_kind = instance_data.get("benchmark", "swebench")
+        skip_patch_gate = benchmark_kind == "terminal_bench"
 
-        if patch_path.exists() and patch_path.stat().st_size > 0:
+        if skip_patch_gate or (patch_path.exists() and patch_path.stat().st_size > 0):
             verdict = harness.run_tests(
                 container_id=container_id,
                 instance_id=run_config.instance_id,
                 workspace_root=env_info["workspace_root"],
                 timeout_seconds=run_config.wall_clock_budget_seconds,
-                patch=patch_path.read_text(),
+                patch=patch_path.read_text() if patch_path.exists() else "",
                 run_id=run_id,
                 instance_data=instance_data,
             )
@@ -179,6 +208,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 gateway_pid=env_info.get("gateway_pid") if env_info else None,
                 node_pid=env_info.get("node_pid") if env_info else None,
                 host_state_dir=env_info.get("host_state_dir") if env_info else None,
+                container_name=env_info.get("container_name") if env_info else None,
             )
         except Exception:
             pass
@@ -217,23 +247,51 @@ def run_sweep(sweep_config_path: Path, swebench_root: Path,
     with open(instance_data_path) as f:
         instances = {inst["instance_id"]: inst for inst in json.load(f)}
 
-    # Initialize harness. HARNESS_BACKEND selects the execution backend:
+    # Initialize harness. HARNESS_BACKEND selects the SWE-bench backend:
     #   docker      (default) — SWEBenchHarness; per-task SWE-bench image
     #   host                  — HostHarness;     run agent on the host
     #   singularity           — SingularityHarness; openclaw inside an OC sif
-    backend = os.environ.get("HARNESS_BACKEND", "docker").lower()
-    if backend == "host":
-        logger.info("Using HostHarness (no docker; scoring deferred).")
-        harness = HostHarness(swebench_root)
-    elif backend == "singularity":
-        logger.info("Using SingularityHarness (openclaw inside OC runtime sif).")
-        harness = SingularityHarness(swebench_root)
-    elif backend == "docker":
-        harness = SWEBenchHarness(swebench_root)
+    # Terminal-Bench instances are auto-routed to TerminalBenchHarness
+    # regardless of HARNESS_BACKEND (per-instance dispatch in _one below).
+    needs_swe = any(
+        inst.get("benchmark", "swebench") != "terminal_bench"
+        for inst in instances.values()
+    )
+    needs_tb = any(
+        inst.get("benchmark") == "terminal_bench" for inst in instances.values()
+    )
+
+    harness = None
+    if needs_swe:
+        backend = os.environ.get("HARNESS_BACKEND", "docker").lower()
+        if backend == "host":
+            logger.info("Using HostHarness (no docker; scoring deferred).")
+            harness = HostHarness(swebench_root)
+        elif backend == "singularity":
+            logger.info("Using SingularityHarness (openclaw inside OC runtime sif).")
+            harness = SingularityHarness(swebench_root)
+        elif backend == "docker":
+            harness = SWEBenchHarness(swebench_root)
+        else:
+            raise ValueError(
+                f"Unknown HARNESS_BACKEND={backend!r}; expected docker|host|singularity"
+            )
     else:
-        raise ValueError(
-            f"Unknown HARNESS_BACKEND={backend!r}; expected docker|host|singularity"
-        )
+        logger.info("Sweep is pure terminal-bench; skipping SWE-bench harness build.")
+
+    # Lazy-build the TB harness only if any instance in this sweep is TB.
+    tb_harness = None
+    if needs_tb:
+        from eval.benchmarks.terminal_bench.harness import TerminalBenchHarness
+        if harness is not None:
+            logger.info(
+                "Sweep contains terminal-bench instances; constructing "
+                "TerminalBenchHarness alongside %s.",
+                type(harness).__name__,
+            )
+        else:
+            logger.info("Constructing TerminalBenchHarness.")
+        tb_harness = TerminalBenchHarness(swebench_root)
 
     completed = 0
     failed = 0
@@ -241,7 +299,14 @@ def run_sweep(sweep_config_path: Path, swebench_root: Path,
 
     def _one(rc):
         try:
-            return execute_run(rc, harness, instances[rc.instance_id], retry_errors)
+            inst = instances[rc.instance_id]
+            h = tb_harness if inst.get("benchmark") == "terminal_bench" else harness
+            if h is None:
+                raise RuntimeError(
+                    f"instance {rc.instance_id} requires terminal_bench harness "
+                    "but it was not constructed (loader bug?)"
+                )
+            return execute_run(rc, h, inst, retry_errors)
         except Exception as e:
             logger.error("run %s crashed: %s", rc.instance_id, e, exc_info=True)
             return None

@@ -1,0 +1,21 @@
+#!/bin/bash
+#PBS -l select=1:ncpus=16:mem=64gb
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -N download_openclaw_sif
+#PBS -o ./logs/download_openclaw_sif.log
+
+scratch_dir="/scratch/users/ntu/$USER"
+
+mkdir -p $scratch_dir/.singularity/cache $scratch_dir/sif_images
+
+# check if image exists
+if [ -f "$scratch_dir/sif_images/openclaw.sif" ]; then
+    echo "openclaw.sif already exists, skipping pull."
+    exit 0
+fi
+
+module load singularity
+export SINGULARITY_CACHEDIR=$scratch_dir/.singularity
+singularity pull $scratch_dir/sif_images/oc_runtime.sif docker://alpine/openclaw:2026.4.22
+echo "openclaw.sif image pulled."
