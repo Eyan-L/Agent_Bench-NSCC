@@ -7,16 +7,16 @@ that matches what you're trying to do.
 
 | Guide | What's in it |
 |---|---|
-| [usage.md](usage.md)             | How to run a benchmark (local + PBS), inspect outputs, replay analysis, troubleshoot. |
-| [repo_layout.md](repo_layout.md) | What each top-level folder is for and where to find what. |
+| [execution.md](execution.md) | How to run a benchmark (Docker, PBS, host modes), inspect outputs, replay analysis, troubleshoot. |
+| [layout.md](layout.md)       | What each top-level folder is for and where to find what. |
 
 ## Extending the framework
 
 | Guide | When to use |
 |---|---|
-| [adding_a_benchmark.md](adding_a_benchmark.md) | New evaluation suite (the *what to test*) — e.g. SWE-bench Lite, HumanEval, a custom internal task set. |
-| [adding_a_condition.md](adding_a_condition.md) | New way the agent attempts a task (the *how* the model is invoked) — e.g. a different retrieval strategy, an ablation, a tool-use variant. |
-| [adding_a_frontend.md](adding_a_frontend.md)   | New agent runtime image / orchestrator (the *who runs the agent*) — e.g. swap OpenClaw for SWE-Agent, claude-code, or a custom CLI. |
+| [benchmarks.md](benchmarks.md) | New evaluation suite (the *what to test*) — e.g. SWE-bench Lite, HumanEval, a custom internal task set. |
+| [conditions.md](conditions.md) | New way the agent attempts a task (the *how* the model is invoked) — e.g. a different retrieval strategy, an ablation, a tool-use variant. |
+| [frontends.md](frontends.md)   | New agent runtime image / orchestrator (the *who runs the agent*) — e.g. swap OpenClaw for SWE-Agent, claude-code, or a custom CLI. |
 
 ## Quick orientation
 
