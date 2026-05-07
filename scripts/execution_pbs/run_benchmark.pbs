@@ -93,7 +93,7 @@ case "$VLLM_PROFILE" in
         # 2× A100-40GB: weights take ~33 GiB/GPU, leaving ~3 GiB headroom.
         # 131072 needs ~1.3 GiB per concurrent seq for KV — won't fit even one.
         # 32768 keeps ~8 full-length seqs in KV; covers the SWE-bench tail.
-        VLLM_MAX_LEN_DEFAULT=131072
+        VLLM_MAX_LEN_DEFAULT=262144
         ;;
     *)
         echo "FATAL: VLLM_PROFILE=$VLLM_PROFILE — must be 'test' or 'bench'" >&2
@@ -470,6 +470,27 @@ if [[ "$STAGE_VLLM" == "1" ]]; then
         sleep 10
     done
     LOG_PREFIX "  vllm ready on http://127.0.0.1:$VLLM_PORT"
+
+    # Sidecar: poll vLLM's Prometheus /metrics endpoint at iteration cadence
+    # (default 100ms) and emit JSONL with running/waiting sequence counts,
+    # token throughput, and KV cache utilization. /metrics gauges update on
+    # every scheduler step, so polling here gives true iteration-level
+    # resolution — vLLM's stdout-log stats are rate-limited to 5-10s and
+    # lose iteration granularity. Output joins with util_sampler.jsonl +
+    # spans.jsonl on ts_ns during offline analysis.
+    OC_ENGINE="${OC_ENGINE:-vllm}"
+    ENGINE_METRICS_LOG="${OC_ENGINE_METRICS_LOG:-$LOG_DIR/engine_metrics.jsonl}"
+    ENGINE_TAILER_LOG="$LOG_DIR/engine_log_tailer.log"
+    OC_ENGINE_INTERVAL="${OC_ENGINE_INTERVAL:-0.1}"
+    python3 "$KIT_ROOT/scripts/engine_log_tailer.py" \
+        --engine "$OC_ENGINE" \
+        --source metrics \
+        --base-url "http://127.0.0.1:$VLLM_PORT" \
+        --interval "$OC_ENGINE_INTERVAL" \
+        --output "$ENGINE_METRICS_LOG" \
+        > "$ENGINE_TAILER_LOG" 2>&1 &
+    ENGINE_TAILER_PID=$!
+    LOG_PREFIX "  engine metrics tailer pid=$ENGINE_TAILER_PID -> $ENGINE_METRICS_LOG (interval=${OC_ENGINE_INTERVAL}s)"
 fi
 
 # ============================================================================
@@ -546,6 +567,13 @@ else
     LOG_PREFIX "  plugin cache already warm at $OC_PLUGIN_CACHE"
 fi
 
+# Sweep partial / disabled plugin dirs from the cache. OC has no clobber flag,
+# so an interrupted prior extract leaves a half-populated dist/extensions/<p>/
+# that crashes the next gateway start with ENOTEMPTY. This is idempotent.
+bash "$KIT_ROOT/scripts/execution_pbs/oc_plugin_cache_clean.sh" \
+    "$OC_PLUGIN_CACHE" "$KIT_ROOT/openclaw_state/openclaw.json" \
+    2>&1 | sed "s|^|$(date +%H:%M:%S) [run_benchmark] |" || true
+
 # ============================================================================
 # Stage 3.5: start local OTel collector (optional but the only way spans.jsonl
 # files get produced — the OC gateway emits OTLP/HTTP to 127.0.0.1:$OC_OTEL_PORT
@@ -599,6 +627,17 @@ if [[ "$STAGE_CLEANUP" == "1" ]]; then
     # tail of the trace file.
     if [[ "$STAGE_OTEL" == "1" ]]; then
         bash "$KIT_ROOT/scripts/execution_pbs/otel_collector.sh" stop || true
+    fi
+    # Stop the engine log tailer before vLLM so it captures the final scheduler
+    # tick that fires as vLLM tears down. SIGTERM triggers a clean JSONL flush.
+    if [[ -n "${ENGINE_TAILER_PID:-}" ]] && kill -0 "$ENGINE_TAILER_PID" 2>/dev/null; then
+        LOG_PREFIX "  stopping engine log tailer pid=$ENGINE_TAILER_PID"
+        kill -TERM "$ENGINE_TAILER_PID" 2>/dev/null || true
+        for _ in {1..10}; do
+            sleep 0.5
+            kill -0 "$ENGINE_TAILER_PID" 2>/dev/null || break
+        done
+        kill -KILL "$ENGINE_TAILER_PID" 2>/dev/null || true
     fi
     if [[ -n "$VLLM_PID" ]] && kill -0 "$VLLM_PID" 2>/dev/null; then
         LOG_PREFIX "  stopping vllm pid=$VLLM_PID"

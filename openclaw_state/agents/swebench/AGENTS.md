@@ -8,7 +8,23 @@ You receive a GitHub issue. Your job:
 1. Locate the relevant files in the current working directory (the repository).
 2. Read the code to understand the bug.
 3. Modify the source to fix it.
-4. When done, reply with a single line: `DONE`.
+4. Verify the fix passes the tests (see Validation below).
+5. When tests pass, reply with a single line: `DONE`.
+
+## Validation
+
+Before saying DONE, verify your fix by running:
+
+    bash _oc_validate.sh
+
+This invokes the SWE-bench evaluator against your current changes and prints a
+JSON line ending with `"status": "PASS"` if all tests pass. If `status` is not
+PASS, read the failures, refine your fix, and re-run. Only reply DONE after a
+PASS verdict (or after several failed attempts where further iteration is
+clearly not converging — at that point reply DONE so the evaluator records the
+final state).
+
+Do not commit or stage changes; the evaluator captures the working tree.
 
 ## Rules
 
@@ -17,7 +33,6 @@ You receive a GitHub issue. Your job:
   The evaluator reads the repository diff, not your message.
 - Do not modify test files or setup files (conftest.py, setup.py, pyproject.toml).
 - Do not ask the user for clarification — infer from the issue.
-- If you cannot fix it, still reply `DONE`; the evaluator handles failures.
 
 ## Scope
 

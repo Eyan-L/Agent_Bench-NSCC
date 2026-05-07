@@ -213,15 +213,47 @@ class OpenClawAgentCondition:
             gw_pid = int(gw_pid) if gw_pid else None
         except (TypeError, ValueError):
             gw_pid = None
+
+        # Self-validation bridge: lets the agent invoke `bash _oc_validate.sh`
+        # inside its container to score the current workspace and iterate
+        # until tests pass. No-op if the harness ref isn't available.
+        from eval.runner.conditions.code_agent.validate_bridge import ValidateBridge
+        bridge: Optional[ValidateBridge] = None
+        harness = self._env_info.get("_harness")
+        if harness is not None and container_id is None:
+            # ValidateBridge talks to harness.run_tests via shared workspace
+            # files — it works for the host-bound (singularity / cluster)
+            # path. For docker mode the workspace is bind-mounted at /testbed
+            # but not at the host path, so reuse only when container_id is None
+            # (HostHarness / SingularityHarness).
+            bridge = ValidateBridge(
+                harness=harness,
+                run_dir=run_dir,
+                workspace_root=workspace_root,
+                instance_id=instance_id,
+                instance_data=instance_data,
+                container_id=container_id,
+                run_id=run_dir.name,
+                timeout_seconds=getattr(
+                    self.agent_config, "validate_timeout_seconds", 600,
+                ),
+            )
+            bridge.start()
+
         with _UtilSampler(run_dir, gateway_pid=gw_pid):
             step_start_ns = time.time_ns()
-            payload, err = self._invoke_agent(
-                container_id=container_id,
-                workspace_root=workspace_root,
-                session_id=run_dir.name,
-                message=message,
-                timeout_seconds=self.agent_config.max_time_seconds,
-            )
+            try:
+                payload, err = self._invoke_agent(
+                    container_id=container_id,
+                    workspace_root=workspace_root,
+                    session_id=run_dir.name,
+                    message=message,
+                    timeout_seconds=self.agent_config.max_time_seconds,
+                )
+            finally:
+                if bridge is not None:
+                    n = bridge.stop()
+                    logger.info("validate bridge: %d call(s) during run", n)
             step_end_ns = time.time_ns()
 
         # diagnostics-otel uses BatchSpanProcessor under the hood. Spans
@@ -314,6 +346,12 @@ class OpenClawAgentCondition:
         # under /root/.openclaw/agents/swebench/sessions/. cache-trace.jsonl
         # (enabled via diagnostics.cacheTrace) lands under .openclaw/logs/.
         self._archive_session_artifacts(container_id, run_dir, run_dir.name)
+
+        # 3d. If the OC tool-call patches didn't fire (most builds), backfill
+        # `openclaw.tool.call` spans from the archived session trajectory so
+        # downstream analysis sees per-tool spans regardless.
+        if spans_path is not None:
+            self._maybe_synthesize_tool_call_spans(spans_path, run_dir, run_dir.name)
 
         # 4. Collect the patch from the container. The agent edited files in
         #    /testbed directly (workspace=/testbed, tools.exec.host=node),
@@ -727,12 +765,21 @@ class OpenClawAgentCondition:
             existing = [json.loads(l) for l in open(spans_path) if l.strip()]
         except (OSError, json.JSONDecodeError):
             existing = []
-        if any(s.get("name") == "openclaw.model.usage" for s in existing):
+        # OC core also emits a periodic `openclaw.model.usage` span on the
+        # `heartbeat` channel — that's a session aggregate, not a per-agent
+        # call, so it must NOT shadow the synthesized per-call span. Dedupe
+        # by (name, channel) instead of name alone.
+        if any(
+            s.get("name") == "openclaw.model.usage"
+            and (s.get("attrs") or {}).get("openclaw.channel") not in (None, "heartbeat")
+            for s in existing
+        ):
             return
 
         duration_ms = float(meta.get("durationMs") or ((end_ns - start_ns) / 1e6))
         from datetime import datetime, timezone
         attrs = {
+            "openclaw.channel": "synth.agent_call",
             "openclaw.provider": am.get("provider") or "unknown",
             "openclaw.model": am.get("model") or "unknown",
             "openclaw.sessionKey": am.get("sessionKey") or "",
@@ -758,6 +805,177 @@ class OpenClawAgentCondition:
             fh.write(json.dumps(span, ensure_ascii=False) + "\n")
         logger.info("  synthesized model.usage span (input=%d output=%d)",
                     attrs["openclaw.tokens.input"], attrs["openclaw.tokens.output"])
+
+    # ------------------------------------------------------------------
+    # Synthetic openclaw.tool.call spans (works around unapplied OC
+    # selection/diagnostics-otel patches by replaying the archived
+    # session trajectory).
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _maybe_synthesize_tool_call_spans(
+        spans_path: Path,
+        run_dir: Path,
+        run_id: str,
+    ) -> int:
+        """Synthesize one openclaw.tool.call span per (toolCall, toolResult)
+        pair found in the archived session trajectory.
+
+        Schema mirrors openclaw-diagnostics-otel-tool-call.patch. Tagged
+        with `openclaw.channel: "synth.tool_call"` so synth and patch spans
+        are distinguishable in downstream analysis.
+
+        No-op if real (non-synth) tool.call spans already exist — i.e. the
+        OC patches did fire and the OTel stream already covered them.
+        """
+        sessions_dir = run_dir / "conversation" / "sessions"
+        if not sessions_dir.is_dir():
+            return 0
+
+        try:
+            existing = [json.loads(l) for l in open(spans_path) if l.strip()]
+        except (OSError, json.JSONDecodeError):
+            existing = []
+        if any(
+            s.get("name") == "openclaw.tool.call"
+            and (s.get("attrs") or {}).get("openclaw.channel") != "synth.tool_call"
+            for s in existing
+        ):
+            return 0
+
+        from datetime import datetime, timezone
+
+        def _to_unix_ns(t) -> int:
+            if t is None:
+                return 0
+            if isinstance(t, (int, float)):
+                # OC writes message timestamps as unix milliseconds.
+                return int(float(t) * 1e6)
+            if isinstance(t, str):
+                try:
+                    iso = t.replace("Z", "+00:00")
+                    return int(datetime.fromisoformat(iso).timestamp() * 1e9)
+                except ValueError:
+                    return 0
+            return 0
+
+        pending: Dict[str, Dict] = {}
+        spans_out: List[Dict] = []
+        session_id = ""
+        session_key = ""
+
+        # Prefer raw <UUID>.jsonl (top-level toolCall/toolResult messages);
+        # fall back to *.trajectory.jsonl if that's all we have. Skip the
+        # already-aggregated trajectory variant when the raw file exists to
+        # avoid double-counting.
+        raw_files = sorted(
+            p for p in sessions_dir.glob("*.jsonl")
+            if not p.name.endswith(".trajectory.jsonl")
+        )
+        traj_files = sorted(sessions_dir.glob("*.trajectory.jsonl"))
+        files = raw_files or traj_files
+
+        for path in files:
+            try:
+                lines = path.read_text(errors="replace").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    evt = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                if evt.get("type") == "session":
+                    session_id = evt.get("id") or session_id
+
+                if evt.get("type") != "message":
+                    continue
+                msg = evt.get("message") or {}
+                role = msg.get("role")
+
+                if role == "assistant":
+                    sk = msg.get("sessionKey") or ""
+                    if sk:
+                        session_key = sk
+                    content = msg.get("content") or []
+                    if not isinstance(content, list):
+                        continue
+                    for c in content:
+                        if isinstance(c, dict) and c.get("type") == "toolCall":
+                            cid = c.get("id")
+                            if not cid:
+                                continue
+                            pending[cid] = {"name": c.get("name") or "unknown"}
+                    continue
+
+                if role == "toolResult":
+                    cid = msg.get("toolCallId")
+                    if not cid:
+                        continue
+                    info = pending.pop(cid, None)
+                    tool_name = (
+                        (info or {}).get("name")
+                        or msg.get("toolName")
+                        or "unknown"
+                    )
+                    details = msg.get("details") or {}
+                    duration_ms = float(details.get("durationMs") or 0)
+                    end_ns = _to_unix_ns(
+                        msg.get("timestamp") or evt.get("timestamp")
+                    )
+                    start_ns = (
+                        end_ns - int(duration_ms * 1e6) if end_ns else 0
+                    )
+                    is_error = bool(
+                        msg.get("isError")
+                        or details.get("status") == "failed"
+                    )
+                    spans_out.append({
+                        "name": "openclaw.tool.call",
+                        "start_unix_nano": start_ns,
+                        "end_unix_nano": end_ns,
+                        "start_iso": (
+                            datetime.fromtimestamp(start_ns / 1e9, tz=timezone.utc).isoformat()
+                            if start_ns else None
+                        ),
+                        "end_iso": (
+                            datetime.fromtimestamp(end_ns / 1e9, tz=timezone.utc).isoformat()
+                            if end_ns else None
+                        ),
+                        "duration_ms": duration_ms,
+                        "attrs": {
+                            "openclaw.channel": "synth.tool_call",
+                            "openclaw.tool.name": tool_name,
+                            "openclaw.tool.callId": cid,
+                            "openclaw.tool.isError": is_error,
+                            "openclaw.runId": run_id,
+                            "openclaw.sessionKey": session_key,
+                            "openclaw.sessionId": session_id,
+                        },
+                        "resource": {
+                            "oc.run_id": run_id,
+                            "service.name": "agent-bench-openclaw",
+                        },
+                        "synthesized": True,
+                    })
+
+        if not spans_out:
+            return 0
+
+        try:
+            with open(spans_path, "a") as fh:
+                for s in spans_out:
+                    fh.write(json.dumps(s, ensure_ascii=False) + "\n")
+        except OSError as e:
+            logger.warning("synthesized tool.call write failed: %s", e)
+            return 0
+
+        logger.info("  synthesized %d tool.call span(s)", len(spans_out))
+        return len(spans_out)
 
     # ------------------------------------------------------------------
     # Session / cache trace archival

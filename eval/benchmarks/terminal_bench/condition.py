@@ -79,11 +79,17 @@ Rules:
 - Write files with heredocs: cat > /app/foo.py <<'EOF' ... EOF
 - Background processes: append `&` to keep them running across turns.
 - pip install must specify exact versions when the task asks for them.
-- When the task is complete and the verifier should pass, emit a final
-  message containing the literal token DONE on its own line.
 - Do not emit DONE while a required server is not yet running.
 - If a command fails, read the stderr and try a different approach.
 - One <bash> block per turn is preferred; multiple is allowed.
+
+Validation before DONE:
+- Before emitting DONE, verify the verifier will pass by running:
+      <bash>bash /tests/test.sh && cat /logs/verifier/reward.txt</bash>
+  The reward file holds `1` for pass, `0` for fail. Only emit DONE on `1`.
+- If reward is `0`, read the verifier output, fix the issue, and re-run.
+- If you've tried several iterations and the verifier still fails, emit DONE
+  anyway so the run is recorded — repeated identical failures waste budget.
 """
 
 

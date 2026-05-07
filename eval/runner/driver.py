@@ -76,7 +76,12 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             run_id=run_id,
             instance_data=instance_data,
         )
-        
+
+        # Hand the harness ref to the condition so OC/TB agents can self-
+        # validate via ValidateBridge while their loop is in flight. Underscore-
+        # prefixed key signals "internal/transient — don't persist into manifests".
+        env_info["_harness"] = harness
+
         container_id = env_info["container_id"]
         
         # Execute condition

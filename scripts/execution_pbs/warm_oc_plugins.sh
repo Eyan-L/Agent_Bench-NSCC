@@ -51,6 +51,15 @@ mkdir -p "$CACHE"
 TMP_STATE="$(mktemp -d -t oc-warm-state.XXXXXX)"
 trap 'rm -rf "$TMP_STATE"' EXIT
 
+# Sweep partial extracts from any prior interrupted warm so the gateway we're
+# about to launch doesn't trip on ENOTEMPTY against a stale dist/extensions/<p>/.
+# Idempotent — no-op when the cache is clean.
+CLEAN_SH="$(dirname "$0")/oc_plugin_cache_clean.sh"
+if [[ -x "$CLEAN_SH" ]]; then
+    bash "$CLEAN_SH" "$CACHE" "${STATE_TEMPLATE:+$STATE_TEMPLATE/openclaw.json}" \
+        2>&1 | sed 's/^/[warm-oc-plugins] /' || true
+fi
+
 OVERLAY_ARG=()
 [[ -n "$OVERLAY" ]] && OVERLAY_ARG=(--overlay "$OVERLAY:ro")
 
