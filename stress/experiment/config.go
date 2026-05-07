@@ -1,7 +1,7 @@
 // Package experiment orchestrates end-to-end trace-replay experiments:
 // launch sglang, run loadgen, collect results, and drive the draw/*.py plots.
 //
-// Config is a single JSON file; see run/configs/ for examples.
+// Config is a single JSON file; see config/stress/ for examples.
 package experiment
 
 import (

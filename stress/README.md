@@ -13,15 +13,15 @@ platform-level slot (paired with `eval/`). Internal Go imports keep the
 
 | Workload      | Go file                  | Sample config                      |
 |---------------|--------------------------|------------------------------------|
-| code_agent    | `loadgen/agent.go`       | `configs/stress/agent.json`        |
-| doc_analysis  | `loadgen/alibaba.go`     | `configs/stress/alibaba.json`      |
-| websearch     | `loadgen/azure.go`       | `configs/stress/azure.json`        |
+| code_agent    | `loadgen/agent.go`       | `config/stress/agent.json`        |
+| doc_analysis  | `loadgen/alibaba.go`     | `config/stress/alibaba.json`      |
+| websearch     | `loadgen/azure.go`       | `config/stress/azure.json`        |
 
 ## Run
 
 ```bash
 SERVING_BACKEND=sglang bash backend/common/serve.sh &
-./stress/loadgen-bin agent --config configs/stress/agent.json
+./stress/loadgen-bin agent --config config/stress/agent.json
 ```
 
 The endpoint URL is derived via `backend/common/endpoint.py` (or the

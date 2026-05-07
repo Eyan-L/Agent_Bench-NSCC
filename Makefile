@@ -50,7 +50,7 @@ eval:
 # Override SWEBENCH_ROOT / INSTANCE_DATA / EXTRA_ARGS as needed.
 define _RUN_SWEEP
 python -m eval.runner.driver \
-  --sweep eval/runner/sweeps/$(1).yaml \
+  --sweep config/sweeps/$(1).yaml \
   --swebench-root $(SWEBENCH_ROOT) \
   --instance-data $(INSTANCE_DATA) \
   $(EXTRA_ARGS)

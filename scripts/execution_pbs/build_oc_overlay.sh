@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bake the OpenClaw runtime patches (eval/frontend/openclaw/patch/) into a
+# Bake the OpenClaw runtime patches (frontend/openclaw/patch/) into a
 # Singularity overlay file. The overlay is mounted read-only in subsequent
 # `singularity exec` calls so the patched dist/*.js bundles are visible
 # to the gateway/agent without ever modifying the upstream sif.
@@ -53,8 +53,8 @@ done
 [[ -d "$KIT_ROOT" ]] || { echo "ERROR: kit-root not found: $KIT_ROOT" >&2; exit 1; }
 command -v singularity >/dev/null 2>&1 || { echo "ERROR: singularity not on PATH" >&2; exit 1; }
 
-PATCH_DIR="$KIT_ROOT/eval/frontend/openclaw/patch"
-APPLY_SCRIPT="$KIT_ROOT/eval/frontend/openclaw/apply_patch.py"
+PATCH_DIR="$KIT_ROOT/frontend/openclaw/patch"
+APPLY_SCRIPT="$KIT_ROOT/frontend/openclaw/apply_patch.py"
 [[ -d "$PATCH_DIR"   ]] || { echo "ERROR: patch dir missing: $PATCH_DIR" >&2; exit 1; }
 [[ -f "$APPLY_SCRIPT" ]] || { echo "ERROR: apply_patch.py missing: $APPLY_SCRIPT" >&2; exit 1; }
 

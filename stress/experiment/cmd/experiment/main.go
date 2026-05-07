@@ -3,11 +3,11 @@
 //
 // Usage:
 //
-//	experiment -config run/configs/alibaba.json
+//	experiment -config config/stress/alibaba.json
 //	experiment -config my.json -project-root /path/to/openclaw_bench_coding
 //
 // The trace_type field in the config selects the loadgen subcommand
-// (alibaba|azure|agent); see run/configs/ for complete examples.
+// (alibaba|azure|agent); see config/stress/ for complete examples.
 package main
 
 import (

@@ -1,6 +1,6 @@
 """Singularity-backed harness for Terminal-Bench 2 tasks.
 
-Same surface as eval/runner/harness.py:HostHarness — `prepare_environment`,
+Same surface as eval/benchmarks/swebench/harness.py:HostHarness — `prepare_environment`,
 `run_tests`, `cleanup` — so the existing driver loop in
 eval/runner/driver.py:execute_run drives it without changes.
 

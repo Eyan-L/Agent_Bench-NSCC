@@ -22,7 +22,7 @@ set -euo pipefail
 
 scratch_dir="/scratch/users/ntu/$USER"
 KIT_ROOT="${KIT_ROOT:-$HOME/Agent_Bench}"
-DATASET="${OC_DATASET:-$KIT_ROOT/data/swebench/verified.json}"
+DATASET="${OC_DATASET:-$KIT_ROOT/config/benchmarks/swebench/verified.json}"
 PARALLEL="${OC_PULL_PARALLEL:-2}"
 
 SIF_DIR="$scratch_dir/sif_images/swebench"

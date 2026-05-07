@@ -102,7 +102,7 @@ def load_task(task_id: str) -> Dict:
 
 def materialize_dataset(task_ids: List[str], out_path: Path) -> None:
     """Write a JSON file with one entry per task — same shape as
-    data/swebench/verified.json, so the existing driver loader at
+    config/benchmarks/swebench/verified.json, so the existing driver loader at
     eval/runner/driver.py:217 picks it up unchanged."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     rows = [load_task(t) for t in task_ids]

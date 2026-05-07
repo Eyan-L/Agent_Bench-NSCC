@@ -12,13 +12,13 @@ from typing import List
 
 from eval.runner.config import load_sweep_config, RunConfig
 from eval.runner.manifest import RunManifest, get_manifest_path, load_or_create_manifest
-from eval.runner.harness import (
+from eval.benchmarks.swebench.harness import (
     SWEBenchHarness, HostHarness, SingularityHarness, validate_fairness_constraints,
 )
-from eval.runner.conditions.code_agent.ar_issue_only import ARIssueOnlyCondition
-from eval.runner.conditions.code_agent.ar_static_context import ARStaticContextCondition
-from eval.runner.conditions.code_agent.openclaw_agent import OpenClawAgentCondition
-from eval.runner.conditions.ablations.no_retry import NoRetryAblation
+from eval.conditions.code_agent.ar_issue_only import ARIssueOnlyCondition
+from eval.conditions.code_agent.ar_static_context import ARStaticContextCondition
+from eval.conditions.code_agent.openclaw_agent import OpenClawAgentCondition
+from eval.conditions.ablations.no_retry import NoRetryAblation
 
 # Terminal-Bench integration is optional: the import is lazy in run_sweep so a
 # pure SWE-bench environment never has to install the TB-side deps (tomllib is
@@ -133,7 +133,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         elif condition_type == "tb_react":
             # Terminal-Bench ReAct loop. Lives under eval/benchmarks/ so the
             # SWE-bench code path stays unchanged.
-            from eval.benchmarks.terminal_bench.condition import (
+            from eval.conditions.code_agent.terminal_bench.react import (
                 TerminalBenchReactCondition,
             )
             condition = TerminalBenchReactCondition(

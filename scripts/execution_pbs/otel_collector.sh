@@ -2,11 +2,11 @@
 # Start/stop a local OTel collector for the OC gateway.
 #
 # The OC gateway emits OTLP/HTTP spans + metrics + logs to
-# http://localhost:$PORT (configured in openclaw_state/openclaw.json →
+# http://localhost:$PORT (configured in frontend/openclaw/state/openclaw.json →
 # diagnostics.otel.endpoint). Without a collector listening, every span is
 # dropped on the floor and `data/runs/<run>/spans.jsonl` is never produced
 # (it's a slice of the collector's on-disk trace file —
-# eval/runner/conditions/code_agent/openclaw_agent.py:_snapshot_otel_spans).
+# eval/conditions/code_agent/openclaw_agent.py:_snapshot_otel_spans).
 #
 # This script runs `otel/opentelemetry-collector-contrib` via singularity
 # with a config that has just one OTLP/HTTP receiver and a `file` exporter
@@ -22,7 +22,7 @@
 #   OC_OTEL_DATA_DIR  Directory for config + trace + pid + log files.
 #                     Default: $SCRATCH/oc-eval/otel.
 #   OC_OTEL_PORT      OTLP/HTTP listen port. Default: 4318. Must match
-#                     openclaw_state/openclaw.json: diagnostics.otel.endpoint.
+#                     frontend/openclaw/state/openclaw.json: diagnostics.otel.endpoint.
 #   OC_OTEL_SIF       Path to the otelcol-contrib .sif. Default:
 #                     $SCRATCH/sif_images/otelcol-contrib.sif.
 #                     Pull on a network-equipped node before submitting:

@@ -32,7 +32,7 @@ compute nodes without internet. Add a new task by dropping its `instruction.md`
 
 ## How a TB run flows
 
-1. Sweep YAML (`eval/runner/sweeps/tb_kv_store.yaml`) lists `instances:` =
+1. Sweep YAML (`config/sweeps/tb_kv_store.yaml`) lists `instances:` =
    task ids, `condition_type: tb_react`, points at the vLLM endpoint.
 2. PBS pipeline (`pbs/run_benchmark_tb.pbs`):
    - **Stage 0**: `singularity pull` each task's `docker_image` (from
@@ -62,7 +62,7 @@ Search for `terminal_bench` in:
 - `eval/runner/driver.py` — adds `tb_react` to the condition dispatch,
   per-instance harness selection, passes `instance_data` to
   `prepare_environment`, skips the empty-patch FAIL gate for TB.
-- `eval/runner/harness.py` — `prepare_environment` signatures gain an
+- `eval/benchmarks/swebench/harness.py` — `prepare_environment` signatures gain an
   `instance_data: Optional[Dict] = None` kwarg (ignored by SWE-bench
   harnesses; consumed by `TerminalBenchHarness`).
 
@@ -76,7 +76,7 @@ qsub pbs/run_benchmark_tb.pbs
 
 # Local (non-PBS) smoke run, assuming vLLM is already up at :8000:
 python -m eval.runner.driver \
-  --sweep eval/runner/sweeps/tb_kv_store.yaml \
+  --sweep config/sweeps/tb_kv_store.yaml \
   --swebench-root /tmp/dummy \
   --instance-data data/terminal_bench/tasks.json
 ```
@@ -118,7 +118,7 @@ see below).
 ## Deferred / TODO
 
 - **OpenClaw integration.** The current condition is a plain ReAct loop.
-  To use `openclaw_state/agents/<id>/` prompts (consistent with SWE-bench),
+  To use `frontend/openclaw/state/agents/<id>/` prompts (consistent with SWE-bench),
   build a derivative .sif layering `node` + `openclaw` on top of the task
   base image and run OC inside it. Keep `condition.py` as the fallback for
   task images where OC can't be layered cleanly.
@@ -134,7 +134,7 @@ see below).
 OpenClaw exposes `sessions_spawn` / `sessions_yield` / `subagents` as
 LLM-callable tools — the parent agent decides at planning time how many
 children to spawn and what each does. Already wired in
-`openclaw_state/openclaw.json`:
+`frontend/openclaw/state/openclaw.json`:
 
 ```json5
 {

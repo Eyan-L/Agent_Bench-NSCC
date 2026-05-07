@@ -8,7 +8,7 @@ Covers:
   4. Forced crash (SIGTERM mid-trajectory) leaves a recoverable JSONL with
      a final manifest line carrying partial=true.
 
-Thresholds load from configs/trace_thresholds.yaml; override path via
+Thresholds load from config/stress/trace_thresholds.yaml; override path via
 TRACE_THRESHOLDS_FILE env var.
 
 Run: python -m tests.trace.test_trace_pipeline

@@ -29,8 +29,8 @@
 #   KIT_ROOT       — repo root (default: $PBS_O_WORKDIR or $HOME/Agent_Bench)
 #   OC_PYLIB       — pip --target dir for swebench + deps (default: $SCRATCH/pylib)
 #   OC_PIP_CACHE   — pip wheel cache (default: $SCRATCH/.pip-cache)
-#   DATASET        — instance JSON (default: $KIT_ROOT/data/swebench/verified.json)
-#   SWEEP          — sweep yaml (default: $KIT_ROOT/eval/runner/sweeps/phase1.yaml)
+#   DATASET        — instance JSON (default: $KIT_ROOT/config/benchmarks/swebench/verified.json)
+#   SWEEP          — sweep yaml (default: $KIT_ROOT/config/sweeps/phase1.yaml)
 #   OC_PKG         — host openclaw npm pkg (default: /scratch/users/ntu/chengzh2/openclaw)
 #   SIF_DIR        — instance .sif dir (default: /scratch/users/ntu/$USER/swebench)
 #   VLLM_SIF       — vllm sif path (default: /scratch/users/ntu/$USER/sif_images/vllm_openai.sif)
@@ -41,7 +41,7 @@
 #
 # Submit:
 #   qsub pbs/run_benchmark.pbs
-#   qsub -v STAGE_PULL=0,SWEEP=$KIT_ROOT/eval/runner/sweeps/phase0.yaml \
+#   qsub -v STAGE_PULL=0,SWEEP=$KIT_ROOT/config/sweeps/phase0.yaml \
 #        pbs/run_benchmark.pbs
 
 set -uo pipefail   # not -e; we want stage failures to log + continue cleanup
@@ -57,8 +57,8 @@ KIT_ROOT="${KIT_ROOT:-${PBS_O_WORKDIR:-$HOME/Agent_Bench}}"
 # Stage 0 sets it to $OC_PYLIB; we pre-bind it here for the case where
 # stage 0 is skipped.
 SWEBENCH_ROOT="${SWEBENCH_ROOT:-$SCRATCH/pylib}"
-DATASET="${DATASET:-$KIT_ROOT/data/swebench/verified.json}"
-SWEEP="${SWEEP:-$KIT_ROOT/eval/runner/sweeps/phase1.yaml}"
+DATASET="${DATASET:-$KIT_ROOT/config/benchmarks/swebench/verified.json}"
+SWEEP="${SWEEP:-$KIT_ROOT/config/sweeps/phase1.yaml}"
 
 OC_PKG="${OC_PKG:-/scratch/users/ntu/chengzh2/openclaw}"
 SIF_DIR="${SIF_DIR:-$SCRATCH/swebench}"
@@ -482,7 +482,7 @@ if [[ "$STAGE_VLLM" == "1" ]]; then
     ENGINE_METRICS_LOG="${OC_ENGINE_METRICS_LOG:-$LOG_DIR/engine_metrics.jsonl}"
     ENGINE_TAILER_LOG="$LOG_DIR/engine_log_tailer.log"
     OC_ENGINE_INTERVAL="${OC_ENGINE_INTERVAL:-0.1}"
-    python3 "$KIT_ROOT/scripts/engine_log_tailer.py" \
+    python3 "$KIT_ROOT/backend/engine_log_tailer.py" \
         --engine "$OC_ENGINE" \
         --source metrics \
         --base-url "http://127.0.0.1:$VLLM_PORT" \
@@ -507,7 +507,7 @@ if [[ "$STAGE_OC_CHECK" == "1" ]]; then
         LOG_PREFIX "  oc runtime sif already present at $OC_RUNTIME_SIF"
     fi
 
-    # Bake eval/frontend/openclaw/patch/*.patch into a Singularity overlay,
+    # Bake frontend/openclaw/patch/*.patch into a Singularity overlay,
     # one-time per host. Subsequent execs mount it read-only.
     LOG_PREFIX "  building OC patch overlay at $OC_RUNTIME_OVERLAY"
     bash "$KIT_ROOT/scripts/execution_pbs/build_oc_overlay.sh" \
@@ -551,7 +551,7 @@ if ! find "$OC_PLUGIN_CACHE" -mindepth 2 -name package.json -print -quit | grep 
             --sif "$OC_OC_SIF" \
             --overlay "$OC_OC_OVERLAY" \
             --cache "$OC_PLUGIN_CACHE" \
-            --state-template "$KIT_ROOT/openclaw_state"; then
+            --state-template "$KIT_ROOT/frontend/openclaw/state"; then
         LOG_PREFIX "  plugin cache warmed"
     else
         LOG_PREFIX "FATAL: plugin cache warm failed."
@@ -560,7 +560,7 @@ if ! find "$OC_PLUGIN_CACHE" -mindepth 2 -name package.json -print -quit | grep 
         LOG_PREFIX "    bash $KIT_ROOT/scripts/execution_pbs/warm_oc_plugins.sh \\"
         LOG_PREFIX "        --sif $OC_OC_SIF --overlay $OC_OC_OVERLAY \\"
         LOG_PREFIX "        --cache $OC_PLUGIN_CACHE \\"
-        LOG_PREFIX "        --state-template $KIT_ROOT/openclaw_state"
+        LOG_PREFIX "        --state-template $KIT_ROOT/frontend/openclaw/state"
         exit 5
     fi
 else
@@ -571,7 +571,7 @@ fi
 # so an interrupted prior extract leaves a half-populated dist/extensions/<p>/
 # that crashes the next gateway start with ENOTEMPTY. This is idempotent.
 bash "$KIT_ROOT/scripts/execution_pbs/oc_plugin_cache_clean.sh" \
-    "$OC_PLUGIN_CACHE" "$KIT_ROOT/openclaw_state/openclaw.json" \
+    "$OC_PLUGIN_CACHE" "$KIT_ROOT/frontend/openclaw/state/openclaw.json" \
     2>&1 | sed "s|^|$(date +%H:%M:%S) [run_benchmark] |" || true
 
 # ============================================================================

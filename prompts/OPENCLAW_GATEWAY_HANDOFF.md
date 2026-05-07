@@ -28,8 +28,8 @@ Project root: `<repo-root>`
 
 ### OpenClaw (installed at `<npm-prefix>/lib/node_modules/openclaw`)
 - Config: `~/.openclaw/openclaw.json` (also mounted from
-  `<project>/openclaw_state/openclaw.json` into container)
-- Agent profile at `<project>/openclaw_state/agents/swebench/*.md` — 6 minimal
+  `<project>/frontend/openclaw/state/openclaw.json` into container)
+- Agent profile at `<project>/frontend/openclaw/state/agents/swebench/*.md` — 6 minimal
   files replacing OpenClaw's Slack-bot persona (AGENTS.md etc)
 - Running via `openclaw agent --local --agent swebench --session-id <id>
   --message <issue> --json`
@@ -135,13 +135,13 @@ ss -tlnp 2>/dev/null | grep -E ':(19000|18789|19001)' \
 
 ## Files to touch
 
-- `eval/runner/harness.py` — add Gateway lifecycle to `prepare_environment`
+- `eval/benchmarks/swebench/harness.py` — add Gateway lifecycle to `prepare_environment`
   and `cleanup`. Container startup: start gateway, wait for ready, create+inject
   token, THEN let condition run. Teardown: stop gateway, rm container.
-- `eval/runner/conditions/openclaw_agent.py` — drop `--local` flag.
+- `eval/conditions/code_agent/openclaw_agent.py` — drop `--local` flag.
   Currently invokes `openclaw agent --local --agent swebench ...`; should
   become `openclaw agent --agent swebench ...`.
-- `openclaw_state/openclaw.json` — add gateway section (port, token, auth
+- `frontend/openclaw/state/openclaw.json` — add gateway section (port, token, auth
   config). Exact schema TBD by investigation.
 - Optionally: a new `scripts/openclaw_gateway_up.sh` that encapsulates the
   "start gateway, wait ready, create token" sequence, callable from harness
@@ -149,7 +149,7 @@ ss -tlnp 2>/dev/null | grep -E ':(19000|18789|19001)' \
 
 ## Files that are correct (don't regress)
 
-- `openclaw_state/agents/swebench/AGENTS.md` and siblings (minimal profile)
+- `frontend/openclaw/state/agents/swebench/AGENTS.md` and siblings (minimal profile)
 - OTel collector config at `/tmp/otel/config.yaml`
 - AR baseline conditions (`ar_issue_only.py`, `ar_static_context.py`) —
   they use a shared `_llm_client.py` for HTTP to vLLM with
@@ -207,7 +207,7 @@ machine (assuming vLLM, Docker, and SWE-bench are already set up). That means
   reboots and is version-controlled. Update collector_up.sh to mount from
   this path.
 
-- `openclaw_state/openclaw.json` — Updated to include the gateway config
+- `frontend/openclaw/state/openclaw.json` — Updated to include the gateway config
   block (port, auth, whatever you set). Currently the config was edited
   piecemeal via `openclaw config set` commands. After this round, the
   committed openclaw.json should be the single source of truth; on a fresh
@@ -241,7 +241,7 @@ In the top-level Makefile, add:
   documented and wrapped in a Makefile target.
 - Leave port numbers / token values hard-coded in harness.py if they
   belong in config. harness.py should read them from env or from
-  `openclaw_state/openclaw.json`.
+  `frontend/openclaw/state/openclaw.json`.
 - Ship the OpenClaw token committed to git. If the token is persistent,
   put it in `.env` (already gitignored) and have harness pick it up from
   environment; or have the gateway_up script generate a fresh token each

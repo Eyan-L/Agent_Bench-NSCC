@@ -5,10 +5,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# OpenClaw runtime state under openclaw_state/ (only the agent profile files
+# OpenClaw runtime state under frontend/openclaw/state/ (only the agent profile files
 # and openclaw.json are checked in; everything else is per-run scratch).
-openclaw_state/logs/
-openclaw_state/agents/*/sessions/
-openclaw_state/agents/*/memory/
-openclaw_state/agents/main/
+frontend/openclaw/state/logs/
+frontend/openclaw/state/agents/*/sessions/
+frontend/openclaw/state/agents/*/memory/
+frontend/openclaw/state/agents/main/
 logs/*

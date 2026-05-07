@@ -16,7 +16,7 @@ run/
     loadgen.go                # builds /loadgen binary and dispatches subcommand
     plots.go                  # invokes draw/*.py after the run
     run.go                    # Run() top-level orchestration
-  configs/                    # example JSON configs for alibaba / azure / agent
+  config/stress/                    # example JSON configs for alibaba / azure / agent
     alibaba.json
     azure.json
     agent.json
@@ -38,7 +38,7 @@ cd run/experiment
 go build -o experiment-bin ./cmd/experiment
 
 # Run a canned config.
-./experiment-bin -config ../configs/alibaba.json
+./experiment-bin -config ../../config/stress/alibaba.json
 ```
 
 The binary:
@@ -57,7 +57,7 @@ override.
 
 ## Config schema
 
-See [`configs/alibaba.json`](configs/alibaba.json) for a fully populated
+See [`config/stress/alibaba.json`](config/stress/alibaba.json) for a fully populated
 example. The top-level layout:
 
 ```json
@@ -81,7 +81,7 @@ Two tokens are expanded in `output_dir`: `{timestamp}` (start time) and
 ### NSCC 2A — singularity launcher
 
 Set `sglang.launcher="singularity"` and provide the container knobs. See
-[`configs/alibaba_nscc_2a_singularity.json`](configs/alibaba_nscc_2a_singularity.json):
+[`config/stress/alibaba_nscc_2a_singularity.json`](config/stress/alibaba_nscc_2a_singularity.json):
 
 ```json
 "sglang": {

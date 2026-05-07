@@ -6,7 +6,7 @@
 # Submit example (1 node, 4 H100 GPUs, 4 hours):
 #
 #   qsub -l select=1:ncpus=32:ngpus=4:mem=128gb -l walltime=04:00:00 \
-#        -v EXP_CONFIG=run/configs/alibaba_nscc_2a_singularity.json \
+#        -v EXP_CONFIG=config/stress/alibaba_nscc_2a_singularity.json \
 #        run/pbs_experiment.pbs
 #
 # The PBS -v EXP_CONFIG=<path> env variable picks which experiment config
@@ -41,7 +41,7 @@ GOPATH="${GOPATH_DIR}" GOCACHE="${GOCACHE_DIR}" \
     "${GO_BIN}" build -C run/experiment -o experiment-bin ./cmd/experiment
 
 # ---------- run ----------
-CONFIG="${EXP_CONFIG:-run/configs/alibaba_nscc_2a_singularity.json}"
+CONFIG="${EXP_CONFIG:-config/stress/alibaba_nscc_2a_singularity.json}"
 echo "[pbs] config: ${CONFIG}"
 echo "[pbs] HF_HOME=${HF_HOME}"
 echo "[pbs] host: $(hostname)  GPUs: ${CUDA_VISIBLE_DEVICES:-<unset>}"

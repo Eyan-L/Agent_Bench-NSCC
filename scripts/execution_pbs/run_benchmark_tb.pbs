@@ -21,9 +21,9 @@
 #
 # Env (override via `qsub -v K1=V1,K2=V2 ...`):
 #   KIT_ROOT       — repo root
-#   SWEEP          — sweep yaml (default: $KIT_ROOT/eval/runner/sweeps/tb_kv_store.yaml)
+#   SWEEP          — sweep yaml (default: $KIT_ROOT/config/sweeps/tb_kv_store.yaml)
 #   TB_TASK_IDS    — space-separated TB task ids; default = all under
-#                    eval/benchmarks/terminal_bench/tasks/
+#                    config/benchmarks/terminal_bench/
 #   DATASET        — path to materialized TB instance JSON
 #   OC_TB_SIF_DIR  — where TB task .sifs land (default $SCRATCH/tb-sif)
 
@@ -36,7 +36,7 @@ HOME="/home/users/ntu/${USER_NAME}"
 PBS_O_WORKDIR=${SCRATCH}/github/Agent_Bench
 KIT_ROOT="${KIT_ROOT:-${PBS_O_WORKDIR:-$HOME/Agent_Bench}}"
 
-SWEEP="${SWEEP:-$KIT_ROOT/eval/runner/sweeps/tb_kv_store.yaml}"
+SWEEP="${SWEEP:-$KIT_ROOT/config/sweeps/tb_kv_store.yaml}"
 DATASET="${DATASET:-$KIT_ROOT/data/terminal_bench/tasks.json}"
 
 OC_TB_SIF_DIR="${OC_TB_SIF_DIR:-$SCRATCH/tb-sif}"
@@ -100,7 +100,7 @@ from eval.benchmarks.terminal_bench.harness import TerminalBenchHarness
 
 ids = os.environ.get("TB_TASK_IDS", "").split() or loader.list_task_ids()
 if not ids:
-    print("no TB tasks under eval/benchmarks/terminal_bench/tasks/", file=sys.stderr)
+    print("no TB tasks under config/benchmarks/terminal_bench/", file=sys.stderr)
     sys.exit(1)
 
 h = TerminalBenchHarness()
