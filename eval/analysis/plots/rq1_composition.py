@@ -108,7 +108,7 @@ def plot_time_fraction_stacked(steps_long: pd.DataFrame, out_dir: Path,
     fracs = by_cfg.divide(totals, axis=0).fillna(0.0)
     fracs = fracs.reindex(order_configs(list(fracs.index)))
 
-    fig, ax = plt.subplots(figsize=(7.5, 4))
+    fig, ax = plt.subplots(figsize=(5.5, 3.5))
     bottoms = np.zeros(len(fracs))
     x = np.arange(len(fracs))
     for st in STEP_TYPES_ORDERED:
@@ -119,9 +119,8 @@ def plot_time_fraction_stacked(steps_long: pd.DataFrame, out_dir: Path,
     ax.set_xticks(x)
     ax.set_xticklabels([display_label(c) for c in fracs.index], rotation=15, ha="right")
     ax.set_ylim(0, 1.0)
-    ax.set_ylabel("Fraction of total wall time")
-    ax.set_title("RQ1 — Execution composition by step type")
-    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), frameon=False)
+    ax.set_ylabel("Wall-time fraction")
+    ax.legend(loc="best", frameon=True, framealpha=0.85)
     return save_fig(fig, out_dir, "rq1_time_fraction_by_step_type", also_pdf)
 
 
@@ -144,7 +143,7 @@ def plot_step_count_stacked(steps_long: pd.DataFrame, out_dir: Path,
     fracs = by_cfg.divide(totals, axis=0).fillna(0.0)
     fracs = fracs.reindex(order_configs(list(fracs.index)))
 
-    fig, ax = plt.subplots(figsize=(7.5, 4))
+    fig, ax = plt.subplots(figsize=(5.5, 3.5))
     bottoms = np.zeros(len(fracs))
     x = np.arange(len(fracs))
     for st in STEP_TYPES_ORDERED:
@@ -155,9 +154,8 @@ def plot_step_count_stacked(steps_long: pd.DataFrame, out_dir: Path,
     ax.set_xticks(x)
     ax.set_xticklabels([display_label(c) for c in fracs.index], rotation=15, ha="right")
     ax.set_ylim(0, 1.0)
-    ax.set_ylabel("Fraction of step count")
-    ax.set_title("RQ1 — Step-count composition by step type")
-    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), frameon=False)
+    ax.set_ylabel("Step-count fraction")
+    ax.legend(loc="best", frameon=True, framealpha=0.85)
     return save_fig(fig, out_dir, "rq1_step_count_by_step_type", also_pdf)
 
 
@@ -179,7 +177,7 @@ def plot_tool_and_stall_fractions(long: pd.DataFrame, out_dir: Path,
         return None
     cfgs = order_configs(sub["config_id"].dropna().unique().tolist())
 
-    fig, ax = plt.subplots(figsize=(7.5, 4))
+    fig, ax = plt.subplots(figsize=(5.5, 3.5))
     n_groups = len(cfgs)
     width = 0.8 / max(len(metrics), 1)
     x = np.arange(n_groups)
@@ -198,10 +196,9 @@ def plot_tool_and_stall_fractions(long: pd.DataFrame, out_dir: Path,
                yerr=errs, capsize=2, label=titles[i])
     ax.set_xticks(x)
     ax.set_xticklabels([display_label(c) for c in cfgs], rotation=15, ha="right")
-    ax.set_ylabel("Fraction (0..1)")
-    ax.set_title("RQ1 — Tool, non-LLM, and stall fractions")
+    ax.set_ylabel("Fraction")
     ax.set_ylim(0, 1.05)
-    ax.legend(frameon=False, loc="upper left", bbox_to_anchor=(1.02, 1.0))
+    ax.legend(loc="best", frameon=True, framealpha=0.85)
     return save_fig(fig, out_dir, "rq1_tool_and_stall_fractions", also_pdf)
 
 
@@ -221,7 +218,7 @@ def plot_token_ratio(long: pd.DataFrame, out_dir: Path,
     cfgs = order_configs(sub["config_id"].dropna().unique().tolist())
     data = [sub[sub["config_id"] == c]["input_output_token_ratio"].values for c in cfgs]
 
-    fig, ax = plt.subplots(figsize=(6.5, 4))
+    fig, ax = plt.subplots(figsize=(5.0, 3.5))
     bp = ax.boxplot(data, tick_labels=[display_label(c) for c in cfgs],
                     showmeans=True, patch_artist=True,
                     boxprops=dict(facecolor="#4C72B0", alpha=0.4))
@@ -230,8 +227,7 @@ def plot_token_ratio(long: pd.DataFrame, out_dir: Path,
         if len(vals) == 0:
             continue
         ax.scatter([i] * len(vals), vals, color="black", alpha=0.6, s=15, zorder=3)
-    ax.set_ylabel("prompt_tokens / completion_tokens (per trajectory)")
-    ax.set_title("RQ1 — Input/output token ratio (prefill-heavy ↑)")
+    ax.set_ylabel("Prompt / completion tokens")
     ax.set_yscale("log")
     plt.setp(ax.get_xticklabels(), rotation=15, ha="right")
     return save_fig(fig, out_dir, "rq1_token_ratio", also_pdf)
@@ -254,7 +250,7 @@ def plot_composition_by_workload_class(steps_long: pd.DataFrame, out_dir: Path,
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(
-        1, len(classes), figsize=(5 * len(classes), 4), sharey=True,
+        1, len(classes), figsize=(3.6 * len(classes), 3.5), sharey=True,
     )
     if len(classes) == 1:
         axes = [axes]
@@ -278,11 +274,12 @@ def plot_composition_by_workload_class(steps_long: pd.DataFrame, out_dir: Path,
             bottoms += v
         ax.set_xticks(x)
         ax.set_xticklabels([display_label(c) for c in fracs.index], rotation=15, ha="right")
-        ax.set_title(f"{wc}")
+        # workload class label is shown via the legend / x-axis ticks
+        from eval.analysis.plots._util import display_workload
+        ax.set_xlabel(display_workload(wc), fontsize=11)
         ax.set_ylim(0, 1.0)
     axes[0].set_ylabel("Fraction of total wall time")
     axes[-1].legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), frameon=False)
-    fig.suptitle("RQ1 — Composition by workload class", y=1.02)
     return save_fig(fig, out_dir, "rq1_composition_by_workload_class", also_pdf)
 
 
@@ -313,7 +310,7 @@ def plot_family_rollup(steps_long: pd.DataFrame, out_dir: Path,
     fracs = by.divide(totals, axis=0).fillna(0.0)
     fracs = fracs.reindex(["AR", "Agent"]).dropna(how="all")
 
-    fig, ax = plt.subplots(figsize=(5.5, 4))
+    fig, ax = plt.subplots(figsize=(4.0, 3.5))
     bottoms = np.zeros(len(fracs))
     x = np.arange(len(fracs))
     for st in STEP_TYPES_ORDERED:
@@ -324,9 +321,8 @@ def plot_family_rollup(steps_long: pd.DataFrame, out_dir: Path,
     ax.set_xticks(x)
     ax.set_xticklabels(list(fracs.index))
     ax.set_ylim(0, 1.0)
-    ax.set_ylabel("Fraction of total wall time")
-    ax.set_title("RQ1 — AR vs Agent execution composition (rollup)")
-    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), frameon=False)
+    ax.set_ylabel("Wall-time fraction")
+    ax.legend(loc="best", frameon=True, framealpha=0.85)
     return save_fig(fig, out_dir, "rq1_ar_vs_agent_rollup", also_pdf)
 
 

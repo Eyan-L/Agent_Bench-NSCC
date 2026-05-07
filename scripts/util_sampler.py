@@ -16,6 +16,17 @@ CPU is read from /proc/stat (Linux). On platforms without /proc/stat the
 "cpu" field is null. GPU is read from `nvidia-smi --query-gpu`; if the
 binary is missing the "gpu" field is an empty list.
 
+Per-group CPU split (PID-tree accounting). Pass any of:
+    --llm-pid <pid>        # vLLM root pid (engine; sums itself + descendants)
+    --client-pid <pid>     # driver / agent pid (the harness Python process)
+    --gateway-pid <pid>    # OpenClaw gateway pid (its descendants are tools)
+
+Each --*-pid can be repeated. Tool processes are computed as
+"descendants of {client + gateway} minus the engine tree". CPU% per
+group is summed jiffies in the group between consecutive samples,
+divided by total host jiffies, ×100×ncpu so values are comparable to the
+host-wide cpu.pct (saturating at ncpu×100).
+
 Output format — one JSON object per sample, one line:
 
     {
@@ -27,7 +38,13 @@ Output format — one JSON object per sample, one line:
         "loadavg":      [<l1>, <l5>, <l15>],
         "mem_total_mb": <int>,
         "mem_used_mb":  <int>,
-        "mem_pct":      <float>
+        "mem_pct":      <float>,
+        "by_group":     {                 # only present if --*-pid was set
+          "llm_engine": {"pct": <float>, "rss_mb": <int>, "n_proc": <int>},
+          "client":     {"pct": <float>, "rss_mb": <int>, "n_proc": <int>},
+          "tools":      {"pct": <float>, "rss_mb": <int>, "n_proc": <int>},
+          "other":      {"pct": <float>}  # host - sum(known)
+        }
       },
       "gpu":  [
         {"index": 0, "name": "...", "util_gpu_pct": <float>,
@@ -122,6 +139,99 @@ def _loadavg() -> Optional[List[float]]:
 
 
 # ---------------------------------------------------------------------------
+# Per-process CPU/RSS via /proc/<pid>/stat,status — no psutil dependency.
+# Accumulates utime+stime jiffies per (group, sample); deltas across samples
+# divided by total /proc/stat jiffies give a CPU-percent comparable to the
+# host-wide cpu.pct (with the same x100 normalization, except per-group is
+# left in "% of one core" so tools_pct + engine_pct + client_pct + other_pct
+# = total host work in core-percent).
+# ---------------------------------------------------------------------------
+
+def _read_pid_stat(pid: int) -> Optional[Tuple[int, int, int, int]]:
+    """Return (utime, stime, ppid, rss_pages) for `pid`, or None if gone."""
+    try:
+        with open(f"/proc/{pid}/stat", "r") as fh:
+            data = fh.read()
+    except (OSError, FileNotFoundError):
+        return None
+    # comm may contain spaces and parentheses — split off the (..) field first.
+    rp = data.rfind(")")
+    if rp == -1:
+        return None
+    rest = data[rp + 2:].split()
+    # Fields after comm (man 5 proc, 1-indexed):
+    #   3 state, 4 ppid, 14 utime, 15 stime, 24 rss
+    # 0-indexed in `rest`: state=0, ppid=1, utime=11, stime=12, rss=21
+    try:
+        ppid = int(rest[1])
+        utime = int(rest[11])
+        stime = int(rest[12])
+        rss_pages = int(rest[21])
+    except (IndexError, ValueError):
+        return None
+    return utime, stime, ppid, rss_pages
+
+
+def _list_descendants(roots: List[int]) -> List[int]:
+    """Return a deduped list of root PIDs and all descendants by walking
+    /proc once and building a parent -> children index. O(N) per sample.
+
+    Excludes pids in `roots` that are gone; descendants are computed off
+    whatever's currently alive.
+    """
+    if not roots:
+        return []
+    try:
+        all_pids = [int(name) for name in os.listdir("/proc") if name.isdigit()]
+    except OSError:
+        return list(set(roots))
+    children: Dict[int, List[int]] = {}
+    for pid in all_pids:
+        s = _read_pid_stat(pid)
+        if s is None:
+            continue
+        _, _, ppid, _ = s
+        children.setdefault(ppid, []).append(pid)
+    out: set = set()
+    stack = list(roots)
+    while stack:
+        pid = stack.pop()
+        if pid in out:
+            continue
+        out.add(pid)
+        stack.extend(children.get(pid, []))
+    return sorted(out)
+
+
+def _group_jiffies_rss(pids: List[int]) -> Tuple[int, int, int]:
+    """Sum utime+stime jiffies and RSS pages across `pids`. Returns
+    (jiffies, rss_pages, n_alive). Dead pids are silently skipped."""
+    jiffies = 0
+    rss_pages = 0
+    n = 0
+    for pid in pids:
+        s = _read_pid_stat(pid)
+        if s is None:
+            continue
+        u, st, _ppid, r = s
+        jiffies += u + st
+        rss_pages += r
+        n += 1
+    return jiffies, rss_pages, n
+
+
+def _ncpu() -> int:
+    return os.cpu_count() or 1
+
+
+def _page_size_bytes() -> int:
+    try:
+        return os.sysconf("SC_PAGESIZE")
+    except (OSError, ValueError):
+        return 4096
+
+
+# ---------------------------------------------------------------------------
 # GPU sampling — nvidia-smi CSV output.
 # ---------------------------------------------------------------------------
 
@@ -195,7 +305,33 @@ def _install_signal_handlers() -> None:
             pass
 
 
-def _build_record(prev_stat, cur_stat) -> Dict:
+def _stat_total_jiffies(stat: List[Tuple[int, int]]) -> int:
+    """Sum the aggregate (idx 0) total jiffies from _read_proc_stat output."""
+    if not stat:
+        return 0
+    return stat[0][1]
+
+
+def _group_pct(prev_j: int, cur_j: int, prev_total: int, cur_total: int,
+               ncpu: int) -> float:
+    """Per-group jiffy delta divided by host total jiffy delta, scaled to a
+    "% of one core × ncpu" so it sums comparably with cpu.pct (host-wide)."""
+    d_total = cur_total - prev_total
+    if d_total <= 0:
+        return 0.0
+    d_group = max(cur_j - prev_j, 0)
+    return round(100.0 * ncpu * d_group / d_total, 2)
+
+
+def _build_record(
+    prev_stat,
+    cur_stat,
+    *,
+    prev_groups: Optional[Dict[str, int]] = None,
+    cur_groups: Optional[Dict[str, Tuple[int, int, int]]] = None,
+    ncpu: int = 1,
+    page_bytes: int = 4096,
+) -> Dict:
     now_ns = time.time_ns()
     iso = datetime.fromtimestamp(now_ns / 1e9, tz=timezone.utc).isoformat()
     cpu_block: Optional[Dict]
@@ -217,6 +353,28 @@ def _build_record(prev_stat, cur_stat) -> Dict:
             "mem_pct":      (round(100.0 * mem_used / mem_total, 2)
                              if mem_total and mem_used is not None else None),
         }
+        # Per-group breakdown (only if pids configured AND we have a delta).
+        if cur_groups is not None:
+            prev_total = _stat_total_jiffies(prev_stat) if prev_stat else 0
+            cur_total = _stat_total_jiffies(cur_stat)
+            by_group: Dict[str, Dict] = {}
+            sum_pct = 0.0
+            for name, (cur_j, rss_pages, n_alive) in cur_groups.items():
+                pj = (prev_groups or {}).get(name, cur_j)
+                pct = _group_pct(pj, cur_j, prev_total, cur_total, ncpu)
+                by_group[name] = {
+                    "pct":    pct,
+                    "rss_mb": (rss_pages * page_bytes) // (1024 * 1024),
+                    "n_proc": n_alive,
+                }
+                sum_pct += pct
+            host_pct = cpu_block["pct"] or 0.0
+            # "other" can go negative if descendants drift between samples
+            # (race between _list_descendants and _group_jiffies_rss); clamp.
+            by_group["other"] = {
+                "pct": round(max(0.0, host_pct - sum_pct), 2),
+            }
+            cpu_block["by_group"] = by_group
     return {
         "ts_ns": now_ns,
         "iso":   iso,
@@ -233,11 +391,23 @@ def main() -> int:
                     help="seconds between samples (default 1.0)")
     ap.add_argument("--duration", type=float, default=0.0,
                     help="stop after N seconds (0 = until SIGTERM)")
+    ap.add_argument("--llm-pid", type=int, action="append", default=[],
+                    help="Engine root pid (vLLM). Repeatable.")
+    ap.add_argument("--client-pid", type=int, action="append", default=[],
+                    help="Driver / agent root pid. Repeatable.")
+    ap.add_argument("--gateway-pid", type=int, action="append", default=[],
+                    help="OpenClaw gateway root pid. Tools = its descendants. "
+                         "Repeatable.")
     args = ap.parse_args()
 
     _install_signal_handlers()
     os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".",
                 exist_ok=True)
+
+    have_groups = bool(args.llm_pid or args.client_pid or args.gateway_pid)
+    ncpu = _ncpu()
+    page_bytes = _page_size_bytes()
+    prev_groups: Dict[str, int] = {}
 
     deadline = time.monotonic() + args.duration if args.duration > 0 else None
     prev_stat = _read_proc_stat()
@@ -255,12 +425,50 @@ def main() -> int:
             "pid":           os.getpid(),
             "host":          os.uname().nodename if hasattr(os, "uname") else None,
             "nvidia_smi":    _have_nvidia_smi(),
+            "ncpu":          ncpu,
+            "pid_groups":    {
+                "llm_engine": list(args.llm_pid),
+                "client":     list(args.client_pid),
+                "gateway":    list(args.gateway_pid),
+            },
         }
         fh.write(json.dumps(header) + "\n")
 
         while not _Stop.flag:
             cur_stat = _read_proc_stat()
-            rec = _build_record(prev_stat, cur_stat)
+            cur_groups: Optional[Dict[str, Tuple[int, int, int]]] = None
+            if have_groups:
+                # Resolve descendants this sample (process tree changes over time).
+                engine_pids = _list_descendants(args.llm_pid)
+                client_pids = _list_descendants(args.client_pid)
+                gateway_pids = _list_descendants(args.gateway_pid)
+                # Tools = under (client + gateway), excluding engine.
+                engine_set = set(engine_pids)
+                tools_pids = [
+                    p for p in (set(client_pids) | set(gateway_pids))
+                    if p not in engine_set
+                    and p not in args.client_pid          # exclude client roots
+                    and p not in args.gateway_pid         # exclude gateway roots
+                ]
+                cur_groups = {
+                    "llm_engine": _group_jiffies_rss(engine_pids),
+                    "client":     _group_jiffies_rss(args.client_pid),
+                    "tools":      _group_jiffies_rss(tools_pids),
+                }
+                # Add in the gateway's own jiffies under "client" so
+                # client = (driver + gateway roots) and tools = their kids.
+                gw_j, gw_rss, gw_n = _group_jiffies_rss(args.gateway_pid)
+                cl_j, cl_rss, cl_n = cur_groups["client"]
+                cur_groups["client"] = (cl_j + gw_j, cl_rss + gw_rss, cl_n + gw_n)
+
+            rec = _build_record(
+                prev_stat, cur_stat,
+                prev_groups=prev_groups if prev_groups else None,
+                cur_groups=cur_groups,
+                ncpu=ncpu, page_bytes=page_bytes,
+            )
+            if cur_groups is not None:
+                prev_groups = {k: v[0] for k, v in cur_groups.items()}
             prev_stat = cur_stat
             fh.write(json.dumps(rec) + "\n")
             if deadline is not None and time.monotonic() >= deadline:

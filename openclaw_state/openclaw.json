@@ -31,6 +31,23 @@
       "includeSystem": true
     }
   },
+  "tools": {
+    "exec": {
+      "host": "node",
+      "security": "full"
+    },
+    "alsoAllow": ["sessions_spawn", "sessions_yield", "subagents"]
+  },
+  "plugins": {
+    "entries": {
+      "vllm":             {"enabled": true},
+      "memory-core":      {"enabled": true},
+      "diagnostics-otel": {"enabled": true},
+      "litellm":          {"enabled": false},
+      "anthropic":        {"enabled": false},
+      "openrouter":       {"enabled": false}
+    }
+  },
   "models": {
     "providers": {
       "vllm": {
@@ -44,13 +61,6 @@
         ]
       }
     }
-  },
-  "tools": {
-    "exec": {
-      "host": "node",
-      "security": "full"
-    },
-    "alsoAllow": ["sessions_spawn", "sessions_yield", "subagents"]
   },
   "agents": {
     "defaults": {

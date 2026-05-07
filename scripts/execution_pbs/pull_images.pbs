@@ -50,7 +50,7 @@ echo "[pull-pbs] cache   =$CACHE_DIR"
 echo "[pull-pbs] parallel=$PARALLEL"
 echo "[pull-pbs] starting at $(date -u +%FT%TZ)"
 
-bash "$KIT_ROOT/pbs/pull_images.sh" \
+bash "$KIT_ROOT/scripts/execution_pbs/pull_images.sh" \
     --dataset "$DATASET" \
     --dir "$SIF_DIR" \
     --parallel "$PARALLEL"

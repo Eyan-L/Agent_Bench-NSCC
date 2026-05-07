@@ -228,6 +228,10 @@ if [[ "$STAGE_RUN" == "1" ]]; then
     # SWE-bench root only used for legacy harness path checks; TB harness ignores it.
     SWEBENCH_ROOT="${SWEBENCH_ROOT:-$OC_PYLIB}"
 
+    # Per-component CPU split: hand vLLM's pid to the sampler so cpu.by_group
+    # in util.jsonl attributes engine work to "llm_engine".
+    [[ -n "$VLLM_PID" ]] && export OC_LLM_PID="$VLLM_PID"
+
     python3 -m eval.runner.driver \
         --sweep "$SWEEP" \
         --swebench-root "$SWEBENCH_ROOT" \

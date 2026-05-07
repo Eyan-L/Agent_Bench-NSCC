@@ -23,6 +23,7 @@ import pandas as pd
 from eval.analysis.plots._util import (
     build_long_metrics,
     display_label,
+    display_workload,
     is_passed,
     iter_runs,
     order_configs,
@@ -44,7 +45,7 @@ def plot_ttft_distribution(long: pd.DataFrame, out_dir: Path,
     return _plot_metric_box(
         long, "ttft_mean",
         title="RQ3 — TTFT (mean) per condition",
-        ylabel="TTFT_mean (ms)",
+        ylabel="TTFT (ms)",
         name="rq3_ttft_mean",
         out_dir=out_dir, also_pdf=also_pdf,
         log_y=True,
@@ -60,7 +61,7 @@ def plot_tpot_distribution(long: pd.DataFrame, out_dir: Path,
     return _plot_metric_box(
         long, "tpot_mean",
         title="RQ3 — TPOT (mean) per condition",
-        ylabel="TPOT_mean (ms / output token)",
+        ylabel="TPOT (ms/tok)",
         name="rq3_tpot_mean",
         out_dir=out_dir, also_pdf=also_pdf,
         log_y=True,
@@ -80,7 +81,7 @@ def _plot_metric_box(long: pd.DataFrame, metric: str, title: str, ylabel: str,
     cfgs = order_configs(sub["config_id"].dropna().unique().tolist())
     data = [sub[sub["config_id"] == c][metric].values for c in cfgs]
 
-    fig, ax = plt.subplots(figsize=(6.5, 4))
+    fig, ax = plt.subplots(figsize=(5.0, 3.5))
     ax.boxplot(data, tick_labels=[display_label(c) for c in cfgs],
                showmeans=True, patch_artist=True,
                boxprops=dict(facecolor="#4C72B0", alpha=0.4))
@@ -89,7 +90,6 @@ def _plot_metric_box(long: pd.DataFrame, metric: str, title: str, ylabel: str,
             continue
         ax.scatter([i] * len(vals), vals, color="black", alpha=0.6, s=15, zorder=3)
     ax.set_ylabel(ylabel)
-    ax.set_title(title)
     if log_y:
         ax.set_yscale("log")
     plt.setp(ax.get_xticklabels(), rotation=15, ha="right")
@@ -118,8 +118,12 @@ def plot_task_latency_box(long: pd.DataFrame, out_dir: Path,
 def plot_alignment_scatter(long: pd.DataFrame, token_metric: str,
                            out_dir: Path, also_pdf: bool = False) -> Optional[Path]:
     """Scatter of token-level metric vs task latency. One point per run.
-    Spearman ρ printed per condition in the legend; an overall ρ across all
-    runs is added as a panel title hint when N >= 3.
+
+    Encoding:
+      - color  → workload class (code_agent, web_search, doc_analysis)
+      - marker → family (AR = square, Agent = circle)
+    Legend has two compact entries — one for color (workload), one for
+    marker (family) — instead of one row per (cfg, ρ, p, n).
     """
     if long.empty:
         return None
@@ -132,47 +136,56 @@ def plot_alignment_scatter(long: pd.DataFrame, token_metric: str,
         return None
 
     import matplotlib.pyplot as plt
-    try:
-        from scipy.stats import spearmanr
-    except ImportError:
-        spearmanr = None
 
-    cfgs = order_configs(df["config_id"].dropna().unique().tolist())
-    palette = ["#4C72B0", "#55A868", "#8172B2", "#CCB974", "#C44E52"]
+    # Workload-class palette (stable across plots).
+    workload_palette = {
+        "code_agent":   "#4C72B0",
+        "web_search":   "#55A868",
+        "doc_analysis": "#C44E52",
+    }
+    # AR vs Agent → marker shape.
+    family_marker = {"AR": "s", "Agent": "o"}  # s=square, o=circle
 
-    fig, ax = plt.subplots(figsize=(6.5, 5))
-    legend_lines = []
-    for i, cfg in enumerate(cfgs):
-        block = df[df["config_id"] == cfg]
-        ax.scatter(block["tk"], block["tl"], s=55, alpha=0.75,
-                   color=palette[i % len(palette)],
-                   label=None, edgecolor="white")
-        if len(block) >= 3 and spearmanr is not None:
-            rho, p = spearmanr(block["tk"], block["tl"])
-            legend_lines.append(f"{display_label(cfg)}: ρ={rho:+.2f}  p={p:.3f}  n={len(block)}")
-        else:
-            legend_lines.append(f"{display_label(cfg)}: n={len(block)} (ρ N/A)")
+    workloads = sorted(df["workload_class"].dropna().unique().tolist())
+    families = sorted(df["family"].dropna().unique().tolist())
 
-    if len(df) >= 3 and spearmanr is not None:
-        rho_all, p_all = spearmanr(df["tk"], df["tl"])
-        title_suffix = f"  (overall ρ={rho_all:+.2f}, p={p_all:.3f}, n={len(df)})"
-    else:
-        title_suffix = ""
+    fig, ax = plt.subplots(figsize=(5.0, 4.0))
+    for wl in workloads:
+        for fam in families:
+            block = df[(df["workload_class"] == wl) & (df["family"] == fam)]
+            if block.empty:
+                continue
+            ax.scatter(
+                block["tk"], block["tl"],
+                s=55, alpha=0.8,
+                color=workload_palette.get(wl, "#888888"),
+                marker=family_marker.get(fam, "o"),
+                edgecolor="white", linewidth=0.6,
+            )
 
-    label = "TTFT_mean" if token_metric == "ttft_mean" else "TPOT_mean"
-    ax.set_xlabel(f"{label}")
-    ax.set_ylabel("End-to-end task latency (s)")
-    ax.set_title(f"RQ3 — {label} vs task latency{title_suffix}")
+    label = "TTFT" if token_metric == "ttft_mean" else "TPOT"
+    ax.set_xlabel(f"{label} (ms)")
+    ax.set_ylabel("Task latency (s)")
     if (df["tk"] > 0).all():
         ax.set_xscale("log")
-    # Manually craft legend so each line has its config color box.
-    handles = [
-        plt.Line2D([0], [0], marker="o", color=palette[i % len(palette)],
-                   linestyle="", markersize=7, markeredgecolor="white")
-        for i in range(len(cfgs))
-    ]
-    ax.legend(handles, legend_lines, frameon=False, fontsize=8,
-              loc="upper left", bbox_to_anchor=(1.02, 1.0))
+
+    # Two compact legend groups: one for color, one for marker shape.
+    handles = []
+    for wl in workloads:
+        handles.append(plt.Line2D(
+            [0], [0], marker="o", linestyle="",
+            color=workload_palette.get(wl, "#888888"),
+            markersize=7, markeredgecolor="white",
+            label=display_workload(wl),
+        ))
+    for fam in families:
+        handles.append(plt.Line2D(
+            [0], [0], marker=family_marker.get(fam, "o"), linestyle="",
+            color="black", markersize=7, markeredgecolor="white",
+            label=fam,
+        ))
+    ax.legend(handles=handles, loc="best", frameon=True, framealpha=0.85,
+              fontsize=10)
     name = f"rq3_{token_metric}_vs_task_latency"
     return save_fig(fig, out_dir, name, also_pdf)
 
@@ -230,7 +243,7 @@ def plot_completion_rate(runs_dir: Path, out_dir: Path,
                 bonly = block[block["latency_s"] <= budget]
                 rates[label].append(bonly["passed"].mean() if len(bonly) else np.nan)
 
-    fig, ax = plt.subplots(figsize=(7.5, 4))
+    fig, ax = plt.subplots(figsize=(5.5, 3.5))
     width = 0.8 / len(budgets)
     x = np.arange(len(cfgs))
     palette = ["#4C72B0", "#55A868", "#8172B2", "#CCB974"]
@@ -244,9 +257,154 @@ def plot_completion_rate(runs_dir: Path, out_dir: Path,
     )
     ax.set_ylabel("Completion rate")
     ax.set_ylim(0, 1.05)
-    ax.set_title("RQ3 — Completion rate (overall and within latency budgets)")
-    ax.legend(frameon=False, loc="upper left", bbox_to_anchor=(1.02, 1.0))
+    ax.legend(loc="best", frameon=True, framealpha=0.85)
     return save_fig(fig, out_dir, "rq3_completion_rate", also_pdf)
+
+
+# ---------------------------------------------------------------------------
+# F3.7 — Serving-regime inversion: TTFT/TPOT vs task latency split by
+# {lat-opt-disagg, thru-opt-agg}. Demonstrates that token-centric metrics
+# are not strictly positively correlated with end-to-end task latency
+# under agentic workflows: AR (single-shot) inherits LLM cost so lat-opt
+# wins on both axes, but Agent (multi-turn) gains from batched throughput
+# so thru-opt yields lower task latency despite worse TTFT/TPOT.
+# ---------------------------------------------------------------------------
+
+def _collect_regime_table(runs_dir: Path) -> pd.DataFrame:
+    """Per-run rows with TTFT/TPOT (mean) + task latency + regime tag.
+
+    TTFT and TPOT are extracted from steps.jsonl as duration / (1 + ct)
+    and duration / ct respectively — same approximation evaluation.py
+    falls back to. Reading steps directly avoids depending on the
+    long-format pipeline knowing about regimes.
+    """
+    rows = []
+    for run_dir, steps, _telem, _verdict, manifest in iter_runs(runs_dir):
+        if steps.empty:
+            continue
+        regime = (
+            manifest.get("serving_regime")
+            or manifest.get("serving_config_id")
+        )
+        if not regime:
+            continue
+        cfg = (
+            manifest.get("condition_id")
+            or manifest.get("config_id")
+            or (steps["config_id"].dropna().iloc[0] if "config_id" in steps.columns else None)
+        )
+        wc = manifest.get("workload_class")
+        if not cfg or not wc:
+            continue
+
+        llm = steps[steps["step_type"] == "LLM_INFER"].copy()
+        if llm.empty:
+            continue
+        ct = llm["completion_tokens"].fillna(0)
+        dur_ms = llm["duration_ms"].fillna(0)
+        ttfts = dur_ms / (1.0 + ct)
+        tpots = dur_ms / ct.replace(0, np.nan)
+
+        wall_s = (
+            float(manifest["duration_seconds"])
+            if manifest.get("duration_seconds") is not None
+            else float((steps["end_ts"].max() - steps["start_ts"].min()) / 1e9)
+        )
+        rows.append({
+            "run_id":   run_dir.name,
+            "config_id": cfg,
+            "family":   "AR" if cfg.startswith("ar") else "Agent",
+            "workload_class": wc,
+            "regime":   regime,
+            "regime_label": manifest.get("serving_regime_label") or regime,
+            "ttft_ms":  float(ttfts.mean()),
+            "tpot_ms":  float(tpots.dropna().mean()) if tpots.notna().any() else np.nan,
+            "task_latency_s": wall_s,
+        })
+    return pd.DataFrame(rows)
+
+
+def plot_regime_inversion(runs_dir: Path, out_dir: Path,
+                          also_pdf: bool = False) -> Optional[Path]:
+    """Two-panel scatter: TTFT (left), TPOT (right) on x; task latency on y.
+    Each (family × workload_class) cell appears as two points connected by
+    an arrow lat-opt → thru-opt. Down-and-right arrows = inversion.
+    """
+    df = _collect_regime_table(runs_dir)
+    if df.empty:
+        return None
+    import matplotlib.pyplot as plt
+
+    # Per-cell mean across runs.
+    grp = (df
+           .groupby(["family", "workload_class", "regime", "regime_label"], as_index=False)
+           [["ttft_ms", "tpot_ms", "task_latency_s"]]
+           .mean())
+
+    family_marker = {"AR": "s", "Agent": "o"}
+    workload_color = {
+        "code_agent":   "#4C72B0",
+        "doc_analysis": "#C44E52",
+        "web_search":   "#55A868",
+    }
+
+    fig, axes = plt.subplots(1, 2, figsize=(9.5, 4.0))
+    panel_specs = [("ttft_ms", "TTFT (ms)"), ("tpot_ms", "TPOT (ms/tok)")]
+
+    families  = sorted(grp["family"].unique().tolist())
+    workloads = sorted(grp["workload_class"].unique().tolist())
+
+    for ax, (xcol, xlab) in zip(axes, panel_specs):
+        for fam in families:
+            for wl in workloads:
+                cell = grp[(grp["family"] == fam) & (grp["workload_class"] == wl)]
+                if cell.empty:
+                    continue
+                # Order: lat-opt first (lower x expected), thru-opt second.
+                cell = cell.sort_values("ttft_ms")
+                xs = cell[xcol].values
+                ys = cell["task_latency_s"].values
+                col = workload_color.get(wl, "#888888")
+                marker = family_marker.get(fam, "o")
+                # Connecting arrow lat-opt -> thru-opt
+                if len(cell) == 2:
+                    ax.annotate(
+                        "",
+                        xy=(xs[1], ys[1]), xytext=(xs[0], ys[0]),
+                        arrowprops=dict(arrowstyle="->", color=col, alpha=0.55,
+                                        linewidth=1.2),
+                    )
+                ax.scatter(xs, ys, color=col, marker=marker, s=55,
+                           alpha=0.85, edgecolor="white", linewidth=0.6)
+        ax.set_xlabel(xlab)
+        ax.set_ylabel("Task latency (s)")
+        if (grp[xcol] > 0).all():
+            ax.set_xscale("log")
+
+    # Build a compact legend on the second panel: workload colors + family markers.
+    handles = []
+    for wl in workloads:
+        handles.append(plt.Line2D(
+            [0], [0], marker="o", linestyle="",
+            color=workload_color.get(wl, "#888888"),
+            markersize=7, markeredgecolor="white",
+            label=display_workload(wl),
+        ))
+    for fam in families:
+        handles.append(plt.Line2D(
+            [0], [0], marker=family_marker.get(fam, "o"), linestyle="",
+            color="black", markersize=7, markeredgecolor="white",
+            label=fam,
+        ))
+    # Arrow legend entry indicates direction of regime change.
+    handles.append(plt.Line2D(
+        [0], [0], marker=r"$\rightarrow$", linestyle="",
+        color="#444444", markersize=11, label="lat-opt → thru-opt",
+    ))
+    axes[1].legend(handles=handles, loc="best", frameon=True, framealpha=0.85,
+                   fontsize=9)
+    fig.tight_layout()
+    return save_fig(fig, out_dir, "rq3_regime_inversion", also_pdf)
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +435,7 @@ def main(argv=None) -> int:
         (plot_alignment_scatter,    dict(long=long, token_metric="ttft_mean")),
         (plot_alignment_scatter,    dict(long=long, token_metric="tpot_mean")),
         (plot_completion_rate,      dict(runs_dir=args.runs_dir)),
+        (plot_regime_inversion,     dict(runs_dir=args.runs_dir)),
     ]:
         try:
             p = fn(out_dir=args.out_dir, also_pdf=args.also_pdf, **kwargs)

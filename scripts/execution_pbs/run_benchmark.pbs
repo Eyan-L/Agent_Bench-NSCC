@@ -93,7 +93,7 @@ case "$VLLM_PROFILE" in
         # 2× A100-40GB: weights take ~33 GiB/GPU, leaving ~3 GiB headroom.
         # 131072 needs ~1.3 GiB per concurrent seq for KV — won't fit even one.
         # 32768 keeps ~8 full-length seqs in KV; covers the SWE-bench tail.
-        VLLM_MAX_LEN_DEFAULT=32768
+        VLLM_MAX_LEN_DEFAULT=131072
         ;;
     *)
         echo "FATAL: VLLM_PROFILE=$VLLM_PROFILE — must be 'test' or 'bench'" >&2
@@ -283,7 +283,7 @@ PY
         TMP_LIST="$SIF_DIR/.sweep_instances.txt"
         sweep_instances > "$TMP_LIST"
         LOG_PREFIX "  pulling $(wc -l < "$TMP_LIST") instances from $SWEEP"
-        OC_SIF_DIR="$SIF_DIR" bash "$KIT_ROOT/pbs/pull_images.sh" \
+        OC_SIF_DIR="$SIF_DIR" bash "$KIT_ROOT/scripts/execution_pbs/pull_images.sh" \
             --instances "$TMP_LIST" \
             --dir "$SIF_DIR" \
             --parallel "$OC_PULL_PARALLEL" \
@@ -489,7 +489,7 @@ if [[ "$STAGE_OC_CHECK" == "1" ]]; then
     # Bake eval/frontend/openclaw/patch/*.patch into a Singularity overlay,
     # one-time per host. Subsequent execs mount it read-only.
     LOG_PREFIX "  building OC patch overlay at $OC_RUNTIME_OVERLAY"
-    bash "$KIT_ROOT/pbs/build_oc_overlay.sh" \
+    bash "$KIT_ROOT/scripts/execution_pbs/build_oc_overlay.sh" \
         --sif "$OC_RUNTIME_SIF" \
         --overlay "$OC_RUNTIME_OVERLAY" \
         --kit-root "$KIT_ROOT" \
@@ -526,7 +526,7 @@ export SINGULARITYENV_NODE_OPTIONS="--dns-result-order=ipv4first"
 # only succeeds on the login node. On compute nodes a cold cache is fatal.
 if ! find "$OC_PLUGIN_CACHE" -mindepth 2 -name package.json -print -quit | grep -q .; then
     LOG_PREFIX "  plugin cache cold at $OC_PLUGIN_CACHE; warming..."
-    if bash "$KIT_ROOT/pbs/warm_oc_plugins.sh" \
+    if bash "$KIT_ROOT/scripts/execution_pbs/warm_oc_plugins.sh" \
             --sif "$OC_OC_SIF" \
             --overlay "$OC_OC_OVERLAY" \
             --cache "$OC_PLUGIN_CACHE" \
@@ -536,7 +536,7 @@ if ! find "$OC_PLUGIN_CACHE" -mindepth 2 -name package.json -print -quit | grep 
         LOG_PREFIX "FATAL: plugin cache warm failed."
         LOG_PREFIX "  Compute node likely has no npm egress (this run probed ipv4=$NPM_IPV4_OK ipv6=$NPM_IPV6_OK)."
         LOG_PREFIX "  Run on a node with internet access (e.g. login node):"
-        LOG_PREFIX "    bash $KIT_ROOT/pbs/warm_oc_plugins.sh \\"
+        LOG_PREFIX "    bash $KIT_ROOT/scripts/execution_pbs/warm_oc_plugins.sh \\"
         LOG_PREFIX "        --sif $OC_OC_SIF --overlay $OC_OC_OVERLAY \\"
         LOG_PREFIX "        --cache $OC_PLUGIN_CACHE \\"
         LOG_PREFIX "        --state-template $KIT_ROOT/openclaw_state"
@@ -554,7 +554,7 @@ fi
 # ============================================================================
 if [[ "$STAGE_OTEL" == "1" ]]; then
     LOG_PREFIX "==== STAGE 3.5: start OTel collector ===="
-    if bash "$KIT_ROOT/pbs/otel_collector.sh" start; then
+    if bash "$KIT_ROOT/scripts/execution_pbs/otel_collector.sh" start; then
         LOG_PREFIX "  OTel collector ready at 127.0.0.1:${OC_OTEL_PORT:-4318}"
         LOG_PREFIX "  trace file -> $OC_OTEL_TRACE_FILE"
     else
@@ -573,6 +573,11 @@ if [[ "$STAGE_RUN" == "1" ]]; then
     export HARNESS_BACKEND=singularity
     export OC_HOST_WORKSPACE_BASE="$SCRATCH/oc-eval/workspaces"
     mkdir -p "$OC_HOST_WORKSPACE_BASE"
+
+    # Per-component CPU split: hand vLLM's pid to the sampler so cpu.by_group
+    # in util.jsonl attributes engine work to "llm_engine". Driver/gateway
+    # pids are picked up by the sampler from the live process tree.
+    [[ -n "$VLLM_PID" ]] && export OC_LLM_PID="$VLLM_PID"
 
     python3 -m eval.runner.driver \
         --sweep "$SWEEP" \
@@ -593,7 +598,7 @@ if [[ "$STAGE_CLEANUP" == "1" ]]; then
     # SIGTERM on otelcol triggers a graceful flush; SIGKILL would lose the
     # tail of the trace file.
     if [[ "$STAGE_OTEL" == "1" ]]; then
-        bash "$KIT_ROOT/pbs/otel_collector.sh" stop || true
+        bash "$KIT_ROOT/scripts/execution_pbs/otel_collector.sh" stop || true
     fi
     if [[ -n "$VLLM_PID" ]] && kill -0 "$VLLM_PID" 2>/dev/null; then
         LOG_PREFIX "  stopping vllm pid=$VLLM_PID"

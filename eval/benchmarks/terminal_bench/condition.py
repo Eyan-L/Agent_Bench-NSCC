@@ -27,12 +27,33 @@ import logging
 import re
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from eval.runner.conditions.code_agent._llm_client import call_llm
+from eval.runner.conditions.code_agent.openclaw_agent import _UtilSampler
 
 logger = logging.getLogger(__name__)
+
+
+def _emit_span(name: str, start_ns: int, end_ns: int,
+               attrs: Dict, resource: Dict) -> Dict:
+    """Build one flattened span dict matching the shape that
+    eval/runner/conditions/code_agent/openclaw_agent.py:_snapshot_otel_spans
+    writes — so spans.jsonl is interchangeable across conditions and the
+    downstream analyzers don't have to branch on producer.
+    """
+    return {
+        "name": name,
+        "start_unix_nano": int(start_ns),
+        "end_unix_nano": int(end_ns),
+        "start_iso": datetime.fromtimestamp(start_ns / 1e9, tz=timezone.utc).isoformat(),
+        "end_iso": datetime.fromtimestamp(end_ns / 1e9, tz=timezone.utc).isoformat(),
+        "duration_ms": (end_ns - start_ns) / 1e6,
+        "attrs": attrs,
+        "resource": resource,
+    }
 
 
 _BASH_BLOCK_RE = re.compile(r"<bash>\s*(.*?)\s*</bash>", re.DOTALL | re.IGNORECASE)
@@ -103,6 +124,18 @@ class TerminalBenchReactCondition:
         logger.info("TB ReAct: instance=%s task=%s", instance_name, instance_id)
 
         steps: List[Dict] = []
+        spans: List[Dict] = []
+        # Resource attrs match what OC's gateway tags spans with, so the
+        # filter on `oc.run_id` in cross-run analysis works the same way.
+        resource_attrs = {
+            "oc.run_id": run_dir.name,
+            "service.name": "tb_react",
+            "tb.instance_id": instance_id,
+            "tb.condition_id": "tb_react",
+            "tb.model_name": getattr(self.model_config, "name", None) or "",
+        }
+        run_start_ns = time.time_ns()
+
         total_prompt_tokens = 0
         total_completion_tokens = 0
         done = False
@@ -113,7 +146,15 @@ class TerminalBenchReactCondition:
         # adequate for a 20-step ReAct loop.
         history: List[Tuple[str, str]] = []  # [(role, content)]
 
-        for step_idx in range(self.max_steps):
+        # TB has no OC gateway; tool processes are children of the driver
+        # (singularity exec subprocesses). Pass the driver pid as the
+        # "tools origin" so the sampler attributes those children to the
+        # tools group; the driver process itself stays under client.
+        import os as _os
+        sampler_cm = _UtilSampler(run_dir, gateway_pid=_os.getpid())
+        sampler_cm.__enter__()
+        try:
+          for step_idx in range(self.max_steps):
             prompt = self._compose_prompt(instruction, history)
             step_start_ns = time.time_ns()
             text, pt, ct, err = call_llm(
@@ -137,6 +178,17 @@ class TerminalBenchReactCondition:
                 completion_tokens=ct,
                 err=err,
                 response_preview=text[:500] if text else None,
+            ))
+            spans.append(_emit_span(
+                name="tb.llm.infer",
+                start_ns=step_start_ns, end_ns=step_end_ns,
+                attrs={
+                    "tb.step_idx": step_idx,
+                    "tb.prompt_tokens": pt,
+                    "tb.completion_tokens": ct,
+                    "tb.error": err or "",
+                },
+                resource=resource_attrs,
             ))
 
             if err:
@@ -178,6 +230,18 @@ class TerminalBenchReactCondition:
                     exit_code=result["rc"],
                     err=("timeout" if result["timed_out"] else None),
                 ))
+                spans.append(_emit_span(
+                    name="tb.tool.exec",
+                    start_ns=t_start, end_ns=t_end,
+                    attrs={
+                        "tb.step_idx": step_idx,
+                        "tb.cmd_idx": cmd_idx,
+                        "tb.command": cmd[:500],
+                        "tb.exit_code": result["rc"],
+                        "tb.timed_out": result["timed_out"],
+                    },
+                    resource=resource_attrs,
+                ))
 
                 tool_outputs.append(self._format_tool_output(cmd_idx, cmd, result))
 
@@ -186,6 +250,8 @@ class TerminalBenchReactCondition:
             if _DONE_RE.search(text or ""):
                 done = True
                 break
+        finally:
+            sampler_cm.__exit__(None, None, None)
 
         # Emit empty patch marker so the driver's exists+nonempty gate stays
         # uniform across benchmarks. The driver branches on benchmark to skip
@@ -206,12 +272,40 @@ class TerminalBenchReactCondition:
         if not done:
             logger.warning("TB ReAct hit max_steps=%d without DONE", self.max_steps)
 
+        # Session span wraps the whole trajectory; written first so spans.jsonl
+        # opens with the parent (mirrors how OC orders its run-level span).
+        run_end_ns = time.time_ns()
+        session_span = _emit_span(
+            name="tb.session",
+            start_ns=run_start_ns, end_ns=run_end_ns,
+            attrs={
+                "tb.steps_run": len(steps),
+                "tb.done": done,
+                "tb.total_prompt_tokens": total_prompt_tokens,
+                "tb.total_completion_tokens": total_completion_tokens,
+            },
+            resource=resource_attrs,
+        )
+        spans_path: Optional[Path] = None
+        try:
+            spans_path = run_dir / "spans.jsonl"
+            with spans_path.open("w") as fh:
+                fh.write(json.dumps(session_span, ensure_ascii=False) + "\n")
+                for span in spans:
+                    fh.write(json.dumps(span, ensure_ascii=False) + "\n")
+            logger.info(
+                "  wrote %d span(s) -> %s", len(spans) + 1, spans_path,
+            )
+        except OSError as e:
+            logger.warning("spans.jsonl write failed: %s", e)
+            spans_path = None
+
         return {
             "step_trace_path": str(step_trace_path),
             "patch_path": str(patch_path),
             "total_prompt_tokens": total_prompt_tokens,
             "total_completion_tokens": total_completion_tokens,
-            "telemetry_path": None,
+            "telemetry_path": str(spans_path) if spans_path else None,
         }
 
     # ------------------------------------------------------------------
@@ -237,11 +331,36 @@ class TerminalBenchReactCondition:
 
     # ------------------------------------------------------------------
 
+    # Wrapper so `cmd &` doesn't pin our subprocess pipes for the full
+    # timeout. Foreground stdout/stderr go to a tmp file; after the
+    # foreground command exits we cat the file and exit bash. Any
+    # backgrounded child keeps writing into the (now-unlinked) tmp file
+    # instead of our pipes, so subprocess.run's read returns immediately.
+    #
+    # Newline-separated (not ;) so user commands using heredocs (where
+    # the terminator must be alone on its line) and trailing `&` (which
+    # already terminates the statement) parse cleanly.
+    _BG_SAFE_WRAPPER = (
+        '__oc_o=$(mktemp)\n'
+        '__oc_e=$(mktemp)\n'
+        'exec 3>&1 4>&2\n'
+        '{\n'
+        '%s\n'
+        '} >"$__oc_o" 2>"$__oc_e" </dev/null\n'
+        '__oc_rc=$?\n'
+        'exec 1>&3 2>&4 3>&- 4>&-\n'
+        'cat "$__oc_o"\n'
+        'cat "$__oc_e" >&2\n'
+        'rm -f "$__oc_o" "$__oc_e"\n'
+        'exit "$__oc_rc"\n'
+    )
+
     def _exec_in_container(self, instance_name: str, cmd: str) -> Dict:
         """Run `bash -lc <cmd>` inside the TB singularity instance."""
+        wrapped = self._BG_SAFE_WRAPPER % cmd
         argv = [
             "singularity", "exec", f"instance://{instance_name}",
-            "bash", "-lc", cmd,
+            "bash", "-lc", wrapped,
         ]
         try:
             r = subprocess.run(
@@ -249,10 +368,16 @@ class TerminalBenchReactCondition:
                 timeout=self.per_cmd_timeout,
             )
         except subprocess.TimeoutExpired as e:
+            # text=True doesn't apply to the partial buffers stashed on the
+            # exception — they come back as bytes. Decode defensively.
+            def _as_str(x):
+                if x is None:
+                    return ""
+                return x.decode("utf-8", errors="replace") if isinstance(x, (bytes, bytearray)) else x
             return {
                 "rc": -1,
-                "stdout": e.stdout or "",
-                "stderr": (e.stderr or "") + f"\n[harness] timeout after {self.per_cmd_timeout}s",
+                "stdout": _as_str(e.stdout),
+                "stderr": _as_str(e.stderr) + f"\n[harness] timeout after {self.per_cmd_timeout}s",
                 "timed_out": True,
             }
         return {

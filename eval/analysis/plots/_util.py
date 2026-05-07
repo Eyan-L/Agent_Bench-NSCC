@@ -38,7 +38,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Order matters for plotting (left → right reads as "less agentic → more").
+# "ar" is the rolled-up baseline used in mock data and (optionally) when
+# real-run analysis treats both AR variants as one.
 CONFIG_DISPLAY_ORDER: List[str] = [
+    "ar",
     "ar_issue_only",
     "ar_static_context",
     "openclaw_agent",
@@ -46,6 +49,7 @@ CONFIG_DISPLAY_ORDER: List[str] = [
 ]
 
 CONFIG_DISPLAY_LABEL: Dict[str, str] = {
+    "ar":                 "AR",
     "ar_issue_only":      "AR (issue only)",
     "ar_static_context":  "AR (static ctx)",
     "openclaw_agent":     "Agent (OpenClaw)",
@@ -53,7 +57,7 @@ CONFIG_DISPLAY_LABEL: Dict[str, str] = {
 }
 
 # AR baselines vs agentic workflow — the core RQ1 split.
-AR_FAMILIES = {"ar_issue_only", "ar_static_context"}
+AR_FAMILIES = {"ar", "ar_issue_only", "ar_static_context"}
 AGENT_FAMILIES = {"openclaw_agent", "tb_react"}
 
 
@@ -85,6 +89,22 @@ def workload_class_for(config_id: Optional[str], manifest: Optional[Dict] = None
 
 def display_label(config_id: str) -> str:
     return CONFIG_DISPLAY_LABEL.get(config_id, config_id)
+
+
+# Workload-class display labels (matches the paper's prose: "code agent",
+# "doc analysis", "web search"). Falls back to underscore->space + lowercase
+# for any future workload classes added to manifest["workload_class"].
+WORKLOAD_DISPLAY_LABEL: Dict[str, str] = {
+    "code_agent":   "code agent",
+    "doc_analysis": "doc analysis",
+    "web_search":   "web search",
+}
+
+
+def display_workload(wc: Optional[str]) -> str:
+    if not wc:
+        return ""
+    return WORKLOAD_DISPLAY_LABEL.get(wc, wc.replace("_", " ").lower())
 
 
 def order_configs(configs: List[str]) -> List[str]:
@@ -142,6 +162,7 @@ def load_util_telemetry(run_dir: Path) -> pd.DataFrame:
         return pd.DataFrame()
 
     rows = []
+    ncpu: Optional[int] = None
     with p.open() as fh:
         for line in fh:
             line = line.strip()
@@ -149,6 +170,10 @@ def load_util_telemetry(run_dir: Path) -> pd.DataFrame:
                 continue
             rec = json.loads(line)
             if rec.get("_meta"):
+                # ncpu lands here when the sampler was launched with the
+                # per-pid flags (newer schema). Older util.jsonl headers
+                # don't have it; we fall back to per_cpu_pct length below.
+                ncpu = rec.get("ncpu") or ncpu
                 continue
             cpu = rec.get("cpu") or {}
             gpus = rec.get("gpu") or []
@@ -156,9 +181,35 @@ def load_util_telemetry(run_dir: Path) -> pd.DataFrame:
             gpu_mem = sum((g.get("mem_used_mb") or 0) for g in gpus)
             gpu_mem_total = sum((g.get("mem_total_mb") or 0) for g in gpus)
             gpu_power = sum((g.get("power_w") or 0) for g in gpus)
+            # Per-group CPU split — only present when the sampler had pids
+            # configured (see scripts/util_sampler.py --llm-pid/--client-pid).
+            # Use NaN for absent groups so plot code can detect "not measured"
+            # vs "measured zero" with .notna().
+            by_group = (cpu.get("by_group") or {})
+            def _g(name: str, key: str = "pct"):
+                v = by_group.get(name)
+                return v.get(key) if isinstance(v, dict) else np.nan
+            # Resolve ncpu: prefer header, fall back to per_cpu_pct length.
+            row_ncpu = ncpu
+            if not row_ncpu:
+                row_ncpu = len(cpu.get("per_cpu_pct") or []) or None
+
+            host_pct = cpu.get("pct")
+            host_cores = (
+                (host_pct * row_ncpu / 100.0)
+                if (host_pct is not None and row_ncpu) else np.nan
+            )
+
+            def _pct_to_cores(v):
+                """Per-group pct is already 'one-core × ncpu' units, so /100
+                yields cores. host-wide pct uses /100 × ncpu (separate)."""
+                return (v / 100.0) if v is not None else np.nan
+
             rows.append({
                 "timestamp_ns":      rec.get("ts_ns"),
-                "cpu_utilization_%": cpu.get("pct"),
+                "ncpu":              row_ncpu,
+                "cpu_utilization_%": host_pct,
+                "cpu_cores_busy":    host_cores,           # host-wide, in cores
                 "gpu_utilization_%": (
                     float(np.nanmean(gpu_utils)) if gpu_utils else np.nan
                 ),
@@ -168,6 +219,20 @@ def load_util_telemetry(run_dir: Path) -> pd.DataFrame:
                 "cpu_mem_used_MB":   cpu.get("mem_used_mb"),
                 "rss_MB":            cpu.get("mem_used_mb"),  # proxy; see docstring
                 "n_gpus":            len(gpus),
+                # Per-group CPU%, retained for back-compat
+                "cpu_pct_llm":     _g("llm_engine"),
+                "cpu_pct_client":  _g("client"),
+                "cpu_pct_tools":   _g("tools"),
+                "cpu_pct_other":   _g("other"),
+                # Per-group cores busy (= cpu_pct_*/100). NaN when by_group absent.
+                "cpu_cores_llm":    _pct_to_cores(_g("llm_engine")),
+                "cpu_cores_client": _pct_to_cores(_g("client")),
+                "cpu_cores_tools":  _pct_to_cores(_g("tools")),
+                "cpu_cores_other":  _pct_to_cores(_g("other")),
+                # Per-group RSS (MB) — "other" has no rss field
+                "rss_mb_llm":      _g("llm_engine", "rss_mb"),
+                "rss_mb_client":   _g("client", "rss_mb"),
+                "rss_mb_tools":    _g("tools", "rss_mb"),
             })
     return pd.DataFrame(rows)
 
@@ -310,7 +375,11 @@ def pivot_metric(long_df: pd.DataFrame, metric_name: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def setup_style():
-    """Apply consistent matplotlib + seaborn settings. Idempotent."""
+    """Apply consistent matplotlib + seaborn settings. Idempotent.
+
+    Tuned for compact paper figures: smaller canvas, larger text so
+    each chart stays legible when reduced to half-column width.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt  # noqa: F401  (side effect: backend lock)
@@ -323,11 +392,11 @@ def setup_style():
     mpl.rcParams.update({
         "figure.dpi":    120,
         "savefig.dpi":   200,
-        "axes.titlesize": 11,
-        "axes.labelsize": 10,
-        "xtick.labelsize": 9,
-        "ytick.labelsize": 9,
-        "legend.fontsize": 9,
+        "axes.titlesize": 14,
+        "axes.labelsize": 13,
+        "xtick.labelsize": 12,
+        "ytick.labelsize": 12,
+        "legend.fontsize": 11,
     })
 
 

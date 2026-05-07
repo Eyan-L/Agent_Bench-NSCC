@@ -847,6 +847,15 @@ class HostHarness:
         env["OPENCLAW_GATEWAY_PORT"] = str(port)
         if run_id:
             env["OTEL_RESOURCE_ATTRIBUTES"] = f"oc.run_id={run_id}"
+        # HPC compute nodes are firewalled — pricing/model-catalog fetches
+        # to litellm/openrouter time out (30s each) and only litter the
+        # gateway log. The plugin-disable in openclaw.json takes care of
+        # most of these; the env knobs below cover anything that bypasses
+        # the plugin gate (model-pricing was historically a built-in
+        # subsystem, not a plugin).
+        env.setdefault("OPENCLAW_DISABLE_PRICING_FETCH", "1")
+        env.setdefault("OPENCLAW_NO_MODEL_PRICING", "1")
+        env.setdefault("LITELLM_DISABLE_PRICING_FETCH", "1")
 
         log_fh = open(log_path, "w")
         argv = ["openclaw", "gateway", "run",

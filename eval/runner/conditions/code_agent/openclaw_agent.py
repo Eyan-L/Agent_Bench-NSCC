@@ -69,9 +69,22 @@ class _UtilSampler:
 
     Toggle off via OC_UTIL_SAMPLE=0; tune cadence via OC_UTIL_SAMPLE_INTERVAL
     (seconds, default 1.0). Output lands at <run_dir>/util.jsonl.
+
+    Per-group CPU split ({llm_engine, client, tools, other}) is enabled when
+    any of llm_pid / client_pid / gateway_pid is provided. llm_pid defaults
+    to the value of $OC_LLM_PID (the PBS driver exports this from $VLLM_PID
+    once vLLM is up). client_pid defaults to the calling process's pid (the
+    eval driver). gateway_pid is the OC gateway whose descendants are tools.
     """
 
-    def __init__(self, run_dir: Path):
+    def __init__(
+        self,
+        run_dir: Path,
+        *,
+        llm_pid: Optional[int] = None,
+        client_pid: Optional[int] = None,
+        gateway_pid: Optional[int] = None,
+    ):
         self.run_dir = run_dir
         self.proc: Optional[subprocess.Popen] = None
         self.enabled = (
@@ -83,22 +96,46 @@ class _UtilSampler:
         except ValueError:
             self.interval = 1.0
 
+        if llm_pid is None:
+            try:
+                llm_pid = int(os.environ.get("OC_LLM_PID") or 0) or None
+            except ValueError:
+                llm_pid = None
+        if client_pid is None:
+            client_pid = os.getpid()
+        self.llm_pid = llm_pid
+        self.client_pid = client_pid
+        self.gateway_pid = gateway_pid
+
     def __enter__(self) -> "_UtilSampler":
         if not self.enabled:
             return self
         out_path = self.run_dir / "util.jsonl"
+        argv = [
+            sys.executable, str(_UTIL_SAMPLER_SCRIPT),
+            "--output", str(out_path),
+            "--interval", str(self.interval),
+        ]
+        if self.llm_pid:
+            argv += ["--llm-pid", str(self.llm_pid)]
+        if self.client_pid:
+            argv += ["--client-pid", str(self.client_pid)]
+        if self.gateway_pid:
+            argv += ["--gateway-pid", str(self.gateway_pid)]
         try:
             self.proc = subprocess.Popen(
-                [sys.executable, str(_UTIL_SAMPLER_SCRIPT),
-                 "--output", str(out_path),
-                 "--interval", str(self.interval)],
+                argv,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
             )
-            logger.info("  util sampler pid=%s -> %s (interval=%.2fs)",
-                        self.proc.pid, out_path.name, self.interval)
+            logger.info(
+                "  util sampler pid=%s -> %s (interval=%.2fs, "
+                "llm=%s client=%s gateway=%s)",
+                self.proc.pid, out_path.name, self.interval,
+                self.llm_pid, self.client_pid, self.gateway_pid,
+            )
         except Exception as e:
             logger.warning("util sampler launch failed: %s", e)
             self.proc = None
@@ -171,7 +208,12 @@ class OpenClawAgentCondition:
         except FileNotFoundError:
             pre_offset = 0
 
-        with _UtilSampler(run_dir):
+        gw_pid = self._env_info.get("gateway_pid")
+        try:
+            gw_pid = int(gw_pid) if gw_pid else None
+        except (TypeError, ValueError):
+            gw_pid = None
+        with _UtilSampler(run_dir, gateway_pid=gw_pid):
             step_start_ns = time.time_ns()
             payload, err = self._invoke_agent(
                 container_id=container_id,
