@@ -18,9 +18,12 @@ _check_eval_inputs:
 	    exit 2; \
 	fi
 
-.PHONY: help serve eval stress analyze report test clean \
+.PHONY: help serve serve-docker serve-stop serve-logs serve-status \
+        eval stress analyze report test clean \
         run_phase0 run_phase1 run_phase2 _check_eval_inputs \
-        otel-up-host otel-down-host scoring-server
+        otel-up-host otel-down-host scoring-server \
+        openhands-image \
+        mig-status mig-prep-test mig-teardown
 
 help:
 	@echo "Targets:"
@@ -35,10 +38,16 @@ help:
 	@echo "  test        Trace pipeline self-tests"
 	@echo "  otel-up-host    Start native otelcol-contrib (no docker)"
 	@echo "  otel-down-host  Stop the native collector"
+	@echo "  serve-docker    Launch vLLM as a docker container (MIG-aware via VLLM_MIG_UUID)"
+	@echo "  serve-stop/logs/status  Lifecycle for the docker-launched vLLM"
+	@echo "  openhands-image  Build agent-bench/openhands:<ver> harness image"
+	@echo "  mig-status / mig-prep-test / mig-teardown  GPU MIG management"
 	@echo ""
 	@echo "Env: SERVING_BACKEND={vllm|sglang} (current: $(SERVING_BACKEND))"
 	@echo "     SWEBENCH_ROOT=$(SWEBENCH_ROOT)"
 	@echo "     INSTANCE_DATA=$(INSTANCE_DATA)"
+	@echo "     VLLM_MIG_UUID   (bind serve-docker to a MIG slice; see mig-status)"
+	@echo "     MIG_GPU/PROFILE (mig-prep-test args: defaults 1 / 1g.24gb)"
 
 serve:
 	bash backend/common/serve.sh
@@ -94,3 +103,59 @@ test:
 
 clean:
 	find . -name __pycache__ -type d -exec rm -rf {} +
+
+# ---- Containerized vLLM (MIG-aware) --------------------------------------
+# Sibling of `make serve`. `make serve` runs vLLM natively (JSON-config
+# driven); `make serve-docker` runs it as a docker container so it can bind
+# to a MIG slice via CDI. See backend/vllm/serve_docker.sh for the env
+# contract (VLLM_IMAGE / VLLM_MIG_UUID / VLLM_DETACH / ...).
+VLLM_CONTAINER_NAME ?= oc-vllm-serve
+
+serve-docker:
+	bash backend/vllm/serve_docker.sh $(VLLM_ARGS)
+
+serve-stop:
+	@if docker ps -a --format '{{.Names}}' | grep -qx "$(VLLM_CONTAINER_NAME)"; then \
+	    docker stop -t 30 "$(VLLM_CONTAINER_NAME)" >/dev/null && \
+	    docker rm  -f    "$(VLLM_CONTAINER_NAME)" >/dev/null && \
+	    echo "stopped $(VLLM_CONTAINER_NAME)"; \
+	else echo "$(VLLM_CONTAINER_NAME) not running"; fi
+
+serve-logs:
+	docker logs -f --tail 200 $(VLLM_CONTAINER_NAME)
+
+serve-status:
+	@docker ps -a --filter "name=$(VLLM_CONTAINER_NAME)" \
+	  --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+	@echo "---"
+	@cat data/serving_metadata.env 2>/dev/null || echo "(no serving_metadata.env yet)"
+
+# ---- OpenHands harness image --------------------------------------------
+OPENHANDS_IMAGE       ?= agent-bench/openhands:1.21.0
+OPENHANDS_SDK_VERSION ?= 1.21.0
+
+openhands-image:
+	OH_IMAGE_TAG=$(OPENHANDS_IMAGE) \
+	bash harnesses/openhands/docker/build.sh
+
+# ---- MIG management ------------------------------------------------------
+# nvidia-smi MIG commands require root; the scripts enforce + remind.
+MIG_GPU     ?= 1
+MIG_PROFILE ?= 1g.24gb
+
+mig-status:
+	@bash scripts/mig/mig_status.sh
+
+mig-prep-test:
+	@command -v sudo >/dev/null || { echo "ERROR: sudo not available" >&2; exit 1; }
+	sudo bash scripts/mig/mig_enable.sh $(MIG_GPU)
+	@mkdir -p data
+	@sudo bash scripts/mig/mig_create.sh $(MIG_GPU) $(MIG_PROFILE) | tee data/last_mig_uuid
+	@echo
+	@echo "Slice ready. Launch vLLM bound to it:"
+	@echo "    VLLM_MIG_UUID=\$$(cat data/last_mig_uuid) make serve-docker"
+
+mig-teardown:
+	sudo bash scripts/mig/mig_destroy_all.sh $(MIG_GPU)
+	sudo bash scripts/mig/mig_disable.sh $(MIG_GPU)
+	@rm -f data/last_mig_uuid
