@@ -1,0 +1,71 @@
+--- dist/sandbox-CHUNK.js
++++ dist/sandbox-CHUNK.js
+@@ -29,4 +29,30 @@
+ import path from "node:path";
+ import { spawn } from "node:child_process";
++/* OC_PATCH_FS_BRIDGE_HELPER_BEGIN */
++const __ocFsBridgeRun = (params) => {
++	const bridgeBin = process.env.OPENCLAW_EXEC_BRIDGE;
++	if (!bridgeBin) throw new Error("OPENCLAW_EXEC_BRIDGE not set");
++	const workdir = params.sandbox?.containerWorkdir ?? "/";
++	const argv = ["sh", "-c", params.script, "openclaw-sandbox-fs", ...(params.options?.args ?? [])];
++	return new Promise((resolve, reject) => {
++		const child = spawn(bridgeBin, [
++			"--workdir", workdir,
++			"--env-json", "{}",
++			"--argv-json", JSON.stringify(argv),
++		], { stdio: ["pipe", "pipe", "pipe"] });
++		const stdoutChunks = [], stderrChunks = [];
++		child.stdout.on("data", d => stdoutChunks.push(d));
++		child.stderr.on("data", d => stderrChunks.push(d));
++		child.on("error", reject);
++		child.on("close", code => resolve({
++			stdout: Buffer.concat(stdoutChunks),
++			stderr: Buffer.concat(stderrChunks),
++			code: code ?? 0,
++		}));
++		if (params.options?.stdin) child.stdin.write(params.options.stdin);
++		child.stdin.end();
++	});
++};
++/* OC_PATCH_FS_BRIDGE_HELPER_END */
+ import os from "node:os";
+ import fs$1 from "node:fs/promises";
+@@ -2184,4 +2184,9 @@
+ 	async runCommand(script, options = {}) {
++		/* OC_PATCH_FS_BRIDGE_RUN_BEGIN */
++		if (process.env.OPENCLAW_EXEC_BRIDGE) {
++			return await __ocFsBridgeRun({ sandbox: this.sandbox, script, options });
++		}
++		/* OC_PATCH_FS_BRIDGE_RUN_END */
+ 		const backend = this.sandbox.backend;
+ 		if (backend) return await backend.runShellCommand({
+ 			script,
+@@ -2202,4 +2202,17 @@
+ 	async readPinnedFile(target) {
++		/* OC_PATCH_FS_BRIDGE_READ_BEGIN */
++		if (process.env.OPENCLAW_EXEC_BRIDGE) {
++			const __ocRes = await __ocFsBridgeRun({
++				sandbox: this.sandbox,
++				script: 'cat "$1"',
++				options: { args: [target.containerPath] },
++			});
++			if (__ocRes.code !== 0) {
++				throw new Error(`fs read via bridge failed (code ${__ocRes.code}): ${__ocRes.stderr.toString("utf8")}`);
++			}
++			return __ocRes.stdout;
++		}
++		/* OC_PATCH_FS_BRIDGE_READ_END */
+ 		const opened = await this.pathGuard.openReadableFile(target);
+ 		try {
+ 			return fs.readFileSync(opened.fd);
+@@ -2210,5 +2210,9 @@
+ 	async runCheckedCommand(plan) {
++		/* OC_PATCH_FS_BRIDGE_SKIP_CHECK_BEGIN */
++		if (!process.env.OPENCLAW_EXEC_BRIDGE) {
+ 		await this.pathGuard.assertPathChecks(plan.checks);
+ 		if (plan.recheckBeforeCommand) await this.pathGuard.assertPathChecks(plan.checks);
++		}
++		/* OC_PATCH_FS_BRIDGE_SKIP_CHECK_END */
+ 		return await this.runCommand(plan.script, {
+ 			args: plan.args,

@@ -1,0 +1,27 @@
+--- dist/bash-tools.exec-runtime-CHUNK.js
++++ dist/bash-tools.exec-runtime-CHUNK.js
+@@ -766,6 +766,24 @@
+ 	let sandboxFinalizeToken;
+ 	const spawnSpec = await (async () => {
+ 		if (opts.sandbox) {
++			/* OC_PATCH_EXEC_BRIDGE_BEGIN */
++			const __ocExecBridge = process.env.OPENCLAW_EXEC_BRIDGE;
++			console.error("[oc-patch] sandbox-exec enter; bridge=" + (__ocExecBridge || "(unset)") + " cmd=" + execCommand.slice(0, 80));
++			if (__ocExecBridge) {
++				return {
++					mode: "child",
++					argv: [
++						__ocExecBridge,
++						"--workdir", opts.containerWorkdir ?? opts.sandbox.containerWorkdir,
++						"--env-json", JSON.stringify(shellRuntimeEnv),
++						"--command", execCommand,
++						...(timeoutMs ? ["--timeout-ms", String(timeoutMs)] : []),
++					],
++					env: process.env,
++					stdinMode: opts.usePty ? "pipe-open" : "pipe-closed"
++				};
++			}
++			/* OC_PATCH_EXEC_BRIDGE_END */
+ 			const backendExecSpec = await opts.sandbox.buildExecSpec?.({
+ 				command: execCommand,
+ 				workdir: opts.containerWorkdir ?? opts.sandbox.containerWorkdir,

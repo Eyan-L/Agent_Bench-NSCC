@@ -2,11 +2,11 @@
 # Start/stop a local OTel collector for the OC gateway.
 #
 # The OC gateway emits OTLP/HTTP spans + metrics + logs to
-# http://localhost:$PORT (configured in frontend/openclaw/state/openclaw.json →
+# http://localhost:$PORT (configured in config/harness/&lt;name&gt;.json (openclaw block) →
 # diagnostics.otel.endpoint). Without a collector listening, every span is
 # dropped on the floor and `data/runs/<run>/spans.jsonl` is never produced
 # (it's a slice of the collector's on-disk trace file —
-# eval/conditions/code_agent/openclaw_agent.py:_snapshot_otel_spans).
+# orchestration/conditions/code_agent/openclaw_agent.py:_snapshot_otel_spans).
 #
 # This script runs `otel/opentelemetry-collector-contrib` via singularity
 # with a config that has just one OTLP/HTTP receiver and a `file` exporter
@@ -20,9 +20,9 @@
 #
 # Env (all optional):
 #   OC_OTEL_DATA_DIR  Directory for config + trace + pid + log files.
-#                     Default: $SCRATCH/oc-eval/otel.
+#                     Default: $SCRATCH/oc-orchestration/otel.
 #   OC_OTEL_PORT      OTLP/HTTP listen port. Default: 4318. Must match
-#                     frontend/openclaw/state/openclaw.json: diagnostics.otel.endpoint.
+#                     config/harness/&lt;name&gt;.json (openclaw block): diagnostics.otel.endpoint.
 #   OC_OTEL_SIF       Path to the otelcol-contrib .sif. Default:
 #                     $SCRATCH/sif_images/otelcol-contrib.sif.
 #                     Pull on a network-equipped node before submitting:
@@ -36,7 +36,7 @@ set -uo pipefail
 USER_NAME="${USER:-$(whoami)}"
 SCRATCH="${SCRATCH:-/scratch/users/ntu/$USER_NAME}"
 
-DATA_DIR="${OC_OTEL_DATA_DIR:-$SCRATCH/oc-eval/otel}"
+DATA_DIR="${OC_OTEL_DATA_DIR:-$SCRATCH/oc-orchestration/otel}"
 PORT="${OC_OTEL_PORT:-4318}"
 SIF="${OC_OTEL_SIF:-$SCRATCH/sif_images/otelcol-contrib.sif}"
 DOCKER="${OC_OTEL_DOCKER:-docker://otel/opentelemetry-collector-contrib:latest}"

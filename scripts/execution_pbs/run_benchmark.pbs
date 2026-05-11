@@ -7,9 +7,9 @@
 #PBS -q normal
 #PBS -j oe
 #PBS -N oc_swebench_bench
-# All logs land under $KIT_ROOT/logs/. PBS directives can't read shell vars, so
+# All logs land under $KIT_ROOT/data/logs/. PBS directives can't read shell vars, so
 # the absolute path is hard-coded; edit this line if your KIT_ROOT differs.
-#PBS -o /scratch/users/ntu/chengzh2/github/Agent_Bench/logs/pbs.log
+#PBS -o /scratch/users/ntu/chengzh2/github/Agent_Bench/data/logs/pbs.log
 #
 # End-to-end benchmark on the cluster (no docker).
 #
@@ -22,7 +22,7 @@
 #   3.5 STAGE_OTEL=1     — start local OTel collector that writes
 #                          $OC_OTEL_DATA_DIR/otel-traces.jsonl, the file
 #                          openclaw_agent.py slices into spans.jsonl
-#   4. STAGE_RUN=1       — invoke eval/runner/driver with the sweep
+#   4. STAGE_RUN=1       — invoke orchestration/runner/driver with the sweep
 #   5. STAGE_CLEANUP=1   — kill vLLM + OTel collector, free ports
 #
 # Env (override via `qsub -v K1=V1,K2=V2 ...`):
@@ -145,7 +145,7 @@ STAGE_CLEANUP="${STAGE_CLEANUP:-1}"
 # them to $OC_OTEL_DATA_DIR/otel-traces.jsonl, which openclaw_agent.py
 # slices into per-run spans.jsonl files. See pbs/otel_collector.sh for the
 # full set of OC_OTEL_* env knobs.
-OC_OTEL_DATA_DIR="${OC_OTEL_DATA_DIR:-$SCRATCH/oc-eval/otel}"
+OC_OTEL_DATA_DIR="${OC_OTEL_DATA_DIR:-$SCRATCH/oc-orchestration/otel}"
 export OC_OTEL_DATA_DIR
 # Tell openclaw_agent.py where to read the trace file from. Default in code
 # is /tmp/otel/otel-traces.jsonl which doesn't survive HPC tmpfs limits.
@@ -507,7 +507,7 @@ if [[ "$STAGE_OC_CHECK" == "1" ]]; then
         LOG_PREFIX "  oc runtime sif already present at $OC_RUNTIME_SIF"
     fi
 
-    # Bake frontend/openclaw/patch/*.patch into a Singularity overlay,
+    # Bake harnesses/openclaw/patch/*.patch into a Singularity overlay,
     # one-time per host. Subsequent execs mount it read-only.
     LOG_PREFIX "  building OC patch overlay at $OC_RUNTIME_OVERLAY"
     bash "$KIT_ROOT/scripts/execution_pbs/build_oc_overlay.sh" \
@@ -542,6 +542,15 @@ export SINGULARITYENV_NPM_CONFIG_REGISTRY="$NPM_MIRROR_URL"
 # Cluster IPv6 egress is unreliable; Node 18+ honours this hint.
 export SINGULARITYENV_NODE_OPTIONS="--dns-result-order=ipv4first"
 
+# Build a merged OpenClaw state-template dir for warm_oc_plugins.sh.
+# (The repo split the legacy pre-merged frontend/openclaw/state/ into
+#  harnesses/openclaw/state/openclaw.json + applications/swebench/openclaw/agents/*.)
+OC_STATE_TEMPLATE_TMP="$(mktemp -d -t oc-state-XXXXXX)"
+trap 'rm -rf "$OC_STATE_TEMPLATE_TMP"' EXIT
+cp "$KIT_ROOT/harnesses/openclaw/state/openclaw.json" "$OC_STATE_TEMPLATE_TMP/openclaw.json"
+mkdir -p "$OC_STATE_TEMPLATE_TMP/agents/swebench"
+cp "$KIT_ROOT/applications/swebench/openclaw/agents/"*.md "$OC_STATE_TEMPLATE_TMP/agents/swebench/"
+
 # Stage 3.5: ensure plugin cache is warm. If empty (first run on this host),
 # attempt to populate it via warm_oc_plugins.sh — this requires network and
 # only succeeds on the login node. On compute nodes a cold cache is fatal.
@@ -551,7 +560,7 @@ if ! find "$OC_PLUGIN_CACHE" -mindepth 2 -name package.json -print -quit | grep 
             --sif "$OC_OC_SIF" \
             --overlay "$OC_OC_OVERLAY" \
             --cache "$OC_PLUGIN_CACHE" \
-            --state-template "$KIT_ROOT/frontend/openclaw/state"; then
+            --state-template "$OC_STATE_TEMPLATE_TMP"; then
         LOG_PREFIX "  plugin cache warmed"
     else
         LOG_PREFIX "FATAL: plugin cache warm failed."
@@ -560,7 +569,7 @@ if ! find "$OC_PLUGIN_CACHE" -mindepth 2 -name package.json -print -quit | grep 
         LOG_PREFIX "    bash $KIT_ROOT/scripts/execution_pbs/warm_oc_plugins.sh \\"
         LOG_PREFIX "        --sif $OC_OC_SIF --overlay $OC_OC_OVERLAY \\"
         LOG_PREFIX "        --cache $OC_PLUGIN_CACHE \\"
-        LOG_PREFIX "        --state-template $KIT_ROOT/frontend/openclaw/state"
+        LOG_PREFIX "        --state-template <merged: harnesses/openclaw/state + applications/swebench/openclaw/agents>"
         exit 5
     fi
 else
@@ -571,7 +580,7 @@ fi
 # so an interrupted prior extract leaves a half-populated dist/extensions/<p>/
 # that crashes the next gateway start with ENOTEMPTY. This is idempotent.
 bash "$KIT_ROOT/scripts/execution_pbs/oc_plugin_cache_clean.sh" \
-    "$OC_PLUGIN_CACHE" "$KIT_ROOT/frontend/openclaw/state/openclaw.json" \
+    "$OC_PLUGIN_CACHE" "$KIT_ROOT/harnesses/openclaw/state/openclaw.json" \
     2>&1 | sed "s|^|$(date +%H:%M:%S) [run_benchmark] |" || true
 
 # ============================================================================
@@ -607,7 +616,7 @@ if [[ "$STAGE_RUN" == "1" ]]; then
     # pids are picked up by the sampler from the live process tree.
     [[ -n "$VLLM_PID" ]] && export OC_LLM_PID="$VLLM_PID"
 
-    python3 -m eval.runner.driver \
+    python3 -m orchestration.runner.driver \
         --sweep "$SWEEP" \
         --swebench-root "$SWEBENCH_ROOT" \
         --instance-data "$DATASET" \

@@ -1,32 +1,63 @@
 #!/usr/bin/env bash
-# backend/vllm/serve.sh — start a vLLM endpoint for the OpenClaw + SWE-bench study.
+# backend/vllm/serve.sh — start a vLLM endpoint for the OpenClaw study.
 #
-# Designed for Qwen3.6-35B-A3B on 2× H100 80GB (tensor parallel = 2).
-# Four presets. The latency / throughput / context presets are the three points
-# of the RQ3 serving-config sweep — run all three and compare.
+# Reads its defaults from two JSON configs (composed-config model):
+#   HARNESS config (model selection)
+#     - HARNESS env var, resolved to $KIT_ROOT/config/harness/$HARNESS.json; or
+#     - VLLM_HARNESS_YAML for an explicit path (var name kept for back-compat).
+#   BACKEND config (engine knobs: TP/port/gpu_mem/max_len/cuda_devices/presets)
+#     - BACKEND env var, resolved to $KIT_ROOT/config/backend/$BACKEND.json; or
+#     - VLLM_BACKEND_YAML for an explicit path (var name kept for back-compat).
+# Any value can still be overridden with a matching env var:
+#   MODEL TP PORT MAX_MODEL_LEN GPU_MEM_UTIL CUDA_VISIBLE_DEVICES
+# Env override wins over the config; config wins over the hardcoded fallbacks.
 #
 # Usage:
-#   serve_vllm.sh                         # default preset
-#   serve_vllm.sh --preset latency
+#   serve_vllm.sh                         # preset from config (or "default")
+#   serve_vllm.sh --preset latency        # explicit preset
 #   serve_vllm.sh --preset throughput
 #   serve_vllm.sh --preset context
 #
-# Env overrides:
-#   MODEL            (default: Qwen/Qwen3.6-35B-A3B)
-#   TP               (default: 2)
-#   PORT             (default: 8000)
-#   MAX_MODEL_LEN    (default: 131072 — Qwen3.6 docs recommend ≥128K)
-#   GPU_MEM_UTIL     (default: 0.90)
-#   HF_HOME          (default: ~/.cache/huggingface)
+# Other env:
+#   HF_HOME               (default: ~/.cache/huggingface)
+#   KIT_ROOT              (default: repo root inferred from this script)
 
 set -euo pipefail
 
-PRESET="default"
-MODEL="${MODEL:-Qwen/Qwen3.6-35B-A3B}"
-TP="${TP:-2}"
+# Resolve repo root so we can find the config files even when invoked from
+# somewhere unusual.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+KIT_ROOT="${KIT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+
+# 1) Harness config: MODEL + MODEL_ENDPOINT (single source of truth).
+HARNESS_CFG="${VLLM_HARNESS_YAML:-}"
+if [[ -z "$HARNESS_CFG" && -n "${HARNESS:-}" ]]; then
+    HARNESS_CFG="$KIT_ROOT/config/harness/${HARNESS}.json"
+fi
+if [[ -n "$HARNESS_CFG" && -f "$HARNESS_CFG" ]]; then
+    eval "$(python3 "$KIT_ROOT/scripts/load_harness_env.py" "$HARNESS_CFG")"
+elif [[ -n "$HARNESS_CFG" ]]; then
+    echo "WARN: harness config not found: $HARNESS_CFG — relying on env/fallbacks" >&2
+fi
+
+# 2) Backend config: engine runtime knobs + first serving preset.
+BACKEND_CFG="${VLLM_BACKEND_YAML:-}"
+if [[ -z "$BACKEND_CFG" && -n "${BACKEND:-}" ]]; then
+    BACKEND_CFG="$KIT_ROOT/config/backend/${BACKEND}.json"
+fi
+if [[ -n "$BACKEND_CFG" && -f "$BACKEND_CFG" ]]; then
+    eval "$(python3 "$KIT_ROOT/scripts/load_backend_env.py" "$BACKEND_CFG")"
+elif [[ -n "$BACKEND_CFG" ]]; then
+    echo "WARN: backend config not found: $BACKEND_CFG — using built-in defaults" >&2
+fi
+
+PRESET="${SERVING_PRESET:-default}"
+MODEL="${MODEL:-Qwen/Qwen3.6-27B}"
+TP="${TP:-1}"
 PORT="${PORT:-8000}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -42,8 +73,23 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ---- Pre-flight checks ---------------------------------------------
+# Auto-activate a conda env if vllm isn't on PATH and VLLM_CONDA_ENV is set.
+# Lets `make run_phase*` work without the user pre-activating the env.
+if ! command -v vllm >/dev/null 2>&1 && [[ -n "${VLLM_CONDA_ENV:-}" ]]; then
+    for conda_sh in \
+        "$HOME/anaconda3/etc/profile.d/conda.sh" \
+        "$HOME/miniconda3/etc/profile.d/conda.sh" \
+        "/opt/conda/etc/profile.d/conda.sh"; do
+        if [[ -f "$conda_sh" ]]; then
+            # shellcheck disable=SC1090
+            source "$conda_sh"
+            conda activate "$VLLM_CONDA_ENV" 2>/dev/null && break
+        fi
+    done
+fi
 if ! command -v vllm >/dev/null 2>&1; then
     echo "ERROR: 'vllm' not on PATH. Install with: pip install 'vllm>=0.19.0'" >&2
+    echo "  (or set VLLM_CONDA_ENV=<env-name> if vllm lives in a conda env)" >&2
     exit 1
 fi
 
@@ -80,7 +126,7 @@ BASE_FLAGS=(
 )
 
 # ---- Preset-specific flags -----------------------------------------
-# These three map directly to the RQ3 sweep points in sweeps/phase2_serving.yaml.
+# These three map directly to the RQ3 sweep points in config/backend/vllm/tp2_rq3.json.
 # Document them so config_id in manifests matches what was actually served.
 
 declare -a PRESET_FLAGS
@@ -138,6 +184,7 @@ esac
 
 echo "[serve_vllm] Preset: $PRESET"
 echo "[serve_vllm] config_id (use this in manifests): $CONFIG_ID"
+echo "[serve_vllm] CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES (TP=$TP)"
 echo "[serve_vllm] Endpoint: http://localhost:$PORT/v1"
 echo "[serve_vllm] Full command:"
 printf "  vllm serve"
@@ -147,5 +194,15 @@ printf "\n\n"
 # Persist the config_id so the experiment driver can read it.
 mkdir -p "${KIT_ROOT:-$(pwd)}/data"
 echo "$CONFIG_ID" > "${KIT_ROOT:-$(pwd)}/data/serving_config_id"
+
+# If VLLM_LOG_FILE is set, redirect engine output into the experiment's
+# results folder. Callers (e.g. scripts/e2e_smoke.sh) set this to
+# <sweep_output_dir>/serving/vllm.log so per-sweep telemetry lands next to
+# the runs.
+if [[ -n "${VLLM_LOG_FILE:-}" ]]; then
+    mkdir -p "$(dirname "$VLLM_LOG_FILE")"
+    echo "[serve_vllm] log file: $VLLM_LOG_FILE"
+    exec vllm serve "${BASE_FLAGS[@]}" "${PRESET_FLAGS[@]}" >>"$VLLM_LOG_FILE" 2>&1
+fi
 
 exec vllm serve "${BASE_FLAGS[@]}" "${PRESET_FLAGS[@]}"

@@ -1,0 +1,14 @@
+{
+  "_doc": "SWE-bench phase2 RQ3 serving-config sweep. The backend yaml supplies the 3 presets (latency/throughput/context); this app json just supplies instances. Instances and repo_mapping are TODOs that you need to fill in before running this sweep.",
+  "sweep_name": "phase2_serving_sweep",
+  "plan_version": "v1.0",
+  "application": "swebench",
+  "seeds": [42],
+  "instances": [],
+  "repo_mapping": {},
+  "container_image": "swebench/swe-bench:latest",
+  "wall_clock_budget_seconds": 1800,
+  "output_dir": "data/runs/phase2_serving",
+  "parallel_limit_gpu": 1,
+  "parallel_limit_cpu_cores": 8
+}

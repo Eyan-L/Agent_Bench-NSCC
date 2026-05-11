@@ -1,0 +1,7 @@
+# Build context for harnesses/openclaw/docker/Dockerfile.
+# Keep only the files the Dockerfile actually COPYs.
+*
+!apply_patch.py
+!defaults.env
+!patch
+!patch/**

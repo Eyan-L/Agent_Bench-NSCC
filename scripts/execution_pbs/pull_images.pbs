@@ -3,7 +3,7 @@
 #PBS -l walltime=24:00:00
 #PBS -j oe
 #PBS -N pull_swebench_sif
-#PBS -o ./logs/pull_swebench_sif.log
+#PBS -o ./data/logs/pull_swebench_sif.log
 #
 # Pull every SWE-bench Verified instance image as a Singularity .sif into
 # the user's scratch space. Idempotent: skips images already on disk.
@@ -28,7 +28,7 @@ PARALLEL="${OC_PULL_PARALLEL:-2}"
 SIF_DIR="$scratch_dir/sif_images/swebench"
 CACHE_DIR="$scratch_dir/.singularity"
 
-mkdir -p "$SIF_DIR" "$CACHE_DIR" "$(dirname "$KIT_ROOT/logs/pull_swebench_sif.log")"
+mkdir -p "$SIF_DIR" "$CACHE_DIR" "$(dirname "$KIT_ROOT/data/logs/pull_swebench_sif.log")"
 
 # Switch to the kit root so relative script paths resolve.
 cd "$KIT_ROOT"

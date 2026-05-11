@@ -9,14 +9,14 @@
 #PBS -q normal
 #PBS -j oe
 #PBS -N oc_tb_bench
-#PBS -o /scratch/users/ntu/chengzh2/github/Agent_Bench/logs/pbs_tb.log
+#PBS -o /scratch/users/ntu/chengzh2/github/Agent_Bench/data/logs/pbs_tb.log
 #
 # Stages (each can be skipped via env flag):
 #   0. STAGE_TB_PULL=1   — singularity pull the TB task .sif from docker hub
 #                          (one-time per docker tag; cached under $OC_TB_SIF_DIR)
 #   1. STAGE_TB_DATA=1   — materialize $DATASET from vendored TB tasks/
 #   2. STAGE_VLLM=1      — start vLLM singularity, serve Qwen3.6
-#   3. STAGE_RUN=1       — invoke eval/runner/driver against the TB sweep
+#   3. STAGE_RUN=1       — invoke orchestration/runner/driver against the TB sweep
 #   4. STAGE_CLEANUP=1   — kill vLLM
 #
 # Env (override via `qsub -v K1=V1,K2=V2 ...`):
@@ -95,8 +95,8 @@ if [[ "$STAGE_TB_PULL" == "1" ]]; then
     OC_TB_SIF_DIR="$OC_TB_SIF_DIR" python3 - <<'PY' || { LOG_PREFIX "FATAL: TB sif pull failed"; exit 1; }
 import os, sys
 from pathlib import Path
-from eval.benchmarks.terminal_bench import loader
-from eval.benchmarks.terminal_bench.harness import TerminalBenchHarness
+from applications.terminal_bench import loader
+from applications.terminal_bench.app import TerminalBenchHarness
 
 ids = os.environ.get("TB_TASK_IDS", "").split() or loader.list_task_ids()
 if not ids:
@@ -124,7 +124,7 @@ if [[ "$STAGE_TB_DATA" == "1" ]]; then
     python3 - <<'PY' || { LOG_PREFIX "FATAL: TB dataset materialize failed"; exit 1; }
 import os
 from pathlib import Path
-from eval.benchmarks.terminal_bench import loader
+from applications.terminal_bench import loader
 
 ids = os.environ.get("TB_TASK_IDS_VAR", "").split() or loader.list_task_ids()
 out = Path(os.environ["OC_TB_DATASET_OUT"])
@@ -232,7 +232,7 @@ if [[ "$STAGE_RUN" == "1" ]]; then
     # in util.jsonl attributes engine work to "llm_engine".
     [[ -n "$VLLM_PID" ]] && export OC_LLM_PID="$VLLM_PID"
 
-    python3 -m eval.runner.driver \
+    python3 -m orchestration.runner.driver \
         --sweep "$SWEEP" \
         --swebench-root "$SWEBENCH_ROOT" \
         --instance-data "$DATASET" \

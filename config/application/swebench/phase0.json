@@ -1,0 +1,21 @@
+{
+  "_doc": "SWE-bench phase0 sanity run, one instance.",
+  "sweep_name": "phase0_sanity",
+  "plan_version": "v1.0",
+  "application": "swebench",
+  "instances": [
+    "astropy__astropy-12907"
+  ],
+  "repo_mapping": {
+    "astropy__astropy-12907": {
+      "repo_id": "astropy/astropy",
+      "base_commit": "d16bfe05a744909de4b27f5875fe0d4ed41ce607"
+    }
+  },
+  "container_image": "swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest",
+  "wall_clock_budget_seconds": 1800,
+  "output_dir": "data/runs/phase0",
+  "seeds": [42],
+  "parallel_limit_gpu": 1,
+  "parallel_limit_cpu_cores": 8
+}
