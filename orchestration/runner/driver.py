@@ -16,9 +16,11 @@ from orchestration.runner.manifest import RunManifest, get_manifest_path, load_o
 from applications.swebench.app import (
     SWEBenchHarness, SingularityHarness, validate_fairness_constraints,
 )
+from applications.swebench.openhands.app import SWEBenchOpenHandsHarness
 from orchestration.conditions.code_agent.ar_issue_only import ARIssueOnlyCondition
 from orchestration.conditions.code_agent.ar_static_context import ARStaticContextCondition
 from orchestration.conditions.code_agent.openclaw_agent import OpenClawAgentCondition
+from orchestration.conditions.code_agent.openhands_agent import OpenHandsAgentCondition
 from orchestration.conditions.ablations.no_retry import NoRetryAblation
 
 # Terminal-Bench integration is optional: the import is lazy in run_sweep so a
@@ -141,7 +143,19 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 container_id=container_id,
                 env_info=env_info
             )
-        
+
+        elif condition_type == "openhands_agent":
+            condition = OpenHandsAgentCondition(
+                model_config=run_config.condition.model,
+                agent_config=run_config.condition.agent,
+            )
+            result = condition.run(
+                instance_data, run_dir, run_config.seed,
+                workspace_root=env_info["workspace_root"],
+                container_id=container_id,
+                env_info=env_info
+            )
+
         elif condition_type == "ablation_no_retry":
             condition = NoRetryAblation(
                 model_config=run_config.condition.model,
@@ -291,6 +305,17 @@ def run_sweep(app_path: Path, harness_path: Path, backend_path: Path,
         inst.get("benchmark") == "terminal_bench" for inst in instances.values()
     )
 
+    # Peek at the harness config to learn which agent runtime this sweep
+    # targets — openclaw (default) or openhands. Each picks a different
+    # Layer-1 class even though they share the SWE-bench application.
+    harness_choice = "openclaw"
+    try:
+        with open(harness_path) as _fh:
+            _hc = json.load(_fh) or {}
+        harness_choice = (_hc.get("harness") or "openclaw").lower()
+    except Exception as e:  # noqa: BLE001 — non-fatal, fall back to default
+        logger.warning("could not read 'harness' from %s: %s", harness_path, e)
+
     harness = None
     if needs_swe:
         if swebench_root is None:
@@ -299,7 +324,13 @@ def run_sweep(app_path: Path, harness_path: Path, backend_path: Path,
                 "not provided"
             )
         backend = os.environ.get("HARNESS_BACKEND", "docker").lower()
-        if backend == "docker":
+        if backend == "docker" and harness_choice == "openhands":
+            logger.info(
+                "Using SWEBenchOpenHandsHarness "
+                "(docker: openhands container + task container + exec-bridge)."
+            )
+            harness = SWEBenchOpenHandsHarness(swebench_root)
+        elif backend == "docker":
             logger.info("Using SWEBenchHarness (docker: openclaw container + task container).")
             harness = SWEBenchHarness(swebench_root)
         elif backend == "singularity":
