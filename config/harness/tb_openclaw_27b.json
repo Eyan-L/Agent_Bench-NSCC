@@ -1,5 +1,5 @@
 {
-  "_doc": "OpenClaw harness for Terminal-Bench (Qwen/Qwen3.6-27B). Same shape as openclaw_27b.json but agents.defaults.workspace=/app (TB convention) and the registered agent name is `terminal-bench-operator`. Agent id stays `swebench` because orchestration/conditions/code_agent/openclaw_agent.py hardcodes `--agent swebench`; the prompts (AGENTS.md etc) come from applications/terminal_bench/openclaw/agents/ so the agent gets TB-flavored instructions despite the id reuse.",
+  "_doc": "OpenClaw harness for Terminal-Bench (Qwen/Qwen3.6-27B). Same shape as openclaw_27b.json but agents.defaults.workspace=/app (TB convention) and the registered agent id is `terminal_bench` (TerminalBenchOpenClawCondition uses `--agent terminal_bench`; the TB harness predicts the sandbox container name from the same id). Per-app prompts (AGENTS.md etc) come from applications/terminal_bench/openclaw/agents/.",
   "harness": "openclaw",
   "model": {
     "name": "Qwen/Qwen3.6-27B",
@@ -99,7 +99,7 @@
       },
       "list": [
         {
-          "id": "swebench",
+          "id": "terminal_bench",
           "default": true,
           "name": "terminal-bench-operator",
           "skills": ["verify"]

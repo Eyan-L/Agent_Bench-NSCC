@@ -16,10 +16,9 @@ from orchestration.runner.manifest import RunManifest, get_manifest_path, load_o
 from applications.swebench.app import (
     SWEBenchHarness, SingularityHarness, validate_fairness_constraints,
 )
-from orchestration.conditions.code_agent.ar_issue_only import ARIssueOnlyCondition
-from orchestration.conditions.code_agent.ar_static_context import ARStaticContextCondition
-from orchestration.conditions.code_agent.openclaw_agent import OpenClawAgentCondition
-from orchestration.conditions.ablations.no_retry import NoRetryAblation
+# Condition classes are lazy-imported in `execute_run` so the driver can boot
+# without pulling every app's condition tree (and so an app that adds a new
+# condition class doesn't force a driver edit).
 
 # Terminal-Bench integration is optional: the import is lazy in run_sweep so a
 # pure SWE-bench environment never has to install the TB-side deps (tomllib is
@@ -101,9 +100,10 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             instance_data=instance_data,
         )
 
-        # Hand the harness ref to the condition so OC/TB agents can self-
-        # validate via ValidateBridge while their loop is in flight. Underscore-
-        # prefixed key signals "internal/transient — don't persist into manifests".
+        # Hand the harness ref to the condition for any host-side helper that
+        # needs to reach harness.run_tests / exec_in_container while the agent
+        # loop is in flight. Underscore-prefixed key signals
+        # "internal/transient — don't persist into manifests".
         env_info["_harness"] = harness
 
         container_id = env_info["container_id"]
@@ -112,13 +112,21 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         condition_type = run_config.condition.condition_type
         
         if condition_type == "ar_issue_only":
+            # AR baselines are SWE-bench-specific (their prompts reference
+            # "fixing a bug in a Python repository"); live under the app.
+            from applications.swebench.conditions.ar_issue_only import (
+                ARIssueOnlyCondition,
+            )
             condition = ARIssueOnlyCondition(
                 model_config=run_config.condition.model,
                 max_turns=1,
             )
             result = condition.run(instance_data, run_dir, run_config.seed)
-        
+
         elif condition_type == "ar_static_context":
+            from applications.swebench.conditions.ar_static_context import (
+                ARStaticContextCondition,
+            )
             condition = ARStaticContextCondition(
                 model_config=run_config.condition.model,
                 max_turns=1,
@@ -129,21 +137,21 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 container_id=container_id,
                 env_info=env_info
             )
-        
+
         elif condition_type == "openclaw_agent":
-            condition = OpenClawAgentCondition(
-                model_config=run_config.condition.model,
-                agent_config=run_config.condition.agent,
-            )
-            result = condition.run(
-                instance_data, run_dir, run_config.seed,
-                workspace_root=env_info["workspace_root"],
-                container_id=container_id,
-                env_info=env_info
-            )
-        
-        elif condition_type == "ablation_no_retry":
-            condition = NoRetryAblation(
+            # Pick the per-app subclass by benchmark — same `condition_type`
+            # in both SWE-bench and TB harness JSONs; instance_data is the
+            # discriminator.
+            benchmark = instance_data.get("benchmark", "swebench")
+            if benchmark == "terminal_bench":
+                from applications.terminal_bench.conditions.openclaw_agent import (
+                    TerminalBenchOpenClawCondition as _Cls,
+                )
+            else:
+                from applications.swebench.conditions.openclaw_agent import (
+                    SWEBenchOpenClawCondition as _Cls,
+                )
+            condition = _Cls(
                 model_config=run_config.condition.model,
                 agent_config=run_config.condition.agent,
             )
@@ -155,9 +163,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             )
 
         elif condition_type == "tb_react":
-            # Terminal-Bench ReAct loop. App-specific condition lives under the
-            # application itself so generic shared conditions (AR baselines,
-            # ablations) stay free of TB coupling.
+            # Terminal-Bench ReAct loop — app-specific, no OpenClaw.
             from applications.terminal_bench.conditions.react import (
                 TerminalBenchReactCondition,
             )

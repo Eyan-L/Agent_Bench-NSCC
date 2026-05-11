@@ -50,7 +50,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from applications.swebench.openclaw.gateway_compose import (
+from applications.conditions.gateway_helpers import (
     pick_free_gateway_port as _pick_free_gateway_port,
     release_gateway_port as _release_gateway_port,
 )

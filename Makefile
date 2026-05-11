@@ -30,13 +30,26 @@ INSTANCE_DATA  ?=
 KIT_ROOT       ?= $(CURDIR)
 export KIT_ROOT
 
+# Per-sweep timestamp (Singapore time) + experiment dir. Both Make and the
+# driver use OC_RUN_STAMP so vllm.log + per-run dirs end up siblings under
+# <app_output_dir>/<stamp>/. Override OC_RUN_STAMP to pin (resume an existing
+# dir) — `?=` honors a value passed on the command line or env.
+OC_RUN_STAMP ?= $(shell TZ=Asia/Singapore date '+%Y-%m-%d_%H-%M-%S')
+export OC_RUN_STAMP
+
+# Deferred (=) so target-specific `APP := <x>` overrides flow through. Reads
+# output_dir from the active app JSON; falls back to data/runs/_unknown when
+# the JSON is missing (e.g. `make help` with the default APP).
+APP_OUTPUT_DIR = $(shell python -c 'import json; print(json.load(open("config/application/$(APP).json"))["output_dir"])' 2>/dev/null)
+SWEEP_DIR      = $(APP_OUTPUT_DIR)/$(OC_RUN_STAMP)
+
 # Serving auto-launch. _ensure_serve polls SERVE_URL; if it can't reach it,
 # it forks `make serve` into the background, writes the engine log to
 # SERVE_LOG, and waits up to SERVE_READY_TIMEOUT seconds for /v1/models to
 # come up. Set SERVE_AUTO=0 to skip (useful when you launch the backend
 # yourself or want to fail fast on missing serving).
 SERVE_URL            ?= http://localhost:8000/v1/models
-SERVE_LOG            ?= $(KIT_ROOT)/data/serving/vllm.log
+SERVE_LOG            ?= $(SWEEP_DIR)/vllm.log
 SERVE_READY_TIMEOUT  ?= 600
 SERVE_AUTO           ?= 1
 
@@ -99,10 +112,14 @@ help:
 	@echo "  SWEBENCH_ROOT=$(SWEBENCH_ROOT)"
 	@echo "  INSTANCE_DATA=$(INSTANCE_DATA)"
 	@echo ""
+	@echo "Experiment folder (Singapore time):"
+	@echo "  OC_RUN_STAMP=$(OC_RUN_STAMP)"
+	@echo "  SWEEP_DIR=$(SWEEP_DIR)"
+	@echo ""
 	@echo "Serving auto-launch (run_phase*):"
 	@echo "  SERVE_AUTO=1                 auto-start backend if down (0 to disable)"
 	@echo "  SERVE_URL=$(SERVE_URL)"
-	@echo "  SERVE_LOG=$(SERVE_LOG)"
+	@echo "  SERVE_LOG=$(SERVE_LOG)              (lives inside SWEEP_DIR by default)"
 	@echo "  SERVE_READY_TIMEOUT=$(SERVE_READY_TIMEOUT)s"
 
 serve:

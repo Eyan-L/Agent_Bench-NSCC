@@ -31,8 +31,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from orchestration.conditions._llm_client import call_llm
-from orchestration.conditions.code_agent.openclaw_agent import _UtilSampler
+from applications.conditions._llm_client import call_llm
+from applications.conditions.util_sampler import UtilSampler
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 def _emit_span(name: str, start_ns: int, end_ns: int,
                attrs: Dict, resource: Dict) -> Dict:
     """Build one flattened span dict matching the shape that
-    orchestration/conditions/code_agent/openclaw_agent.py:_snapshot_otel_spans
+    applications/conditions/openclaw_agent.py:_snapshot_otel_spans
     writes — so spans.jsonl is interchangeable across conditions and the
     downstream analyzers don't have to branch on producer.
     """
@@ -168,7 +168,7 @@ class TerminalBenchReactCondition:
         # "tools origin" so the sampler attributes those children to the
         # tools group; the driver process itself stays under client.
         import os as _os
-        sampler_cm = _UtilSampler(run_dir, gateway_pid=_os.getpid())
+        sampler_cm = UtilSampler(run_dir, gateway_pid=_os.getpid())
         sampler_cm.__enter__()
         try:
           for step_idx in range(self.max_steps):

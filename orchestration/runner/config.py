@@ -204,6 +204,7 @@ def load_composed_config(
     JSON-friendly stand-in for the comments YAML would otherwise allow.
     """
     from datetime import datetime
+    from zoneinfo import ZoneInfo
     import os as _os
 
     with open(app_path) as f:
@@ -264,7 +265,12 @@ def load_composed_config(
         ))
 
     # --- application-level (instances/budget/output) -----------------
-    stamp = _os.environ.get("OC_RUN_STAMP") or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    # Singapore time so experiment folder names match wall-clock on this host.
+    # Override OC_RUN_STAMP to pin / resume.
+    stamp = (
+        _os.environ.get("OC_RUN_STAMP")
+        or datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y-%m-%d_%H-%M-%S")
+    )
     output_dir = Path(app["output_dir"]) / stamp
 
     return SweepConfig(
