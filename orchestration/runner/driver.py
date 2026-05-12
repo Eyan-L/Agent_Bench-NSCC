@@ -18,7 +18,9 @@ from applications.swebench.app import (
 )
 # Condition classes are lazy-imported in `execute_run` so the driver can boot
 # without pulling every app's condition tree (and so an app that adds a new
-# condition class doesn't force a driver edit).
+# condition class doesn't force a driver edit). Harness classes that are only
+# selected behind a config flag (e.g. SWEBenchOpenHandsHarness) are also
+# imported lazily inside `run_sweep` below.
 
 # Terminal-Bench integration is optional: the import is lazy in run_sweep so a
 # pure SWE-bench environment never has to install the TB-side deps (tomllib is
@@ -152,6 +154,23 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                     SWEBenchOpenClawCondition as _Cls,
                 )
             condition = _Cls(
+                model_config=run_config.condition.model,
+                agent_config=run_config.condition.agent,
+            )
+            result = condition.run(
+                instance_data, run_dir, run_config.seed,
+                workspace_root=env_info["workspace_root"],
+                container_id=container_id,
+                env_info=env_info
+            )
+
+        elif condition_type == "openhands_agent":
+            # OpenHands is SWE-bench-only in this branch (no TB port yet); the
+            # condition file lives next to the openclaw one under the app dir.
+            from applications.swebench.conditions.openhands_agent import (
+                OpenHandsAgentCondition,
+            )
+            condition = OpenHandsAgentCondition(
                 model_config=run_config.condition.model,
                 agent_config=run_config.condition.agent,
             )
@@ -297,6 +316,17 @@ def run_sweep(app_path: Path, harness_path: Path, backend_path: Path,
         inst.get("benchmark") == "terminal_bench" for inst in instances.values()
     )
 
+    # Peek at the harness config to learn which agent runtime this sweep
+    # targets — openclaw (default) or openhands. Each picks a different
+    # Layer-1 class even though they share the SWE-bench application.
+    harness_choice = "openclaw"
+    try:
+        with open(harness_path) as _fh:
+            _hc = json.load(_fh) or {}
+        harness_choice = (_hc.get("harness") or "openclaw").lower()
+    except Exception as e:  # noqa: BLE001 — non-fatal, fall back to default
+        logger.warning("could not read 'harness' from %s: %s", harness_path, e)
+
     harness = None
     if needs_swe:
         if swebench_root is None:
@@ -305,7 +335,16 @@ def run_sweep(app_path: Path, harness_path: Path, backend_path: Path,
                 "not provided"
             )
         backend = os.environ.get("HARNESS_BACKEND", "docker").lower()
-        if backend == "docker":
+        if backend == "docker" and harness_choice == "openhands":
+            # Lazy import — the OpenHands app subtree is only required when a
+            # harness JSON explicitly opts in via "harness": "openhands".
+            from applications.swebench.openhands.app import SWEBenchOpenHandsHarness
+            logger.info(
+                "Using SWEBenchOpenHandsHarness "
+                "(docker: openhands container + task container + exec-bridge)."
+            )
+            harness = SWEBenchOpenHandsHarness(swebench_root)
+        elif backend == "docker":
             logger.info("Using SWEBenchHarness (docker: openclaw container + task container).")
             harness = SWEBenchHarness(swebench_root)
         elif backend == "singularity":
