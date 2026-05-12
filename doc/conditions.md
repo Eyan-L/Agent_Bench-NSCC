@@ -5,43 +5,36 @@ conditions:
 
 | Condition | Module | What it does |
 |---|---|---|
-| `ar_issue_only`     | `eval/conditions/code_agent/ar_issue_only.py`     | One-shot LLM call from the issue text. No tools. |
-| `ar_static_context` | `eval/conditions/code_agent/ar_static_context.py` | One-shot + offline BM25 retrieval. |
-| `openclaw_agent`    | `eval/conditions/code_agent/openclaw_agent.py`    | Multi-turn agent loop driven by OpenClaw. |
-| `tb_react`          | `eval/conditions/code_agent/terminal_bench/react.py`          | Multi-turn ReAct loop with `<bash>` blocks (terminal-bench tasks). |
-| `ablation_no_retry` | `eval/conditions/ablations/no_retry.py`           | `OpenClawAgentCondition` with retry_limit=1. |
+| `ar_issue_only`     | `applications/swebench/conditions/ar_issue_only.py`     | One-shot LLM call from the issue text. No tools. SWE-bench specific. |
+| `ar_static_context` | `applications/swebench/conditions/ar_static_context.py` | One-shot + offline BM25 retrieval. SWE-bench specific. |
+| `openclaw_agent`    | base: `applications/conditions/openclaw_agent.py`<br>SWE: `applications/swebench/conditions/openclaw_agent.py`<br>TB:  `applications/terminal_bench/conditions/openclaw_agent.py` | Multi-turn agent loop driven by OpenClaw. Same `condition_type` for both benchmarks; the driver picks the subclass by `instance_data["benchmark"]`. |
+| `tb_react`          | `applications/terminal_bench/conditions/react.py`             | Multi-turn ReAct loop with `<bash>` blocks (terminal-bench tasks). No OpenClaw involvement. |
 
-## Pick the workload axis
+## Layout
 
-Conditions live under `eval/conditions/<workload>/` where workload is one of:
+- `applications/conditions/` — base classes + utilities shared by all apps.
+  Today:
+  - `openclaw_agent.py` — `OpenClawAgentCondition` base (per-app subclasses
+    plug in `agent_id`, `_build_message`, optional `_collect_artifacts`)
+  - `_llm_client.py` — OpenAI-compat HTTP caller + unified-diff extractor
+  - `util_sampler.py` — `UtilSampler` context manager (CPU/RSS/GPU sampling)
+- `applications/<app>/conditions/` — conditions specific to that benchmark, or
+  per-app subclasses of a shared base.
 
-- `code_agent` — code- and shell-automation tasks (SWE-bench, Terminal-Bench).
-  Terminal-Bench is folded in here because TB tasks are code/automation work
-  even though they're shell-driven rather than patch-driven.
-- `doc_analysis` — placeholder
-- `websearch` — placeholder
-- `ablations` — variants of an existing condition
+`orchestration/` no longer carries any condition code — only driver / dispatcher
+/ runner / analysis / trace.
 
-If your condition targets a workload that doesn't exist yet, create the folder
-(`eval/conditions/<workload>/__init__.py`) — it's just a Python package.
-
-Shared utilities sit at `eval/conditions/`:
-- `_base.py` — `ConditionProtocol` + `ConditionResult`
-- `_llm_client.py` — OpenAI-compat caller
-- `_validate_bridge.py` — workspace IPC for self-validation
-
-## Implement the protocol
+## Adding a benchmark-specific condition (`applications/<app>/conditions/<name>.py`)
 
 ```python
-# eval/conditions/<workload>/<name>.py
 from pathlib import Path
 from typing import Dict, Optional
 
-from .._base import ConditionResult        # shared utilities live one level up
+from applications.conditions._llm_client import call_llm
 
 
 class YourCondition:
-    bench_type: str = "your_workload"     # purely informational; not dispatch
+    bench_type: str = "your_workload"     # informational; not used for dispatch
 
     def __init__(self, model_config, agent_config=None):
         self.model_config = model_config
@@ -52,76 +45,82 @@ class YourCondition:
         instance_data: Dict,
         run_dir: Path,
         seed: int,
-        # The driver passes these as kwargs for non-AR conditions only:
         workspace_root: Optional[str] = None,
         container_id: Optional[str] = None,
         env_info: Optional[Dict] = None,
     ) -> Dict:
-        """Run the condition. Return the dict the driver expects:
-            step_trace_path        : str  — JSONL of agent steps (eval/trace/logger.py)
-            patch_path             : str  — file path; written empty if no patch
+        """Return the dict the driver expects:
+            step_trace_path        : str
+            patch_path             : str
             total_prompt_tokens    : int
             total_completion_tokens: int
-            telemetry_path         : str | None — _UtilSampler output (optional)
+            telemetry_path         : str | None
         """
-        # 1. Read the task description from instance_data
-        # 2. Run the agent loop / single LLM call / whatever your condition does
-        # 3. Apply effects to workspace_root (the host-bound CWD inside container)
-        # 4. Return the dict above
         ...
 ```
 
-The signature flexibility — AR conditions take 3 positional args, agent
-conditions take 6 — is enforced by the driver's dispatch chain rather than the
-protocol. AR conditions don't need a workspace because they don't modify code.
+AR conditions take 3 positional args; agent conditions take 6 — the driver's
+dispatch chain enforces the signature, not the protocol.
 
-## Patterns to lift from existing conditions
+## Adding a subclass of `OpenClawAgentCondition`
 
-- **LLM call.** Use `eval.conditions._llm_client.call_llm(...)`. Streaming
-  TTFT/TPOT capture is built in via `eval/trace/llm_wrapper.py`.
-- **Step trace.** Each LLM call or tool exec should be one row in
-  `step_trace.jsonl` so the analysis layer (`eval/analysis/`) can compute
-  composition. Use `eval.trace.logger.StepLogger`.
-- **Self-validation.** If your condition runs against a benchmark whose
-  harness exposes `run_tests()` against the live workspace, instantiate
-  `_validate_bridge.ValidateBridge` around your loop:
+Use this when your benchmark needs the OpenClaw CLI loop (with bridge, gateway,
+session archival, OTel span synthesis, etc.) but its own framing or artifact
+workflow. Override three things:
 
-  ```python
-  from .._validate_bridge import ValidateBridge
+```python
+from typing import Dict, Optional
+from pathlib import Path
 
-  bridge = ValidateBridge(
-      harness=env_info["_harness"],     # driver puts harness ref here
-      run_dir=run_dir,
-      workspace_root=workspace_root,
-      instance_id=instance_data["instance_id"],
-      instance_data=instance_data,
-      container_id=container_id,
-      run_id=run_dir.name,
-      timeout_seconds=...,
-  )
-  bridge.start()
-  try:
-      # ... agent loop ...
-  finally:
-      n = bridge.stop()
-  ```
+from applications.conditions.openclaw_agent import OpenClawAgentCondition
 
-  The bridge drops `_oc_validate.sh` into the workspace; the agent invokes it
-  via the existing `exec` tool and gets a JSON verdict back. Lets the loop
-  exit early on PASS instead of running out the clock.
-- **Telemetry.** Wrap the loop in `eval.conditions.code_agent.openclaw_agent._UtilSampler`
-  for CPU/RSS/GPU sampling at run cadence. (TB uses the same.)
+
+class YourBenchOpenClawCondition(OpenClawAgentCondition):
+    agent_id = "your_bench"           # must match openclaw.json agents.list[].id
+                                      # and the harness's predicted sandbox name
+
+    def _build_message(self, instance_data: Dict) -> str:
+        return f"<framing>\n\nTask:\n{instance_data['instruction']}"
+
+    def _collect_artifacts(
+        self,
+        container_id: Optional[str],
+        env_info: Dict,
+        run_dir: Path,
+        workspace_root: str,
+    ) -> Optional[str]:
+        # Return patch text (it'll be written to candidate.patch), or None for
+        # no artifact (in which case driver.skip_patch_gate must be true for
+        # this benchmark).
+        return None
+```
+
+See `applications/swebench/conditions/openclaw_agent.py` for an example that
+collects a git diff.
+
+## Patterns to lift
+
+- **LLM call.** `applications.conditions._llm_client.call_llm(...)` — handles
+  the OpenAI-compat request shape and returns `(text, prompt_tokens, completion_tokens, error)`.
+- **Step trace.** One row per LLM call or tool exec in `steps.jsonl` so
+  `orchestration/analysis/` can compute composition.
+- **In-loop self-validation.** Surface a `verify` OpenClaw skill at
+  `applications/<app>/openclaw/skills/verify/SKILL.md` that tells the agent
+  how to run the in-container test command (e.g. `python -m pytest` for
+  SWE-bench, `bash /app/_oc_validate.sh` for TB). The skill runs in the same
+  sandbox container as the agent's `exec` tool — no host IPC needed.
+- **Telemetry.** Wrap the loop with `UtilSampler` from
+  `applications.conditions.util_sampler` for CPU/RSS/GPU sampling. Both
+  `tb_react` and `OpenClawAgentCondition` already do this.
 
 ## Wire the dispatcher
 
-Two edits to `eval/runner/driver.py`:
+`orchestration/runner/driver.py:execute_run` — add an `elif condition_type ==
+"your_condition":` branch with a lazy import:
 
 ```python
-# 1. Import (top of file)
-from eval.conditions.your_workload.your_condition import YourCondition
-
-# 2. Dispatch (in execute_run)
 elif condition_type == "your_condition":
+    from applications.<app>.conditions.<your_condition> import YourCondition
     condition = YourCondition(
         model_config=run_config.condition.model,
         agent_config=run_config.condition.agent,
@@ -134,48 +133,35 @@ elif condition_type == "your_condition":
     )
 ```
 
-The `condition_type` string is the public dispatch key — it's referenced by
-sweep YAMLs and shouldn't change once published.
+Keep the import lazy so the driver doesn't pull every app on startup.
+
+If your new condition is an `OpenClawAgentCondition` subclass, you don't need a
+new `condition_type` — extend the existing `openclaw_agent` branch's
+benchmark-keyed dispatch.
 
 ## Test it
 
 ```bash
 # Smoke import
-PYTHONPATH=. python3 -c "
-from eval.conditions.your_workload.your_condition import YourCondition
-print('OK')
-"
+PYTHONPATH=. python3 -c "from applications.<app>.conditions.<name> import YourCondition; print('OK')"
 
-# Run a 1-instance sweep
-cat > /tmp/your_condition_smoke.yaml <<EOF
-sweep_id: your_condition_smoke
-instances: [<some_instance_id>]
-conditions:
-  - { condition_id: your, condition_type: your_condition, model: {...}, agent: {...} }
-serving:  { ... }
-seeds: [0]
-output_dir: data/runs/your_condition_smoke
-EOF
-
-PYTHONPATH=. python3 -m eval.runner.driver --sweep /tmp/your_condition_smoke.yaml
+# Single-instance smoke run (using existing harness + app configs)
+make eval APP=<app>/<exp> HARNESS=<harness_with_your_condition> ...
 ```
 
-Inspect `data/runs/your_condition_smoke/<run_id>/`:
-- `step_trace.jsonl` — agent steps with timings
+Inspect `data/runs/<sweep>/<ts>/<run_id>/`:
+- `steps.jsonl` — agent steps with timings
 - `verdict.json` — harness scoring result
 - `manifest.json` — run state
-- `spans.jsonl` (if you used the validate bridge / OC stack)
-- `util.jsonl` (if you used `_UtilSampler`)
+- `spans.jsonl` — OTel snapshot (OC conditions only)
+- `util.jsonl` — UtilSampler output
 
 ## Checklist
 
-- [ ] File at `eval/conditions/<workload>/<name>.py` (workload package exists)
+- [ ] File at `applications/<app>/conditions/<name>.py` (or `applications/conditions/<name>.py` if cross-app)
 - [ ] `__init__` accepts `(model_config, agent_config)` for parity with peers
-- [ ] `run()` returns dict with `step_trace_path`, `patch_path`,
-      `total_prompt_tokens`, `total_completion_tokens`
-- [ ] Patch artifact written even on failure (empty file is fine — the driver's
-      patch-gate reads size, not content)
-- [ ] Imports use relative-up syntax for shared utilities
-      (`from .._base`, `from .._llm_client`, `from .._validate_bridge`)
-- [ ] Dispatch added in `eval/runner/driver.py` with a unique `condition_type`
-- [ ] Sweep YAML using the new condition runs end-to-end
+- [ ] `run()` returns dict with `step_trace_path`, `patch_path`, `total_prompt_tokens`, `total_completion_tokens`
+- [ ] Patch artifact written even on failure (empty file is fine — driver gates on size, not content; benchmarks without patches use `skip_patch_gate`)
+- [ ] Shared utilities imported via absolute paths (`from applications.conditions._llm_client import ...`)
+- [ ] Dispatch branch added in `orchestration/runner/driver.py` with a lazy import
+- [ ] Sweep harness JSON using the new condition runs end-to-end

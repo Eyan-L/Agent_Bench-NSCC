@@ -1,17 +1,16 @@
 # Execution
 
-Three deployment modes — pick by environment, not by preference. The
-underlying eval pipeline is identical; only the harness backend changes.
+Two deployment modes — pick by environment. In **both**, openclaw and the
+SWE-bench task each run in their **own** isolated container/sif. The host
+runs only vLLM (or another backend serving the LLM).
 
 | Mode | When to use | Harness backend |
 |---|---|---|
-| **Docker (local)** | Workstation development; iterating on a condition | `SWEBenchHarness` |
-| **PBS / singularity (cluster)** | HPC nodes without docker daemon; batch sweeps | `SingularityHarness` |
-| **Bare host (no container)** | Quick smoke; analysis-only replays; no scoring backend | `HostHarness` (scoring deferred or via HTTP) |
+| **Docker** | Workstation / docker-equipped nodes | `SWEBenchHarness` (oc container + task container, shared workspace) |
+| **Singularity** | HPC nodes without docker daemon | `SingularityHarness` (oc .sif + task .sif; under rework) |
 
-Selected via `HARNESS_BACKEND={docker,singularity,host}`. Default in
-`scripts/execution_pbs/run_benchmark.pbs` is `singularity`; default for
-`make eval` is `docker`.
+Selected via `HARNESS_BACKEND={docker,singularity}`. Default for `make eval`
+is `docker`. There is **no** host mode — openclaw is always containerized.
 
 ---
 
@@ -66,7 +65,7 @@ curl -s http://localhost:8000/v1/models | jq .
 
 ```bash
 HARNESS_BACKEND=docker \
-PYTHONPATH=. python3 -m eval.runner.driver \
+PYTHONPATH=. python3 -m orchestration.runner.driver \
     --sweep config/sweeps/phase1.yaml \
     --max-runs 1
 ```
@@ -77,14 +76,14 @@ Or via Makefile:
 make eval EVAL_ARGS="--sweep config/sweeps/phase1.yaml --max-runs 1"
 ```
 
-The Docker harness (`eval/benchmarks/swebench/harness.py:SWEBenchHarness`)
+The Docker harness (`applications/swebench/app.py:SWEBenchHarness`)
 pulls the per-instance image lazily and `docker run`s it. First run on a new
 instance pulls 1-3 GiB; subsequent runs reuse the cached image.
 
 ### Single-instance debug loop
 
 ```bash
-INSTANCE=$(jq -r 'keys[0]' config/benchmarks/swebench/verified.json)
+INSTANCE=$(jq -r 'keys[0]' "$INSTANCE_DATA")
 
 cat > /tmp/one.yaml <<EOF
 sweep_id: smoke
@@ -97,7 +96,7 @@ output_dir: data/runs/smoke
 EOF
 
 HARNESS_BACKEND=docker PYTHONPATH=. \
-    python3 -m eval.runner.driver --sweep /tmp/one.yaml
+    python3 -m orchestration.runner.driver --sweep /tmp/one.yaml
 ```
 
 Inspect `data/runs/smoke/<run_id>/{verdict.json,step_trace.jsonl,spans.jsonl}`.
@@ -141,7 +140,7 @@ qsub scripts/execution_pbs/run_benchmark_tb.pbs
 | `STAGE_VLLM`     | start vLLM in singularity, serve the model |
 | `STAGE_OC_CHECK` | pull alpine/openclaw sif + bake patch overlay |
 | `STAGE_OTEL`     | start the local OTel collector that writes otel-traces.jsonl |
-| `STAGE_RUN`      | invoke `eval/runner/driver` with the sweep |
+| `STAGE_RUN`      | invoke `orchestration/runner/driver` with the sweep |
 | `STAGE_CLEANUP`  | kill vLLM + OTel, free ports |
 
 See the header comment in `scripts/execution_pbs/run_benchmark.pbs` for the
@@ -150,7 +149,7 @@ full env-var menu.
 ### Outputs on the cluster
 
 Per-run dirs land in `$KIT_ROOT/data/runs/<sweep_id>/<run_id>/`. Logs go to
-`$KIT_ROOT/logs/`:
+`$KIT_ROOT/data/logs/`:
 
 - `pbs.log` — top-level PBS job log
 - `vllm.log` — engine stdout (parsed by `engine_log_tailer`)
@@ -159,42 +158,16 @@ Per-run dirs land in `$KIT_ROOT/data/runs/<sweep_id>/<run_id>/`. Logs go to
 
 ---
 
-## Mode 3 — Bare host (no container)
+## Mode 3 — Bare host
 
-For analysis replays or driving the agent from your own Python without
-spinning a container. Scoring is deferred (predictions written to disk)
-unless you point at an external scoring server.
-
-### Setup
-
-```bash
-export HARNESS_BACKEND=host
-export OPENCLAW_STATE_DIR=$PWD/frontend/openclaw/state
-export OC_PYLIB=$PWD/.pylib
-pip install -t "$OC_PYLIB" swebench
-export PYTHONPATH=.:$OC_PYLIB:$PYTHONPATH
-
-# Either: start a serving backend yourself (vllm/sglang serve ...)
-# Or:     point at an existing one
-export VLLM_BASE_URL=http://my-vllm:8000/v1
-```
-
-### Run
-
-```bash
-PYTHONPATH=. python3 -m eval.runner.driver \
-    --sweep config/sweeps/phase0.yaml \
-    --max-runs 1
-```
-
-The host harness (`eval/benchmarks/swebench/harness.py:HostHarness`) doesn't
-launch containers — it expects you to clone the target repo into a workspace
-dir, then runs the OC gateway directly on the host. After the agent finishes,
-scoring follows one of three paths:
+Removed. OpenClaw is always containerized; running the agent on the host
+process is no longer supported. If you need a quick smoke without the
+SWE-bench task image, use `HARNESS_BACKEND=docker` and skip the agent
+condition (use `ar_issue_only` for one-shot AR baseline). Legacy notes:
 
 1. `OC_SCORING_SIF_DIR` set → score via singularity (still needs SIFs).
 2. `OC_SCORING_URL` set → POST patch + instance to a scoring server
-   (`eval/scoring_server/main.py` is a reference implementation).
+   (`orchestration/scoring_server/main.py` is a reference implementation).
 3. Neither → write `predictions-<instance>.json` next to the workspace and
    exit with `status: "DEFERRED"`. Score later with
    `python -m swebench.harness.run_evaluation`.
@@ -217,14 +190,14 @@ jq . data/runs/<sweep>/<run_id>/verdict.json
 find data/runs/<sweep> -name verdict.json -exec jq -r .status {} \; | sort | uniq -c
 
 # Replay analysis without re-running anything
-PYTHONPATH=. python3 -m eval.analysis.aggregate --runs data/runs/<sweep>
+PYTHONPATH=. python3 -m orchestration.analysis.aggregate --runs data/runs/<sweep>
 
 # Render figures
-PYTHONPATH=. python3 eval/analysis/plots/plot_all.py \
+PYTHONPATH=. python3 orchestration/analysis/plots/plot_all.py \
     --runs data/runs/<sweep_id> --out data/figures/<sweep_id>
 
 # Mock figures (no real runs needed)
-PYTHONPATH=. python3 eval/analysis/plots/plot_all.py --mock
+PYTHONPATH=. python3 orchestration/analysis/plots/plot_all.py --mock
 ```
 
 ---
@@ -286,7 +259,7 @@ Outputs land in `stress/loadgen/result/`.
 
 | Symptom | First check |
 |---|---|
-| `spans.jsonl` has only one record (heartbeat) | OC patches not applied — see `frontend/openclaw/patch/MANIFEST.json` markers and the patch overlay build |
+| `spans.jsonl` has only one record (heartbeat) | OC patches not applied — see `harnesses/openclaw/patch/MANIFEST.json` markers and the patch overlay build |
 | `replayInvalid: true` in trajectory | Long-context formatting drift — slim the system prompt or raise per-call `max_tokens` |
 | `ENOTEMPTY` on plugin extract | Run `bash scripts/execution_pbs/oc_plugin_cache_clean.sh $OC_PLUGIN_CACHE` |
 | vLLM never reaches ready | `tail -50 $LOG_DIR/vllm.log` — usually plugin npm install on a cold cache (network needed) |

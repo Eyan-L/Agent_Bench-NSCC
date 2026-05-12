@@ -5,53 +5,97 @@ neighbors, and where to look for what.
 
 ```
 Agent_Bench/
-├── frontend/        agent runtime images + state (currently: openclaw)
-├── backend/         serving stack (vllm, sglang) + engine telemetry tailer
-├── config/          inputs: benchmark instance data, sweeps, stress presets
-├── eval/            backend code: benchmarks, conditions, runner, analysis
+├── applications/    Layer 1: application/dataset (swebench, terminal_bench, ...)
+├── harnesses/       Layer 2: agent runtime (openclaw, future openhands, ...)
+├── backend/         Layer 3: serving stack (vllm, sglang) + engine telemetry
+├── config/          inputs: per-instance task data, sweeps, stress presets
+├── eval/            orchestration: runner, conditions, scoring, analysis, trace
 ├── data/            outputs: per-run artifacts, figures
 ├── scripts/         top-level CLIs: PBS jobs, host samplers
 ├── stress/          load-generation stack (Go) for serving-side stress tests
 ├── doc/             development guides (this folder)
 ├── prompts/         operator handoff notes for Claude
-├── skills/          Claude pipeline definitions
+├── skills/          Claude pipeline definitions (NOT OpenClaw skills — those live under applications/<app>/openclaw/skills/)
 ├── tests/           pipeline self-checks
-└── analysis_tools/  ad-hoc plotting (separate from the eval/analysis lib)
+└── analysis_tools/  ad-hoc plotting (separate from the orchestration/analysis lib)
 ```
 
-The repo separates **inputs** (`config/`), **runtime images + state**
-(`frontend/`, `backend/`), **code** (`eval/`, `stress/`, `scripts/`,
-`backend/`, `frontend/`), and **outputs** (`data/`). Each top-level folder
-owns one concern.
+## The three-layer abstraction
+
+The top three dirs (`applications/`, `harnesses/`, `backend/`) are the load-bearing
+abstraction:
+
+- **applications/** — *which app/dataset is being evaluated.* Owns instance
+  preparation, scoring, and **how the app wires up to each harness**. Per-(app ×
+  harness) customization lives under `applications/<app>/<harness>/` (e.g.
+  `applications/swebench/openclaw/`). Adding a new app/harness pair = one new
+  directory.
+- **harnesses/** — *which agent runtime drives the model.* Only harness-wide
+  shared code lives here (gateway lifecycle scripts, patches, common config
+  templates). OpenClaw is the only harness today.
+- **backend/** — *which inference engine serves the model.* vLLM or SGLang;
+  selection is `SERVING_BACKEND={vllm|sglang}`.
+
+`eval/` is layer-agnostic glue: the run driver dispatches across (app, harness,
+backend), the conditions implement how an agent attempts a task, the scoring
+server provides remote evaluation, and analysis processes results.
 
 ---
 
-## `frontend/`
-
-Agent runtime images and the configuration they read at startup. Currently
-holds OpenClaw only.
+## `applications/` (Layer 1)
 
 ```
-frontend/openclaw/
-├── apply_patch.py     applies vendored .patch files to OC's bundled JS
-├── apply_profile.sh   profile selection at deploy time
-├── configure.sh       env / dep checks
-├── gateway_up.sh      bring OC's gateway up for a run
-├── gateway_down.sh    tear it down
-├── defaults.env       defaults for the above
-├── patch/             vendored unified diffs against OC's bundle
-└── state/             OC reads this at startup
-    ├── openclaw.json  gateway, plugins, providers, agent definitions
-    └── agents/swebench/{AGENTS,SOUL,IDENTITY,USER,TOOLS,HEARTBEAT}.md
+applications/
+├── conditions/                           cross-app condition base classes + utilities
+│   ├── openclaw_agent.py                 OpenClawAgentCondition base (agent_id + prompt as hooks)
+│   ├── _llm_client.py                    OpenAI-compat HTTP caller (shared by AR baselines + TB ReAct)
+│   ├── util_sampler.py                   CPU/RSS/GPU sampler sidecar (shared by all condition paths)
+│   └── gateway_helpers.py                gateway port pool + singularity argv wrapper (shared by both harnesses + OC condition)
+├── swebench/
+│   ├── __init__.py
+│   ├── app.py                            SWEBenchHarness (two-container docker), SingularityHarness (stub)
+│   ├── conditions/                       SWE-bench specific conditions
+│   │   ├── ar_issue_only.py              one-shot AR baseline
+│   │   ├── ar_static_context.py          one-shot + BM25 retrieval baseline
+│   │   └── openclaw_agent.py             SWEBenchOpenClawCondition (subclass; agent_id=swebench, git-diff patch collection)
+│   └── openclaw/                         OpenClaw customization for SWE-bench
+│       ├── agents/{AGENTS,SOUL,...}.md   prompts mounted into /root/.openclaw/agents/swebench/
+│       └── skills/verify/SKILL.md        the `verify` OpenClaw skill (agent runs `python -m pytest` in /testbed)
+└── terminal_bench/
+    ├── __init__.py, app.py, loader.py, README.md, tasks/
+    ├── conditions/
+    │   ├── react.py                      TerminalBenchReactCondition (no OpenClaw — direct docker exec)
+    │   └── openclaw_agent.py             TerminalBenchOpenClawCondition (subclass; agent_id=terminal_bench, no patch)
+    └── openclaw/                         OpenClaw customization for Terminal-Bench
+        ├── agents/{AGENTS,SOUL,...}.md   prompts mounted into /root/.openclaw/agents/terminal_bench/
+        ├── agents/BOOTSTRAP.md           seeded into /app at run start (silences OC's "[Bootstrap pending]" injection)
+        └── skills/verify/{SKILL.md, _oc_validate.sh}
+                                          the `verify` skill + helper; harness copies _oc_validate.sh into /app at run start
 ```
 
-Why separate from `eval/`: the agent runtime is image-shaped (build, deploy,
-start, stop), not eval-shaped (load instance, run, score). Keeping them
-apart means a new frontend (e.g. SWE-Agent) drops in as
-`frontend/<name>/` without disturbing eval logic. See
-[adding_a_frontend.md](adding_a_frontend.md).
+Adding a new application: see [benchmarks.md](benchmarks.md). The `<app>/openclaw/`
+subdir is the documented per-(app × harness) slot.
 
-## `backend/`
+## `harnesses/` (Layer 2)
+
+```
+harnesses/
+└── openclaw/
+    ├── apply_patch.py     applies vendored .patch files to OC's bundled JS
+    ├── apply_profile.sh   profile selection at deploy time
+    ├── configure.sh       env / dep checks
+    ├── gateway_up.sh      bring OC's gateway up for a run
+    ├── gateway_down.sh    tear it down
+    ├── defaults.env       defaults for the above
+    ├── patch/             vendored unified diffs against OC's bundle
+    └── state/openclaw.json   the gateway/plugin/provider config template
+```
+
+Per-app prompts and skills do **not** live here — those live under
+`applications/<app>/openclaw/`. A new harness drops in as `harnesses/<name>/`
+plus per-app glue under `applications/<app>/<name>/`. See [harnesses.md](harnesses.md).
+
+## `backend/` (Layer 3)
 
 Serving stack — vLLM + SGLang launchers + the engine log tailer.
 
@@ -83,69 +127,32 @@ config/
 ├── sweeps/                                        what to evaluate, how
 │   └── *.yaml
 └── stress/                                        loadgen presets + thresholds
-    ├── agent.json                                 code_agent workload
-    ├── alibaba.json                               doc_analysis (GPT-4 trace shape)
-    ├── azure.json                                 websearch (Azure trace shape)
-    ├── alibaba_nscc_2a_singularity.json           NSCC 2A cluster overrides
-    ├── agent_dirs.example.json                    code_agent dataset selector
-    ├── trace_thresholds.yaml                      trace pipeline self-test thresholds
-    └── sglang/                                    SGLang-specific variants
 ```
 
-Splitting inputs out of `eval/` and `stress/` means swapping a sweep is a
-config change, not a code change.
+Splitting inputs out of code dirs means swapping a sweep is a config change,
+not a code change.
 
 ## `eval/`
 
-The eval pipeline code. The largest folder by line count and the one with
-the most internal structure.
+Orchestration: drives runs, implements conditions, scores SWE-bench
+remotely, post-processes traces. Layer-agnostic.
 
 ```
 eval/
-├── benchmarks/
-│   ├── swebench/{harness.py, loader.py}          SWE-bench adapter
-│   └── terminal_bench/{harness.py, loader.py}    TB adapter
-├── conditions/                                    how the agent attempts a task
-│   ├── _base.py                                   ConditionProtocol
-│   ├── _llm_client.py                             OpenAI-compat caller (shared)
-│   ├── _validate_bridge.py                        workspace IPC for self-validate
-│   ├── code_agent/                                code-/automation-flavored
-│   │   ├── ar_issue_only.py                       SWE-bench AR (one-shot)
-│   │   ├── ar_static_context.py                   SWE-bench AR + retrieval
-│   │   ├── openclaw_agent.py                      SWE-bench agent loop
-│   │   └── terminal_bench/                        TB-specific (subfolder
-│   │       └── react.py                            because TB will likely grow
-│   │                                               more variants)
-│   ├── doc_analysis/                              placeholder (no impl yet)
-│   ├── websearch/                                 placeholder (no impl yet)
-│   └── ablations/no_retry.py
 ├── runner/                                        orchestration
 │   ├── driver.py                                  the dispatch table + run loop
 │   ├── config.py                                  RunConfig, sweep YAML loading
 │   ├── manifest.py                                per-run state tracking
 │   └── fairness_check.py
+│                                                  (no condition code under orchestration/ — all moved to applications/conditions/)
 ├── analysis/                                      post-run metric computation
-│   ├── aggregate.py, composition.py, evaluation.py, ...
-│   └── plots/
 ├── trace/                                         instrumentation primitives
-│   ├── logger.py                                  step-trace JSONL writer
-│   ├── llm_wrapper.py                             TTFT/TPOT capture
-│   ├── telemetry.py                               GPU/CPU/RSS sampler
-│   ├── align.py                                   monotonic ↔ wall-clock
-│   └── otel/
-├── otel/otel_query.py                             OTel post-hoc query helper
-└── scoring_server/                                external validation (HTTP)
+├── otel/                                          OTel post-hoc query helpers
+└── scoring_server/                                external SWE-bench scoring (HTTP)
 ```
 
-The four submodules implement orthogonal axes:
-
-- **benchmarks** = which task suite (one folder per benchmark)
-- **conditions** = how the agent tries (one folder per workload, then per condition)
-- **runner** = wiring (driver dispatches benchmark × condition)
-- **analysis / trace** = instrumentation and post-processing
-
-See [adding_a_benchmark.md](adding_a_benchmark.md) and
-[adding_a_condition.md](adding_a_condition.md) for the extension surfaces.
+The driver dispatches on (application × condition × backend) without knowing
+about OpenClaw specifics — those live in `applications/<app>/openclaw/`.
 
 ## `data/`
 
@@ -181,7 +188,7 @@ scripts/
 └── helper_pbs/                        small helper jobs
 ```
 
-Why separate from `eval/runner/`: these scripts are **operations**, not
+Why separate from `orchestration/runner/`: these scripts are **operations**, not
 eval logic. They orchestrate stage-by-stage setup (install, pull, patch,
 serve, run, teardown) on the cluster.
 
@@ -192,10 +199,7 @@ serving backend without an agent loop.
 
 ```
 stress/
-├── loadgen/                  Go: cmd/, client/, sampling/, result/, loadgen-bin
-├── experiment/               Go: orchestration (sglang lifecycle + loadgen + plots)
-├── workloads/                workload defs: code_agent, doc_analysis, websearch
-├── scripts/                  pbs_experiment.pbs and replay drivers
+├── loadgen/, experiment/, workloads/, scripts/
 └── README.md
 ```
 
@@ -208,18 +212,7 @@ Development docs (this folder). See `doc/README.md` for the index.
 
 ## `prompts/`, `skills/`
 
-Claude-specific pipeline definitions. `prompts/` holds operator handoff notes
+`prompts/` holds free-form operator handoff notes for Claude
 (e.g. `OPENCLAW_GATEWAY_HANDOFF.md`); `skills/` defines reusable Claude
-pipelines for common tasks (instrumentation, report generation, trace
-analysis). Outside the eval pipeline.
-
-## `tests/`
-
-Trace-pipeline self-checks. Thresholds in
-`config/stress/trace_thresholds.yaml`. Run with `make test`.
-
-## `analysis_tools/`
-
-Ad-hoc plotting helpers. Separate from `eval/analysis/` because these are
-exploratory scripts that don't necessarily round-trip through the analysis
-library — useful for one-off TTFT/TBT/GPU plots when prototyping.
+pipeline definitions. Note: these are **Claude pipeline skills**, not
+OpenClaw skills — the latter live under `applications/<app>/openclaw/skills/`.

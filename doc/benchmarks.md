@@ -1,19 +1,23 @@
 # Adding a new benchmark
 
-A *benchmark* is a task suite the agent is scored against. The two existing
-benchmarks are SWE-bench (`eval/benchmarks/swebench/`) and Terminal-Bench
-(`eval/benchmarks/terminal_bench/`). Adding a new one means writing a harness,
-a loader, dropping the task data into `config/`, and wiring the dispatcher.
+A *benchmark* (or "application" in the three-layer abstraction) is a task
+suite the agent is scored against. The two existing applications are SWE-bench
+(`applications/swebench/`) and Terminal-Bench (`applications/terminal_bench/`).
+Adding a new one means writing the app code, a loader, per-(app × harness) glue,
+dropping the task data into `config/`, and wiring the dispatcher.
 
 ## What you'll add
 
 ```
-eval/benchmarks/<name>/
+applications/<name>/
 ├── __init__.py
-├── harness.py         # lifecycle + scoring
-└── loader.py          # turn instance_id → instance_data dict
+├── app.py             # lifecycle + scoring (historically called harness.py)
+├── loader.py          # turn instance_id → instance_data dict
+└── openclaw/          # OpenClaw customization for THIS app (per-(app × harness))
+    ├── agents/        # AGENTS.md etc. — mounted into /root/.openclaw/agents/<id>/
+    └── skills/verify/SKILL.md  # `verify` OpenClaw skill — tells the agent how to run the in-loop check
 
-config/benchmarks/<name>/
+applications/<name>/tasks/           # per-task assets vendored under the app
 └── ... (instance JSONs / task definitions / per-instance assets)
 
 config/sweeps/<name>_<sweep>.yaml   # at least one sweep that targets it
@@ -23,7 +27,7 @@ config/sweeps/<name>_<sweep>.yaml   # at least one sweep that targets it
 
 A harness owns the **per-run lifecycle**: stand up the environment, expose it
 to the condition, score the result, tear down. The driver
-(`eval/runner/driver.py`) calls these methods in order:
+(`orchestration/runner/driver.py`) calls these methods in order:
 
 ```python
 class YourBenchmarkHarness:
@@ -77,24 +81,25 @@ Implementation tips drawn from the existing harnesses:
   script via `swebench.harness.test_spec.make_test_spec` and parses the log
   with `get_eval_report`. If your benchmark publishes a Python harness package,
   prefer that over re-implementing the scoring math.
-- **Three backend variants are normal.** SWE-bench has `SWEBenchHarness`
-  (docker), `HostHarness` (host-mode singularity scoring), and
-  `SingularityHarness` (full singularity, including OC runtime). Pick what
-  matches your deployment; HPC clusters typically need at least the
-  singularity variant.
+- **Two backend variants.** SWE-bench has `SWEBenchHarness` (docker:
+  oc container + task container) and `SingularityHarness` (singularity:
+  oc .sif + task .sif — currently being rewritten for the two-instance
+  model). Pick what matches your deployment; both isolate the agent from
+  the host.
 - **Workspace bind matters.** The agent's CWD inside the container must point
   at a host directory you control, so the condition can read the post-run
   state and the harness can score it. Pick a stable bind path (e.g. `/testbed`
   for SWE-bench, `/app` for TB).
 - **Scoring is deterministic given the workspace.** A good harness passes
-  `patch=None` and re-collects from the workspace via `git diff` — that lets
-  the [validate bridge](../eval/conditions/_validate_bridge.py) call
-  `run_tests()` mid-run on the live workspace state without diff bookkeeping.
+  `patch=None` and re-collects from the workspace via `git diff` — so a future
+  in-loop self-validation skill can call `run_tests()` on the live workspace
+  without diff bookkeeping. (Today both apps' `verify` skills run the test
+  command directly inside the sandbox container; no host IPC needed.)
 
 ## 2. The loader
 
 ```python
-# eval/benchmarks/<name>/loader.py
+# applications/<name>/loader.py
 def load_instances(dataset_path: str) -> Dict[str, Dict]:
     """Return {instance_id: instance_data}. instance_data must include:
         instance_id      : str
@@ -108,11 +113,12 @@ right `instance_data` to `prepare_environment(...)` for each run.
 
 ## 3. Drop the task data
 
-Goes under `config/benchmarks/<name>/`. There's no required shape — it's just
-where the loader reads from. Examples:
+Goes under the application itself — `applications/<name>/tasks/` (or wherever
+the loader points). There's no required shape; it's just where the loader
+reads from. Examples:
 
-- SWE-bench: `config/benchmarks/swebench/verified.json` — single JSON of all instances.
-- Terminal-Bench: `config/benchmarks/terminal_bench/<task>/{task.toml, environment/, tests/}` — one folder per task.
+- SWE-bench: external `verified.json` (path via `--instance-data`) — single JSON of all instances. No tasks/ dir because the upstream dataset is one big JSON.
+- Terminal-Bench: `applications/terminal_bench/tasks/<task>/{task.toml, environment/, tests/}` — one folder per task, vendored in-repo.
 
 Pick whichever matches the upstream benchmark's distribution format.
 
@@ -120,13 +126,13 @@ Pick whichever matches the upstream benchmark's distribution format.
 
 Two places:
 
-**`eval/runner/driver.py`** — the harness selection (currently in
+**`orchestration/runner/driver.py`** — the harness selection (currently in
 `execute_run` near top): branch on `instance_data["benchmark"]`. Existing pattern:
 
 ```python
 benchmark_kind = instance_data.get("benchmark", "swebench")
 if benchmark_kind == "your_benchmark":
-    from eval.benchmarks.your_benchmark.harness import YourBenchmarkHarness
+    from applications.your_benchmark.app import YourBenchmarkHarness
     harness = YourBenchmarkHarness(...)
 else:
     # existing branches
@@ -134,7 +140,7 @@ else:
 
 Lazy import keeps a pure SWE-bench install from needing your benchmark's deps.
 
-**`eval/runner/driver.py`** — the patch gate. Some benchmarks (TB) have no
+**`orchestration/runner/driver.py`** — the patch gate. Some benchmarks (TB) have no
 patch artifact and the empty-patch FAIL gate must be skipped. Add your
 benchmark to:
 
@@ -169,11 +175,11 @@ output_dir: data/runs/your_benchmark_phase1
 
 ```bash
 PYTHONPATH=. python3 -c "
-from eval.benchmarks.your_benchmark.harness import YourBenchmarkHarness
-from eval.benchmarks.your_benchmark.loader import load_instances
+from applications.your_benchmark.app import YourBenchmarkHarness
+from applications.your_benchmark.loader import load_instances
 print('OK')
 "
-PYTHONPATH=. python3 -m eval.runner.driver \
+PYTHONPATH=. python3 -m orchestration.runner.driver \
     --sweep config/sweeps/your_benchmark_phase1.yaml \
     --max-runs 1
 ```
@@ -183,10 +189,11 @@ Then inspect `data/runs/your_benchmark_phase1/<run_id>/` for `verdict.json`,
 
 ## Checklist
 
-- [ ] `eval/benchmarks/<name>/{__init__.py, harness.py, loader.py}`
+- [ ] `applications/<name>/{__init__.py, app.py, loader.py}`
+- [ ] `applications/<name>/openclaw/{agents,skills}` if running on OpenClaw (cross-app gateway helpers come from `applications/conditions/gateway_helpers.py`)
 - [ ] Harness exposes `prepare_environment` / `run_tests` / `cleanup` with the
       shapes above
-- [ ] `config/benchmarks/<name>/` populated
+- [ ] `applications/<name>/tasks/` populated (or external dataset path documented)
 - [ ] Driver dispatch branches on `instance_data["benchmark"]`
 - [ ] Patch-gate exemption added (only if your benchmark has no patch artifact)
 - [ ] At least one sweep YAML in `config/sweeps/`
