@@ -36,7 +36,7 @@ from orchestration.trace.align import align_telemetry_to_steps
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_THRESHOLDS = _REPO_ROOT / "configs" / "trace_thresholds.yaml"
+_DEFAULT_THRESHOLDS = _REPO_ROOT / "config" / "stress" / "trace_thresholds.yaml"
 
 
 def load_thresholds() -> dict:
