@@ -13,8 +13,9 @@ from typing import List, Optional
 
 from orchestration.runner.config import load_composed_config, RunConfig
 from orchestration.runner.manifest import RunManifest, get_manifest_path, load_or_create_manifest
-from applications.swebench.app import (
-    SWEBenchHarness, SingularityHarness, validate_fairness_constraints,
+from applications.swebench.app import validate_fairness_constraints
+from applications.swebench.openclaw.app import (
+    SWEBenchHarness, SingularityHarness,
 )
 # Condition classes are lazy-imported in `execute_run` so the driver can boot
 # without pulling every app's condition tree (and so an app that adds a new
