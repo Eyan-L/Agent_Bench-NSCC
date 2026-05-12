@@ -1,0 +1,32 @@
+{
+  "_doc": "OpenHands harness (SDK 1.21.0) against a locally-mounted Qwen2.5-7B-Instruct. Same vLLM endpoint as the OpenClaw harness — host-side --add-host vllm-host:host-gateway is added by the SWE-bench application layer so the OH container can reach the host's vLLM as http://vllm-host:8000/v1.",
+  "harness": "openhands",
+  "model": {
+    "name": "/mnt/network_drive/models/Qwen2.5-7B-Instruct",
+    "endpoint": "http://vllm-host:8000/v1",
+    "temperature": 0.0,
+    "max_tokens": 4096
+  },
+  "openhands": {
+    "_doc": "Block consumed by applications.swebench.openhands.app._build_state_dir.",
+    "agent": {
+      "name": "CodeActAgent"
+    },
+    "run": {
+      "runtime": "process",
+      "max_iterations": 100
+    }
+  },
+  "conditions": [
+    {
+      "condition_id": "openhands_agent",
+      "condition_type": "openhands_agent",
+      "description": "OpenHands SDK 1.21 code agent: full trajectory, tool execs routed through the shared exec-bridge into the SWE-bench sandbox.",
+      "agent": {
+        "max_steps": 500,
+        "max_time_seconds": 1800,
+        "retry_limit": 10
+      }
+    }
+  ]
+}

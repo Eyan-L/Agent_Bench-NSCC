@@ -161,6 +161,14 @@ fi
 if [[ "${NO_REASONING:-1}" != "1" ]]; then
     BASE_FLAGS+=(--reasoning-parser qwen3)
 fi
+# Qwen3.6 (qwen3_5_moe arch) uses GDN linear attention; the FlashInfer
+# prefill kernel for it is JIT-compiled with nvcc at first run. The
+# chengzhilu/vllm image has no nvcc, so the JIT crashes the worker.
+# Force the pure-Triton GDN backend to skip nvcc entirely.
+GDN_PREFILL_BACKEND="${GDN_PREFILL_BACKEND:-triton}"
+if [[ -n "$GDN_PREFILL_BACKEND" ]]; then
+    BASE_FLAGS+=(--gdn-prefill-backend "$GDN_PREFILL_BACKEND")
+fi
 
 declare -a PRESET_FLAGS
 CONFIG_ID=""

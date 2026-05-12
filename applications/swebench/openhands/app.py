@@ -41,6 +41,7 @@ import secrets
 import shutil
 import string
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -226,7 +227,10 @@ class SWEBenchOpenHandsHarness:
             "--network", net_name,
             "--add-host", "vllm-host:host-gateway",
             "--user", "0",
-            "-v", f"{state_dir}:{_STATE_DIR_IN_OH}:ro",
+            # state_dir holds the rendered config.toml (read-only-ish) *and*
+            # events.jsonl which the OH driver appends to from inside the
+            # container — so the mount must be rw.
+            "-v", f"{state_dir}:{_STATE_DIR_IN_OH}:rw",
             "-v", f"{ws_host}:{_WORKSPACE_IN_OH}:rw",
             "-w", _WORKSPACE_IN_OH,
             "-e", f"OPENHANDS_RUN_ID={run_id}",
@@ -339,8 +343,23 @@ class SWEBenchOpenHandsHarness:
                 f"openhands config.toml.template missing at {template_path}"
             )
 
+        # OpenHands -> LiteLLM needs a provider prefix to route. vLLM speaks
+        # OpenAI-compat, so wrap any bare/path-style model id with `openai/`.
+        # Path-style (e.g. `/mnt/.../Qwen2.5-7B-Instruct`) is what we use when
+        # `--model <local-dir>` is fed to vLLM; LiteLLM forwards that string
+        # verbatim to the endpoint, so `openai/<path>` ends up correct.
+        _model_raw = model_cfg.get("name") or "Qwen/Qwen3.6-35B-A3B"
+        _LITELLM_PROVIDERS = (
+            "openai/", "anthropic/", "vllm/", "hosted_vllm/", "azure/",
+            "bedrock/", "gemini/", "groq/", "together_ai/", "huggingface/",
+            "mistral/", "cohere/", "ollama/",
+        )
+        _model_resolved = (
+            _model_raw if _model_raw.startswith(_LITELLM_PROVIDERS)
+            else f"openai/{_model_raw}"
+        )
         values = {
-            "MODEL": model_cfg.get("name") or "openai/Qwen/Qwen3.6-35B-A3B",
+            "MODEL": _model_resolved,
             "BASE_URL": model_cfg.get("endpoint") or "http://vllm-host:8000/v1",
             "API_KEY": model_cfg.get("api_key") or "EMPTY",
             "TEMPERATURE": str(model_cfg.get("temperature") or 0.0),
@@ -402,6 +421,15 @@ class SWEBenchOpenHandsHarness:
              f"rm -rf {self._OH_SCAFFOLD_DIRS}"],
             check=False,
         )
+        # Git refuses to operate on a repo whose dir is owned by another uid
+        # ("dubious ownership"). The /workspace bind is on the host file
+        # system so ownership inside the container often differs from the
+        # uid git is running as; tell git to trust this specific path.
+        self._exec(
+            container_id,
+            ["git", "config", "--global", "--add", "safe.directory", ws],
+            check=False,
+        )
         self._exec(container_id, ["git", "-C", ws, "add", "-A"])
         r = self._exec(container_id, ["git", "-C", ws, "diff", "--cached"])
         return r.stdout
@@ -456,7 +484,7 @@ class SWEBenchOpenHandsHarness:
                 "model_patch": patch,
             }]))
             cmd = [
-                "python", "-m", "swebench.harness.run_evaluation",
+                sys.executable, "-m", "swebench.harness.run_evaluation",
                 "--dataset_name", "princeton-nlp/SWE-bench_Verified",
                 "--predictions_path", str(pred_path),
                 "--instance_ids", instance_id,
