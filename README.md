@@ -35,31 +35,35 @@ cp .env.example .env && $EDITOR .env
 set -a && . .env && set +a
 ```
 
-Pick the mode that matches your environment.
+Two modes — `docker` and `singularity`. In both, openclaw and the SWE-bench
+task each run in their **own** container (or .sif). The host runs **only
+vLLM**.
 
-**Local Docker** — needs a running Docker daemon (per-instance SWE-bench
-images are pulled lazily on first use, ~1–3 GiB each). Start a serving
-backend, then run a sweep:
+**Local Docker** (default) — needs a running Docker daemon and the
+patched OpenClaw image:
 
 ```bash
-make serve &                                                 # vLLM/SGLang in the background
+bash harnesses/openclaw/docker/build.sh   # one-time: agent-bench/openclaw:<v>
+make serve &                              # vLLM on the host
 HARNESS_BACKEND=docker \
-    make run_phase1 SWEBENCH_ROOT=/path/to/SWE-bench \
-                    INSTANCE_DATA=/path/to/verified.json
+    make eval EVAL_ARGS="--sweep config/sweeps/phase1.yaml"
 ```
 
-`HARNESS=<harness>` / `BACKEND=<engine>/<name>` pick the harness +
-backend JSONs under `config/{harness,backend}/` (defaults:
-`openclaw_27b` + `vllm/tp1`).
+Per-run docker layout: a private docker network, a `task-<run_id>` container
+(SWE-bench instance image), an `oc-<run_id>` container (`agent-bench/openclaw`
+running `gateway`). Workspace is bind-mounted into both at `/testbed`.
 
-**HPC cluster (PBS / Singularity)** — the PBS script provisions
-everything itself (vLLM, OC overlay, OTel collector, sweep, teardown).
-Don't pre-start serving; the job spins it up on the compute node. The
-sweep runs with `HARNESS_BACKEND=singularity`.
+**HPC cluster (PBS)** — the PBS script provisions everything itself
+(vLLM, OC sif, OTel collector, sweep, teardown). Don't pre-start
+serving; the job spins it up on the compute node.
 
 ```bash
 qsub scripts/execution_pbs/run_benchmark.pbs
 ```
+
+**Singularity** — analogous to docker but using two `singularity instance`s
+(openclaw .sif + task .sif) on the same private mount tree. Currently
+under rework — fall back to docker mode for now.
 
 Then aggregate + render:
 
@@ -81,7 +85,7 @@ make test     # trace pipeline self-checks
 
 Detailed guides live under [`doc/`](doc/):
 
-- [doc/execution.md](doc/execution.md) — running benchmarks (Docker, PBS/Singularity), inputs/outputs, common operations, troubleshooting.
+- [doc/execution.md](doc/execution.md) — running benchmarks (Docker, PBS, host modes), inputs/outputs, common operations, troubleshooting.
 - [doc/layout.md](doc/layout.md) — what each top-level folder is for.
 - [doc/benchmarks.md](doc/benchmarks.md) — adding a new benchmark.
 - [doc/conditions.md](doc/conditions.md) — adding a new condition.

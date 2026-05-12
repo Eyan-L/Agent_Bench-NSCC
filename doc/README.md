@@ -14,15 +14,22 @@ that matches what you're trying to do.
 
 | Guide | When to use |
 |---|---|
-| [benchmarks.md](benchmarks.md) | New evaluation suite (the *what to test*) — e.g. SWE-bench Lite, HumanEval, a custom internal task set. |
+| [benchmarks.md](benchmarks.md) | New application/dataset (the *what to test*) — e.g. SWE-bench Lite, HumanEval, a custom internal task set. Lives under `applications/<name>/`. |
 | [conditions.md](conditions.md) | New way the agent attempts a task (the *how* the model is invoked) — e.g. a different retrieval strategy, an ablation, a tool-use variant. |
-| [frontends.md](frontends.md)   | New agent runtime image / orchestrator (the *who runs the agent*) — e.g. swap OpenClaw for SWE-Agent, claude-code, or a custom CLI. |
+| [harnesses.md](harnesses.md)   | New agent runtime / orchestrator (the *who runs the agent*) — e.g. add OpenHands alongside OpenClaw, or swap in claude-code. Lives under `harnesses/<name>/`. |
 
 ## Quick orientation
 
-The three extension axes — benchmark, condition, frontend — are *orthogonal*.
-A new benchmark is a new task set scored against any condition. A new
-condition runs against any benchmark its harness supports. A new frontend
-changes how the agent is launched but not what it's solving. When in doubt
-about which axis a change lives on, check which subfolder of `eval/` the
-change *most* mutates; that's usually the right axis.
+The repo's load-bearing abstraction is three layers:
+
+- **applications/** — *which app/dataset is being evaluated.* Owns instance
+  prep, scoring, and per-(app × harness) glue (e.g. `applications/swebench/openclaw/`).
+- **harnesses/** — *which agent runtime drives the model.* Harness-wide shared
+  parts only.
+- **backend/** — *which inference engine serves the model.* vLLM or SGLang.
+
+The three extension axes — application, condition, harness — are
+orthogonal: a new application is a new task set scored against any
+condition; a new condition runs against any application its conditions list
+supports; a new harness adds a new runtime with its own per-app glue.
+When in doubt about which axis a change lives on, see [layout.md](layout.md).

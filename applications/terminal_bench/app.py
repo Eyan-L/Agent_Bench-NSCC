@@ -57,7 +57,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from applications.swebench.openclaw.gateway_compose import (
+from applications.conditions.gateway_helpers import (
     pick_free_gateway_port as _pick_free_gateway_port,
     release_gateway_port as _release_gateway_port,
 )
@@ -69,6 +69,40 @@ from applications.swebench.app import (
 from orchestration.dispatcher.openclaw_remote import OpenClawRemoteDispatcher
 
 logger = logging.getLogger(__name__)
+
+
+# ----------------------------------------------------------------------
+# Workspace seeding — drop TB-flavoured BOOTSTRAP.md + _oc_validate.sh
+# from the per-app prompts/skills tree into the live /app workspace.
+# ----------------------------------------------------------------------
+
+_THIS_DIR = Path(__file__).resolve().parent
+_BOOTSTRAP_SRC = _THIS_DIR / "openclaw" / "agents" / "BOOTSTRAP.md"
+_VALIDATE_SRC = _THIS_DIR / "openclaw" / "skills" / "verify" / "_oc_validate.sh"
+
+
+def _seed_workspace_helpers(app_dir: Path, instance_data: Dict) -> None:
+    """Drop BOOTSTRAP.md + _oc_validate.sh into the per-run /app workspace.
+
+    Sources of truth (edit these files, not inline strings):
+      - `applications/terminal_bench/openclaw/agents/BOOTSTRAP.md` — silences
+        OC's `[Bootstrap pending] read BOOTSTRAP.md` injection
+        (system-prompt-BDZ2g8e3.js:133-139) and replaces it with explicit
+        container-path rules.
+      - `applications/terminal_bench/openclaw/skills/verify/_oc_validate.sh`
+        — the helper the TB `verify` SKILL.md points at; without it the
+        agent either fails the call or hallucinates a host path.
+
+    Idempotent. Best-effort: warn on OSError; the run can proceed without
+    these helpers, it'll just be more brittle.
+    """
+    try:
+        shutil.copyfile(_BOOTSTRAP_SRC, app_dir / "BOOTSTRAP.md")
+        dst_validate = app_dir / "_oc_validate.sh"
+        shutil.copyfile(_VALIDATE_SRC, dst_validate)
+        os.chmod(dst_validate, 0o755)
+    except OSError as e:
+        logger.warning("workspace seed (BOOTSTRAP.md/_oc_validate.sh) failed: %s", e)
 
 
 # ----------------------------------------------------------------------
@@ -199,12 +233,11 @@ class TerminalBenchDockerHarness:
         # Agent id MUST match three places: (1) the harness config's
         # `openclaw.agents.list[0].id`, (2) the dirname under state_dir/agents/
         # where prompts are dropped, (3) what the condition passes to
-        # `openclaw agent --agent <id>` (currently hardcoded "swebench" in
-        # orchestration/conditions/code_agent/openclaw_agent.py). Pull it from
-        # the OC config when present, defaulting to "swebench" so the existing
-        # condition Just Works.
+        # `openclaw agent --agent <id>` (TerminalBenchOpenClawCondition uses
+        # "terminal_bench"). Pull from OC config when present so a custom
+        # harness can override.
         sandbox_scope = "agent"
-        sandbox_agent_id = self._agent_id_from_harness_cfg() or "swebench"
+        sandbox_agent_id = self._agent_id_from_harness_cfg() or "terminal_bench"
         scope_key = f"agent:{sandbox_agent_id}"
         sandbox_prefix = f"oc-sbx-{rid_short}-"
         task_container_name = _oc_sandbox_name(sandbox_prefix, scope_key)
@@ -256,6 +289,13 @@ class TerminalBenchDockerHarness:
             self._prime_app_from_image(docker_image, app_dir)
         except Exception as e:
             logger.warning("TB workspace prime skipped: %s", e)
+
+        # 2b. Seed BOOTSTRAP.md + _oc_validate.sh into /app. BOOTSTRAP.md
+        #     silences OC's "[Bootstrap pending] please read BOOTSTRAP.md"
+        #     injection (system-prompt-BDZ2g8e3.js:133+) and replaces it
+        #     with explicit TB path rules. _oc_validate.sh is what the
+        #     `verify` skill claims is present — wire it for real.
+        _seed_workspace_helpers(app_dir, instance_data)
 
         # 3. (Optional) per-run state_dir for OC — only when OC is in play.
         state_dir: Optional[Path] = None
@@ -451,9 +491,9 @@ class TerminalBenchDockerHarness:
             _force_rmtree(state_dir)
         # Agent dirname must match the id the condition will invoke with
         # `openclaw agent --agent <id>` AND the openclaw.json `agents.list[].id`.
-        # The condition currently hardcodes "swebench"; we pull the id from
-        # the active harness config so a future per-app id flows through.
-        agent_id = self._agent_id_from_harness_cfg() or "swebench"
+        # TerminalBenchOpenClawCondition uses "terminal_bench"; pull from OC
+        # config when present so a custom harness can override.
+        agent_id = self._agent_id_from_harness_cfg() or "terminal_bench"
         os.makedirs(state_dir / "agents" / agent_id, exist_ok=True)
 
         override = os.environ.get("OC_HOST_STATE_TEMPLATE")
@@ -508,7 +548,13 @@ class TerminalBenchDockerHarness:
                 else swe_skills
             )
             if os.path.isdir(src_agents):
+                # BOOTSTRAP.md is workspace-scoped (lives in /app at runtime,
+                # see _seed_workspace_helpers). The file in agents/ is just
+                # the source-of-truth — don't also copy it into
+                # state_dir/agents/<id>/, where it'd be agent-persona context.
                 for f in os.listdir(src_agents):
+                    if f == "BOOTSTRAP.md":
+                        continue
                     s = os.path.join(src_agents, f)
                     if os.path.isfile(s):
                         shutil.copyfile(s, state_dir / "agents" / agent_id / f)
@@ -669,7 +715,7 @@ class TerminalBenchDockerHarness:
         # agent id used at prepare_environment time).
         run_id = run_id or instance_id
         rid_short = run_id[:12]
-        sandbox_agent_id = self._agent_id_from_harness_cfg() or "swebench"
+        sandbox_agent_id = self._agent_id_from_harness_cfg() or "terminal_bench"
         scope_key = f"agent:{sandbox_agent_id}"
         sandbox_prefix = f"oc-sbx-{rid_short}-"
         task_container_name = _oc_sandbox_name(sandbox_prefix, scope_key)
@@ -913,6 +959,8 @@ class TerminalBenchSingularityHarness:
         logs_dir = run_root / "logs" / "verifier"
         app_dir.mkdir(parents=True, exist_ok=True)
         logs_dir.mkdir(parents=True, exist_ok=True)
+
+        _seed_workspace_helpers(app_dir, instance_data)
 
         instance_name = self._instance_name_for(run_id)
         self._try_stop_instance(instance_name)

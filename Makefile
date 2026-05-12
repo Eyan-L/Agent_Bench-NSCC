@@ -1,8 +1,26 @@
 # bench-platform top-level orchestration.
-# SERVING_BACKEND={vllm|sglang} controls which backend `make serve` launches.
+#
+# Composed-config run model. A run is the cartesian product of three JSON configs:
+#   APP      config/application/<app>/<exp>.json   what to run (instances, repos, budgets)
+#   HARNESS  config/harness/<name>.json             how to drive it + which model
+#                                                   (model selection lives here)
+#   BACKEND  config/backend/<engine>/<name>.json   how to serve it (TP/GPU/port/...
+#                                                   serving presets; no model)
+# Override any of them on the command line, e.g.
+#   make run_phase0 BACKEND=vllm/tp2 HARNESS=openclaw_35b_a3b
+# SERVING_BACKEND={vllm|sglang} still controls which backend `make serve`
+# launches; it is derived from BACKEND's first path segment by default.
 
 SHELL := /usr/bin/env bash
-SERVING_BACKEND ?= sglang
+
+# --- composed-config defaults --------------------------------------------
+APP     ?= swebench/phase0
+HARNESS ?= openclaw_27b
+BACKEND ?= vllm/tp1
+export APP HARNESS BACKEND
+
+# SERVING_BACKEND := first path segment of BACKEND (vllm/... -> vllm).
+SERVING_BACKEND ?= $(firstword $(subst /, ,$(BACKEND)))
 export SERVING_BACKEND
 
 # Eval inputs — set via env or CLI:
@@ -12,14 +30,28 @@ INSTANCE_DATA  ?=
 KIT_ROOT       ?= $(CURDIR)
 export KIT_ROOT
 
-# Composed-config driver inputs. Application JSON is picked per-phase by the
-# _RUN_SWEEP macro; harness + backend are shared and overridable from the CLI:
-#   make run_phase0 HARNESS=openhands_27b BACKEND=vllm/tp2 ...
-APPLICATION_DIR ?= config/application/swebench
-HARNESS         ?= openclaw_27b
-BACKEND         ?= vllm/tp1
-HARNESS_CONFIG  ?= config/harness/$(HARNESS).json
-BACKEND_CONFIG  ?= config/backend/$(BACKEND).json
+# Per-sweep timestamp (Singapore time) + experiment dir. Both Make and the
+# driver use OC_RUN_STAMP so vllm.log + per-run dirs end up siblings under
+# <app_output_dir>/<stamp>/. Override OC_RUN_STAMP to pin (resume an existing
+# dir) — `?=` honors a value passed on the command line or env.
+OC_RUN_STAMP ?= $(shell TZ=Asia/Singapore date '+%Y-%m-%d_%H-%M-%S')
+export OC_RUN_STAMP
+
+# Deferred (=) so target-specific `APP := <x>` overrides flow through. Reads
+# output_dir from the active app JSON; falls back to data/runs/_unknown when
+# the JSON is missing (e.g. `make help` with the default APP).
+APP_OUTPUT_DIR = $(shell python -c 'import json; print(json.load(open("config/application/$(APP).json"))["output_dir"])' 2>/dev/null)
+SWEEP_DIR      = $(APP_OUTPUT_DIR)/$(OC_RUN_STAMP)
+
+# Serving auto-launch. _ensure_serve polls SERVE_URL; if it can't reach it,
+# it forks `make serve` into the background, writes the engine log to
+# SERVE_LOG, and waits up to SERVE_READY_TIMEOUT seconds for /v1/models to
+# come up. Set SERVE_AUTO=0 to skip (useful when you launch the backend
+# yourself or want to fail fast on missing serving).
+SERVE_URL            ?= http://localhost:8000/v1/models
+SERVE_LOG            ?= $(SWEEP_DIR)/vllm.log
+SERVE_READY_TIMEOUT  ?= 600
+SERVE_AUTO           ?= 1
 
 _check_eval_inputs:
 	@if [ -z "$(SWEBENCH_ROOT)" ] || [ -z "$(INSTANCE_DATA)" ]; then \
@@ -27,9 +59,36 @@ _check_eval_inputs:
 	    exit 2; \
 	fi
 
+_ensure_serve:
+	@if [ "$(SERVE_AUTO)" = "0" ]; then \
+	    echo "[serve] SERVE_AUTO=0 — skipping auto-launch"; \
+	elif curl -s -f -m 2 "$(SERVE_URL)" >/dev/null 2>&1; then \
+	    echo "[serve] $(SERVE_URL) already up — reusing"; \
+	else \
+	    mkdir -p "$$(dirname "$(SERVE_LOG)")"; \
+	    echo "[serve] launching $(SERVING_BACKEND) → $(SERVE_LOG)"; \
+	    nohup bash backend/common/serve.sh >>"$(SERVE_LOG)" 2>&1 </dev/null & \
+	    pid=$$!; \
+	    echo "[serve] PID $$pid — polling $(SERVE_URL) (timeout $(SERVE_READY_TIMEOUT)s)"; \
+	    deadline=$$(( $$(date +%s) + $(SERVE_READY_TIMEOUT) )); \
+	    while ! curl -s -f -m 2 "$(SERVE_URL)" >/dev/null 2>&1; do \
+	        if ! kill -0 $$pid 2>/dev/null; then \
+	            echo "[serve] PID $$pid died — see $(SERVE_LOG)" >&2; \
+	            tail -n 30 "$(SERVE_LOG)" >&2 2>/dev/null; exit 1; \
+	        fi; \
+	        if [ $$(date +%s) -gt $$deadline ]; then \
+	            echo "[serve] timed out after $(SERVE_READY_TIMEOUT)s — see $(SERVE_LOG)" >&2; \
+	            exit 1; \
+	        fi; \
+	        sleep 10; \
+	    done; \
+	    echo "[serve] ready"; \
+	fi
+
 .PHONY: help serve serve-docker serve-stop serve-logs serve-status \
         eval stress analyze report test clean \
-        run_phase0 run_phase1 run_phase2 _check_eval_inputs \
+        run_phase0 run_phase1 run_phase2 run_tb tb-tasks \
+        _check_eval_inputs _ensure_serve \
         otel-up-host otel-down-host scoring-server \
         openhands-image \
         mig-status mig-prep-test mig-teardown
@@ -37,10 +96,11 @@ _check_eval_inputs:
 help:
 	@echo "Targets:"
 	@echo "  serve       Launch backend (SERVING_BACKEND=$(SERVING_BACKEND))"
-	@echo "  eval        Run real-eval pipeline (orchestration/runner/driver.py)"
-	@echo "  run_phase0  Run phase0 sanity sweep (1 instance)"
-	@echo "  run_phase1  Run phase1 sweep"
-	@echo "  run_phase2  Run phase2 serving sweep (RQ3)"
+	@echo "  eval        Run driver with current APP/HARNESS/BACKEND"
+	@echo "  run_phase0  SWE-bench phase0 sanity (APP=swebench/phase0)"
+	@echo "  run_phase1  SWE-bench phase1 mini-verified (APP=swebench/phase1)"
+	@echo "  run_phase2  SWE-bench phase2 serving sweep (APP=swebench/phase2_serving)"
+	@echo "  run_tb      Terminal-Bench kv-store-grpc (APP=terminal_bench/kv_store, HARNESS=tb_react)"
 	@echo "  stress      Run simulated stress workload (stress/loadgen-bin)"
 	@echo "  analyze     Aggregate results (orchestration/analysis/aggregate.py)"
 	@echo "  report      Build report (orchestration/report/generate.py)"
@@ -52,42 +112,75 @@ help:
 	@echo "  openhands-image  Build agent-bench/openhands:<ver> harness image"
 	@echo "  mig-status / mig-prep-test / mig-teardown  GPU MIG management"
 	@echo ""
-	@echo "Env: SERVING_BACKEND={vllm|sglang} (current: $(SERVING_BACKEND))"
-	@echo "     SWEBENCH_ROOT=$(SWEBENCH_ROOT)"
-	@echo "     INSTANCE_DATA=$(INSTANCE_DATA)"
-	@echo "     HARNESS=$(HARNESS)   (-> $(HARNESS_CONFIG))"
-	@echo "     BACKEND=$(BACKEND)   (-> $(BACKEND_CONFIG))"
-	@echo "     VLLM_MIG_UUID   (bind serve-docker to a MIG slice; see mig-status)"
-	@echo "     MIG_GPU/PROFILE (mig-prep-test args: defaults 1 / 1g.24gb)"
+	@echo "Composed config (override any at the command line):"
+	@echo "  APP=$(APP)"
+	@echo "  HARNESS=$(HARNESS)"
+	@echo "  BACKEND=$(BACKEND)  -> SERVING_BACKEND=$(SERVING_BACKEND)"
+	@echo "  SWEBENCH_ROOT=$(SWEBENCH_ROOT)"
+	@echo "  INSTANCE_DATA=$(INSTANCE_DATA)"
+	@echo ""
+	@echo "Experiment folder (Singapore time):"
+	@echo "  OC_RUN_STAMP=$(OC_RUN_STAMP)"
+	@echo "  SWEEP_DIR=$(SWEEP_DIR)"
+	@echo ""
+	@echo "Serving auto-launch (run_phase*):"
+	@echo "  SERVE_AUTO=1                 auto-start backend if down (0 to disable)"
+	@echo "  SERVE_URL=$(SERVE_URL)"
+	@echo "  SERVE_LOG=$(SERVE_LOG)              (lives inside SWEEP_DIR by default)"
+	@echo "  SERVE_READY_TIMEOUT=$(SERVE_READY_TIMEOUT)s"
+	@echo ""
+	@echo "Docker / GPU helpers:"
+	@echo "  VLLM_MIG_UUID                bind serve-docker to a MIG slice (see mig-status)"
+	@echo "  MIG_GPU=$(MIG_GPU) / MIG_PROFILE=$(MIG_PROFILE) (mig-prep-test args)"
 
 serve:
 	bash backend/common/serve.sh
 
-eval:
-	python3 -m orchestration.runner.driver $(EVAL_ARGS)
+eval: _check_eval_inputs _ensure_serve
+	python -m orchestration.runner.driver \
+	  --app     config/application/$(APP).json \
+	  --harness config/harness/$(HARNESS).json \
+	  --backend config/backend/$(BACKEND).json \
+	  --swebench-root $(SWEBENCH_ROOT) \
+	  --instance-data $(INSTANCE_DATA) \
+	  $(EXTRA_ARGS)
 
-# Phase shortcuts — wrap the composed-config driver. Each phase pairs the
-# per-experiment application JSON with the shared HARNESS / BACKEND configs.
-# Override SWEBENCH_ROOT / INSTANCE_DATA / HARNESS / BACKEND / EXTRA_ARGS as
-# needed.
-define _RUN_SWEEP
-python3 -m orchestration.runner.driver \
-  --app $(APPLICATION_DIR)/$(1).json \
-  --harness $(HARNESS_CONFIG) \
-  --backend $(BACKEND_CONFIG) \
-  --swebench-root $(SWEBENCH_ROOT) \
-  --instance-data $(INSTANCE_DATA) \
-  $(EXTRA_ARGS)
-endef
+# Phase shortcuts — same as `eval`, but pin APP so the user can stay on
+# `make run_phase0` muscle memory. Override HARNESS / BACKEND as needed.
+run_phase0: APP := swebench/phase0
+run_phase0: eval
 
-run_phase0: _check_eval_inputs
-	$(call _RUN_SWEEP,phase0)
+run_phase1: APP := swebench/phase1
+run_phase1: eval
 
-run_phase1: _check_eval_inputs
-	$(call _RUN_SWEEP,phase1)
+run_phase2: APP := swebench/phase2_serving
+run_phase2: HARNESS := openclaw_35b_a3b
+run_phase2: BACKEND := vllm/tp2_rq3
+run_phase2: eval
 
-run_phase2: _check_eval_inputs
-	$(call _RUN_SWEEP,phase2_serving)
+# Terminal-Bench shortcut: defaults to the kv_store task and tb_react harness.
+# TB doesn't use SWE-bench inputs, so it bypasses `_check_eval_inputs` and
+# materializes its own instance_data via the loader. Override:
+#   make run_tb HARNESS=openclaw_27b   # OC-driven TB (needs `openclaw` block)
+#   make run_tb HARNESS_BACKEND=singularity   # HPC fallback
+TB_INSTANCE_DATA ?= $(KIT_ROOT)/data/terminal_bench/tasks.json
+
+# Materialize the TB tasks.json from applications/terminal_bench/tasks/.
+# Re-runs are idempotent — the loader overwrites the file each time.
+tb-tasks:
+	@mkdir -p "$$(dirname "$(TB_INSTANCE_DATA)")"
+	python -m applications.terminal_bench.loader "$(TB_INSTANCE_DATA)"
+	@echo "[tb] instance_data -> $(TB_INSTANCE_DATA)"
+
+run_tb: APP := terminal_bench/kv_store
+run_tb: HARNESS := tb_react_27b
+run_tb: tb-tasks _ensure_serve
+	python -m orchestration.runner.driver \
+	  --app     config/application/$(APP).json \
+	  --harness config/harness/$(HARNESS).json \
+	  --backend config/backend/$(BACKEND).json \
+	  --instance-data $(TB_INSTANCE_DATA) \
+	  $(EXTRA_ARGS)
 
 # Native OTel collector (no docker). Downloads otelcol-contrib on first run.
 otel-up-host:
@@ -100,7 +193,7 @@ otel-down-host:
 # Clients set OC_SCORING_URL=http://<this-host>:8765 to use it.
 SCORING_PORT ?= 8765
 scoring-server: _check_eval_inputs
-	python3 -m orchestration.scoring_server.main \
+	python -m orchestration.scoring_server.main \
 	  --swebench-root $(SWEBENCH_ROOT) \
 	  --host 0.0.0.0 --port $(SCORING_PORT)
 
@@ -108,10 +201,10 @@ stress:
 	./stress/loadgen-bin $(STRESS_ARGS)
 
 analyze:
-	python3 -m orchestration.analysis.aggregate $(ANALYZE_ARGS)
+	python -m orchestration.analysis.aggregate $(ANALYZE_ARGS)
 
 report:
-	python3 -m orchestration.report.generate $(REPORT_ARGS)
+	python -m orchestration.report.generate $(REPORT_ARGS)
 
 test:
 	python3 -m tests.trace.test_trace_pipeline

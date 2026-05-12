@@ -1,112 +1,107 @@
-# Adding a new frontend
+# Adding a new harness
 
-A *frontend* is the agent runtime — the image plus the orchestrator that
-actually drives the LLM through tool calls. The only frontend currently
-implemented is OpenClaw (`frontend/openclaw/`). This guide covers swapping in
-or adding alongside another (e.g. SWE-Agent, claude-code, a custom CLI).
+A *harness* is the agent runtime — the runtime image plus the orchestrator that
+actually drives the LLM through tool calls. The only harness currently
+implemented is OpenClaw (`harnesses/openclaw/`). This guide covers swapping in
+or adding alongside another (e.g. OpenHands, SWE-Agent, claude-code, a custom
+CLI).
 
-## What "frontend" includes
+In the three-layer abstraction:
+
+- **harness-wide shared parts** live under `harnesses/<name>/` (gateway
+  lifecycle, patches, common config templates).
+- **per-(app × harness) customization** lives under
+  `applications/<app>/<name>/` (agent prompts, skills, mount/gateway-start
+  helpers, host-side verify wiring). This split is load-bearing — see
+  [layout.md](layout.md).
+
+## What "harness" includes
 
 ```
-frontend/<name>/
+harnesses/<name>/
 ├── apply_patch.py        # if the runtime needs binary patches at deploy time
 ├── configure.sh          # any setup / dep checks
-├── gateway_up.sh         # bring the frontend up for one run
+├── gateway_up.sh         # bring the harness up for one run
 ├── gateway_down.sh       # tear it down
 ├── patch/                # source patches (vendored)
 │   └── *.patch
-└── state/                # runtime config (mounted into the container)
+└── state/                # runtime config template (mounted into the container)
     └── ...
 ```
+
+For each application that runs on this harness:
+
+```
+applications/<app>/<name>/
+├── agents/               # static prompt files (mounted into /root/.openclaw/agents/<id>/)
+└── skills/               # SKILL.md folders (OpenClaw-specific concept; each one tells the agent how to invoke a capability)
+```
+
+Cross-app gateway helpers (port pool + singularity argv wrapper) live in
+`applications/conditions/gateway_helpers.py`.
 
 Two distinct concerns:
 
 1. **Image plumbing** — pulling/building the SIF, applying patches, ensuring
-   the binary is on PATH inside the container. Lives in `frontend/<name>/`.
+   the binary is on PATH inside the container. Lives in `harnesses/<name>/`.
 2. **Per-run lifecycle** — start the gateway/agent process, hand a token+port
    back to the harness, tear it down. Surfaced by `gateway_up.sh` /
    `gateway_down.sh`.
 
 ## 1. Image plumbing
 
-For each frontend, decide:
+For each harness, decide:
 
 - **Where does the binary live?** OpenClaw uses
   `$SCRATCH/sif_images/oc_runtime.sif` pulled from `docker://alpine/openclaw:main`.
   PBS handles the pull (see `scripts/execution_pbs/run_benchmark.pbs:STAGE_OC_CHECK`).
 - **Does it need patching?** OpenClaw applies four patches to its bundled JS
-  (see `frontend/openclaw/patch/MANIFEST.json`). The patch overlay is built
+  (see `harnesses/openclaw/patch/MANIFEST.json`). The patch overlay is built
   by `scripts/execution_pbs/build_oc_overlay.sh` once per host.
 - **What state does it read?** OpenClaw reads `state/openclaw.json` (gateway
-  config + plugin enable/disable + agent definitions) and per-agent prompts
-  (`state/agents/swebench/{AGENTS,SOUL,...}.md`).
+  config + plugin enable/disable + agent definitions). The per-app slice
+  (agent prompts, skills) lives under `applications/<app>/<name>/` and is
+  merged with the shared template at run start.
 
-If your frontend doesn't need patching, the layout simplifies to just
+If your harness doesn't need patching, the layout simplifies to just
 `gateway_up.sh` + `gateway_down.sh` + `state/`.
 
-## 2. The gateway lifecycle scripts
+## 2. The gateway lifecycle
 
-The harness invokes these from `applications/<bench>/app.py:prepare_environment`:
+In the current OpenClaw layout the harness's `prepare_environment` directly
+runs `docker run -d ... --entrypoint /usr/local/bin/openclaw <image> gateway`
+and waits for the gateway-ready log line via `docker logs`. There are no
+separate `gateway_up.sh` / `gateway_down.sh` scripts in the in-flight path —
+those exist under `harnesses/openclaw/` as reference / singularity-fallback
+helpers but the docker mode doesn't shell into them.
 
-```bash
-# gateway_up.sh — must be idempotent
-#   $1: container_id  (or empty for non-container backends)
-#   $2: port          (free port the harness picked)
-#   $3: token         (random secret — write into $WORKSPACE/.your_frontend_env)
-#   $4: run_id        (for OTel resource attrs)
-#
-# Behavior:
-#   - Start the agent runtime in the background
-#   - Block until it's ready (poll a readiness signal)
-#   - Persist URL + token to /tmp/<frontend>_env inside the container so
-#     subsequent `docker exec <frontend> agent ...` invocations can source it
-#   - exit 0 on ready, non-zero with tail-of-log on failure
-```
+Key invariants the harness must enforce:
 
-```bash
-# gateway_down.sh — also idempotent; called from finally
-#   $1: container_id
-#
-# Behavior:
-#   - SIGTERM the gateway (give it time to flush — OTel exporters need this)
-#   - SIGKILL after grace period
-#   - Free the port
-#   - Never raise — if there's nothing to stop, exit 0
-```
-
-Look at `frontend/openclaw/gateway_up.sh` for a working reference. Key points:
-
-- **Token + port via env vars**, never on the command line — they show up in
-  `ps` otherwise.
+- **Token + port via env vars on the docker run**, never on the command line
+  — they'd show up in `ps` otherwise.
 - **`OTEL_RESOURCE_ATTRIBUTES=oc.run_id=$RUN_ID`** so concurrent runs don't
   cross-contaminate the shared trace file.
-- **Readiness via log grep** (`[gateway] ready`) is simpler and more reliable
-  than HTTP polling for processes that take 1-2 minutes to load plugins.
+- **Readiness via `docker logs | grep '[gateway] ... listening on'`** — more
+  reliable than HTTP polling for processes that take 1-2 minutes to load
+  plugins.
+- **`pick_free_gateway_port` / `release_gateway_port`** from
+  `applications/conditions/gateway_helpers.py` to coordinate ports across
+  concurrent runs.
 
-## 3. Hook into the harness
+## 3. Hook into the application
 
-The harness is the seam — it doesn't know about specific frontends, just calls
-the lifecycle scripts. SWE-bench's `applications/swebench/app.py`
-hard-codes OpenClaw via `frontend/openclaw/gateway_up.sh`. To make it
-pluggable:
-
-```python
-# in harness.prepare_environment
-frontend = os.environ.get("OC_FRONTEND", "openclaw")
-gateway_up = f"frontend/{frontend}/gateway_up.sh"
-subprocess.run([gateway_up, container_id, str(port), token, run_id], check=True)
-# ... return env_info with gateway_port/token/url ...
-```
-
-Then add a corresponding `gateway_down.sh` invocation in `cleanup`.
-
-If you only ever use one frontend, skip the env-var indirection — the harness
-can just call `frontend/<your_frontend>/gateway_up.sh` directly.
+The app's `app.py:prepare_environment` should: pick a port (via
+`pick_free_gateway_port`), build the docker run argv inline (state_dir +
+bridge mounts + env vars), wait for gateway-ready, return env_info with
+gateway_url + gateway_token. SWE-bench (`applications/swebench/app.py`) and
+TB (`applications/terminal_bench/app.py`) both follow this pattern; the OC
+container start is ~30 lines of `docker run -d ...` argv with the standard
+mounts.
 
 ## 4. Tell conditions about it
 
 Conditions invoke the agent through the gateway. The current pattern (see
-`orchestration/conditions/code_agent/openclaw_agent.py:_invoke_agent`):
+`applications/conditions/openclaw_agent.py:_invoke_agent`):
 
 ```python
 # Inside the container, source the env file the gateway_up.sh script wrote
@@ -114,9 +109,9 @@ docker exec $cid bash -c "source /tmp/oc_gateway_env && \
     openclaw agent --json --message ..."
 ```
 
-For your frontend:
+For your harness:
 
-1. Pick an in-container env file path (`/tmp/<frontend>_env`) and have
+1. Pick an in-container env file path (`/tmp/<harness>_env`) and have
    `gateway_up.sh` write `$URL` and `$TOKEN` to it.
 2. In your condition, source it before invoking the CLI.
 3. Parse the CLI's JSON output into the per-step trace shape.
@@ -125,11 +120,11 @@ For your frontend:
 
 OpenClaw's diagnostics-otel plugin emits `openclaw.model.usage` and
 `openclaw.tool.call` spans. The condition's `_snapshot_otel_spans` slices
-those into `spans.jsonl`, with synth fallbacks (`_validate_bridge` does the
-self-validation case; `_maybe_synthesize_*` fills missing per-call spans
-when patches don't fire).
+those into `spans.jsonl`, with synth fallbacks (`_maybe_synthesize_*` fills
+missing per-call spans when OC's selection/diagnostics-otel patches don't
+fire on the build in use).
 
-For a new frontend, mirror the schema so the analysis layer doesn't need to
+For a new harness, mirror the schema so the analysis layer doesn't need to
 branch:
 
 | Span name | Required attrs |
@@ -137,35 +132,29 @@ branch:
 | `openclaw.model.usage` | `openclaw.tokens.{input,output,cache_read,cache_write,total}`, `openclaw.model`, `openclaw.provider`, `openclaw.channel` |
 | `openclaw.tool.call`   | `openclaw.tool.name`, `openclaw.tool.callId`, `openclaw.tool.isError`, `openclaw.runId`, `openclaw.sessionId` |
 
-If your frontend doesn't natively emit OTel, write the spans directly into
+If your harness doesn't natively emit OTel, write the spans directly into
 `<run_dir>/spans.jsonl` from the condition (the TB ReAct condition does this
-via `orchestration/conditions/code_agent/terminal_bench/react.py:_emit_span`).
+via `applications/terminal_bench/conditions/react.py:_emit_span`).
 
 ## 6. Smoke test
 
 ```bash
-# Manual: bring up the frontend, hit it once, tear down
+# Manual: bring up the harness, hit it once, tear down
 RUN_DIR=$(mktemp -d)
-bash frontend/your_frontend/gateway_up.sh "" 18900 "smoke-token" smoke-run
-# ... your_frontend agent invocation ...
-bash frontend/your_frontend/gateway_down.sh ""
+bash harnesses/your_harness/gateway_up.sh "" 18900 "smoke-token" smoke-run
+# ... your_harness agent invocation ...
+bash harnesses/your_harness/gateway_down.sh ""
 ```
 
-Then run a 1-instance sweep with `OC_FRONTEND=your_frontend` set.
+Then run a 1-instance sweep that uses your harness condition.
 
 ## Checklist
 
-- [ ] `frontend/<name>/gateway_up.sh` and `gateway_down.sh`, both idempotent
-- [ ] State files mounted (or copied) into the runtime container at the path
-      the binary expects
-- [ ] Env file (`/tmp/<frontend>_env`) holds URL + token for the condition to
-      source
-- [ ] `OTEL_RESOURCE_ATTRIBUTES=oc.run_id=$RUN_ID` set when launching the
-      agent so spans demux per-run
-- [ ] `gateway_down.sh` SIGTERMs first, gives ≥1s for OTel flush, then
-      SIGKILLs
-- [ ] Spans emitted in the canonical schema (or the condition writes them
-      directly to `spans.jsonl`)
-- [ ] Harness invokes the new frontend (either hard-coded or via `OC_FRONTEND`
-      env var)
+- [ ] `harnesses/<name>/gateway_up.sh` and `gateway_down.sh`, both idempotent
+- [ ] `harnesses/<name>/state/` template (with whatever shared config the runtime needs)
+- [ ] For each application running on this harness: `applications/<app>/<name>/{agents,skills}` (prompts + skills); harness-driving code lives in `applications/<app>/app.py`.
+- [ ] Env file (`/tmp/<harness>_env`) holds URL + token for the condition to source
+- [ ] `OTEL_RESOURCE_ATTRIBUTES=oc.run_id=$RUN_ID` set when launching the agent so spans demux per-run
+- [ ] `gateway_down.sh` SIGTERMs first, gives ≥1s for OTel flush, then SIGKILLs
+- [ ] Spans emitted in the canonical schema (or the condition writes them directly to `spans.jsonl`)
 - [ ] One full run produces `verdict.json` + `step_trace.jsonl` + `spans.jsonl`

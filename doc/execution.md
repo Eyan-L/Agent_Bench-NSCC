@@ -1,17 +1,16 @@
 # Execution
 
-Two deployment modes — pick by environment, not by preference. The
-underlying eval pipeline is identical; only the harness backend changes.
+Two deployment modes — pick by environment. In **both**, openclaw and the
+SWE-bench task each run in their **own** isolated container/sif. The host
+runs only vLLM (or another backend serving the LLM).
 
 | Mode | When to use | Harness backend |
 |---|---|---|
-| **Docker (local)** | Workstation development; iterating on a condition | `SWEBenchHarness` |
-| **PBS / singularity (cluster)** | HPC nodes without docker daemon; batch sweeps | `SingularityHarness` |
+| **Docker** | Workstation / docker-equipped nodes | `SWEBenchHarness` (oc container + task container, shared workspace) |
+| **Singularity** | HPC nodes without docker daemon | `SingularityHarness` (oc .sif + task .sif; under rework) |
 
-Selected via `HARNESS_BACKEND={docker,singularity}`. Default in
-`scripts/execution_pbs/run_benchmark.pbs` is `singularity`; default for
-`make eval` / `make run_phase*` is `docker`. (Bare-host mode was removed —
-openclaw must always be containerized.)
+Selected via `HARNESS_BACKEND={docker,singularity}`. Default for `make eval`
+is `docker`. There is **no** host mode — openclaw is always containerized.
 
 ---
 
@@ -36,6 +35,7 @@ Per-mode infrastructure (only the row matching your mode applies):
 |---|---|
 | Docker (local) | Docker daemon, ability to pull from `docker.io/swebench/...` |
 | PBS / singularity (cluster) | `singularity` ≥ 3.7 on PATH, PBS scheduler, `qsub` |
+| Bare host | Python only — no container runtime |
 
 Benchmark-specific:
 
@@ -63,70 +63,40 @@ curl -s http://localhost:8000/v1/models | jq .
 
 ### Run a sweep
 
-Via Makefile (preferred):
-
-```bash
-HARNESS_BACKEND=docker \
-    make run_phase1 SWEBENCH_ROOT=/path/to/SWE-bench \
-                    INSTANCE_DATA=/path/to/verified.json
-```
-
-Override the harness/backend JSONs from the CLI:
-
-```bash
-make run_phase1 HARNESS=openhands_27b BACKEND=vllm/tp2 \
-                SWEBENCH_ROOT=... INSTANCE_DATA=...
-```
-
-The driver is `orchestration.runner.driver`, which composes three
-configs: `--app config/application/swebench/<exp>.json`,
-`--harness config/harness/<HARNESS>.json`,
-`--backend config/backend/<BACKEND>.json`. The Makefile wires those for
-you. Direct invocation:
-
 ```bash
 HARNESS_BACKEND=docker \
 PYTHONPATH=. python3 -m orchestration.runner.driver \
-    --app config/application/swebench/phase1.json \
-    --harness config/harness/openclaw_27b.json \
-    --backend config/backend/vllm/tp1.json \
-    --swebench-root /path/to/SWE-bench \
-    --instance-data /path/to/verified.json
+    --sweep config/sweeps/phase1.yaml \
+    --max-runs 1
+```
+
+Or via Makefile:
+
+```bash
+make eval EVAL_ARGS="--sweep config/sweeps/phase1.yaml --max-runs 1"
 ```
 
 The Docker harness (`applications/swebench/app.py:SWEBenchHarness`)
-pulls the per-instance image lazily and `docker run`s it. First run on a
-new instance pulls 1-3 GiB; subsequent runs reuse the cached image.
+pulls the per-instance image lazily and `docker run`s it. First run on a new
+instance pulls 1-3 GiB; subsequent runs reuse the cached image.
 
 ### Single-instance debug loop
 
-Drop a one-off application JSON next to `phase0.json`:
-
 ```bash
-INSTANCE=astropy__astropy-12907   # any verified instance_id
+INSTANCE=$(jq -r 'keys[0]' "$INSTANCE_DATA")
 
-cat > config/application/swebench/smoke.json <<EOF
-{
-  "sweep_name": "smoke",
-  "plan_version": "v1.0",
-  "application": "swebench",
-  "instances": ["$INSTANCE"],
-  "repo_mapping": {"$INSTANCE": {"repo_id": "astropy/astropy", "base_commit": "d16bfe05a744909de4b27f5875fe0d4ed41ce607"}},
-  "container_image": "swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest",
-  "wall_clock_budget_seconds": 1800,
-  "output_dir": "data/runs/smoke",
-  "seeds": [0],
-  "parallel_limit_gpu": 1,
-  "parallel_limit_cpu_cores": 8
-}
+cat > /tmp/one.yaml <<EOF
+sweep_id: smoke
+instances: ["$INSTANCE"]
+conditions:
+  - { condition_id: openclaw_agent, condition_type: openclaw_agent, model: {...}, agent: {...} }
+serving: { config_id: vllm_default, base_url: "http://localhost:8000/v1" }
+seeds: [0]
+output_dir: data/runs/smoke
 EOF
 
-HARNESS_BACKEND=docker PYTHONPATH=. python3 -m orchestration.runner.driver \
-    --app config/application/swebench/smoke.json \
-    --harness config/harness/openclaw_27b.json \
-    --backend config/backend/vllm/tp1.json \
-    --swebench-root /path/to/SWE-bench \
-    --instance-data /path/to/verified.json
+HARNESS_BACKEND=docker PYTHONPATH=. \
+    python3 -m orchestration.runner.driver --sweep /tmp/one.yaml
 ```
 
 Inspect `data/runs/smoke/<run_id>/{verdict.json,step_trace.jsonl,spans.jsonl}`.
@@ -145,8 +115,8 @@ collector, run the driver, tear everything down.
 # Default bench profile (4× A100, 24h walltime)
 qsub scripts/execution_pbs/run_benchmark.pbs
 
-# Override the application, skip stage 0 (assume pylib already populated)
-qsub -v STAGE_SWEBENCH=0,APP=$KIT_ROOT/config/application/swebench/phase0.json \
+# Override the sweep, skip stage 0 (assume pylib already populated)
+qsub -v STAGE_SWEBENCH=0,SWEEP=$KIT_ROOT/config/sweeps/phase0.yaml \
     scripts/execution_pbs/run_benchmark.pbs
 
 # Test profile — small model on 1 GPU, smokes the full pipeline cheaply
@@ -170,7 +140,7 @@ qsub scripts/execution_pbs/run_benchmark_tb.pbs
 | `STAGE_VLLM`     | start vLLM in singularity, serve the model |
 | `STAGE_OC_CHECK` | pull alpine/openclaw sif + bake patch overlay |
 | `STAGE_OTEL`     | start the local OTel collector that writes otel-traces.jsonl |
-| `STAGE_RUN`      | invoke `orchestration/runner/driver` with the composed configs |
+| `STAGE_RUN`      | invoke `orchestration/runner/driver` with the sweep |
 | `STAGE_CLEANUP`  | kill vLLM + OTel, free ports |
 
 See the header comment in `scripts/execution_pbs/run_benchmark.pbs` for the
@@ -179,7 +149,7 @@ full env-var menu.
 ### Outputs on the cluster
 
 Per-run dirs land in `$KIT_ROOT/data/runs/<sweep_id>/<run_id>/`. Logs go to
-`$KIT_ROOT/logs/`:
+`$KIT_ROOT/data/logs/`:
 
 - `pbs.log` — top-level PBS job log
 - `vllm.log` — engine stdout (parsed by `engine_log_tailer`)
@@ -188,21 +158,25 @@ Per-run dirs land in `$KIT_ROOT/data/runs/<sweep_id>/<run_id>/`. Logs go to
 
 ---
 
-## Scoring offload (HTTP scoring server)
+## Mode 3 — Bare host
 
-For singularity / restricted-network nodes that can't run the full
-SWE-bench scoring image themselves, run the scoring server on a docker
-host and point sweeps at it:
+Removed. OpenClaw is always containerized; running the agent on the host
+process is no longer supported. If you need a quick smoke without the
+SWE-bench task image, use `HARNESS_BACKEND=docker` and skip the agent
+condition (use `ar_issue_only` for one-shot AR baseline). Legacy notes:
 
-```bash
-# On the docker host
-make scoring-server SWEBENCH_ROOT=/path/to/SWE-bench INSTANCE_DATA=/path/to/verified.json
+1. `OC_SCORING_SIF_DIR` set → score via singularity (still needs SIFs).
+2. `OC_SCORING_URL` set → POST patch + instance to a scoring server
+   (`orchestration/scoring_server/main.py` is a reference implementation).
+3. Neither → write `predictions-<instance>.json` next to the workspace and
+   exit with `status: "DEFERRED"`. Score later with
+   `python -m swebench.harness.run_evaluation`.
 
-# On the sweep node
-export OC_SCORING_URL=http://<docker-host>:8765
-```
+### When host mode is right
 
-The reference implementation is `orchestration/scoring_server/main.py`.
+- Replaying analysis on existing run dirs (no new agent runs).
+- Smoke-testing a condition end-to-end without docker/singularity overhead.
+- Running on a system that has neither docker nor singularity available.
 
 ---
 
@@ -285,7 +259,7 @@ Outputs land in `stress/loadgen/result/`.
 
 | Symptom | First check |
 |---|---|
-| `spans.jsonl` has only one record (heartbeat) | OC patches not applied — see `frontend/openclaw/patch/MANIFEST.json` markers and the patch overlay build |
+| `spans.jsonl` has only one record (heartbeat) | OC patches not applied — see `harnesses/openclaw/patch/MANIFEST.json` markers and the patch overlay build |
 | `replayInvalid: true` in trajectory | Long-context formatting drift — slim the system prompt or raise per-call `max_tokens` |
 | `ENOTEMPTY` on plugin extract | Run `bash scripts/execution_pbs/oc_plugin_cache_clean.sh $OC_PLUGIN_CACHE` |
 | vLLM never reaches ready | `tail -50 $LOG_DIR/vllm.log` — usually plugin npm install on a cold cache (network needed) |
