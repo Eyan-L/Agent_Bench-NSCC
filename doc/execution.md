@@ -1,17 +1,17 @@
 # Execution
 
-Three deployment modes — pick by environment, not by preference. The
+Two deployment modes — pick by environment, not by preference. The
 underlying eval pipeline is identical; only the harness backend changes.
 
 | Mode | When to use | Harness backend |
 |---|---|---|
 | **Docker (local)** | Workstation development; iterating on a condition | `SWEBenchHarness` |
 | **PBS / singularity (cluster)** | HPC nodes without docker daemon; batch sweeps | `SingularityHarness` |
-| **Bare host (no container)** | Quick smoke; analysis-only replays; no scoring backend | `HostHarness` (scoring deferred or via HTTP) |
 
-Selected via `HARNESS_BACKEND={docker,singularity,host}`. Default in
+Selected via `HARNESS_BACKEND={docker,singularity}`. Default in
 `scripts/execution_pbs/run_benchmark.pbs` is `singularity`; default for
-`make eval` is `docker`.
+`make eval` / `make run_phase*` is `docker`. (Bare-host mode was removed —
+openclaw must always be containerized.)
 
 ---
 
@@ -36,7 +36,6 @@ Per-mode infrastructure (only the row matching your mode applies):
 |---|---|
 | Docker (local) | Docker daemon, ability to pull from `docker.io/swebench/...` |
 | PBS / singularity (cluster) | `singularity` ≥ 3.7 on PATH, PBS scheduler, `qsub` |
-| Bare host | Python only — no container runtime |
 
 Benchmark-specific:
 
@@ -64,40 +63,70 @@ curl -s http://localhost:8000/v1/models | jq .
 
 ### Run a sweep
 
+Via Makefile (preferred):
+
 ```bash
 HARNESS_BACKEND=docker \
-PYTHONPATH=. python3 -m eval.runner.driver \
-    --sweep config/sweeps/phase1.yaml \
-    --max-runs 1
+    make run_phase1 SWEBENCH_ROOT=/path/to/SWE-bench \
+                    INSTANCE_DATA=/path/to/verified.json
 ```
 
-Or via Makefile:
+Override the harness/backend JSONs from the CLI:
 
 ```bash
-make eval EVAL_ARGS="--sweep config/sweeps/phase1.yaml --max-runs 1"
+make run_phase1 HARNESS=openhands_27b BACKEND=vllm/tp2 \
+                SWEBENCH_ROOT=... INSTANCE_DATA=...
 ```
 
-The Docker harness (`eval/benchmarks/swebench/harness.py:SWEBenchHarness`)
-pulls the per-instance image lazily and `docker run`s it. First run on a new
-instance pulls 1-3 GiB; subsequent runs reuse the cached image.
+The driver is `orchestration.runner.driver`, which composes three
+configs: `--app config/application/swebench/<exp>.json`,
+`--harness config/harness/<HARNESS>.json`,
+`--backend config/backend/<BACKEND>.json`. The Makefile wires those for
+you. Direct invocation:
+
+```bash
+HARNESS_BACKEND=docker \
+PYTHONPATH=. python3 -m orchestration.runner.driver \
+    --app config/application/swebench/phase1.json \
+    --harness config/harness/openclaw_27b.json \
+    --backend config/backend/vllm/tp1.json \
+    --swebench-root /path/to/SWE-bench \
+    --instance-data /path/to/verified.json
+```
+
+The Docker harness (`applications/swebench/app.py:SWEBenchHarness`)
+pulls the per-instance image lazily and `docker run`s it. First run on a
+new instance pulls 1-3 GiB; subsequent runs reuse the cached image.
 
 ### Single-instance debug loop
 
-```bash
-INSTANCE=$(jq -r 'keys[0]' config/benchmarks/swebench/verified.json)
+Drop a one-off application JSON next to `phase0.json`:
 
-cat > /tmp/one.yaml <<EOF
-sweep_id: smoke
-instances: ["$INSTANCE"]
-conditions:
-  - { condition_id: openclaw_agent, condition_type: openclaw_agent, model: {...}, agent: {...} }
-serving: { config_id: vllm_default, base_url: "http://localhost:8000/v1" }
-seeds: [0]
-output_dir: data/runs/smoke
+```bash
+INSTANCE=astropy__astropy-12907   # any verified instance_id
+
+cat > config/application/swebench/smoke.json <<EOF
+{
+  "sweep_name": "smoke",
+  "plan_version": "v1.0",
+  "application": "swebench",
+  "instances": ["$INSTANCE"],
+  "repo_mapping": {"$INSTANCE": {"repo_id": "astropy/astropy", "base_commit": "d16bfe05a744909de4b27f5875fe0d4ed41ce607"}},
+  "container_image": "swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest",
+  "wall_clock_budget_seconds": 1800,
+  "output_dir": "data/runs/smoke",
+  "seeds": [0],
+  "parallel_limit_gpu": 1,
+  "parallel_limit_cpu_cores": 8
+}
 EOF
 
-HARNESS_BACKEND=docker PYTHONPATH=. \
-    python3 -m eval.runner.driver --sweep /tmp/one.yaml
+HARNESS_BACKEND=docker PYTHONPATH=. python3 -m orchestration.runner.driver \
+    --app config/application/swebench/smoke.json \
+    --harness config/harness/openclaw_27b.json \
+    --backend config/backend/vllm/tp1.json \
+    --swebench-root /path/to/SWE-bench \
+    --instance-data /path/to/verified.json
 ```
 
 Inspect `data/runs/smoke/<run_id>/{verdict.json,step_trace.jsonl,spans.jsonl}`.
@@ -116,8 +145,8 @@ collector, run the driver, tear everything down.
 # Default bench profile (4× A100, 24h walltime)
 qsub scripts/execution_pbs/run_benchmark.pbs
 
-# Override the sweep, skip stage 0 (assume pylib already populated)
-qsub -v STAGE_SWEBENCH=0,SWEEP=$KIT_ROOT/config/sweeps/phase0.yaml \
+# Override the application, skip stage 0 (assume pylib already populated)
+qsub -v STAGE_SWEBENCH=0,APP=$KIT_ROOT/config/application/swebench/phase0.json \
     scripts/execution_pbs/run_benchmark.pbs
 
 # Test profile — small model on 1 GPU, smokes the full pipeline cheaply
@@ -141,7 +170,7 @@ qsub scripts/execution_pbs/run_benchmark_tb.pbs
 | `STAGE_VLLM`     | start vLLM in singularity, serve the model |
 | `STAGE_OC_CHECK` | pull alpine/openclaw sif + bake patch overlay |
 | `STAGE_OTEL`     | start the local OTel collector that writes otel-traces.jsonl |
-| `STAGE_RUN`      | invoke `eval/runner/driver` with the sweep |
+| `STAGE_RUN`      | invoke `orchestration/runner/driver` with the composed configs |
 | `STAGE_CLEANUP`  | kill vLLM + OTel, free ports |
 
 See the header comment in `scripts/execution_pbs/run_benchmark.pbs` for the
@@ -159,51 +188,21 @@ Per-run dirs land in `$KIT_ROOT/data/runs/<sweep_id>/<run_id>/`. Logs go to
 
 ---
 
-## Mode 3 — Bare host (no container)
+## Scoring offload (HTTP scoring server)
 
-For analysis replays or driving the agent from your own Python without
-spinning a container. Scoring is deferred (predictions written to disk)
-unless you point at an external scoring server.
-
-### Setup
+For singularity / restricted-network nodes that can't run the full
+SWE-bench scoring image themselves, run the scoring server on a docker
+host and point sweeps at it:
 
 ```bash
-export HARNESS_BACKEND=host
-export OPENCLAW_STATE_DIR=$PWD/frontend/openclaw/state
-export OC_PYLIB=$PWD/.pylib
-pip install -t "$OC_PYLIB" swebench
-export PYTHONPATH=.:$OC_PYLIB:$PYTHONPATH
+# On the docker host
+make scoring-server SWEBENCH_ROOT=/path/to/SWE-bench INSTANCE_DATA=/path/to/verified.json
 
-# Either: start a serving backend yourself (vllm/sglang serve ...)
-# Or:     point at an existing one
-export VLLM_BASE_URL=http://my-vllm:8000/v1
+# On the sweep node
+export OC_SCORING_URL=http://<docker-host>:8765
 ```
 
-### Run
-
-```bash
-PYTHONPATH=. python3 -m eval.runner.driver \
-    --sweep config/sweeps/phase0.yaml \
-    --max-runs 1
-```
-
-The host harness (`eval/benchmarks/swebench/harness.py:HostHarness`) doesn't
-launch containers — it expects you to clone the target repo into a workspace
-dir, then runs the OC gateway directly on the host. After the agent finishes,
-scoring follows one of three paths:
-
-1. `OC_SCORING_SIF_DIR` set → score via singularity (still needs SIFs).
-2. `OC_SCORING_URL` set → POST patch + instance to a scoring server
-   (`eval/scoring_server/main.py` is a reference implementation).
-3. Neither → write `predictions-<instance>.json` next to the workspace and
-   exit with `status: "DEFERRED"`. Score later with
-   `python -m swebench.harness.run_evaluation`.
-
-### When host mode is right
-
-- Replaying analysis on existing run dirs (no new agent runs).
-- Smoke-testing a condition end-to-end without docker/singularity overhead.
-- Running on a system that has neither docker nor singularity available.
+The reference implementation is `orchestration/scoring_server/main.py`.
 
 ---
 
@@ -217,14 +216,14 @@ jq . data/runs/<sweep>/<run_id>/verdict.json
 find data/runs/<sweep> -name verdict.json -exec jq -r .status {} \; | sort | uniq -c
 
 # Replay analysis without re-running anything
-PYTHONPATH=. python3 -m eval.analysis.aggregate --runs data/runs/<sweep>
+PYTHONPATH=. python3 -m orchestration.analysis.aggregate --runs data/runs/<sweep>
 
 # Render figures
-PYTHONPATH=. python3 eval/analysis/plots/plot_all.py \
+PYTHONPATH=. python3 orchestration/analysis/plots/plot_all.py \
     --runs data/runs/<sweep_id> --out data/figures/<sweep_id>
 
 # Mock figures (no real runs needed)
-PYTHONPATH=. python3 eval/analysis/plots/plot_all.py --mock
+PYTHONPATH=. python3 orchestration/analysis/plots/plot_all.py --mock
 ```
 
 ---

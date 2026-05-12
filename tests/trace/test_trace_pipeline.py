@@ -1,4 +1,4 @@
-"""Sanity checks for the eval/trace/ instrumentation layer.
+"""Sanity checks for the orchestration/trace/ instrumentation layer.
 
 Covers:
   1. Synthetic step durations roll up within tolerance (StepLogger + JSONL).
@@ -27,12 +27,12 @@ from typing import Any, Dict, Iterable, List
 
 import yaml
 
-from eval.trace.schema import StepEvent, TelemetrySample
-from eval.trace.logger import StepLogger
-from eval.trace.writers import JSONLWriter
-from eval.trace.telemetry import ResourceCollector
-from eval.trace.llm_wrapper import LLMWrapper
-from eval.trace.align import align_telemetry_to_steps
+from orchestration.trace.schema import StepEvent, TelemetrySample
+from orchestration.trace.logger import StepLogger
+from orchestration.trace.writers import JSONLWriter
+from orchestration.trace.telemetry import ResourceCollector
+from orchestration.trace.llm_wrapper import LLMWrapper
+from orchestration.trace.align import align_telemetry_to_steps
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -229,7 +229,7 @@ def check_coverage(tmp: Path, cfg: dict) -> None:
 _CRASH_SCRIPT = """
 import os, sys, time, signal
 sys.path.insert(0, {repo_root!r})
-from eval.trace.logger import StepLogger
+from orchestration.trace.logger import StepLogger
 
 logger = StepLogger(
     output_path={path!r},

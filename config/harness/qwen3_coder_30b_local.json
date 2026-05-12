@@ -1,0 +1,122 @@
+{
+  "_doc": "OpenClaw harness against locally-mounted Qwen3-Coder-30B-A3B-Instruct (MoE, 3B active, 256K context). This is the model the agent-bench openclaw stack was originally tuned for; vLLM's --tool-call-parser qwen3_coder matches its tool-call markers natively. Bind /mnt/network_drive/shared_models into the vLLM container so the path resolves.",
+  "harness": "openclaw",
+  "model": {
+    "name": "/mnt/network_drive/shared_models/Qwen3-Coder-30B-A3B-Instruct",
+    "endpoint": "http://localhost:8000/v1",
+    "temperature": 0.0,
+    "max_tokens": 4096
+  },
+  "openclaw": {
+    "gateway": {
+      "mode": "local",
+      "bind": "loopback",
+      "auth": {
+        "mode": "token",
+        "token": {
+          "source": "env",
+          "provider": "env",
+          "id": "OPENCLAW_GATEWAY_TOKEN"
+        }
+      }
+    },
+    "diagnostics": {
+      "enabled": true,
+      "otel": {
+        "enabled": true,
+        "endpoint": "http://localhost:4318",
+        "protocol": "http/protobuf",
+        "serviceName": "agent-bench-openclaw",
+        "traces": true,
+        "metrics": true,
+        "logs": true,
+        "sampleRate": 1,
+        "flushIntervalMs": 20
+      },
+      "cacheTrace": {
+        "enabled": true,
+        "includeMessages": true,
+        "includePrompt": true,
+        "includeSystem": true
+      }
+    },
+    "tools": {
+      "exec": {
+        "host": "gateway",
+        "security": "full"
+      },
+      "alsoAllow": ["sessions_spawn", "sessions_yield", "subagents"]
+    },
+    "skills": {
+      "load": {
+        "extraDirs": ["/root/.openclaw/skills"]
+      }
+    },
+    "plugins": {
+      "entries": {
+        "vllm":             {"enabled": true},
+        "memory-core":      {"enabled": true},
+        "diagnostics-otel": {"enabled": true},
+        "anthropic":        {"enabled": false},
+        "openai":           {"enabled": false},
+        "openrouter":       {"enabled": false},
+        "litellm":          {"enabled": false},
+        "lmstudio":         {"enabled": false},
+        "xai":              {"enabled": false},
+        "groq":             {"enabled": false},
+        "together":         {"enabled": false},
+        "fireworks":        {"enabled": false},
+        "deepseek":         {"enabled": false},
+        "moonshot":         {"enabled": false},
+        "mistral":          {"enabled": false},
+        "cohere":           {"enabled": false},
+        "google":           {"enabled": false},
+        "vertex":           {"enabled": false},
+        "bedrock":          {"enabled": false},
+        "azure":            {"enabled": false},
+        "ollama":           {"enabled": false},
+        "huggingface":      {"enabled": false},
+        "minimax":          {"enabled": false},
+        "perplexity":       {"enabled": false},
+        "qwen":             {"enabled": false}
+      }
+    },
+    "models": {
+      "providers": {
+        "vllm": {
+          "baseUrl": "http://localhost:8000/v1",
+          "apiKey": "sk-dummy"
+        }
+      }
+    },
+    "agents": {
+      "defaults": {
+        "workspace": "/testbed",
+        "subagents": {
+          "maxConcurrent": 4,
+          "runTimeoutSeconds": 600
+        }
+      },
+      "list": [
+        {
+          "id": "swebench",
+          "default": true,
+          "name": "swebench-coder",
+          "skills": ["verify"]
+        }
+      ]
+    }
+  },
+  "conditions": [
+    {
+      "condition_id": "openclaw_agent",
+      "condition_type": "openclaw_agent",
+      "description": "OpenClaw code agent: full trajectory",
+      "agent": {
+        "max_steps": 500,
+        "max_time_seconds": 1800,
+        "retry_limit": 10
+      }
+    }
+  ]
+}

@@ -44,25 +44,21 @@ backend, then run a sweep:
 ```bash
 make serve &                                                 # vLLM/SGLang in the background
 HARNESS_BACKEND=docker \
-    make eval EVAL_ARGS="--sweep config/sweeps/phase1.yaml"
+    make run_phase1 SWEBENCH_ROOT=/path/to/SWE-bench \
+                    INSTANCE_DATA=/path/to/verified.json
 ```
 
-**HPC cluster (PBS)** — the PBS script provisions everything itself
-(vLLM, OC overlay, OTel collector, sweep, teardown). Don't pre-start
-serving; the job spins it up on the compute node.
+`HARNESS=<harness>` / `BACKEND=<engine>/<name>` pick the harness +
+backend JSONs under `config/{harness,backend}/` (defaults:
+`openclaw_27b` + `vllm/tp1`).
+
+**HPC cluster (PBS / Singularity)** — the PBS script provisions
+everything itself (vLLM, OC overlay, OTel collector, sweep, teardown).
+Don't pre-start serving; the job spins it up on the compute node. The
+sweep runs with `HARNESS_BACKEND=singularity`.
 
 ```bash
 qsub scripts/execution_pbs/run_benchmark.pbs
-```
-
-**Bare host (no container)** — start a serving backend, then run with
-`HARNESS_BACKEND=host` (scoring is deferred unless `OC_SCORING_SIF_DIR`
-or `OC_SCORING_URL` is set):
-
-```bash
-make serve &
-HARNESS_BACKEND=host PYTHONPATH=. python3 -m eval.runner.driver \
-    --sweep config/sweeps/phase1.yaml --max-runs 1
 ```
 
 Then aggregate + render:
@@ -85,7 +81,7 @@ make test     # trace pipeline self-checks
 
 Detailed guides live under [`doc/`](doc/):
 
-- [doc/execution.md](doc/execution.md) — running benchmarks (Docker, PBS, host modes), inputs/outputs, common operations, troubleshooting.
+- [doc/execution.md](doc/execution.md) — running benchmarks (Docker, PBS/Singularity), inputs/outputs, common operations, troubleshooting.
 - [doc/layout.md](doc/layout.md) — what each top-level folder is for.
 - [doc/benchmarks.md](doc/benchmarks.md) — adding a new benchmark.
 - [doc/conditions.md](doc/conditions.md) — adding a new condition.

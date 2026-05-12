@@ -12,6 +12,15 @@ INSTANCE_DATA  ?=
 KIT_ROOT       ?= $(CURDIR)
 export KIT_ROOT
 
+# Composed-config driver inputs. Application JSON is picked per-phase by the
+# _RUN_SWEEP macro; harness + backend are shared and overridable from the CLI:
+#   make run_phase0 HARNESS=openhands_27b BACKEND=vllm/tp2 ...
+APPLICATION_DIR ?= config/application/swebench
+HARNESS         ?= openclaw_27b
+BACKEND         ?= vllm/tp1
+HARNESS_CONFIG  ?= config/harness/$(HARNESS).json
+BACKEND_CONFIG  ?= config/backend/$(BACKEND).json
+
 _check_eval_inputs:
 	@if [ -z "$(SWEBENCH_ROOT)" ] || [ -z "$(INSTANCE_DATA)" ]; then \
 	    echo "ERROR: set SWEBENCH_ROOT and INSTANCE_DATA (env or make var)." >&2; \
@@ -28,13 +37,13 @@ _check_eval_inputs:
 help:
 	@echo "Targets:"
 	@echo "  serve       Launch backend (SERVING_BACKEND=$(SERVING_BACKEND))"
-	@echo "  eval        Run real-eval pipeline (eval/runner/driver.py)"
+	@echo "  eval        Run real-eval pipeline (orchestration/runner/driver.py)"
 	@echo "  run_phase0  Run phase0 sanity sweep (1 instance)"
 	@echo "  run_phase1  Run phase1 sweep"
 	@echo "  run_phase2  Run phase2 serving sweep (RQ3)"
 	@echo "  stress      Run simulated stress workload (stress/loadgen-bin)"
-	@echo "  analyze     Aggregate results (eval/analysis/aggregate.py)"
-	@echo "  report      Build report (eval/report/generate.py)"
+	@echo "  analyze     Aggregate results (orchestration/analysis/aggregate.py)"
+	@echo "  report      Build report (orchestration/report/generate.py)"
 	@echo "  test        Trace pipeline self-tests"
 	@echo "  otel-up-host    Start native otelcol-contrib (no docker)"
 	@echo "  otel-down-host  Stop the native collector"
@@ -46,6 +55,8 @@ help:
 	@echo "Env: SERVING_BACKEND={vllm|sglang} (current: $(SERVING_BACKEND))"
 	@echo "     SWEBENCH_ROOT=$(SWEBENCH_ROOT)"
 	@echo "     INSTANCE_DATA=$(INSTANCE_DATA)"
+	@echo "     HARNESS=$(HARNESS)   (-> $(HARNESS_CONFIG))"
+	@echo "     BACKEND=$(BACKEND)   (-> $(BACKEND_CONFIG))"
 	@echo "     VLLM_MIG_UUID   (bind serve-docker to a MIG slice; see mig-status)"
 	@echo "     MIG_GPU/PROFILE (mig-prep-test args: defaults 1 / 1g.24gb)"
 
@@ -53,13 +64,17 @@ serve:
 	bash backend/common/serve.sh
 
 eval:
-	python -m eval.runner.driver $(EVAL_ARGS)
+	python3 -m orchestration.runner.driver $(EVAL_ARGS)
 
-# Phase shortcuts — wrap `eval` with the canonical sweep yaml.
-# Override SWEBENCH_ROOT / INSTANCE_DATA / EXTRA_ARGS as needed.
+# Phase shortcuts — wrap the composed-config driver. Each phase pairs the
+# per-experiment application JSON with the shared HARNESS / BACKEND configs.
+# Override SWEBENCH_ROOT / INSTANCE_DATA / HARNESS / BACKEND / EXTRA_ARGS as
+# needed.
 define _RUN_SWEEP
-python -m eval.runner.driver \
-  --sweep config/sweeps/$(1).yaml \
+python3 -m orchestration.runner.driver \
+  --app $(APPLICATION_DIR)/$(1).json \
+  --harness $(HARNESS_CONFIG) \
+  --backend $(BACKEND_CONFIG) \
   --swebench-root $(SWEBENCH_ROOT) \
   --instance-data $(INSTANCE_DATA) \
   $(EXTRA_ARGS)
@@ -76,16 +91,16 @@ run_phase2: _check_eval_inputs
 
 # Native OTel collector (no docker). Downloads otelcol-contrib on first run.
 otel-up-host:
-	bash eval/otel/host_up.sh
+	bash orchestration/otel/host_up.sh
 
 otel-down-host:
-	bash eval/otel/host_down.sh
+	bash orchestration/otel/host_down.sh
 
 # Self-hosted SWE-bench scoring server (run on a docker host).
 # Clients set OC_SCORING_URL=http://<this-host>:8765 to use it.
 SCORING_PORT ?= 8765
 scoring-server: _check_eval_inputs
-	python -m eval.scoring_server.main \
+	python3 -m orchestration.scoring_server.main \
 	  --swebench-root $(SWEBENCH_ROOT) \
 	  --host 0.0.0.0 --port $(SCORING_PORT)
 
@@ -93,13 +108,13 @@ stress:
 	./stress/loadgen-bin $(STRESS_ARGS)
 
 analyze:
-	python -m eval.analysis.aggregate $(ANALYZE_ARGS)
+	python3 -m orchestration.analysis.aggregate $(ANALYZE_ARGS)
 
 report:
-	python -m eval.report.generate $(REPORT_ARGS)
+	python3 -m orchestration.report.generate $(REPORT_ARGS)
 
 test:
-	python -m tests.trace.test_trace_pipeline
+	python3 -m tests.trace.test_trace_pipeline
 
 clean:
 	find . -name __pycache__ -type d -exec rm -rf {} +

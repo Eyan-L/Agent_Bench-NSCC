@@ -46,7 +46,7 @@ If your frontend doesn't need patching, the layout simplifies to just
 
 ## 2. The gateway lifecycle scripts
 
-The harness invokes these from `eval/benchmarks/<bench>/harness.py:prepare_environment`:
+The harness invokes these from `applications/<bench>/app.py:prepare_environment`:
 
 ```bash
 # gateway_up.sh — must be idempotent
@@ -86,7 +86,7 @@ Look at `frontend/openclaw/gateway_up.sh` for a working reference. Key points:
 ## 3. Hook into the harness
 
 The harness is the seam — it doesn't know about specific frontends, just calls
-the lifecycle scripts. SWE-bench's `eval/benchmarks/swebench/harness.py`
+the lifecycle scripts. SWE-bench's `applications/swebench/app.py`
 hard-codes OpenClaw via `frontend/openclaw/gateway_up.sh`. To make it
 pluggable:
 
@@ -106,7 +106,7 @@ can just call `frontend/<your_frontend>/gateway_up.sh` directly.
 ## 4. Tell conditions about it
 
 Conditions invoke the agent through the gateway. The current pattern (see
-`eval/conditions/code_agent/openclaw_agent.py:_invoke_agent`):
+`orchestration/conditions/code_agent/openclaw_agent.py:_invoke_agent`):
 
 ```python
 # Inside the container, source the env file the gateway_up.sh script wrote
@@ -139,7 +139,7 @@ branch:
 
 If your frontend doesn't natively emit OTel, write the spans directly into
 `<run_dir>/spans.jsonl` from the condition (the TB ReAct condition does this
-via `eval/conditions/code_agent/terminal_bench/react.py:_emit_span`).
+via `orchestration/conditions/code_agent/terminal_bench/react.py:_emit_span`).
 
 ## 6. Smoke test
 

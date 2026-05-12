@@ -30,7 +30,12 @@
 #   OC_PYLIB       — pip --target dir for swebench + deps (default: $SCRATCH/pylib)
 #   OC_PIP_CACHE   — pip wheel cache (default: $SCRATCH/.pip-cache)
 #   DATASET        — instance JSON (default: $KIT_ROOT/config/benchmarks/swebench/verified.json)
-#   SWEEP          — sweep yaml (default: $KIT_ROOT/config/sweeps/phase1.yaml)
+#   APP            — application JSON (default: $KIT_ROOT/config/application/swebench/phase1.json)
+#                    Drives the instance list + scoring image + output_dir.
+#   HARNESS_CONFIG — harness JSON  (default: $KIT_ROOT/config/harness/openclaw_27b.json)
+#                    Selects model + agent runtime (openclaw / openhands).
+#   BACKEND_CONFIG — backend JSON  (default: $KIT_ROOT/config/backend/vllm/tp1.json)
+#                    vLLM/SGLang runtime knobs + serving_configs presets.
 #   OC_PKG         — host openclaw npm pkg (default: /scratch/users/ntu/chengzh2/openclaw)
 #   SIF_DIR        — instance .sif dir (default: /scratch/users/ntu/$USER/swebench)
 #   VLLM_SIF       — vllm sif path (default: /scratch/users/ntu/$USER/sif_images/vllm_openai.sif)
@@ -41,7 +46,7 @@
 #
 # Submit:
 #   qsub pbs/run_benchmark.pbs
-#   qsub -v STAGE_PULL=0,SWEEP=$KIT_ROOT/config/sweeps/phase0.yaml \
+#   qsub -v STAGE_PULL=0,APP=$KIT_ROOT/config/application/swebench/phase0.json \
 #        pbs/run_benchmark.pbs
 
 set -uo pipefail   # not -e; we want stage failures to log + continue cleanup
@@ -58,7 +63,9 @@ KIT_ROOT="${KIT_ROOT:-${PBS_O_WORKDIR:-$HOME/Agent_Bench}}"
 # stage 0 is skipped.
 SWEBENCH_ROOT="${SWEBENCH_ROOT:-$SCRATCH/pylib}"
 DATASET="${DATASET:-$KIT_ROOT/config/benchmarks/swebench/verified.json}"
-SWEEP="${SWEEP:-$KIT_ROOT/config/sweeps/phase1.yaml}"
+APP="${APP:-$KIT_ROOT/config/application/swebench/phase1.json}"
+HARNESS_CONFIG="${HARNESS_CONFIG:-$KIT_ROOT/config/harness/openclaw_27b.json}"
+BACKEND_CONFIG="${BACKEND_CONFIG:-$KIT_ROOT/config/backend/vllm/tp1.json}"
 
 OC_PKG="${OC_PKG:-/scratch/users/ntu/chengzh2/openclaw}"
 SIF_DIR="${SIF_DIR:-$SCRATCH/swebench}"
@@ -166,7 +173,9 @@ LOG_PREFIX() { echo "[$(date -u +%FT%TZ)] $*"; }
 
 LOG_PREFIX "kit_root      = $KIT_ROOT"
 LOG_PREFIX "swebench_root = $SWEBENCH_ROOT"
-LOG_PREFIX "sweep         = $SWEEP"
+LOG_PREFIX "app           = $APP"
+LOG_PREFIX "harness       = $HARNESS_CONFIG"
+LOG_PREFIX "backend       = $BACKEND_CONFIG"
 LOG_PREFIX "dataset       = $DATASET"
 LOG_PREFIX "oc_pkg        = $OC_PKG"
 LOG_PREFIX "sif_dir       = $SIF_DIR"
@@ -215,25 +224,24 @@ if [[ "$STAGE_SWEBENCH" == "1" ]]; then
     SWEBENCH_ROOT="$OC_PYLIB"
 
     # Materialize $DATASET as a slim JSON containing only the instances the
-    # sweep actually uses. Source of truth = the sweep yaml's `instances:`
-    # list. Pulls full instance dicts (problem_statement / test_patch /
-    # FAIL_TO_PASS / ...) from princeton-nlp/SWE-bench_Verified on HF.
-    LOG_PREFIX "  building $DATASET from $SWEEP ids (HF SWE-bench_Verified)"
+    # application config actually uses. Source of truth = the app JSON's
+    # `instances:` list. Pulls full instance dicts (problem_statement /
+    # test_patch / FAIL_TO_PASS / ...) from princeton-nlp/SWE-bench_Verified.
+    LOG_PREFIX "  building $DATASET from $APP ids (HF SWE-bench_Verified)"
     mkdir -p "$(dirname "$DATASET")"
-    OC_SWEEP="$SWEEP" OC_DATASET_OUT="$DATASET" \
+    OC_APP="$APP" OC_DATASET_OUT="$DATASET" \
     python3 - <<'PY' || { LOG_PREFIX "FATAL: dataset materialize failed"; exit 1; }
 import json, os, sys
-import yaml
 from datasets import load_dataset
 
-sweep_path = os.environ["OC_SWEEP"]
-out_path   = os.environ["OC_DATASET_OUT"]
+app_path = os.environ["OC_APP"]
+out_path = os.environ["OC_DATASET_OUT"]
 
-with open(sweep_path) as fh:
-    sweep = yaml.safe_load(fh)
-ids = list(sweep.get("instances") or [])
+with open(app_path) as fh:
+    app = json.load(fh)
+ids = list(app.get("instances") or [])
 if not ids:
-    print(f"sweep {sweep_path} has no instances", file=sys.stderr); sys.exit(1)
+    print(f"app {app_path} has no instances", file=sys.stderr); sys.exit(1)
 
 want = set(ids)
 existing = []
@@ -271,18 +279,19 @@ if [[ "$STAGE_PULL" == "1" ]]; then
     if [[ ! -f "$DATASET" ]]; then
         LOG_PREFIX "ERROR: dataset not found at $DATASET — skipping pull"
     else
-        # Only pull instances that this sweep actually uses, not all 500.
-        sweep_instances() {
+        # Only pull instances that this app config actually uses, not all 500.
+        app_instances() {
             python3 - <<PY
-import sys, yaml
-y = yaml.safe_load(open("$SWEEP"))
+import json, sys
+with open("$APP") as fh:
+    y = json.load(fh)
 for i in y.get("instances") or []:
     print(i)
 PY
         }
-        TMP_LIST="$SIF_DIR/.sweep_instances.txt"
-        sweep_instances > "$TMP_LIST"
-        LOG_PREFIX "  pulling $(wc -l < "$TMP_LIST") instances from $SWEEP"
+        TMP_LIST="$SIF_DIR/.app_instances.txt"
+        app_instances > "$TMP_LIST"
+        LOG_PREFIX "  pulling $(wc -l < "$TMP_LIST") instances from $APP"
         OC_SIF_DIR="$SIF_DIR" bash "$KIT_ROOT/scripts/execution_pbs/pull_images.sh" \
             --instances "$TMP_LIST" \
             --dir "$SIF_DIR" \
@@ -617,7 +626,9 @@ if [[ "$STAGE_RUN" == "1" ]]; then
     [[ -n "$VLLM_PID" ]] && export OC_LLM_PID="$VLLM_PID"
 
     python3 -m orchestration.runner.driver \
-        --sweep "$SWEEP" \
+        --app "$APP" \
+        --harness "$HARNESS_CONFIG" \
+        --backend "$BACKEND_CONFIG" \
         --swebench-root "$SWEBENCH_ROOT" \
         --instance-data "$DATASET" \
         2>&1 | tee -a "$LOG_DIR/run.log"

@@ -21,7 +21,9 @@
 #
 # Env (override via `qsub -v K1=V1,K2=V2 ...`):
 #   KIT_ROOT       — repo root
-#   SWEEP          — sweep yaml (default: $KIT_ROOT/config/sweeps/tb_kv_store.yaml)
+#   APP            — application JSON (default: $KIT_ROOT/config/application/terminal_bench/kv_store.json)
+#   HARNESS_CONFIG — harness JSON     (default: $KIT_ROOT/config/harness/tb_react_27b.json)
+#   BACKEND_CONFIG — backend JSON     (default: $KIT_ROOT/config/backend/vllm/tp1.json)
 #   TB_TASK_IDS    — space-separated TB task ids; default = all under
 #                    config/benchmarks/terminal_bench/
 #   DATASET        — path to materialized TB instance JSON
@@ -36,7 +38,9 @@ HOME="/home/users/ntu/${USER_NAME}"
 PBS_O_WORKDIR=${SCRATCH}/github/Agent_Bench
 KIT_ROOT="${KIT_ROOT:-${PBS_O_WORKDIR:-$HOME/Agent_Bench}}"
 
-SWEEP="${SWEEP:-$KIT_ROOT/config/sweeps/tb_kv_store.yaml}"
+APP="${APP:-$KIT_ROOT/config/application/terminal_bench/kv_store.json}"
+HARNESS_CONFIG="${HARNESS_CONFIG:-$KIT_ROOT/config/harness/tb_react_27b.json}"
+BACKEND_CONFIG="${BACKEND_CONFIG:-$KIT_ROOT/config/backend/vllm/tp1.json}"
 DATASET="${DATASET:-$KIT_ROOT/data/terminal_bench/tasks.json}"
 
 OC_TB_SIF_DIR="${OC_TB_SIF_DIR:-$SCRATCH/tb-sif}"
@@ -69,7 +73,9 @@ cd "$KIT_ROOT"
 LOG_PREFIX() { echo "[$(date -u +%FT%TZ)] $*"; }
 
 LOG_PREFIX "kit_root      = $KIT_ROOT"
-LOG_PREFIX "sweep         = $SWEEP"
+LOG_PREFIX "app           = $APP"
+LOG_PREFIX "harness       = $HARNESS_CONFIG"
+LOG_PREFIX "backend       = $BACKEND_CONFIG"
 LOG_PREFIX "dataset       = $DATASET"
 LOG_PREFIX "tb_sif_dir    = $OC_TB_SIF_DIR"
 LOG_PREFIX "vllm          = device=$VLLM_DEVICE model=$VLLM_MODEL tp=$VLLM_TP max_len=$VLLM_MAX_LEN"
@@ -233,7 +239,9 @@ if [[ "$STAGE_RUN" == "1" ]]; then
     [[ -n "$VLLM_PID" ]] && export OC_LLM_PID="$VLLM_PID"
 
     python3 -m orchestration.runner.driver \
-        --sweep "$SWEEP" \
+        --app "$APP" \
+        --harness "$HARNESS_CONFIG" \
+        --backend "$BACKEND_CONFIG" \
         --swebench-root "$SWEBENCH_ROOT" \
         --instance-data "$DATASET" \
         2>&1 | tee -a "$LOG_DIR/run_tb.log"

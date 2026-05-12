@@ -137,17 +137,30 @@ fi
 
 # ---- vLLM arg construction (mirrors serve_host.sh presets) --------------
 
+# TOOL_CALL_PARSER selects which family of <tool_call> markers vLLM extracts
+# from the model output into the OpenAI-compat `tool_calls` field.
+#   qwen3_coder   Qwen3-Coder / Qwen3.6 (default; the agent-bench reference model)
+#   hermes        Qwen2.5-Instruct, Hermes models — `<tool_call>{...}</tool_call>`
+#   ""            no parser; tools markers stay in `content` (OC plugin parses them)
+TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen3_coder}"
+
 BASE_FLAGS=(
     --host 0.0.0.0
     --port "$PORT"
     --tensor-parallel-size "$TP"
     --max-model-len "$MAX_MODEL_LEN"
     --gpu-memory-utilization "$GPU_MEM_UTIL"
-    --reasoning-parser qwen3
-    --enable-auto-tool-choice
-    --tool-call-parser qwen3_coder
     --trust-remote-code
 )
+if [[ -n "$TOOL_CALL_PARSER" ]]; then
+    BASE_FLAGS+=(--enable-auto-tool-choice --tool-call-parser "$TOOL_CALL_PARSER")
+fi
+# Qwen3 thinking-mode routes the model's chain-of-thought to a separate
+# `reasoning` field. Most agent harnesses read `content` only, so they see
+# an empty response. Default OFF here; set NO_REASONING=0 to opt back in.
+if [[ "${NO_REASONING:-1}" != "1" ]]; then
+    BASE_FLAGS+=(--reasoning-parser qwen3)
+fi
 
 declare -a PRESET_FLAGS
 CONFIG_ID=""

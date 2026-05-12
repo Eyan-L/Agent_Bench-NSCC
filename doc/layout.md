@@ -5,10 +5,12 @@ neighbors, and where to look for what.
 
 ```
 Agent_Bench/
-├── frontend/        agent runtime images + state (currently: openclaw)
+├── frontend/        agent runtime state (currently: openclaw)
 ├── backend/         serving stack (vllm, sglang) + engine telemetry tailer
-├── config/          inputs: benchmark instance data, sweeps, stress presets
-├── eval/            backend code: benchmarks, conditions, runner, analysis
+├── harnesses/       agent harness images (openclaw, openhands)
+├── applications/    benchmark adapters (swebench, terminal_bench)
+├── orchestration/   driver + conditions + analysis + trace instrumentation
+├── config/          inputs: application/harness/backend configs, stress presets
 ├── data/            outputs: per-run artifacts, figures
 ├── scripts/         top-level CLIs: PBS jobs, host samplers
 ├── stress/          load-generation stack (Go) for serving-side stress tests
@@ -16,13 +18,14 @@ Agent_Bench/
 ├── prompts/         operator handoff notes for Claude
 ├── skills/          Claude pipeline definitions
 ├── tests/           pipeline self-checks
-└── analysis_tools/  ad-hoc plotting (separate from the eval/analysis lib)
+├── utils/           shared helpers
+└── analysis_tools/  ad-hoc plotting (separate from orchestration/analysis/)
 ```
 
 The repo separates **inputs** (`config/`), **runtime images + state**
-(`frontend/`, `backend/`), **code** (`eval/`, `stress/`, `scripts/`,
-`backend/`, `frontend/`), and **outputs** (`data/`). Each top-level folder
-owns one concern.
+(`frontend/`, `backend/`, `harnesses/`), **code** (`orchestration/`,
+`applications/`, `stress/`, `scripts/`), and **outputs** (`data/`). Each
+top-level folder owns one concern.
 
 ---
 
@@ -45,11 +48,11 @@ frontend/openclaw/
     └── agents/swebench/{AGENTS,SOUL,IDENTITY,USER,TOOLS,HEARTBEAT}.md
 ```
 
-Why separate from `eval/`: the agent runtime is image-shaped (build, deploy,
-start, stop), not eval-shaped (load instance, run, score). Keeping them
-apart means a new frontend (e.g. SWE-Agent) drops in as
-`frontend/<name>/` without disturbing eval logic. See
-[adding_a_frontend.md](adding_a_frontend.md).
+Why separate from `applications/` / `orchestration/`: the agent runtime
+is image-shaped (build, deploy, start, stop), not eval-shaped (load
+instance, run, score). Keeping them apart means a new frontend (e.g.
+SWE-Agent) drops in as `frontend/<name>/` without disturbing eval logic.
+See [harnesses.md](harnesses.md).
 
 ## `backend/`
 
@@ -92,19 +95,34 @@ config/
     └── sglang/                                    SGLang-specific variants
 ```
 
-Splitting inputs out of `eval/` and `stress/` means swapping a sweep is a
-config change, not a code change.
+Splitting inputs out of `orchestration/` and `stress/` means swapping
+an experiment is a config change, not a code change.
 
-## `eval/`
+## `applications/`
 
-The eval pipeline code. The largest folder by line count and the one with
-the most internal structure.
+One folder per benchmark. Holds the harness lifecycle + scoring + (often)
+the loader as a single `app.py`.
 
 ```
-eval/
-├── benchmarks/
-│   ├── swebench/{harness.py, loader.py}          SWE-bench adapter
-│   └── terminal_bench/{harness.py, loader.py}    TB adapter
+applications/
+├── swebench/
+│   ├── app.py            SWEBenchHarness + SingularityHarness + helpers
+│   ├── openclaw/         openclaw-specific bridge (gateway compose, validate)
+│   └── openhands/        SWEBenchOpenHandsHarness
+└── terminal_bench/
+    ├── app.py            TB harness lifecycle + scoring
+    ├── loader.py         task.toml → instance_data
+    ├── conditions/       TB-specific conditions (react)
+    └── tasks/            vendored TB task definitions
+```
+
+## `orchestration/`
+
+The eval pipeline code: driver, conditions, analysis, trace
+instrumentation. Largest folder by line count.
+
+```
+orchestration/
 ├── conditions/                                    how the agent attempts a task
 │   ├── _base.py                                   ConditionProtocol
 │   ├── _llm_client.py                             OpenAI-compat caller (shared)
@@ -113,15 +131,14 @@ eval/
 │   │   ├── ar_issue_only.py                       SWE-bench AR (one-shot)
 │   │   ├── ar_static_context.py                   SWE-bench AR + retrieval
 │   │   ├── openclaw_agent.py                      SWE-bench agent loop
-│   │   └── terminal_bench/                        TB-specific (subfolder
-│   │       └── react.py                            because TB will likely grow
-│   │                                               more variants)
+│   │   ├── openhands_agent.py                     OpenHands SDK agent loop
+│   │   └── terminal_bench/react.py                TB ReAct loop
 │   ├── doc_analysis/                              placeholder (no impl yet)
 │   ├── websearch/                                 placeholder (no impl yet)
 │   └── ablations/no_retry.py
 ├── runner/                                        orchestration
 │   ├── driver.py                                  the dispatch table + run loop
-│   ├── config.py                                  RunConfig, sweep YAML loading
+│   ├── config.py                                  RunConfig + composed-config loader
 │   ├── manifest.py                                per-run state tracking
 │   └── fairness_check.py
 ├── analysis/                                      post-run metric computation
@@ -133,19 +150,33 @@ eval/
 │   ├── telemetry.py                               GPU/CPU/RSS sampler
 │   ├── align.py                                   monotonic ↔ wall-clock
 │   └── otel/
-├── otel/otel_query.py                             OTel post-hoc query helper
+├── otel/                                          native OTel collector lifecycle
 └── scoring_server/                                external validation (HTTP)
 ```
 
-The four submodules implement orthogonal axes:
+The submodules implement orthogonal axes:
 
-- **benchmarks** = which task suite (one folder per benchmark)
-- **conditions** = how the agent tries (one folder per workload, then per condition)
-- **runner** = wiring (driver dispatches benchmark × condition)
-- **analysis / trace** = instrumentation and post-processing
+- **applications/** = which task suite (one folder per benchmark)
+- **orchestration/conditions** = how the agent tries (one folder per workload)
+- **orchestration/runner** = wiring (driver dispatches application × condition)
+- **orchestration/analysis + trace** = instrumentation and post-processing
 
-See [adding_a_benchmark.md](adding_a_benchmark.md) and
-[adding_a_condition.md](adding_a_condition.md) for the extension surfaces.
+See [benchmarks.md](benchmarks.md) and [conditions.md](conditions.md) for
+the extension surfaces.
+
+## `harnesses/`
+
+Agent harness images — the container the agent runs *inside* (separate
+from `applications/` which describes the *task* it operates on).
+
+```
+harnesses/
+├── openclaw/{docker/, gateway_up.sh, gateway_down.sh, configure.sh, ...}
+└── openhands/{docker/, driver.py, state/, ...}
+```
+
+`make openhands-image` builds the OpenHands harness image; the openclaw
+image comes from `harnesses/openclaw/docker/build.sh`.
 
 ## `data/`
 
@@ -181,9 +212,9 @@ scripts/
 └── helper_pbs/                        small helper jobs
 ```
 
-Why separate from `eval/runner/`: these scripts are **operations**, not
-eval logic. They orchestrate stage-by-stage setup (install, pull, patch,
-serve, run, teardown) on the cluster.
+Why separate from `orchestration/runner/`: these scripts are
+**operations**, not eval logic. They orchestrate stage-by-stage setup
+(install, pull, patch, serve, run, teardown) on the cluster.
 
 ## `stress/`
 
@@ -220,6 +251,7 @@ Trace-pipeline self-checks. Thresholds in
 
 ## `analysis_tools/`
 
-Ad-hoc plotting helpers. Separate from `eval/analysis/` because these are
-exploratory scripts that don't necessarily round-trip through the analysis
-library — useful for one-off TTFT/TBT/GPU plots when prototyping.
+Ad-hoc plotting helpers. Separate from `orchestration/analysis/` because
+these are exploratory scripts that don't necessarily round-trip through
+the analysis library — useful for one-off TTFT/TBT/GPU plots when
+prototyping.
