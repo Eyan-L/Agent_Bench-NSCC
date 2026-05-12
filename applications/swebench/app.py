@@ -218,6 +218,17 @@ class SWEBenchHarness:
         run_id: Optional[str] = None,
         instance_data: Optional[Dict] = None,
     ) -> Dict:
+        # Resolve the per-instance SWE-bench image when the sweep config uses
+        # the `UNUSED` placeholder (multi-instance sweeps can't pin a single
+        # image at sweep level). Mirrors swebench.harness TestSpec.instance_image_key
+        # for remote images: `{namespace}/sweb.eval.{arch}.{instance_id_lower}:{tag}`
+        # with `__` -> `_1776_` (docker tag-name encoding).
+        if "UNUSED" in container_image:
+            container_image = (
+                f"swebench/sweb.eval.x86_64.{instance_id.lower()}:latest"
+                .replace("__", "_1776_")
+            )
+
         run_id = run_id or instance_id
         rid_short = run_id[:12]
         net_name = f"oc-eval-net-{rid_short}"
