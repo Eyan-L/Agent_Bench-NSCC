@@ -49,6 +49,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -704,7 +705,7 @@ class SWEBenchHarness:
             }]))
 
             cmd = [
-                "python", "-m", "swebench.harness.run_evaluation",
+                sys.executable, "-m", "swebench.harness.run_evaluation",
                 "--dataset_name", "princeton-nlp/SWE-bench_Verified",
                 "--predictions_path", str(pred_path),
                 "--instance_ids", instance_id,
