@@ -1,6 +1,7 @@
 --- dist/sandbox-CHUNK.js
 +++ dist/sandbox-CHUNK.js
-@@ -29,4 +29,30 @@
+@@ -28,6 +28,32 @@
+ import fs from "node:fs";
  import path from "node:path";
  import { spawn } from "node:child_process";
 +/* OC_PATCH_FS_BRIDGE_HELPER_BEGIN */
@@ -31,7 +32,35 @@
 +/* OC_PATCH_FS_BRIDGE_HELPER_END */
  import os from "node:os";
  import fs$1 from "node:fs/promises";
-@@ -2184,4 +2184,9 @@
+ import crypto from "node:crypto";
+@@ -2066,6 +2092,24 @@
+ 		return this.readPinnedFile(target);
+ 	}
+ 	async writeFile(params) {
++		/* OC_PATCH_FS_BRIDGE_WRITE_BEGIN */
++		if (process.env.OPENCLAW_EXEC_BRIDGE) {
++			const __ocTarget = this.resolveResolvedPath(params);
++			const __ocBuf = Buffer.isBuffer(params.data) ? params.data : Buffer.from(params.data, params.encoding ?? "utf8");
++			const __ocScript = params.mkdir !== false
++				? 'mkdir -p "$(dirname "$1")" && cat > "$1"'
++				: 'cat > "$1"';
++			const __ocRes = await __ocFsBridgeRun({
++				sandbox: this.sandbox,
++				script: __ocScript,
++				options: { args: [__ocTarget.containerPath], stdin: __ocBuf },
++			});
++			if (__ocRes.code !== 0) {
++				throw new Error(`fs write via bridge failed (code ${__ocRes.code}): ${__ocRes.stderr.toString("utf8")}`);
++			}
++			return;
++		}
++		/* OC_PATCH_FS_BRIDGE_WRITE_END */
+ 		const target = this.resolveResolvedPath(params);
+ 		this.ensureWriteAccess(target, "write files");
+ 		const writeCheck = {
+@@ -2182,6 +2226,11 @@
+ 		};
+ 	}
  	async runCommand(script, options = {}) {
 +		/* OC_PATCH_FS_BRIDGE_RUN_BEGIN */
 +		if (process.env.OPENCLAW_EXEC_BRIDGE) {
@@ -41,7 +70,9 @@
  		const backend = this.sandbox.backend;
  		if (backend) return await backend.runShellCommand({
  			script,
-@@ -2202,4 +2202,17 @@
+@@ -2200,6 +2249,19 @@
+ 		});
+ 	}
  	async readPinnedFile(target) {
 +		/* OC_PATCH_FS_BRIDGE_READ_BEGIN */
 +		if (process.env.OPENCLAW_EXEC_BRIDGE) {
@@ -59,7 +90,9 @@
  		const opened = await this.pathGuard.openReadableFile(target);
  		try {
  			return fs.readFileSync(opened.fd);
-@@ -2210,5 +2210,9 @@
+@@ -2208,8 +2270,12 @@
+ 		}
+ 	}
  	async runCheckedCommand(plan) {
 +		/* OC_PATCH_FS_BRIDGE_SKIP_CHECK_BEGIN */
 +		if (!process.env.OPENCLAW_EXEC_BRIDGE) {
@@ -69,3 +102,4 @@
 +		/* OC_PATCH_FS_BRIDGE_SKIP_CHECK_END */
  		return await this.runCommand(plan.script, {
  			args: plan.args,
+ 			stdin: plan.stdin,

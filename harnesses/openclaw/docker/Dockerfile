@@ -44,19 +44,23 @@ COPY apply_patch.py ${OC_TOOLS_DIR}/apply_patch.py
 COPY defaults.env   ${OC_TOOLS_DIR}/defaults.env
 COPY patch          ${OC_TOOLS_DIR}/patch
 
-RUN python3 ${OC_TOOLS_DIR}/apply_patch.py apply \
- && OC_PATCH_MODE=baked python3 ${OC_TOOLS_DIR}/apply_patch.py status \
- && chown -R node:node ${OC_TOOLS_DIR}
-
 # Plugin runtime-deps pre-warm. OpenClaw lazily npm-installs each plugin's
 # bundled deps (e.g. github-copilot needs @mariozechner/pi-ai) on first plugin
 # init in any node process. With two openclaw processes (gateway + agent CLI)
 # starting back-to-back, they race-install on the same dirs and trash each
 # other with ENOTEMPTY. Bake the install at image build time so subsequent
 # loads detect "already there" and skip the npm step.
+#
+# This MUST run before apply_patch — the warmup installs per-plugin copies
+# of @mariozechner/pi-ai into dist/extensions/<plugin>/node_modules/, which
+# the patch step then has to find via target_glob_all.
 RUN su node -c '/usr/local/bin/openclaw plugins list >/tmp/oc_warmup.log 2>&1' \
  && tail -20 /tmp/oc_warmup.log \
  && rm /tmp/oc_warmup.log
+
+RUN python3 ${OC_TOOLS_DIR}/apply_patch.py apply \
+ && OC_PATCH_MODE=baked python3 ${OC_TOOLS_DIR}/apply_patch.py status \
+ && chown -R node:node ${OC_TOOLS_DIR}
 
 # Switch back to upstream's runtime profile.
 ENV OC_PATCH_MODE=baked

@@ -49,6 +49,17 @@ def load_oc_root() -> Path:
     return p
 
 
+def resolve_targets(entry: dict, oc_root: Path) -> list[Path]:
+    """Multi-target variant. Returns a list of Path; most entries have one."""
+    if "target_glob_all" in entry:
+        matches = sorted(glob.glob(str(oc_root / entry["target_glob_all"]), recursive=True))
+        matches = [m for m in matches if not m.endswith(".oc-orig")]
+        if not matches:
+            sys.exit(f"no match for {entry['target_glob_all']} under {oc_root}")
+        return [Path(m) for m in matches]
+    return [resolve_target(entry, oc_root)]
+
+
 def resolve_target(entry: dict, oc_root: Path) -> Path:
     if "target_path" in entry:
         return oc_root / entry["target_path"]
@@ -101,38 +112,39 @@ def is_applied(entry: dict, target: Path) -> bool:
 
 
 def apply_one(entry: dict, oc_root: Path, patch_dir: Path) -> None:
-    target = resolve_target(entry, oc_root)
+    targets = resolve_targets(entry, oc_root)
     name = entry["file"]
 
-    if is_applied(entry, target):
-        print(f"[skip] {name}: already applied")
-        return
+    for target in targets:
+        if is_applied(entry, target):
+            print(f"[skip] {name}: already applied -> {target.relative_to(oc_root)}")
+            continue
 
-    backup = target.with_suffix(target.suffix + ".oc-orig")
-    if not backup.exists():
-        shutil.copy2(target, backup)
+        backup = target.with_suffix(target.suffix + ".oc-orig")
+        if not backup.exists():
+            shutil.copy2(target, backup)
 
-    tmp = materialize_patch(entry, target, patch_dir)
-    try:
-        rc = subprocess.run(
-            ["patch", "-p1", "--forward", "--silent", str(target), str(tmp)],
+        tmp = materialize_patch(entry, target, patch_dir)
+        try:
+            rc = subprocess.run(
+                ["patch", "-p1", "--forward", "--silent", str(target), str(tmp)],
+                capture_output=True, text=True,
+            )
+            if rc.returncode != 0:
+                shutil.copy2(backup, target)
+                sys.exit(f"[fail] {name}: patch rc={rc.returncode} on {target}\n{rc.stderr}")
+        finally:
+            tmp.unlink(missing_ok=True)
+
+        check = subprocess.run(
+            ["node", "--check", str(target)],
             capture_output=True, text=True,
         )
-        if rc.returncode != 0:
+        if check.returncode != 0:
             shutil.copy2(backup, target)
-            sys.exit(f"[fail] {name}: patch rc={rc.returncode}\n{rc.stderr}")
-    finally:
-        tmp.unlink(missing_ok=True)
+            sys.exit(f"[fail] {name}: node --check failed after apply on {target}\n{check.stderr}")
 
-    check = subprocess.run(
-        ["node", "--check", str(target)],
-        capture_output=True, text=True,
-    )
-    if check.returncode != 0:
-        shutil.copy2(backup, target)
-        sys.exit(f"[fail] {name}: node --check failed after apply\n{check.stderr}")
-
-    print(f"[ok]   {name}: applied to {target.relative_to(oc_root)}")
+        print(f"[ok]   {name}: applied to {target.relative_to(oc_root)}")
 
 
 def cmd_apply(args, manifest, oc_root, patch_dir, mode):
@@ -142,9 +154,9 @@ def cmd_apply(args, manifest, oc_root, patch_dir, mode):
     if mode == "baked":
         bad = []
         for entry in manifest["patches"]:
-            target = resolve_target(entry, oc_root)
-            if not is_applied(entry, target):
-                bad.append(entry["file"])
+            for target in resolve_targets(entry, oc_root):
+                if not is_applied(entry, target):
+                    bad.append(f"{entry['file']} -> {target}")
         if bad:
             sys.exit(f"[mode=baked] markers missing for: {bad}")
         print("[mode=baked] all markers present")
@@ -158,24 +170,25 @@ def cmd_status(args, manifest, oc_root, patch_dir, mode):
     print(f"OC_PATCH_MODE    = {mode}")
     for entry in manifest["patches"]:
         try:
-            target = resolve_target(entry, oc_root)
-            applied = is_applied(entry, target)
+            targets = resolve_targets(entry, oc_root)
         except SystemExit as e:
             print(f"  ?  {entry['file']}: {e}")
             continue
-        flag = "applied" if applied else "missing"
-        print(f"  {flag:7s} {entry['file']} -> {target.relative_to(oc_root)}")
+        for target in targets:
+            applied = is_applied(entry, target)
+            flag = "applied" if applied else "missing"
+            print(f"  {flag:7s} {entry['file']} -> {target.relative_to(oc_root)}")
 
 
 def cmd_restore(args, manifest, oc_root, patch_dir, mode):
     for entry in manifest["patches"]:
-        target = resolve_target(entry, oc_root)
-        backup = target.with_suffix(target.suffix + ".oc-orig")
-        if backup.exists():
-            shutil.copy2(backup, target)
-            print(f"[restored] {target.relative_to(oc_root)}")
-        else:
-            print(f"[no-backup] {target.relative_to(oc_root)}")
+        for target in resolve_targets(entry, oc_root):
+            backup = target.with_suffix(target.suffix + ".oc-orig")
+            if backup.exists():
+                shutil.copy2(backup, target)
+                print(f"[restored] {target.relative_to(oc_root)}")
+            else:
+                print(f"[no-backup] {target.relative_to(oc_root)}")
 
 
 def main() -> int:

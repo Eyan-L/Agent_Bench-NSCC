@@ -652,8 +652,14 @@ class SWEBenchHarness:
              f"rm -rf {self._OC_SCAFFOLD_DIRS}"],
             check=False,
         )
-        self._exec(container_id, ["git", "-C", ws, "add", "-A"])
-        r = self._exec(container_id, ["git", "-C", ws, "diff", "--cached"])
+        # SWE-bench's setup runs `git commit -am SWE-bench` after install
+        # (see swebench/harness/test_spec/python.py), so HEAD is the
+        # post-setup baseline. Diffing against HEAD captures every agent
+        # edit to a tracked file and naturally excludes untracked artifacts
+        # (build/, *.egg-info, __pycache__, .pytest_cache) that would
+        # otherwise turn into giant "new file" hunks and trip the eval
+        # container's patch -R heuristic.
+        r = self._exec(container_id, ["git", "-C", ws, "diff", "HEAD"])
         return r.stdout
 
     # ------------------------------------------------------------------

@@ -1,0 +1,26 @@
+--- dist/utils/validation.js.oc-orig
++++ dist/utils/validation.js
+@@ -252,6 +252,23 @@
+  */
+ export function validateToolArguments(tool, toolCall) {
+     const args = structuredClone(toolCall.arguments);
++    /* OC_PATCH_PIAI_VALIDATION_JSONSTRING_BEGIN */
++    // Some models (notably Qwen3-coder via vllm's qwen3_coder parser) emit
++    // nested array/object tool-call arguments as JSON-encoded strings.
++    // Pre-parse such string values BEFORE typebox/AJV validation runs, so
++    // typebox-flagged schemas (which bypass coerceWithJsonSchema below)
++    // also benefit. Best-effort: keep the original string on parse error.
++    if (isRecord(args) && isRecord(tool.parameters) && isRecord(tool.parameters.properties)) {
++        for (const _ocKey of Object.keys(args)) {
++            const _ocProp = tool.parameters.properties[_ocKey];
++            if (!_ocProp) continue;
++            const _ocType = _ocProp.type;
++            if (typeof args[_ocKey] === "string" && (_ocType === "array" || _ocType === "object")) {
++                try { args[_ocKey] = JSON.parse(args[_ocKey]); } catch (_e) { /* leave */ }
++            }
++        }
++    }
++    /* OC_PATCH_PIAI_VALIDATION_JSONSTRING_END */
+     Value.Convert(tool.parameters, args);
+     const validator = getValidator(tool.parameters);
+     if (!hasTypeBoxMetadata(tool.parameters) && isJsonSchemaObject(tool.parameters)) {

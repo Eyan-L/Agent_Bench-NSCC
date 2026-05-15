@@ -69,8 +69,7 @@ class SWEBenchOpenClawCondition(OpenClawAgentCondition):
     def _collect_patch_host_mode(ws: str) -> str:
         # Scaffold cleanup is best-effort because some scaffolds are written
         # by OC running as root in the sandbox container (we're the host user
-        # here) and rmtree can't remove root-owned files. The git diff below
-        # filters them via pathspec exclusion as a belt-and-suspenders defense.
+        # here) and rmtree can't remove root-owned files.
         for f in _OC_SCAFFOLD_FILES.split():
             try:
                 os.remove(os.path.join(ws, f))
@@ -78,15 +77,14 @@ class SWEBenchOpenClawCondition(OpenClawAgentCondition):
                 pass
         for d in _OC_SCAFFOLD_DIRS.split():
             shutil.rmtree(os.path.join(ws, d), ignore_errors=True)
-        excludes = [f":(exclude){p}" for p in (
-            _OC_SCAFFOLD_FILES.split() + _OC_SCAFFOLD_DIRS.split()
-        )]
-        subprocess.run(
-            ["git", "-C", ws, "add", "-A", "--", ".", *excludes],
-            capture_output=True,
-        )
+        # SWE-bench's install step does `git commit -am SWE-bench` after
+        # install, so HEAD is the post-setup baseline. `git diff HEAD`
+        # captures exactly the agent's edits to tracked files and skips
+        # untracked artifacts (build/, *.egg-info, __pycache__, .pytest_cache)
+        # — these would otherwise become huge "new file" hunks and trip
+        # the eval container's `patch -R` reverse-detection.
         r = subprocess.run(
-            ["git", "-C", ws, "diff", "--cached", "--", ".", *excludes],
+            ["git", "-C", ws, "diff", "HEAD"],
             capture_output=True, text=True,
         )
         return r.stdout if r.returncode == 0 else ""
@@ -100,7 +98,7 @@ class SWEBenchOpenClawCondition(OpenClawAgentCondition):
         # bind-mount of a host directory whose files are owned by the host
         # user — git treats this as "dubious ownership" and silently refuses
         # to operate, returning empty diff. `-c safe.directory=*` whitelists
-        # all paths so add/diff just work regardless of fs ownership.
+        # all paths so diff just works regardless of fs ownership.
         if container_id is None:
             return ""
         self._exec(
@@ -110,10 +108,7 @@ class SWEBenchOpenClawCondition(OpenClawAgentCondition):
              f"rm -rf {_OC_SCAFFOLD_DIRS}"],
             check=False,
         )
-        self._exec(container_id,
-                   ["git", "-c", "safe.directory=*", "-C", ws, "add", "-A"],
-                   check=False)
         r = self._exec(container_id,
-                       ["git", "-c", "safe.directory=*", "-C", ws, "diff", "--cached"],
+                       ["git", "-c", "safe.directory=*", "-C", ws, "diff", "HEAD"],
                        check=False)
         return r.stdout if r.returncode == 0 else ""

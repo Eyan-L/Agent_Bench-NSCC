@@ -430,8 +430,12 @@ class SWEBenchOpenHandsHarness:
             ["git", "config", "--global", "--add", "safe.directory", ws],
             check=False,
         )
-        self._exec(container_id, ["git", "-C", ws, "add", "-A"])
-        r = self._exec(container_id, ["git", "-C", ws, "diff", "--cached"])
+        # SWE-bench's setup pins HEAD at "base_commit + install commit",
+        # so `git diff HEAD` is exactly the agent's tracked-file changes —
+        # without untracked build artifacts (build/, *.egg-info,
+        # __pycache__) that would otherwise pollute the patch and trip
+        # the eval container's `patch -R` heuristic.
+        r = self._exec(container_id, ["git", "-C", ws, "diff", "HEAD"])
         return r.stdout
 
     # ------------------------------------------------------------------

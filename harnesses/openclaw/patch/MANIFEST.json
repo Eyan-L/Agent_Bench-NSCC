@@ -5,6 +5,7 @@
       "file": "relative path under patch/ to the unified diff",
       "target_glob": "glob (relative to OC_HOST_OPENCLAW) for content-hashed bundles; substituted into the patch's CHUNK placeholder",
       "target_path": "exact relative path (used instead of target_glob when filename is stable)",
+      "target_glob_all": "recursive glob (relative to OC_HOST_OPENCLAW); patch is applied to every match (used when the same source file is duplicated across plugin bundles)",
       "chunk_placeholder": "string in patch that maps to the matched glob suffix (default: CHUNK)",
       "idempotent_marker": "literal string in patched output; if present in target file, the patch is treated as already applied",
       "summary": "human-readable description"
@@ -55,6 +56,12 @@
       "target_content_hint": "readPinnedFile",
       "idempotent_marker": "OC_PATCH_FS_BRIDGE_HELPER_BEGIN",
       "summary": "route fs-bridge read/write/stat/etc through the same external bridge"
+    },
+    {
+      "file": "pi-ai-validation-jsonstring.patch",
+      "target_glob_all": "**/node_modules/@mariozechner/pi-ai/dist/utils/validation.js",
+      "idempotent_marker": "OC_PATCH_PIAI_VALIDATION_JSONSTRING_BEGIN",
+      "summary": "coerce JSON-stringified array/object args into real arrays before AJV validates (Qwen3 emits nested args as JSON strings). Applied to every pi-ai copy (main + per-plugin bundles)."
     }
   ]
 }

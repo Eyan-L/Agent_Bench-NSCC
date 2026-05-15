@@ -64,6 +64,15 @@ _ensure_serve:
 	    echo "[serve] SERVE_AUTO=0 — skipping auto-launch"; \
 	elif curl -s -f -m 2 "$(SERVE_URL)" >/dev/null 2>&1; then \
 	    echo "[serve] $(SERVE_URL) already up — reusing"; \
+	    mkdir -p "$$(dirname "$(SERVE_LOG)")"; \
+	    pid=$$(pgrep -f "$(SERVING_BACKEND).*serve|$(SERVING_BACKEND) serve" | head -1); \
+	    if [ -n "$$pid" ] && [ -r /proc/$$pid/fd/1 ]; then \
+	        actual=$$(readlink /proc/$$pid/fd/1); \
+	        if [ -n "$$actual" ] && [ "$$actual" != "$(SERVE_LOG)" ]; then \
+	            ln -sfn "$$actual" "$(SERVE_LOG)"; \
+	            echo "[serve] linked $(SERVE_LOG) -> $$actual (reused PID $$pid)"; \
+	        fi; \
+	    fi; \
 	else \
 	    mkdir -p "$$(dirname "$(SERVE_LOG)")"; \
 	    echo "[serve] launching $(SERVING_BACKEND) → $(SERVE_LOG)"; \
