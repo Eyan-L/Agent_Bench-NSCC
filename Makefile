@@ -12,6 +12,7 @@
 # launches; it is derived from BACKEND's first path segment by default.
 
 SHELL := /usr/bin/env bash
+PYTHON ?= python3
 
 # --- composed-config defaults --------------------------------------------
 APP     ?= swebench/phase0
@@ -40,7 +41,7 @@ export OC_RUN_STAMP
 # Deferred (=) so target-specific `APP := <x>` overrides flow through. Reads
 # output_dir from the active app JSON; falls back to data/runs/_unknown when
 # the JSON is missing (e.g. `make help` with the default APP).
-APP_OUTPUT_DIR = $(shell python -c 'import json; print(json.load(open("config/application/$(APP).json"))["output_dir"])' 2>/dev/null)
+APP_OUTPUT_DIR = $(shell $(PYTHON) -c 'import json; print(json.load(open("config/application/$(APP).json"))["output_dir"])' 2>/dev/null)
 SWEEP_DIR      = $(APP_OUTPUT_DIR)/$(OC_RUN_STAMP)
 
 # Serving auto-launch. _ensure_serve polls SERVE_URL; if it can't reach it,
@@ -100,7 +101,8 @@ _ensure_serve:
         _check_eval_inputs _ensure_serve \
         otel-up-host otel-down-host scoring-server \
         openhands-image \
-        mig-status mig-prep-test mig-teardown
+        mig-status mig-prep-test mig-teardown mig-smoke run_tb_mig \
+        _check_mig_uuid _ensure_mig_serve
 
 help:
 	@echo "Targets:"
@@ -120,6 +122,8 @@ help:
 	@echo "  serve-stop/logs/status  Lifecycle for the docker-launched vLLM"
 	@echo "  openhands-image  Build agent-bench/openhands:<ver> harness image"
 	@echo "  mig-status / mig-prep-test / mig-teardown  GPU MIG management"
+	@echo "  mig-smoke   Dry-run MIG vLLM binding using data/last_mig_uuid"
+	@echo "  run_tb_mig  One-command TB smoke against MIG-bound vLLM"
 	@echo ""
 	@echo "Composed config (override any at the command line):"
 	@echo "  APP=$(APP)"
@@ -141,12 +145,13 @@ help:
 	@echo "Docker / GPU helpers:"
 	@echo "  VLLM_MIG_UUID                bind serve-docker to a MIG slice (see mig-status)"
 	@echo "  MIG_GPU=$(MIG_GPU) / MIG_PROFILE=$(MIG_PROFILE) (mig-prep-test args)"
+	@echo "  MIG_UUID=$(MIG_UUID) (defaults to data/last_mig_uuid)"
 
 serve:
 	bash backend/common/serve.sh
 
 eval: _check_eval_inputs _ensure_serve
-	python -m orchestration.runner.driver \
+	$(PYTHON) -m orchestration.runner.driver \
 	  --app     config/application/$(APP).json \
 	  --harness config/harness/$(HARNESS).json \
 	  --backend config/backend/$(BACKEND).json \
@@ -178,13 +183,13 @@ TB_INSTANCE_DATA ?= $(KIT_ROOT)/data/terminal_bench/tasks.json
 # Re-runs are idempotent — the loader overwrites the file each time.
 tb-tasks:
 	@mkdir -p "$$(dirname "$(TB_INSTANCE_DATA)")"
-	python -m applications.terminal_bench.loader "$(TB_INSTANCE_DATA)"
+	$(PYTHON) -m applications.terminal_bench.loader "$(TB_INSTANCE_DATA)"
 	@echo "[tb] instance_data -> $(TB_INSTANCE_DATA)"
 
 run_tb: APP := terminal_bench/kv_store
 run_tb: HARNESS := tb_react_27b
 run_tb: tb-tasks _ensure_serve
-	python -m orchestration.runner.driver \
+	$(PYTHON) -m orchestration.runner.driver \
 	  --app     config/application/$(APP).json \
 	  --harness config/harness/$(HARNESS).json \
 	  --backend config/backend/$(BACKEND).json \
@@ -202,7 +207,7 @@ otel-down-host:
 # Clients set OC_SCORING_URL=http://<this-host>:8765 to use it.
 SCORING_PORT ?= 8765
 scoring-server: _check_eval_inputs
-	python -m orchestration.scoring_server.main \
+	$(PYTHON) -m orchestration.scoring_server.main \
 	  --swebench-root $(SWEBENCH_ROOT) \
 	  --host 0.0.0.0 --port $(SCORING_PORT)
 
@@ -210,13 +215,13 @@ stress:
 	./stress/loadgen-bin $(STRESS_ARGS)
 
 analyze:
-	python -m orchestration.analysis.aggregate $(ANALYZE_ARGS)
+	$(PYTHON) -m orchestration.analysis.aggregate $(ANALYZE_ARGS)
 
 report:
-	python -m orchestration.report.generate $(REPORT_ARGS)
+	$(PYTHON) -m orchestration.report.generate $(REPORT_ARGS)
 
 test:
-	python3 -m tests.trace.test_trace_pipeline
+	$(PYTHON) -m tests.trace.test_trace_pipeline
 
 clean:
 	find . -name __pycache__ -type d -exec rm -rf {} +
@@ -259,9 +264,59 @@ openhands-image:
 # nvidia-smi MIG commands require root; the scripts enforce + remind.
 MIG_GPU     ?= 1
 MIG_PROFILE ?= 1g.24gb
+MIG_UUID    ?= $(shell cat data/last_mig_uuid 2>/dev/null)
+MIG_SERVE_LOG ?= $(SWEEP_DIR)/vllm-mig.log
+MIG_SERVE_READY_TIMEOUT ?= $(SERVE_READY_TIMEOUT)
 
 mig-status:
 	@bash scripts/mig/mig_status.sh
+
+_check_mig_uuid:
+	@if [ -z "$(MIG_UUID)" ]; then \
+	    echo "ERROR: MIG_UUID is empty. Run 'make mig-prep-test' or pass MIG_UUID=MIG-..." >&2; \
+	    exit 2; \
+	fi
+	@if command -v nvidia-smi >/dev/null 2>&1 && ! nvidia-smi -L 2>/dev/null | grep -qF "$(MIG_UUID)"; then \
+	    echo "ERROR: MIG slice $(MIG_UUID) not found. Run 'make mig-status'." >&2; \
+	    exit 2; \
+	fi
+
+mig-smoke: _check_mig_uuid
+	@VLLM_MIG_UUID="$(MIG_UUID)" DRY_RUN=1 bash backend/vllm/serve_docker.sh --preset latency
+
+_ensure_mig_serve: _check_mig_uuid
+	@if curl -s -f -m 2 "$(SERVE_URL)" >/dev/null 2>&1; then \
+	    echo "[mig-serve] $(SERVE_URL) already up — reusing"; \
+	else \
+	    mkdir -p "$$(dirname "$(MIG_SERVE_LOG)")"; \
+	    echo "[mig-serve] launching vLLM on $(MIG_UUID) → $(MIG_SERVE_LOG)"; \
+	    VLLM_MIG_UUID="$(MIG_UUID)" VLLM_TAIL_LOGS=0 VLLM_DETACH=1 \
+	      bash backend/vllm/serve_docker.sh >>"$(MIG_SERVE_LOG)" 2>&1; \
+	    echo "[mig-serve] polling $(SERVE_URL) (timeout $(MIG_SERVE_READY_TIMEOUT)s)"; \
+	    deadline=$$(( $$(date +%s) + $(MIG_SERVE_READY_TIMEOUT) )); \
+	    while ! curl -s -f -m 2 "$(SERVE_URL)" >/dev/null 2>&1; do \
+	        if ! docker ps --format '{{.Names}}' | grep -qx "$(VLLM_CONTAINER_NAME)"; then \
+	            echo "[mig-serve] container $(VLLM_CONTAINER_NAME) is not running — see $(MIG_SERVE_LOG)" >&2; \
+	            tail -n 50 "$(MIG_SERVE_LOG)" >&2 2>/dev/null; exit 1; \
+	        fi; \
+	        if [ $$(date +%s) -gt $$deadline ]; then \
+	            echo "[mig-serve] timed out after $(MIG_SERVE_READY_TIMEOUT)s — see $(MIG_SERVE_LOG)" >&2; \
+	            exit 1; \
+	        fi; \
+	        sleep 10; \
+	    done; \
+	    echo "[mig-serve] ready"; \
+	fi
+
+run_tb_mig: APP := terminal_bench/kv_store
+run_tb_mig: HARNESS := tb_react_27b
+run_tb_mig: tb-tasks _ensure_mig_serve
+	$(PYTHON) -m orchestration.runner.driver \
+	  --app     config/application/$(APP).json \
+	  --harness config/harness/$(HARNESS).json \
+	  --backend config/backend/$(BACKEND).json \
+	  --instance-data $(TB_INSTANCE_DATA) \
+	  $(EXTRA_ARGS)
 
 mig-prep-test:
 	@command -v sudo >/dev/null || { echo "ERROR: sudo not available" >&2; exit 1; }

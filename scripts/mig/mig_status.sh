@@ -42,12 +42,19 @@ fi
 
 echo
 echo "=== GPU instances (-lgi) ==="
-nvidia-smi mig -lgi 2>/dev/null | grep -v "^$" || echo "  (none)"
+if ! nvidia-smi mig -lgi 2>&1 | grep -v "^$"; then
+    echo "  (none)"
+fi
 
 echo
 echo "=== Compute instances (-lci) ==="
-nvidia-smi mig -lci 2>/dev/null | grep -v "^$" || echo "  (none)"
+if ! nvidia-smi mig -lci 2>&1 | grep -v "^$"; then
+    echo "  (none)"
+fi
 
 echo
 echo "Supported profiles on this hardware (-lgip):"
-nvidia-smi mig -lgip 2>/dev/null | awk '/MIG/ && /Name/' || nvidia-smi mig -lgip 2>/dev/null | grep -E "^\|.*[0-9]g\." | head -8
+LGIP_OUTPUT="$(nvidia-smi mig -lgip 2>&1 || true)"
+if ! printf "%s\n" "$LGIP_OUTPUT" | grep -E "^\|.*[0-9]g\." | head -20; then
+    echo "  (unavailable)"
+fi

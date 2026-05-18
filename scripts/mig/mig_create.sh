@@ -29,7 +29,7 @@ fi
 # Snapshot UUIDs before creation so we can find the new one afterwards.
 SNAP_BEFORE="$(nvidia-smi -L 2>/dev/null | grep -oE 'MIG-[0-9a-fA-F-]+' | sort -u || true)"
 
-echo "[mig-create] creating $PROFILE on GPU $GPU ..."
+echo "[mig-create] creating $PROFILE on GPU $GPU ..." >&2
 if ! nvidia-smi mig -cgi "$PROFILE" -C -i "$GPU" >&2; then
     echo "ERROR: nvidia-smi mig -cgi failed." >&2
     echo "       List available profiles: nvidia-smi mig -lgip -i $GPU" >&2

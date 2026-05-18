@@ -23,6 +23,7 @@
 #                           `--device nvidia.com/gpu=MIG-<uuid>`.
 #   VLLM_CONTAINER_NAME     docker container name (default: oc-vllm-serve)
 #   VLLM_DETACH             1 = detach + tail logs (default), 0 = foreground
+#   VLLM_TAIL_LOGS          1 = follow logs after detached start (default), 0 = return
 #   VLLM_HOST_HF_HOME       host HF cache dir (default: $HF_HOME or ~/.cache/huggingface)
 #   VLLM_EXTRA_DOCKER_ARGS  pass-through to docker run (e.g. "--memory 64g")
 #   HUGGING_FACE_HUB_TOKEN  forwarded into the container if set
@@ -41,6 +42,7 @@ GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"
 VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.11.0}"
 VLLM_CONTAINER_NAME="${VLLM_CONTAINER_NAME:-oc-vllm-serve}"
 VLLM_DETACH="${VLLM_DETACH:-1}"
+VLLM_TAIL_LOGS="${VLLM_TAIL_LOGS:-1}"
 VLLM_MIG_UUID="${VLLM_MIG_UUID:-}"
 VLLM_HOST_HF_HOME="${VLLM_HOST_HF_HOME:-${HF_HOME:-$HOME/.cache/huggingface}}"
 VLLM_EXTRA_DOCKER_ARGS="${VLLM_EXTRA_DOCKER_ARGS:-}"
@@ -92,11 +94,16 @@ if [[ -n "$VLLM_MIG_UUID" ]]; then
             echo "       Run 'make mig-status' to list available slices." >&2
             exit 3
         fi
-        # Best-effort profile lookup (e.g. "MIG 1g.24gb") for the manifest tag.
+        # Best-effort profile lookup (e.g. "1g.24gb") for the manifest tag.
         MIG_PROFILE="$(nvidia-smi -L | awk -v u="$MIG_FULL" '
-            $0 ~ "MIG " { name=$0; next }
-            $0 ~ u { print name; exit }
-        ' | sed -E 's/.*\(([^)]*)\).*/\1/' | tr -d ' ' || true)"
+            $0 ~ u {
+                prof = $0
+                sub(/.*MIG /, "", prof)
+                sub(/ +Device.*/, "", prof)
+                print prof
+                exit
+            }
+        ' | tr -d ' ' || true)"
     fi
 
     # MIG slices are isolated — TP > 1 across them is impossible.
@@ -239,7 +246,7 @@ echo "$CONFIG_ID" > "${KIT_ROOT:-$(pwd)}/data/serving_config_id"
 {
     echo "config_id=$CONFIG_ID"
     echo "vllm_image=$VLLM_IMAGE"
-    echo "mig_uuid=${VLLM_MIG_UUID:-}"
+    echo "mig_uuid=${MIG_FULL:-}"
     echo "mig_profile=${MIG_PROFILE:-}"
     echo "tensor_parallel_size=$TP"
 } > "${KIT_ROOT:-$(pwd)}/data/serving_metadata.env"
@@ -254,6 +261,10 @@ fi
 if [[ "$VLLM_DETACH" = "1" ]]; then
     CID="$(docker "${DOCKER_ARGS[@]}")"
     echo "[serve_vllm] started detached (cid=${CID:0:12})"
+    if [[ "$VLLM_TAIL_LOGS" != "1" ]]; then
+        echo "[serve_vllm] VLLM_TAIL_LOGS=0 — returning after detached start"
+        exit 0
+    fi
     echo "[serve_vllm] tailing logs (Ctrl-C stops the tail; container keeps running)"
     echo "[serve_vllm] stop with: make serve-stop"
     exec docker logs -f "$VLLM_CONTAINER_NAME"
