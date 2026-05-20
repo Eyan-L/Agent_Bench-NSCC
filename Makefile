@@ -32,10 +32,14 @@ KIT_ROOT       ?= $(CURDIR)
 export KIT_ROOT
 
 # Per-sweep timestamp (Singapore time) + experiment dir. Both Make and the
-# driver use OC_RUN_STAMP so vllm.log + per-run dirs end up siblings under
-# <app_output_dir>/<stamp>/. Override OC_RUN_STAMP to pin (resume an existing
-# dir) — `?=` honors a value passed on the command line or env.
-OC_RUN_STAMP ?= $(shell TZ=Asia/Singapore date '+%Y-%m-%d_%H-%M-%S')
+# driver use OC_RUN_STAMP so the engine log + per-run dirs end up siblings
+# under <app_output_dir>/<stamp>/. Override OC_RUN_STAMP to pin (resume an
+# existing dir) — `?=` honors a value passed on the command line or env.
+# Lock OC_RUN_STAMP to a single timestamp for the whole make run. The old
+# `?=` form left the right-hand side deferred — every $(SERVE_LOG)
+# reference re-invoked `date`, so mkdir and nohup-redirect could land in
+# different per-second dirs and the redirect would fail silently.
+OC_RUN_STAMP := $(or $(OC_RUN_STAMP),$(shell TZ=Asia/Singapore date '+%Y-%m-%d_%H-%M-%S'))
 export OC_RUN_STAMP
 
 # Deferred (=) so target-specific `APP := <x>` overrides flow through. Reads
@@ -50,9 +54,15 @@ SWEEP_DIR      = $(APP_OUTPUT_DIR)/$(OC_RUN_STAMP)
 # come up. Set SERVE_AUTO=0 to skip (useful when you launch the backend
 # yourself or want to fail fast on missing serving).
 SERVE_URL            ?= http://localhost:8000/v1/models
-SERVE_LOG            ?= $(SWEEP_DIR)/vllm.log
+SERVE_LOG            ?= $(SWEEP_DIR)/$(SERVING_BACKEND).log
 SERVE_READY_TIMEOUT  ?= 600
 SERVE_AUTO           ?= 1
+
+# Shell snippet to register an EXIT trap that stops the active backend after
+# the recipe's driver finishes (or on Ctrl-C). Skipped when SERVE_AUTO=0
+# (user manages backend lifecycle themselves). One sglang/vllm process per
+# experiment — never reused across runs.
+SERVE_CLEANUP_HOOK = if [ "$(SERVE_AUTO)" != "0" ]; then trap 'echo "[serve] stopping $(SERVING_BACKEND) after experiment"; bash backend/common/serve.sh stop 2>&1 | sed "s|^|[serve] |" || true' EXIT INT TERM; fi
 
 _check_eval_inputs:
 	@if [ -z "$(SWEBENCH_ROOT)" ] || [ -z "$(INSTANCE_DATA)" ]; then \
@@ -63,18 +73,15 @@ _check_eval_inputs:
 _ensure_serve:
 	@if [ "$(SERVE_AUTO)" = "0" ]; then \
 	    echo "[serve] SERVE_AUTO=0 — skipping auto-launch"; \
-	elif curl -s -f -m 2 "$(SERVE_URL)" >/dev/null 2>&1; then \
-	    echo "[serve] $(SERVE_URL) already up — reusing"; \
-	    mkdir -p "$$(dirname "$(SERVE_LOG)")"; \
-	    pid=$$(pgrep -f "$(SERVING_BACKEND).*serve|$(SERVING_BACKEND) serve" | head -1); \
-	    if [ -n "$$pid" ] && [ -r /proc/$$pid/fd/1 ]; then \
-	        actual=$$(readlink /proc/$$pid/fd/1); \
-	        if [ -n "$$actual" ] && [ "$$actual" != "$(SERVE_LOG)" ]; then \
-	            ln -sfn "$$actual" "$(SERVE_LOG)"; \
-	            echo "[serve] linked $(SERVE_LOG) -> $$actual (reused PID $$pid)"; \
-	        fi; \
-	    fi; \
 	else \
+	    if curl -s -f -m 2 "$(SERVE_URL)" >/dev/null 2>&1; then \
+	        echo "[serve] $(SERVE_URL) already up — stopping for fresh per-experiment launch"; \
+	        bash backend/common/serve.sh stop 2>&1 | sed 's/^/[serve] /'; \
+	        for i in $$(seq 1 20); do \
+	            sleep 1; \
+	            curl -s -f -m 1 "$(SERVE_URL)" >/dev/null 2>&1 || break; \
+	        done; \
+	    fi; \
 	    mkdir -p "$$(dirname "$(SERVE_LOG)")"; \
 	    echo "[serve] launching $(SERVING_BACKEND) → $(SERVE_LOG)"; \
 	    nohup bash backend/common/serve.sh >>"$(SERVE_LOG)" 2>&1 </dev/null & \
@@ -98,6 +105,9 @@ _ensure_serve:
 .PHONY: help serve serve-docker serve-stop serve-logs serve-status \
         eval stress analyze report test clean \
         run_phase0 run_phase1 run_phase2 run_tb tb-tasks \
+        run_dr_smoke1 run_dr_smoke run_dr_full dr-tasks \
+        run_dr_smoke1_agent run_dr_smoke_agent run_dr_full_agent \
+        run_dr_smoke1_eval  run_dr_smoke_eval  run_dr_full_eval \
         _check_eval_inputs _ensure_serve \
         otel-up-host otel-down-host scoring-server \
         openhands-image \
@@ -112,6 +122,9 @@ help:
 	@echo "  run_phase1  SWE-bench phase1 mini-verified (APP=swebench/phase1)"
 	@echo "  run_phase2  SWE-bench phase2 serving sweep (APP=swebench/phase2_serving)"
 	@echo "  run_tb      Terminal-Bench kv-store-grpc (APP=terminal_bench/kv_store, HARNESS=tb_react)"
+	@echo "  run_dr_smoke1[_agent|_eval]  DeepResearch-Bench 1 task (full / agent only / re-judge persisted; ~28/3/20 min)"
+	@echo "  run_dr_smoke[_agent|_eval]   DeepResearch-Bench 3 tasks (same split)"
+	@echo "  run_dr_full[_agent|_eval]    DeepResearch-Bench full 100 tasks (same split)"
 	@echo "  stress      Run simulated stress workload (stress/loadgen-bin)"
 	@echo "  analyze     Aggregate results (orchestration/analysis/aggregate.py)"
 	@echo "  report      Build report (orchestration/report/generate.py)"
@@ -151,6 +164,7 @@ serve:
 	bash backend/common/serve.sh
 
 eval: _check_eval_inputs _ensure_serve
+	@$(SERVE_CLEANUP_HOOK); \
 	$(PYTHON) -m orchestration.runner.driver \
 	  --app     config/application/$(APP).json \
 	  --harness config/harness/$(HARNESS).json \
@@ -189,11 +203,137 @@ tb-tasks:
 run_tb: APP := terminal_bench/kv_store
 run_tb: HARNESS := tb_react_27b
 run_tb: tb-tasks _ensure_serve
+	@$(SERVE_CLEANUP_HOOK); \
 	$(PYTHON) -m orchestration.runner.driver \
 	  --app     config/application/$(APP).json \
 	  --harness config/harness/$(HARNESS).json \
 	  --backend config/backend/$(BACKEND).json \
 	  --instance-data $(TB_INSTANCE_DATA) \
+	  $(EXTRA_ARGS)
+
+# ----------------------------------------------------------------------
+# DeepResearch-Bench shortcuts.
+#
+# Three forms per sweep size (smoke1=1 instance, smoke=3, full=100):
+#   run_dr_<sweep>        agent run + judge in one shot   (~28 min for smoke1)
+#   run_dr_<sweep>_agent  agent run only (DR_SKIP_EVAL=1) (~3 min)
+#   run_dr_<sweep>_eval   re-judge persisted report.md    (~20 min)
+#
+# The _agent / _eval split exists because the judge (RACE + FACT, ~25 min)
+# is far slower than the agent (~3 min). Run agent first, look at the
+# report, then judge — or rerun the judge with different settings without
+# re-burning the agent budget.
+#
+# Requires four env vars at run time (auto-sourced from .env):
+#   BRAVE_API_KEY      OC native web_search (Brave Search API)
+#   JINA_READER_API    FACT citation scraping (aliased to JINA_API_KEY by
+#                      applications/deepresearch_bench/eval/judge_runner.py)
+#   DEEPSEEK_API_KEY   RACE + FACT judge (DeepSeek-V4-Pro)
+#
+# Override HARNESS to swap the agent model or web_search provider — defaults
+# to deepresearch_35b_brave (Qwen3.6-35B-A3B via local vLLM + Brave Search).
+# Use deepresearch_35b_ddg for DuckDuckGo (key-free; rate-limited, see config).
+# ----------------------------------------------------------------------
+DR_INSTANCE_DATA ?= $(KIT_ROOT)/data/deepresearch_bench/instances.json
+DR_LOAD_ENV      := set -a; [ -f $(KIT_ROOT)/.env ] && . $(KIT_ROOT)/.env; set +a;
+DR_HARNESS       ?= deepresearch_35b_brave
+
+# Materialize DR instances.json from eval/vendor/.../query.jsonl. Idempotent.
+dr-tasks:
+	@mkdir -p "$$(dirname "$(DR_INSTANCE_DATA)")"
+	python -m applications.deepresearch_bench.loader "$(DR_INSTANCE_DATA)"
+	@echo "[dr] instance_data -> $(DR_INSTANCE_DATA)"
+
+# --- combined (agent + eval) -----------------------------------------
+run_dr_smoke1: APP := deepresearch_bench/smoke1
+run_dr_smoke1: HARNESS := $(DR_HARNESS)
+run_dr_smoke1: dr-tasks _ensure_serve
+	@$(SERVE_CLEANUP_HOOK); \
+	$(DR_LOAD_ENV) python -m orchestration.runner.driver \
+	  --app     config/application/$(APP).json \
+	  --harness config/harness/$(HARNESS).json \
+	  --backend config/backend/$(BACKEND).json \
+	  --instance-data $(DR_INSTANCE_DATA) \
+	  $(EXTRA_ARGS)
+
+run_dr_smoke: APP := deepresearch_bench/smoke3
+run_dr_smoke: HARNESS := $(DR_HARNESS)
+run_dr_smoke: dr-tasks _ensure_serve
+	@$(SERVE_CLEANUP_HOOK); \
+	$(DR_LOAD_ENV) python -m orchestration.runner.driver \
+	  --app     config/application/$(APP).json \
+	  --harness config/harness/$(HARNESS).json \
+	  --backend config/backend/$(BACKEND).json \
+	  --instance-data $(DR_INSTANCE_DATA) \
+	  $(EXTRA_ARGS)
+
+run_dr_full: APP := deepresearch_bench/full100
+run_dr_full: HARNESS := $(DR_HARNESS)
+run_dr_full: dr-tasks _ensure_serve
+	@$(SERVE_CLEANUP_HOOK); \
+	$(DR_LOAD_ENV) python -m orchestration.runner.driver \
+	  --app     config/application/$(APP).json \
+	  --harness config/harness/$(HARNESS).json \
+	  --backend config/backend/$(BACKEND).json \
+	  --instance-data $(DR_INSTANCE_DATA) \
+	  $(EXTRA_ARGS)
+
+# --- agent only (DR_SKIP_EVAL=1) -------------------------------------
+run_dr_smoke1_agent: APP := deepresearch_bench/smoke1
+run_dr_smoke1_agent: HARNESS := $(DR_HARNESS)
+run_dr_smoke1_agent: dr-tasks _ensure_serve
+	@$(SERVE_CLEANUP_HOOK); \
+	$(DR_LOAD_ENV) DR_SKIP_EVAL=1 python -m orchestration.runner.driver \
+	  --app     config/application/$(APP).json \
+	  --harness config/harness/$(HARNESS).json \
+	  --backend config/backend/$(BACKEND).json \
+	  --instance-data $(DR_INSTANCE_DATA) \
+	  $(EXTRA_ARGS)
+
+run_dr_smoke_agent: APP := deepresearch_bench/smoke3
+run_dr_smoke_agent: HARNESS := $(DR_HARNESS)
+run_dr_smoke_agent: dr-tasks _ensure_serve
+	@$(SERVE_CLEANUP_HOOK); \
+	$(DR_LOAD_ENV) DR_SKIP_EVAL=1 python -m orchestration.runner.driver \
+	  --app     config/application/$(APP).json \
+	  --harness config/harness/$(HARNESS).json \
+	  --backend config/backend/$(BACKEND).json \
+	  --instance-data $(DR_INSTANCE_DATA) \
+	  $(EXTRA_ARGS)
+
+run_dr_full_agent: APP := deepresearch_bench/full100
+run_dr_full_agent: HARNESS := $(DR_HARNESS)
+run_dr_full_agent: dr-tasks _ensure_serve
+	@$(SERVE_CLEANUP_HOOK); \
+	$(DR_LOAD_ENV) DR_SKIP_EVAL=1 python -m orchestration.runner.driver \
+	  --app     config/application/$(APP).json \
+	  --harness config/harness/$(HARNESS).json \
+	  --backend config/backend/$(BACKEND).json \
+	  --instance-data $(DR_INSTANCE_DATA) \
+	  $(EXTRA_ARGS)
+
+# --- eval only (re-judges latest stamped sweep) ----------------------
+# Picks the most recent stamped subdir under data/runs/<sweep_name>.
+# Add EXTRA_ARGS="--force" to re-grade a sweep that already has verdicts.
+run_dr_smoke1_eval: APP := deepresearch_bench/smoke1
+run_dr_smoke1_eval: dr-tasks
+	$(DR_LOAD_ENV) python -m applications.deepresearch_bench.eval.runner \
+	  --sweep         $(APP_OUTPUT_DIR) \
+	  --instance-data $(DR_INSTANCE_DATA) \
+	  $(EXTRA_ARGS)
+
+run_dr_smoke_eval: APP := deepresearch_bench/smoke3
+run_dr_smoke_eval: dr-tasks
+	$(DR_LOAD_ENV) python -m applications.deepresearch_bench.eval.runner \
+	  --sweep         $(APP_OUTPUT_DIR) \
+	  --instance-data $(DR_INSTANCE_DATA) \
+	  $(EXTRA_ARGS)
+
+run_dr_full_eval: APP := deepresearch_bench/full100
+run_dr_full_eval: dr-tasks
+	$(DR_LOAD_ENV) python -m applications.deepresearch_bench.eval.runner \
+	  --sweep         $(APP_OUTPUT_DIR) \
+	  --instance-data $(DR_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
 # Native OTel collector (no docker). Downloads otelcol-contrib on first run.

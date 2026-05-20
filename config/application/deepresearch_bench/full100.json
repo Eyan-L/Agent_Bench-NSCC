@@ -1,0 +1,518 @@
+{
+  "_doc": "DeepResearch-Bench full 100 tasks (50 ZH + 50 EN). See smoke3.json for field-by-field notes.",
+  "sweep_name": "dr_full100",
+  "plan_version": "v1.0",
+  "application": "deepresearch_bench",
+  "instances": [
+    "dr_001",
+    "dr_002",
+    "dr_003",
+    "dr_004",
+    "dr_005",
+    "dr_006",
+    "dr_007",
+    "dr_008",
+    "dr_009",
+    "dr_010",
+    "dr_011",
+    "dr_012",
+    "dr_013",
+    "dr_014",
+    "dr_015",
+    "dr_016",
+    "dr_017",
+    "dr_018",
+    "dr_019",
+    "dr_020",
+    "dr_021",
+    "dr_022",
+    "dr_023",
+    "dr_024",
+    "dr_025",
+    "dr_026",
+    "dr_027",
+    "dr_028",
+    "dr_029",
+    "dr_030",
+    "dr_031",
+    "dr_032",
+    "dr_033",
+    "dr_034",
+    "dr_035",
+    "dr_036",
+    "dr_037",
+    "dr_038",
+    "dr_039",
+    "dr_040",
+    "dr_041",
+    "dr_042",
+    "dr_043",
+    "dr_044",
+    "dr_045",
+    "dr_046",
+    "dr_047",
+    "dr_048",
+    "dr_049",
+    "dr_050",
+    "dr_051",
+    "dr_052",
+    "dr_053",
+    "dr_054",
+    "dr_055",
+    "dr_056",
+    "dr_057",
+    "dr_058",
+    "dr_059",
+    "dr_060",
+    "dr_061",
+    "dr_062",
+    "dr_063",
+    "dr_064",
+    "dr_065",
+    "dr_066",
+    "dr_067",
+    "dr_068",
+    "dr_069",
+    "dr_070",
+    "dr_071",
+    "dr_072",
+    "dr_073",
+    "dr_074",
+    "dr_075",
+    "dr_076",
+    "dr_077",
+    "dr_078",
+    "dr_079",
+    "dr_080",
+    "dr_081",
+    "dr_082",
+    "dr_083",
+    "dr_084",
+    "dr_085",
+    "dr_086",
+    "dr_087",
+    "dr_088",
+    "dr_089",
+    "dr_090",
+    "dr_091",
+    "dr_092",
+    "dr_093",
+    "dr_094",
+    "dr_095",
+    "dr_096",
+    "dr_097",
+    "dr_098",
+    "dr_099",
+    "dr_100"
+  ],
+  "repo_mapping": {
+    "dr_001": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_002": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_003": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_004": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_005": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_006": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_007": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_008": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_009": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_010": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_011": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_012": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_013": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_014": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_015": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_016": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_017": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_018": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_019": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_020": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_021": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_022": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_023": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_024": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_025": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_026": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_027": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_028": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_029": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_030": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_031": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_032": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_033": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_034": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_035": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_036": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_037": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_038": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_039": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_040": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_041": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_042": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_043": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_044": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_045": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_046": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_047": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_048": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_049": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_050": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_051": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_052": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_053": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_054": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_055": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_056": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_057": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_058": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_059": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_060": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_061": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_062": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_063": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_064": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_065": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_066": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_067": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_068": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_069": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_070": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_071": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_072": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_073": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_074": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_075": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_076": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_077": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_078": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_079": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_080": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_081": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_082": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_083": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_084": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_085": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_086": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_087": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_088": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_089": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_090": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_091": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_092": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_093": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_094": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_095": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_096": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_097": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_098": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_099": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_100": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    }
+  },
+  "container_image": "hongrui0/dr-sandbox:1.0",
+  "wall_clock_budget_seconds": 3600,
+  "output_dir": "data/runs/dr_full100",
+  "seeds": [
+    42
+  ],
+  "parallel_limit_gpu": 1,
+  "parallel_limit_cpu_cores": 8
+}

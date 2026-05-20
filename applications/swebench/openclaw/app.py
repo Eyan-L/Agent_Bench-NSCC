@@ -1,4 +1,4 @@
-"""SWE-bench application — OpenClaw native sandbox docker harness.
+"""SWE-bench application — OpenClaw harness.
 
 Sibling of `applications/swebench/openhands/app.py`. Implements the same
 lifecycle contract (`prepare_environment`, `run_tests`, `cleanup`,
@@ -7,38 +7,34 @@ interchangeably — the choice is made per-sweep from the harness JSON.
 
 Layered model (no host-mode anywhere):
 
-    host  ──── only vLLM runs here ────  http://localhost:8000/v1
+    host  ──── only vLLM/sglang runs here ────  http://localhost:8000/v1
                                    ▲
-                                   │ OpenAI-compat HTTP (vllm-host:8000)
-                                   │
+                                   │ OpenAI-compat HTTP
+                                   │  (docker: vllm-host:8000 via --add-host)
+                                   │  (singularity: localhost:8000, shared net)
     ┌──────────────────────────────────────┐
     │ oc-<rid>  agent-bench/openclaw:<v>   │
     │ - openclaw gateway (long-running)    │
     │ - openclaw agent CLI (per session)   │
-    │ - docker CLI + /var/run/docker.sock  │
     └────────┬─────────────────────────────┘
-             │  spawns per-session via OpenClaw's
-             │  sandbox.docker config:
+             │  agent tool.exec is hijacked by the OC patches and
+             │  routed through the exec-bridge unix socket back to
+             │  the host, where server.py docker-execs or
+             │  singularity-execs into the task container:
              ↓
     ┌──────────────────────────────────────┐
-    │ openclaw-sandbox-<sess>              │
-    │ image: swebench/sweb.eval.<inst>     │
+    │ task-<rid>  swebench/sweb.eval.<inst>│
     │ - per-instance python env + pytest   │
     │ - workspace bind-mounted at /testbed │
-    │ - tool exec from agent lands here    │
     └──────────────────────────────────────┘
 
-The gateway routes the agent's `tools.exec` (bash, file edits) into the
-sandbox container automatically — see `agents.defaults.sandbox.docker` in
-the per-run openclaw.json. The agent never knows there are two containers;
-it just sees a shell with /testbed cloned and a python env.
+The same `SWEBenchHarness` drives both docker and singularity flows — it
+talks to a runtime-agnostic `Container` injected by the driver. See
+`orchestration/container/` for the two implementations.
 
 Scoring (`run_tests`) is independent of the sandbox — it shells out to
 `python -m swebench.harness.run_evaluation` on the host; that command
 spawns its own scoring containers and writes report.json.
-
-`SingularityHarness` is the singularity counterpart (two .sif instances);
-not yet implemented (NotImplementedError stub).
 """
 from __future__ import annotations
 
@@ -64,6 +60,12 @@ from applications.swebench.app import (
     _force_rmtree,
     _oc_sandbox_name,
 )
+from orchestration.container import (
+    Container,
+    ContainerHandle,
+    ContainerSpec,
+    Mount,
+)
 from orchestration.dispatcher.openclaw_remote import OpenClawRemoteDispatcher
 
 logger = logging.getLogger(__name__)
@@ -77,34 +79,48 @@ _SWEBENCH_AGENT_PROMPTS = (
 
 
 class SWEBenchHarness:
-    """Two-container docker harness.
+    """Two-container OC harness, runtime-agnostic.
 
-    `prepare_environment` brings up: a per-run docker network, a task
-    container (the SWE-bench instance image holding /testbed and its
+    `prepare_environment` brings up: (optionally) a per-run docker network,
+    a task container (the SWE-bench instance image holding /testbed and its
     python env), and an openclaw container (the patched OC runtime image
     holding the gateway + agent CLI). They share the workspace via
-    bind-mount and a docker network so the agent's gateway is reachable
-    over WS without exposing a host port.
-
-    Conditions that need to invoke `openclaw agent` should `docker exec`
-    into the openclaw container's id (`oc_container_id` in env_info).
+    bind-mount; the agent's `tools.exec` is hijacked by the OC patches and
+    routed through the host-side exec-bridge into the task container — the
+    `Container` injected by the driver picks docker or singularity for the
+    actual `exec` call.
     """
 
-    backend_id = "docker"
+    backend_id = "container-agnostic"
 
     # OpenClaw 2026.4+ logs `[gateway] listening on ws://...` at readiness;
     # earlier versions said `[gateway] ... ready`.
     _GATEWAY_READY_RE = re.compile(
         r"\[gateway\][^\n]{0,80}(ready|listening on )", re.IGNORECASE,
     )
-    _GATEWAY_READY_TIMEOUT_SECONDS = 180
+    _GATEWAY_READY_TIMEOUT_SECONDS = 600
 
-    def __init__(self, swebench_root: Path, oc_image: Optional[str] = None,
-                 workspace_base: Optional[Path] = None):
+    def __init__(
+        self,
+        swebench_root: Path,
+        *,
+        container: Container,
+        oc_image: Optional[str] = None,
+        workspace_base: Optional[Path] = None,
+    ):
         self.swebench_root = Path(swebench_root)
-        self.oc_image = oc_image or DEFAULT_OC_IMAGE
+        self.container = container
+        # `oc_image` is the OC runtime container reference. docker: image tag
+        # (e.g. `agent-bench/openclaw:2026.4.22`). singularity: absolute path
+        # to oc_runtime.sif. Driver/PBS passes the right one via env when
+        # building this harness.
+        self.oc_image = (
+            oc_image
+            or os.environ.get("OC_OC_SIF")
+            or DEFAULT_OC_IMAGE
+        )
 
-        # Pre-flight: swebench python pkg + docker daemon + oc image present.
+        # Pre-flight: swebench python pkg + container runtime + OC image.
         try:
             import swebench  # noqa: F401
         except ImportError as e:
@@ -112,21 +128,8 @@ class SWEBenchHarness:
                 "swebench python package not importable; "
                 "install in the driver env: pip install swebench"
             ) from e
-        r = subprocess.run(
-            ["docker", "version", "--format", "{{.Server.Version}}"],
-            capture_output=True, text=True,
-        )
-        if r.returncode != 0:
-            raise RuntimeError(f"docker not available: {r.stderr.strip()}")
-        r = subprocess.run(
-            ["docker", "image", "inspect", self.oc_image],
-            capture_output=True, text=True,
-        )
-        if r.returncode != 0:
-            raise RuntimeError(
-                f"openclaw image not found: {self.oc_image}\n"
-                "Build it first: bash harnesses/openclaw/docker/build.sh"
-            )
+        self.container.check_available()
+        self.container.check_image(self.oc_image)
 
         self.workspace_base = Path(
             workspace_base
@@ -164,6 +167,11 @@ class SWEBenchHarness:
                 .replace("__", "_1776_")
             )
 
+        # The task container image. docker: the resolved docker tag.
+        # singularity: an absolute path to the per-instance .sif. The harness
+        # asks the active Container to translate.
+        task_image = self._resolve_task_image(container_image)
+
         run_id = run_id or instance_id
         rid_short = run_id[:12]
         net_name = f"oc-eval-net-{rid_short}"
@@ -184,9 +192,9 @@ class SWEBenchHarness:
         task_container_name = _oc_sandbox_name(sandbox_prefix, scope_key)
 
         logger.info(
-            "Preparing run %s (sandbox image=%s, oc=%s, repo=%s@%s, task=%s)",
-            run_id, container_image, self.oc_image, repo_id, base_commit[:12],
-            task_container_name,
+            "Preparing run %s [runtime=%s] (sandbox image=%s, oc=%s, repo=%s@%s, task=%s)",
+            run_id, self.container.backend_id, container_image, self.oc_image,
+            repo_id, base_commit[:12], task_container_name,
         )
 
         # 1. Per-run host workspace dir. We prime it from the task image's
@@ -209,19 +217,14 @@ class SWEBenchHarness:
             scope=sandbox_scope,
         )
 
-        # 3. Per-run docker network (for OC↔task container, if needed).
-        r = subprocess.run(
-            ["docker", "network", "create", net_name],
-            capture_output=True, text=True,
-        )
-        if r.returncode != 0 and "already exists" not in (r.stderr or ""):
-            raise RuntimeError(f"docker network create failed: {r.stderr.strip()}")
+        # 3. Per-run docker network (no-op for singularity).
+        self.container.create_network(net_name)
 
         # 4. Prime the host workspace from the task image — required because
         #    bind-mounting an empty <ws_host>:/testbed would mask the image's
         #    pre-checked-out repo and the agent would see /testbed as empty.
         try:
-            self._prime_workspace_from_image(container_image, ws_host)
+            self._prime_workspace_from_image(task_image, ws_host)
         except Exception:
             self._best_effort_cleanup(net_name, oc_name, task_container_name)
             raise
@@ -229,7 +232,7 @@ class SWEBenchHarness:
         # 4.5. Start the SWE-bench task env container ourselves with the
         #      name OC will look for. We mount <ws_host> at /testbed:rw so
         #      the agent's edits land on the host (for patch extraction)
-        #      and `sleep infinity` keeps it alive for `docker exec` from OC.
+        #      and the container stays alive for exec from the bridge.
         # SWE-bench images ship astropy (and the rest of the pinned dep set)
         # pre-installed in a conda env at /opt/miniconda3/envs/testbed. The
         # image default PATH points at the base conda env (no astropy), so
@@ -242,40 +245,38 @@ class SWEBenchHarness:
             "/opt/miniconda3/bin:"
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         )
-        task_run_cmd = [
-            "docker", "run", "-d",
-            "--name", task_container_name,
-            "--network", net_name,
-            "--user", "0",
-            "--label", "openclaw.sandbox=1",
-            "--label", f"openclaw.sessionKey={scope_key}",
-            "--label", f"oc-eval.run_id={run_id}",
-            "-v", f"{ws_host}:/testbed:rw",
-            "-w", "/testbed",
-            "-e", f"PATH={task_path}",
-            "--entrypoint", "sleep",
-            container_image,
-            "infinity",
-        ]
-        r = subprocess.run(task_run_cmd, capture_output=True, text=True, timeout=600)
-        if r.returncode != 0:
+        task_spec = ContainerSpec(
+            name=task_container_name,
+            image=task_image,
+            network=net_name,
+            user="0",
+            labels={
+                "openclaw.sandbox": "1",
+                "openclaw.sessionKey": scope_key,
+                "oc-eval.run_id": run_id,
+            },
+            mounts=(Mount(host=ws_host, container="/testbed", mode="rw"),),
+            workdir="/testbed",
+            env={"PATH": task_path},
+            entrypoint="sleep",
+            command=("infinity",),
+        )
+        try:
+            task_handle = self.container.start(task_spec)
+        except Exception:
             self._best_effort_cleanup(net_name, oc_name, task_container_name)
-            raise RuntimeError(
-                f"task env container start failed: {r.stderr.strip()}"
-            )
-        task_container_id = r.stdout.strip()
+            raise
+        task_container_id = task_handle.id
 
         # 4.6. Launch the exec-bridge dispatcher on the host. OC's patched
-        #      runtime (see harnesses/openclaw/patch/openclaw-external-exec-bridge.patch)
-        #      will hijack sandbox tool execs and route them through bridge.py
-        #      inside the container → unix socket → this server → backend.
-        #      The socket lives inside state_dir, which is already bind-mounted
-        #      into OC at /root/.openclaw, so no extra mounts are needed.
+        #      runtime hijacks sandbox tool execs and routes them through
+        #      bridge.py inside the container → unix socket → this server →
+        #      Container backend (docker exec or singularity exec).
         dispatcher = OpenClawRemoteDispatcher()
         try:
             dispatcher.start(
                 state_dir=state_dir,
-                backend="docker",
+                backend=self.container.backend_id,
                 target=task_container_name,
             )
         except Exception:
@@ -288,75 +289,131 @@ class SWEBenchHarness:
 
         # 5. Start the openclaw container. Gateway runs here. OC's patched
         #    runtime sees OPENCLAW_EXEC_BRIDGE in env and re-routes every
-        #    sandbox tool exec through bridge.py → unix socket → our
+        #    sandbox tool exec through the bridge → unix socket → our
         #    host-side server. OC has no idea its execs aren't running
         #    locally — to it, agent commands "just work".
-        #    We run as `--user 0` so the gateway can talk to docker.sock
-        #    (host's docker.sock GID rarely matches `node`).
         gateway_port = _pick_free_gateway_port()
         gateway_token = secrets.token_hex(24)
 
-        cmd = [
-            "docker", "run", "-d",
-            "--name", oc_name,
-            "--network", net_name,
-            "--add-host", "vllm-host:host-gateway",  # reach host vLLM
-            "--user", "0",                            # docker.sock access
+        oc_mounts: list[Mount] = [
             # State dir mount — root's HOME is /root. Must be :rw so OpenClaw
             # can mkdir per-session sessions/, memory/, and write cache-trace
-            # under agents/<id>/. The state_dir is per-run (rebuilt by
-            # _build_state_dir on every prepare_environment) so there's no
-            # cross-run leakage to defend against.
-            "-v", f"{state_dir}:/root/.openclaw:rw",
-            # Workspace bind kept for git/diff convenience inside oc; the
-            # task container also sees the same dir at /testbed via OC's
-            # sandbox.docker.binds.
-            "-v", f"{ws_host}:/testbed:rw",
-            "-v", "/var/run/docker.sock:/var/run/docker.sock",
-            "-w", "/testbed",
-            "-e", f"OPENCLAW_GATEWAY_TOKEN={gateway_token}",
-            "-e", f"OPENCLAW_GATEWAY_OTEL_ENDPOINT={os.environ.get('OC_OTEL_ENDPOINT', 'http://vllm-host:4318')}",
-            "-e", f"OPENCLAW_RUN_ID={run_id}",
-            "-e", f"OTEL_RESOURCE_ATTRIBUTES=oc.run_id={run_id}",
-            # OC image ships docker CLI 20.10 (API 1.41). Modern docker daemons
-            # (≥28.0) refuse anything below 1.44. Negotiate up; inspect/run/etc.
-            # are wire-compatible across this range.
-            "-e", "DOCKER_API_VERSION=1.44",
-            # Bridge mount + OPENCLAW_EXEC_BRIDGE_* env. When this trio is
-            # present, OC's patched spawnSpec returns the bridge argv
-            # instead of `["docker", "exec", ...]`, sending each exec
-            # through our host-side dispatcher over the socket.
-            *dispatcher.agent_container_args(),
-            "--entrypoint", "/usr/local/bin/openclaw",
-            self.oc_image,
-            "gateway", "--allow-unconfigured",
+            # under agents/<id>/. Per-run state_dir (rebuilt by
+            # _build_state_dir on every prepare_environment).
+            Mount(host=state_dir, container="/root/.openclaw", mode="rw"),
+            # Workspace bind for git/diff convenience inside oc; task
+            # container sees the same dir at /testbed via OC sandbox binds.
+            Mount(host=ws_host, container="/testbed", mode="rw"),
         ]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-        if r.returncode != 0:
+        # docker.sock — only useful in docker mode where OC's docker plugin
+        # may still try to ping the daemon at init. Singularity has nothing
+        # to mount here.
+        if self.container.backend_id == "docker":
+            oc_mounts.append(Mount(
+                host=Path("/var/run/docker.sock"),
+                container="/var/run/docker.sock",
+                mode="rw",
+            ))
+
+        oc_env = {
+            # State dir is bind-mounted at /root/.openclaw; OC reads its
+            # config from $HOME/.openclaw. docker runs the container as
+            # --user 0 so HOME is /root by default; singularity passes the
+            # host user's HOME (e.g. /home/users/ntu/$USER), which would
+            # send OC looking for state in the wrong place. Pin HOME=/root
+            # so both runtimes land on the same path.
+            "HOME": "/root",
+            "OPENCLAW_GATEWAY_TOKEN": gateway_token,
+            "OPENCLAW_GATEWAY_OTEL_ENDPOINT": os.environ.get(
+                "OC_OTEL_ENDPOINT",
+                f"http://{self.container.host_address}:4318",
+            ),
+            "OPENCLAW_RUN_ID": run_id,
+            # pi-ai openai-completions patch tees every LLM HTTP response
+            # into this file; collected back via the state_dir mount.
+            "OPENCLAW_RAW_RESPONSE_LOG": "/root/.openclaw/logs/llm-raw-responses.jsonl",
+            "OTEL_RESOURCE_ATTRIBUTES": f"oc.run_id={run_id}",
+            # OC image ships docker CLI 20.10 (API 1.41). Modern daemons
+            # (≥28.0) refuse anything below 1.44. Harmless in singularity.
+            "DOCKER_API_VERSION": "1.44",
+            # NSCC blocks egress to registry.npmjs.org. OC plugins (e.g.
+            # browser, mcp-*) `npm install` runtime deps on first use; without
+            # a reachable registry they hang ~10min retrying. Route npm at the
+            # Alibaba mirror (registry.npmmirror.com — current Taobao successor)
+            # which IS reachable from NSCC, plus fast-fail knobs as backstop.
+            "NPM_CONFIG_REGISTRY": "https://registry.npmmirror.com",
+            "NPM_CONFIG_FETCH_RETRIES": "1",
+            "NPM_CONFIG_FETCH_TIMEOUT": "15000",
+            "NODE_OPTIONS": "--dns-result-order=ipv4first",
+            # OC's bonjour/mDNS advertiser tries to announce a service via
+            # UDP multicast on the host net interface. In docker mode that
+            # multicast stays inside the container's own net namespace;
+            # in singularity mode the container shares the host net, so
+            # the multicast hits the actual NIC and NSCC's compute-node
+            # firewall drops it. The advertiser's `advertise()` await then
+            # never returns → gateway stays in "starting channels and
+            # sidecars" forever and never enters the HTTP accept loop.
+            # OC reads OPENCLAW_DISABLE_BONJOUR=1 as a hard kill-switch
+            # (dist/server.impl-*.js: `bonjourEnabled = mdnsMode!=="off" &&
+            # process.env.OPENCLAW_DISABLE_BONJOUR!=="1" && !VITEST`).
+            "OPENCLAW_DISABLE_BONJOUR": "1",
+        }
+        # Bridge wiring (mount + env). Runtime-agnostic.
+        b_mounts, b_env = dispatcher.agent_mounts_and_env()
+        oc_mounts.extend(b_mounts)
+        oc_env.update(b_env)
+        # In singularity mode there's no docker daemon to inspect / talk to,
+        # but OC's stock sandbox.backend=docker factory calls dockerImageExists
+        # / dockerContainerState / docker run during lane init. The OC patch
+        # `openclaw-ensure-sandbox-bridge-bypass` short-circuits
+        # ensureSandboxContainer when this env is set: returns the precomputed
+        # containerName (we pre-started the task sif under exactly that name)
+        # without touching docker. Tool exec still flows through the
+        # OPENCLAW_EXEC_BRIDGE patch into bridge.py → singularity exec.
+        if self.container.backend_id == "singularity":
+            oc_env["OPENCLAW_BYPASS_ENSURE_SANDBOX"] = "1"
+
+        oc_spec = ContainerSpec(
+            name=oc_name,
+            image=self.oc_image,
+            network=net_name,
+            extra_hosts={"vllm-host": "host-gateway"},  # docker only
+            user="0",                                   # docker only
+            mounts=tuple(oc_mounts),
+            workdir="/testbed",
+            env=oc_env,
+            entrypoint="/usr/local/bin/openclaw",
+            command=("gateway", "--allow-unconfigured"),
+        )
+        try:
+            oc_handle = self.container.start(oc_spec)
+        except Exception:
             _release_gateway_port(gateway_port)
             dispatcher.stop()
             self._best_effort_cleanup(net_name, oc_name, task_container_name)
-            raise RuntimeError(f"oc container start failed: {r.stderr.strip()}")
-        oc_container_id = r.stdout.strip()
+            raise
+        oc_container_id = oc_handle.id
 
         # 6. Wait for gateway readiness.
         try:
-            self._wait_for_gateway_ready(oc_container_id)
+            self._wait_for_gateway_ready(oc_handle)
         except Exception:
             _release_gateway_port(gateway_port)
             dispatcher.stop()
             self._best_effort_cleanup(net_name, oc_name, task_container_name)
             raise
 
-        # 7. Drop a /tmp/oc_gateway_env so condition's docker-exec invocations
-        #    can `source` it before `openclaw agent ...`.
+        # 7. Drop a /tmp/oc_gateway_env so the condition layer can `source`
+        #    it before `openclaw agent ...`.
         gw_env = (
             f"export OPENCLAW_GATEWAY_URL=ws://127.0.0.1:18789\n"
             f"export OPENCLAW_GATEWAY_TOKEN={gateway_token}\n"
             f"export OPENCLAW_RUN_ID={run_id}\n"
         )
-        self._exec(oc_container_id,
-                   ["bash", "-c", f"cat > /tmp/oc_gateway_env <<'EOF'\n{gw_env}EOF"])
+        self.container.exec(
+            oc_handle,
+            ["bash", "-c", f"cat > /tmp/oc_gateway_env <<'EOF'\n{gw_env}EOF"],
+        )
 
         logger.info(
             "  ready: oc=%s task=%s bridge_pid=%s net=%s",
@@ -365,7 +422,7 @@ class SWEBenchHarness:
         return {
             "container_id": oc_container_id,
             "container_name": oc_name,
-            "backend": "docker",
+            "backend": self.container.backend_id,
             "oc_container_id": oc_container_id,
             "task_container_id": task_container_id,
             "task_container_name": task_container_name,
@@ -379,6 +436,41 @@ class SWEBenchHarness:
             "sandbox_image": container_image,
             **dispatcher.env_info(),
         }
+
+    # ------------------------------------------------------------------
+    # Container image resolution
+    # ------------------------------------------------------------------
+
+    def _resolve_task_image(self, container_image: str) -> str:
+        """Translate a docker tag like `swebench/sweb.eval.x86_64.<id>:latest`
+        into the runtime's expected reference.
+
+        docker: pass through unchanged.
+        singularity: a sif filename under `$OC_SCORING_SIF_DIR`. The on-disk
+        naming convention is `<instance_id>.sif` (see
+        scripts/execution_pbs/pull_images.sh:pull_one). We recover the
+        instance_id from the docker tag (last `.` segment before `:`).
+        """
+        if self.container.backend_id == "docker":
+            return container_image
+        sif_dir = os.environ.get("OC_SCORING_SIF_DIR")
+        if not sif_dir:
+            raise RuntimeError(
+                "OC_SCORING_SIF_DIR not set; the singularity backend needs "
+                "the per-instance .sif directory (where pull_images.sh "
+                "wrote the pulled SWE-bench task images)."
+            )
+        # `swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest`
+        #  → tag = "swebench/sweb.eval.x86_64.astropy_1776_astropy-12907"
+        #  → last segment after the final `.` = the instance_id slug
+        #    (with `__` already turned into `_1776_` by docker tag encoding).
+        # pull_images.sh names sifs as `<instance_id>.sif` using the original
+        # instance_id (with `__`), so we have to reverse the encoding.
+        tag = container_image.split(":")[0]
+        slug = tag.split(".")[-1]                  # astropy_1776_astropy-12907
+        instance_id = slug.replace("_1776_", "__") # astropy__astropy-12907
+        sif_path = Path(sif_dir) / f"{instance_id}.sif"
+        return str(sif_path)
 
     # ------------------------------------------------------------------
     # State-dir compose: config/harness/<name>.json `openclaw` block +
@@ -498,25 +590,23 @@ class SWEBenchHarness:
             cfg.setdefault("skills", {}).setdefault("load", {})["extraDirs"] = [
                 "/root/.openclaw/skills"
             ]
-        # vLLM lives on the host. Inside the oc container, the host is reachable
-        # at the docker `host-gateway` synthetic hostname we add via --add-host.
-        # Harness yamls ship with `baseUrl: http://localhost:8000/v1` (matches
-        # what the user sees on the host); rewrite per-run to the in-container
-        # form so OC actually reaches the host's vLLM.
+        # vLLM/sglang lives on the host. The container reaches the host via
+        # `self.container.host_address` (docker: `vllm-host` synthetic
+        # hostname; singularity: `127.0.0.1` shared net namespace). Harness
+        # yamls ship with `baseUrl: http://localhost:8000/v1` (host
+        # perspective); rewrite per-run.
+        host = self.container.host_address
         vllm_endpoint = os.environ.get(
-            "OC_VLLM_BASE_URL", "http://vllm-host:8000/v1"
+            "OC_VLLM_BASE_URL", f"http://{host}:8000/v1"
         )
         providers = cfg.setdefault("models", {}).setdefault("providers", {})
         if "vllm" in providers:
             providers["vllm"]["baseUrl"] = vllm_endpoint
-        # OTel collector lives on the host too — same rewrite story as vLLM.
-        # The harness yaml's `diagnostics.otel.endpoint=http://localhost:4318`
-        # is the host-perspective form; inside the OC container we need the
-        # `host-gateway` alias so OTLP exports actually reach the collector.
+        # OTel collector lives on the host too — same rewrite story.
         otel_cfg = (cfg.get("diagnostics") or {}).get("otel") or {}
         if otel_cfg.get("enabled"):
             cfg["diagnostics"]["otel"]["endpoint"] = os.environ.get(
-                "OC_OTEL_ENDPOINT", "http://vllm-host:4318",
+                "OC_OTEL_ENDPOINT", f"http://{host}:4318",
             )
         with open(cfg_path, "w") as fh:
             json.dump(cfg, fh, indent=2)
@@ -526,58 +616,20 @@ class SWEBenchHarness:
     # Workspace priming
     # ------------------------------------------------------------------
 
-    def _prime_workspace_from_image(self, container_image: str, ws_host: Path) -> None:
+    def _prime_workspace_from_image(self, task_image: str, ws_host: Path) -> None:
         """Copy /testbed out of the task image into ws_host, so the
         bind-mount overlay isn't empty when the real task container starts."""
-        scratch_name = f"oc-eval-prime-{ws_host.name[:12]}-{os.urandom(2).hex()}"
-        r = subprocess.run(
-            ["docker", "create", "--name", scratch_name,
-             "--entrypoint", "true", container_image],
-            capture_output=True, text=True, timeout=600,
-        )
-        if r.returncode != 0:
-            raise RuntimeError(f"docker create scratch failed: {r.stderr.strip()}")
-        try:
-            r = subprocess.run(
-                ["docker", "cp", f"{scratch_name}:/testbed/.", str(ws_host) + "/"],
-                capture_output=True, text=True, timeout=600,
-            )
-            if r.returncode != 0:
-                raise RuntimeError(f"docker cp from {container_image}:/testbed failed: {r.stderr.strip()}")
-        finally:
-            subprocess.run(["docker", "rm", "-f", scratch_name],
-                           capture_output=True, check=False)
+        self.container.copy_from_image(task_image, "/testbed", ws_host)
 
     # ------------------------------------------------------------------
     # Gateway readiness
     # ------------------------------------------------------------------
 
-    def _wait_for_gateway_ready(self, oc_container_id: str) -> None:
-        deadline = time.time() + self._GATEWAY_READY_TIMEOUT_SECONDS
-        last_log_tail = ""
-        while time.time() < deadline:
-            r = subprocess.run(
-                ["docker", "logs", oc_container_id],
-                capture_output=True, text=True, timeout=30,
-            )
-            log_text = (r.stdout or "") + (r.stderr or "")
-            if self._GATEWAY_READY_RE.search(log_text):
-                return
-            last_log_tail = log_text[-1500:]
-            # Container died?
-            r = subprocess.run(
-                ["docker", "inspect", "-f", "{{.State.Running}}", oc_container_id],
-                capture_output=True, text=True,
-            )
-            if (r.stdout or "").strip() != "true":
-                raise RuntimeError(
-                    f"openclaw container exited before gateway ready. "
-                    f"last log:\n{last_log_tail}"
-                )
-            time.sleep(2)
-        raise RuntimeError(
-            f"gateway did not signal ready within "
-            f"{self._GATEWAY_READY_TIMEOUT_SECONDS}s. last log:\n{last_log_tail}"
+    def _wait_for_gateway_ready(self, oc_handle: ContainerHandle) -> None:
+        self.container.wait_log_pattern(
+            oc_handle,
+            self._GATEWAY_READY_RE,
+            timeout_s=self._GATEWAY_READY_TIMEOUT_SECONDS,
         )
 
     # ------------------------------------------------------------------
@@ -586,22 +638,28 @@ class SWEBenchHarness:
 
     def _exec(
         self,
-        container_id: str,
+        container_handle_or_id,
         argv: List[str],
         check: bool = True,
         timeout: Optional[int] = None,
         input_text: Optional[str] = None,
     ) -> subprocess.CompletedProcess:
-        cmd = ["docker", "exec", container_id] + argv
-        r = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, input=input_text
-        )
-        if check and r.returncode != 0:
-            raise RuntimeError(
-                f"docker exec failed ({argv[0]}): rc={r.returncode}\n"
-                f"stderr: {r.stderr[-500:]}"
+        """Back-compat helper; new call sites should use self.container.exec.
+
+        Accepts either a `ContainerHandle` (preferred) or a bare id (for the
+        legacy condition-layer calls that only know the id string).
+        """
+        if isinstance(container_handle_or_id, ContainerHandle):
+            h = container_handle_or_id
+        else:
+            h = ContainerHandle(
+                id=str(container_handle_or_id),
+                name=str(container_handle_or_id),
+                backend=self.container.backend_id,
             )
-        return r
+        return self.container.exec(
+            h, argv, check=check, timeout=timeout, input_text=input_text,
+        )
 
     # ------------------------------------------------------------------
     # Patch application + collection
@@ -617,22 +675,23 @@ class SWEBenchHarness:
         has /testbed bind-mounted to the same host workspace)."""
         logger.info("Applying patch %s in %s", patch_path, container_id[:12])
         target = f"{workspace_root}/oc_candidate.patch"
-        r = subprocess.run(
-            ["docker", "cp", str(patch_path), f"{container_id}:{target}"],
-            capture_output=True, text=True,
+        h = ContainerHandle(
+            id=container_id, name=container_id, backend=self.container.backend_id,
         )
-        if r.returncode != 0:
-            logger.error("docker cp failed: %s", r.stderr)
+        try:
+            self.container.copy_into(h, Path(patch_path), target)
+        except Exception as e:
+            logger.error("copy_into failed: %s", e)
             return False
         dry = self._exec(
-            container_id,
+            h,
             ["git", "-C", workspace_root, "apply", "--check", target],
             check=False,
         )
         if dry.returncode != 0:
             logger.warning("Patch does not apply: %s", dry.stderr[-300:])
             return False
-        self._exec(container_id, ["git", "-C", workspace_root, "apply", target])
+        self._exec(h, ["git", "-C", workspace_root, "apply", target])
         return True
 
     # OpenClaw scaffolding files agent might write into the workspace; strip
@@ -849,18 +908,27 @@ class SWEBenchHarness:
         )
 
         # Chown state_dir contents back to host UID from inside the still-
-        # alive OC container — OC runs as root and writes per-session files
-        # owned by root; without chown the host-side rmtree below hits EACCES.
+        # alive OC container — OC runs as root (in docker) and writes
+        # per-session files owned by root; without chown the host-side
+        # rmtree below hits EACCES. Singularity already runs as host UID,
+        # so the chown is a no-op there but harmless.
         uid = os.getuid()
         gid = os.getgid()
         for cid in {oc_container_id, container_id}:
             if not cid:
                 continue
-            subprocess.run(
-                ["docker", "exec", cid, "chown", "-R",
-                 f"{uid}:{gid}", "/root/.openclaw"],
-                capture_output=True, check=False, timeout=30,
+            h = ContainerHandle(
+                id=cid, name=cid, backend=self.container.backend_id,
             )
+            try:
+                self.container.exec(
+                    h,
+                    ["chown", "-R", f"{uid}:{gid}", "/root/.openclaw"],
+                    check=False, timeout=30,
+                )
+            except Exception:
+                pass
+
         # Tear down ALL containers we created (OC + task env). Both names
         # are deterministic — no `--filter` scan needed. This is the
         # invariant that guarantees "previous run cannot affect next run":
@@ -869,22 +937,18 @@ class SWEBenchHarness:
                                task_container_id, task_container_name)
                    if t]
         for cid in dict.fromkeys(targets):  # de-dupe preserving order
-            subprocess.run(
-                ["docker", "rm", "-f", "-v", cid],
-                capture_output=True, check=False,
+            h = ContainerHandle(
+                id=cid, name=cid, backend=self.container.backend_id,
             )
-        # Sweep the per-run network (in case the task container or OC left
-        # anything attached) and remove it.
+            try:
+                self.container.stop(h)
+            except Exception:
+                pass
         if network_name:
-            r = subprocess.run(
-                ["docker", "ps", "-aq", "--filter", f"network={network_name}"],
-                capture_output=True, text=True,
-            )
-            for cid in (r.stdout or "").split():
-                subprocess.run(["docker", "rm", "-f", "-v", cid],
-                               capture_output=True, check=False)
-            subprocess.run(["docker", "network", "rm", network_name],
-                           capture_output=True, check=False)
+            try:
+                self.container.remove_network(network_name)
+            except Exception:
+                pass
 
         keep = os.environ.get("OC_HOST_KEEP_WORKSPACE", "0") == "1"
         if not keep and workspace_host_path and os.path.isdir(workspace_host_path):
@@ -900,33 +964,14 @@ class SWEBenchHarness:
     ) -> None:
         for name in (oc, task):
             if name:
-                subprocess.run(["docker", "rm", "-f", "-v", name],
-                               capture_output=True, check=False)
-        # Sweep anything left dangling on this network, then drop the network.
-        r = subprocess.run(
-            ["docker", "ps", "-aq", "--filter", f"network={net}"],
-            capture_output=True, text=True,
-        )
-        for cid in (r.stdout or "").split():
-            subprocess.run(["docker", "rm", "-f", "-v", cid],
-                           capture_output=True, check=False)
-        subprocess.run(["docker", "network", "rm", net],
-                       capture_output=True, check=False)
-
-
-# ----------------------------------------------------------------------
-# SingularityHarness — placeholder for the two-instance singularity model.
-# Will mirror SWEBenchHarness with `singularity instance start` for both
-# the openclaw .sif (built from agent-bench/openclaw image) and the per-task
-# .sif (built from the SWE-bench instance image).
-# ----------------------------------------------------------------------
-
-
-class SingularityHarness:
-    backend_id = "singularity"
-
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError(
-            "SingularityHarness is being rewritten for the two-instance model "
-            "(openclaw sif + task sif). Use HARNESS_BACKEND=docker until then."
-        )
+                h = ContainerHandle(
+                    id=name, name=name, backend=self.container.backend_id,
+                )
+                try:
+                    self.container.stop(h)
+                except Exception:
+                    pass
+        try:
+            self.container.remove_network(net)
+        except Exception:
+            pass

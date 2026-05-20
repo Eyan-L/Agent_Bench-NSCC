@@ -1,0 +1,139 @@
+{
+  "_doc": "OpenClaw harness for DeepResearch-Bench against the locally-mounted Qwen3.6-35B-A3B (MoE, 3B active, 256K context). Web search via DuckDuckGo HTML scraping plugin — zero-config, no API key, but unstable: DDG aggressively challenges burst traffic from a single IP (3/8 fail in our smoke baseline; IP can enter a multi-hour cooldown after sustained challenges). The harnesses/openclaw/patch/openclaw-ddg-serial.patch serializes requests with a 400-800ms jittered gap to stay under DDG's burst threshold; even so, expect occasional failures and IP cooldowns under heavy use. For production/long runs, use deepresearch_35b_brave.json instead. DR-specific: agents.defaults.workspace=/workspace, agent id `deep_researcher`, no `verify` skill, agent.max_time_seconds=3000s.",
+  "harness": "openclaw",
+  "model": {
+    "name": "/mnt/network_drive/shared_models/hub/models--Qwen--Qwen3.6-35B-A3B/snapshots/995ad96eacd98c81ed38be0c5b274b04031597b0",
+    "endpoint": "http://localhost:8000/v1",
+    "temperature": 0.3,
+    "max_tokens": 4096
+  },
+  "openclaw": {
+    "gateway": {
+      "mode": "local",
+      "bind": "loopback",
+      "auth": {
+        "mode": "token",
+        "token": {
+          "source": "env",
+          "provider": "env",
+          "id": "OPENCLAW_GATEWAY_TOKEN"
+        }
+      }
+    },
+    "diagnostics": {
+      "enabled": true,
+      "otel": {
+        "enabled": true,
+        "endpoint": "http://localhost:4318",
+        "protocol": "http/protobuf",
+        "serviceName": "agent-bench-openclaw",
+        "traces": true,
+        "metrics": true,
+        "logs": true,
+        "sampleRate": 1,
+        "flushIntervalMs": 20
+      },
+      "cacheTrace": {
+        "enabled": true,
+        "includeMessages": true,
+        "includePrompt": true,
+        "includeSystem": true
+      }
+    },
+    "tools": {
+      "profile": "coding",
+      "web": {
+        "search": {
+          "provider": "duckduckgo",
+          "enabled": true
+        },
+        "fetch": {
+          "enabled": true
+        }
+      },
+      "sandbox": {
+        "tools": {
+          "allow": [
+            "exec", "process", "read", "write", "edit", "apply_patch", "image",
+            "sessions_list", "sessions_history", "sessions_send",
+            "sessions_spawn", "sessions_yield", "subagents", "session_status",
+            "web_search", "web_fetch",
+            "memory_get", "memory_search"
+          ]
+        }
+      }
+    },
+    "skills": {
+      "load": {
+        "extraDirs": ["/root/.openclaw/skills"]
+      }
+    },
+    "plugins": {
+      "entries": {
+        "vllm":             {"enabled": true},
+        "memory-core":      {"enabled": true},
+        "diagnostics-otel": {"enabled": true},
+        "duckduckgo":       {"enabled": true, "config": {"webSearch": {"region": "us-en", "safeSearch": "moderate"}}},
+        "anthropic":        {"enabled": false},
+        "openai":           {"enabled": false},
+        "openrouter":       {"enabled": false},
+        "litellm":          {"enabled": false},
+        "lmstudio":         {"enabled": false},
+        "xai":              {"enabled": false},
+        "groq":             {"enabled": false},
+        "together":         {"enabled": false},
+        "fireworks":        {"enabled": false},
+        "deepseek":         {"enabled": false},
+        "moonshot":         {"enabled": false},
+        "mistral":          {"enabled": false},
+        "ollama":           {"enabled": false},
+        "huggingface":      {"enabled": false},
+        "minimax":          {"enabled": false},
+        "perplexity":       {"enabled": false},
+        "qwen":             {"enabled": false}
+      }
+    },
+    "models": {
+      "providers": {
+        "vllm": {
+          "baseUrl": "http://localhost:8000/v1",
+          "apiKey": "sk-dummy"
+        }
+      }
+    },
+    "agents": {
+      "defaults": {
+        "workspace": "/workspace",
+        "subagents": {
+          "maxConcurrent": 4,
+          "runTimeoutSeconds": 1200
+        }
+      },
+      "list": [
+        {
+          "id": "deep_researcher",
+          "default": true,
+          "name": "deep-researcher",
+          "skills": ["research_fetch"]
+        }
+      ]
+    }
+  },
+  "evaluation": {
+    "judge_provider": "deepseek",
+    "judge_model": "deepseek-v4-pro",
+    "pass_threshold": 0.5
+  },
+  "conditions": [
+    {
+      "condition_id": "openclaw_agent",
+      "condition_type": "openclaw_agent",
+      "description": "OpenClaw agent driving a DeepResearch-Bench task container (DuckDuckGo HTML scraping)",
+      "agent": {
+        "max_steps": 300,
+        "max_time_seconds": 3000,
+        "retry_limit": 5
+      }
+    }
+  ]
+}

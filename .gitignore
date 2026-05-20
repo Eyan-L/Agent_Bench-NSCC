@@ -1,3 +1,11 @@
+# Local environment / secrets — never commit
+.env
+.env.local
+.env.*.local
+
+# DR-Bench vendor — reference reports (15 MB); re-fetched by `make dr-vendor`
+applications/deepresearch_bench/eval/vendor/data/test_data/
+
 data/*
 
 # Python bytecode caches

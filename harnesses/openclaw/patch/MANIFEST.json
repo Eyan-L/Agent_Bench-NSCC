@@ -50,6 +50,13 @@
       "summary": "hijack sandbox tool exec to external bridge when OPENCLAW_EXEC_BRIDGE env is set"
     },
     {
+      "file": "openclaw-ensure-sandbox-bridge-bypass.patch",
+      "target_glob": "dist/docker-*.js",
+      "chunk_placeholder": "CHUNK",
+      "idempotent_marker": "OC_PATCH_ENSURE_BRIDGE_BYPASS_BEGIN",
+      "summary": "short-circuit ensureSandboxContainer when OPENCLAW_BYPASS_ENSURE_SANDBOX is set; skip all docker calls (image inspect, container state, create) — singularity mode pre-starts the task container and the bridge owns exec, so OC doesn't need any docker access"
+    },
+    {
       "file": "openclaw-fs-bridge.patch",
       "target_glob": "dist/sandbox-*.js",
       "chunk_placeholder": "CHUNK",
@@ -62,6 +69,19 @@
       "target_glob_all": "**/node_modules/@mariozechner/pi-ai/dist/utils/validation.js",
       "idempotent_marker": "OC_PATCH_PIAI_VALIDATION_JSONSTRING_BEGIN",
       "summary": "coerce JSON-stringified array/object args into real arrays before AJV validates (Qwen3 emits nested args as JSON strings). Applied to every pi-ai copy (main + per-plugin bundles)."
+    },
+    {
+      "file": "openclaw-ddg-serial.patch",
+      "target_glob": "dist/ddg-client-*.js",
+      "chunk_placeholder": "CHUNK",
+      "idempotent_marker": "OC_PATCH_DDG_SERIAL_BEGIN",
+      "summary": "serialize duckduckgo web_search requests with 400-800ms jittered gap to avoid DDG bot-detection challenge under burst loads"
+    },
+    {
+      "file": "openclaw-pi-ai-raw-response.patch",
+      "target_glob_all": "**/node_modules/@mariozechner/pi-ai/dist/providers/openai-completions.js",
+      "idempotent_marker": "OC_PATCH_RAW_RESPONSE_LOG_BEGIN",
+      "summary": "tee every OpenAI-compatible streaming response (raw SDK chunks) into the file at env OPENCLAW_RAW_RESPONSE_LOG, with agent/session/run id from env. One JSONL line per LLM request. Empty env = no logging."
     }
   ]
 }

@@ -8,7 +8,8 @@ Lifecycle, driven by the harness:
 
     d = SomeDispatcher(...)
     d.start(state_dir=..., backend="docker", target=container_name)
-    # harness splices d.agent_container_args() into the agent's `docker run`
+    # harness reads d.agent_mounts_and_env() (or legacy agent_container_args)
+    # to wire the agent runtime container.
     # ... agent runs ...
     d.stop()
 
@@ -49,12 +50,17 @@ class Dispatcher(ABC):
         (as returned by `env_info()`). Used by harness cleanup paths that
         only have access to the env_info dict, not the live instance."""
 
-    @abstractmethod
     def agent_container_args(self) -> List[str]:
-        """`docker run` extras (volume mounts + env vars) that the harness
-        must splice into the agent runtime container so it can reach this
-        dispatcher. Returned as a flat list, e.g. ["-v", "src:dst:ro",
-        "-e", "FOO=bar", ...]."""
+        """Legacy `docker run` extras (volume mounts + env vars) the harness
+        used to splice into the agent runtime container. Returned as a flat
+        list, e.g. ["-v", "src:dst:ro", "-e", "FOO=bar", ...].
+
+        Superseded by `agent_mounts_and_env()` which is runtime-agnostic
+        (returns Mount + dict, harness translates). Kept on the ABC as a
+        non-abstract default to avoid forcing every dispatcher to implement
+        the docker-specific shape. New dispatchers should implement
+        `agent_mounts_and_env` instead."""
+        return []
 
     @abstractmethod
     def env_info(self) -> Dict[str, Any]:

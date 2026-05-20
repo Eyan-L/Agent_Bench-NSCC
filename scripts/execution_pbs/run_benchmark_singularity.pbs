@@ -1,0 +1,412 @@
+#!/bin/bash
+# Resources (`-l select=...`, `-l walltime=...`) must be supplied at qsub
+# time — they aren't pinned in the header. Examples for the 14B default:
+#   qsub -l select=1:ncpus=8:ngpus=1:mem=64gb -l walltime=08:00:00 \
+#        -o $KIT_ROOT/data/runs/phase0/<stamp>/pbs.log <pbs>
+# For the 35B / TP=4 path: ngpus=4, mem=128gb.
+# Note: the PBS -o frame log can't easily go inside the per-sweep dir at
+# directive time (stamp is computed inside the script). Either pass -o on
+# qsub explicitly, or accept PBS default (writes <jobname>.o<jobid> in
+# qsub's cwd). All other logs (sglang, run, otel, engine_metrics) go into
+# $SWEEP_DIR/logs/.
+#PBS -q normal
+#PBS -j oe
+#PBS -N oc_swebench_sglang
+#
+# Singularity-backed end-to-end SWE-bench run on NSCC.
+# Serving: sglang (lmsysorg/sglang sif). Harness: OpenClaw via SWEBenchHarness
+# + SingularityContainer (no docker daemon required).
+#
+# Stages (each can be skipped via env flag):
+#   0. STAGE_SWEBENCH=1   pip install swebench into a persistent scratch lib cache ($OC_PYLIB)
+#   1. STAGE_PULL=1       pull SWE-bench instance .sif images via pull_images.sh
+#   2. STAGE_SGLANG=1     start sglang in singularity (replaces vLLM)
+#   3. STAGE_OC_CHECK=1   verify oc_runtime.sif exists (no overlay/plugin-cache here;
+#                          the sif is self-contained — build it once on a login node
+#                          via scripts/execution_pbs/build_oc_sif.sh)
+#   3.5 STAGE_OTEL=1      start local OTel collector that writes
+#                          $OC_OTEL_DATA_DIR/otel-traces.jsonl
+#   4. STAGE_RUN=1        invoke orchestration/runner/driver with the active sweep
+#   5. STAGE_CLEANUP=1    stop sglang + OTel, free ports
+#
+# Submit:
+#   qsub scripts/execution_pbs/run_benchmark_singularity.pbs
+#   qsub -v STAGE_PULL=0 scripts/execution_pbs/run_benchmark_singularity.pbs
+#
+# Required prerequisites (one-time on a login node):
+#   bash scripts/execution_pbs/build_oc_sif.sh \
+#       --out /scratch/users/ntu/$USER/sif_images/oc_runtime.sif \
+#       --kit-root /home/users/ntu/$USER/Agent_Bench
+#   (sglang sif is pulled separately via scripts/execution_pbs/pull_sglang_sif.pbs)
+#
+# Env (override via `qsub -v K1=V1,K2=V2 ...`):
+#   KIT_ROOT          repo root (default: $SCRATCH/github/Agent_Bench or $HOME/Agent_Bench)
+#   APP               application JSON  (default: $KIT_ROOT/config/application/swebench/phase0.json)
+#   HARNESS_CONFIG    harness JSON      (default: $KIT_ROOT/config/harness/openclaw_qwen3_14b_sglang.json)
+#   BACKEND_CONFIG    backend JSON      (default: $KIT_ROOT/config/backend/sglang/tp1.json)
+#   DATASET           instance JSON     (default: $KIT_ROOT/config/benchmarks/swebench/verified.json)
+#   SIF_DIR           per-instance .sif dir (default: $SCRATCH/swebench)
+#   OC_RUNTIME_SIF    oc_runtime.sif path (default: $SCRATCH/sif_image/oc_runtime.sif)
+#   SGLANG_SIF        sglang sif path   (default: $SCRATCH/sif_image/sglang_v0.5.11-cu128-sm80.sif —
+#                      the patched hongrui0/sglang:v0.5.11 image which adds `distro`)
+#   SGLANG_MODEL_DIR  host dir holding the HF snapshot; bound 1:1 into the container
+#                      (default: /scratch/users/ntu/$USER/model/hub/models--Qwen--Qwen3-14B/
+#                                snapshots/40c069824f4251a91eefaf281ebe4c544efd3e18)
+#   SGLANG_PORT       (default: 8000 — must match the OC harness's hardcoded endpoint)
+#   SGLANG_TP         (default: 1)
+#   SGLANG_TOOL_CALL_PARSER  (default: qwen25)
+#   SGLANG_REASONING_PARSER  (default: qwen3)
+#   STAGE_*           set to 0 to skip a stage
+
+set -uo pipefail
+
+# ---- Resolve paths ---------------------------------------------------------
+USER_NAME="${USER:-$(whoami)}"
+SCRATCH="/scratch/users/ntu/$USER_NAME"
+HOME="/home/users/ntu/${USER_NAME}"
+# KIT_ROOT priority: explicit env > qsub-time PBS_O_WORKDIR > $HOME/Agent_Bench.
+# (Do NOT hardcode PBS_O_WORKDIR; PBS injects it from the dir where qsub ran.)
+KIT_ROOT="${KIT_ROOT:-${PBS_O_WORKDIR:-$HOME/Agent_Bench}}"
+SWEBENCH_ROOT="${SWEBENCH_ROOT:-$SCRATCH/pylib}"
+
+APP="${APP:-$KIT_ROOT/config/application/swebench/phase0.json}"
+HARNESS_CONFIG="${HARNESS_CONFIG:-$KIT_ROOT/config/harness/openclaw_qwen3_14b_sglang.json}"
+BACKEND_CONFIG="${BACKEND_CONFIG:-$KIT_ROOT/config/backend/sglang/tp1.json}"
+DATASET="${DATASET:-$KIT_ROOT/config/benchmarks/swebench/verified.json}"
+
+SIF_DIR="${SIF_DIR:-$SCRATCH/swebench}"
+SINGULARITY_CACHE="${SINGULARITY_CACHE:-$SCRATCH/singularity_cache}"
+
+OC_RUNTIME_SIF="${OC_RUNTIME_SIF:-$SCRATCH/sif_image/oc_runtime.sif}"
+
+SGLANG_SIF="${SGLANG_SIF:-$SCRATCH/sif_image/sglang_v0.5.11-cu128-sm80.sif}"
+SGLANG_MODEL_DIR="${SGLANG_MODEL_DIR:-$SCRATCH/model/hub/models--Qwen--Qwen3-14B/snapshots/40c069824f4251a91eefaf281ebe4c544efd3e18}"
+SGLANG_PORT="${SGLANG_PORT:-8000}"
+SGLANG_TP="${SGLANG_TP:-1}"
+# serve_singularity.sh derives --tp from the *count* of visible GPU ids, not
+# from SGLANG_TP. Default the visible-device list to 0..TP-1 so tp=4 actually
+# sees 4 GPUs; still overridable via `qsub -v SGLANG_CUDA_VISIBLE_DEVICES=...`.
+SGLANG_CUDA_VISIBLE_DEVICES="${SGLANG_CUDA_VISIBLE_DEVICES:-$(seq -s, 0 $((SGLANG_TP - 1)))}"
+SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-0.85}"
+SGLANG_CONTEXT_LENGTH="${SGLANG_CONTEXT_LENGTH:-32768}"
+SGLANG_TOOL_CALL_PARSER="${SGLANG_TOOL_CALL_PARSER:-qwen}"
+SGLANG_REASONING_PARSER="${SGLANG_REASONING_PARSER:-qwen3}"
+SGLANG_ENABLE_HIERARCHICAL_CACHE="${SGLANG_ENABLE_HIERARCHICAL_CACHE:-1}"
+
+OC_PULL_PARALLEL="${OC_PULL_PARALLEL:-2}"
+
+STAGE_SWEBENCH="${STAGE_SWEBENCH:-1}"
+STAGE_PULL="${STAGE_PULL:-1}"
+STAGE_SGLANG="${STAGE_SGLANG:-1}"
+STAGE_OC_CHECK="${STAGE_OC_CHECK:-1}"
+STAGE_OTEL="${STAGE_OTEL:-1}"
+STAGE_RUN="${STAGE_RUN:-1}"
+STAGE_CLEANUP="${STAGE_CLEANUP:-1}"
+
+OC_PYLIB="${OC_PYLIB:-$SCRATCH/pylib}"
+OC_PIP_CACHE="${OC_PIP_CACHE:-$SCRATCH/.pip-cache}"
+
+# All logs for one experiment go under the same per-sweep dir as the driver's
+# per-run output, mirroring the docker mode's layout:
+#   $KIT_ROOT/<app.output_dir>/<OC_RUN_STAMP>/
+#       ├── logs/           ← sglang.log, run.log, engine_metrics.jsonl,
+#       │                     pip-swebench.log, otel/...
+#       └── <run_id>/       ← driver per-run output (verdict.json, spans, …)
+#
+# OC_RUN_STAMP is picked here and exported so the driver writes its run dirs
+# into the same parent dir. Defaults to Singapore-local timestamp.
+APP_OUTPUT_DIR="$(python3 -c "import json; print(json.load(open('$APP'))['output_dir'])" 2>/dev/null)"
+[[ -z "$APP_OUTPUT_DIR" ]] && APP_OUTPUT_DIR="data/runs/_unknown"
+export OC_RUN_STAMP="${OC_RUN_STAMP:-$(TZ=Asia/Singapore date '+%Y-%m-%d_%H-%M-%S')}"
+SWEEP_DIR="$KIT_ROOT/$APP_OUTPUT_DIR/$OC_RUN_STAMP"
+LOG_DIR="$SWEEP_DIR/logs"
+export OC_LOG_DIR="$LOG_DIR"
+
+OC_OTEL_DATA_DIR="${OC_OTEL_DATA_DIR:-$LOG_DIR/otel}"
+export OC_OTEL_DATA_DIR
+export OC_OTEL_TRACE_FILE="${OC_OTEL_TRACE_FILE:-$OC_OTEL_DATA_DIR/otel-traces.jsonl}"
+
+mkdir -p "$LOG_DIR" "$SIF_DIR" "$SINGULARITY_CACHE" "$OC_OTEL_DATA_DIR"
+cd "$KIT_ROOT"
+
+LOG_PREFIX() { echo "[$(date -u +%FT%TZ)] $*"; }
+
+LOG_PREFIX "kit_root        = $KIT_ROOT"
+LOG_PREFIX "sweep_dir       = $SWEEP_DIR"
+LOG_PREFIX "log_dir         = $LOG_DIR"
+LOG_PREFIX "run_stamp       = $OC_RUN_STAMP"
+LOG_PREFIX "swebench_root   = $SWEBENCH_ROOT"
+LOG_PREFIX "app             = $APP"
+LOG_PREFIX "harness         = $HARNESS_CONFIG"
+LOG_PREFIX "backend         = $BACKEND_CONFIG"
+LOG_PREFIX "dataset         = $DATASET"
+LOG_PREFIX "sif_dir         = $SIF_DIR"
+LOG_PREFIX "oc_runtime_sif  = $OC_RUNTIME_SIF"
+LOG_PREFIX "sglang_sif      = $SGLANG_SIF"
+LOG_PREFIX "sglang_model_dir= $SGLANG_MODEL_DIR"
+LOG_PREFIX "sglang_port=$SGLANG_PORT tp=$SGLANG_TP context=$SGLANG_CONTEXT_LENGTH"
+LOG_PREFIX "stages: swebench=$STAGE_SWEBENCH pull=$STAGE_PULL sglang=$STAGE_SGLANG oc=$STAGE_OC_CHECK otel=$STAGE_OTEL run=$STAGE_RUN cleanup=$STAGE_CLEANUP"
+
+# ---- Modules ---------------------------------------------------------------
+# Pin singularity to 4.3.1 — compute nodes default to 3.10.0, which SIGBUSes on
+# sif images pulled with newer singularity (OCI overlay layout mismatch).
+SINGULARITY_MODULE="${SINGULARITY_MODULE:-singularity/4.3.1}"
+module load "$SINGULARITY_MODULE" 2>/dev/null \
+    || module load singularity 2>/dev/null \
+    || LOG_PREFIX "WARN: module load singularity failed; assuming binary on PATH"
+command -v singularity >/dev/null 2>&1 || { LOG_PREFIX "FATAL: singularity not found"; exit 1; }
+LOG_PREFIX "singularity     = $(command -v singularity)  ($(singularity --version 2>&1))"
+export SINGULARITY_CACHEDIR="$SINGULARITY_CACHE"
+
+module load python/3.12.1-gcc11 2>/dev/null || module load python 2>/dev/null || true
+command -v python3 >/dev/null 2>&1 || { LOG_PREFIX "FATAL: python3 not found"; exit 1; }
+
+# ============================================================================
+# Stage 0: pip install swebench
+# ============================================================================
+if [[ "$STAGE_SWEBENCH" == "1" ]]; then
+    LOG_PREFIX "==== STAGE 0: pip install swebench into $OC_PYLIB ===="
+    mkdir -p "$OC_PYLIB" "$OC_PIP_CACHE"
+    export PYTHONPATH="$OC_PYLIB:${PYTHONPATH:-}"
+    if ! python3 -c "from swebench.harness.test_spec.test_spec import make_test_spec; from swebench.harness.grading import get_eval_report" 2>/dev/null; then
+        python3 -m pip install \
+            --target "$OC_PYLIB" --cache-dir "$OC_PIP_CACHE" --upgrade swebench \
+            >"$LOG_DIR/pip-swebench.log" 2>&1 \
+            || { LOG_PREFIX "FATAL: pip install swebench failed; tail:"; tail -40 "$LOG_DIR/pip-swebench.log"; exit 1; }
+        LOG_PREFIX "  swebench install OK"
+    else
+        LOG_PREFIX "  swebench already importable; skipping install"
+    fi
+    SWEBENCH_ROOT="$OC_PYLIB"
+
+    LOG_PREFIX "  building $DATASET from $APP ids (HF SWE-bench_Verified)"
+    mkdir -p "$(dirname "$DATASET")"
+    OC_APP="$APP" OC_DATASET_OUT="$DATASET" \
+    python3 - <<'PY' || { LOG_PREFIX "FATAL: dataset materialize failed"; exit 1; }
+import json, os, sys
+from datasets import load_dataset
+app_path = os.environ["OC_APP"]
+out_path = os.environ["OC_DATASET_OUT"]
+with open(app_path) as fh:
+    app = json.load(fh)
+ids = list(app.get("instances") or [])
+if not ids:
+    print(f"app {app_path} has no instances", file=sys.stderr); sys.exit(1)
+want = set(ids)
+existing = []
+if os.path.exists(out_path):
+    try:
+        existing = json.load(open(out_path))
+        have = {d.get("instance_id") for d in existing}
+        if want.issubset(have):
+            print(f"  dataset already covers all {len(ids)} ids; skip"); sys.exit(0)
+    except Exception:
+        pass
+ds = load_dataset(os.environ.get("OC_HF_DATASET", "princeton-nlp/SWE-bench_Verified"),
+                  split=os.environ.get("OC_HF_SPLIT", "test"))
+filt = [dict(r) for r in ds if r["instance_id"] in want]
+missing = want - {d["instance_id"] for d in filt}
+if missing:
+    print(f"WARN: {len(missing)} ids missing: {sorted(missing)[:5]}", file=sys.stderr)
+keep_by_id = {d["instance_id"]: d for d in existing}
+keep_by_id.update({d["instance_id"]: d for d in filt})
+with open(out_path, "w") as fh:
+    json.dump(list(keep_by_id.values()), fh)
+print(f"  wrote {len(filt)} (total {len(keep_by_id)}) instances -> {out_path}")
+PY
+fi
+
+# ============================================================================
+# Stage 1: pull instance .sif images
+# ============================================================================
+if [[ "$STAGE_PULL" == "1" ]]; then
+    LOG_PREFIX "==== STAGE 1: pull instance .sif images ===="
+    if [[ ! -f "$DATASET" ]]; then
+        LOG_PREFIX "ERROR: dataset not found at $DATASET — skipping pull"
+    else
+        TMP_LIST="$SIF_DIR/.app_instances.txt"
+        python3 - <<PY >"$TMP_LIST"
+import json
+with open("$APP") as fh:
+    y = json.load(fh)
+for i in y.get("instances") or []:
+    print(i)
+PY
+        LOG_PREFIX "  pulling $(wc -l < "$TMP_LIST") instances from $APP"
+        OC_SIF_DIR="$SIF_DIR" bash "$KIT_ROOT/scripts/execution_pbs/pull_images.sh" \
+            --instances "$TMP_LIST" --dir "$SIF_DIR" --parallel "$OC_PULL_PARALLEL" \
+            || LOG_PREFIX "WARN: some pulls failed (see $SIF_DIR/*.pull.log)"
+    fi
+fi
+
+# ============================================================================
+# Stage 2: sglang singularity
+# ============================================================================
+SGLANG_LOG="$LOG_DIR/sglang.log"
+SGLANG_PID_FILE="$KIT_ROOT/.sglang.pid"
+if [[ "$STAGE_SGLANG" == "1" ]]; then
+    LOG_PREFIX "==== STAGE 2: start sglang singularity ===="
+    [[ -f "$SGLANG_SIF" ]] || {
+        LOG_PREFIX "FATAL: sglang sif not found at $SGLANG_SIF"
+        LOG_PREFIX "  pull it first via: qsub $KIT_ROOT/scripts/execution_pbs/pull_sglang_sif.pbs"
+        exit 2
+    }
+    [[ -d "$SGLANG_MODEL_DIR" ]] || {
+        LOG_PREFIX "FATAL: sglang model dir not found at $SGLANG_MODEL_DIR"
+        exit 2
+    }
+
+    OC_CUDA_MODULE="${OC_CUDA_MODULE:-cuda/12.2.2}"
+    module load "$OC_CUDA_MODULE" 2>/dev/null \
+        && LOG_PREFIX "  module load $OC_CUDA_MODULE  ok" \
+        || LOG_PREFIX "  WARN: module load $OC_CUDA_MODULE failed; relying on host cuda"
+    nvidia-smi -L >/dev/null 2>&1 || { LOG_PREFIX "FATAL: no GPU visible"; exit 2; }
+    LOG_PREFIX "  $(nvidia-smi -L | head -1)"
+
+    # Bind the model dir 1:1 so model.name resolves to the same path inside
+    # the container as it does on the host (the OC harness writes the host
+    # path into the per-run openclaw.json, and the bridge / endpoint config
+    # would otherwise see a stale path).
+    : > "$SGLANG_LOG"
+    SGLANG_SIF_IMAGE="$SGLANG_SIF" \
+    SGLANG_MOUNTS="$SCRATCH:$SCRATCH" \
+    SGLANG_MODULES="$SINGULARITY_MODULE $OC_CUDA_MODULE" \
+    SGLANG_EXTRAS_DIR="${SGLANG_EXTRAS_DIR:-}" \
+    SGLANG_MODEL_PATH="$SGLANG_MODEL_DIR" \
+    SGLANG_CUDA_VISIBLE_DEVICES="$SGLANG_CUDA_VISIBLE_DEVICES" \
+    SGLANG_PORT="$SGLANG_PORT" \
+    SGLANG_MEM_FRACTION_STATIC="$SGLANG_MEM_FRACTION_STATIC" \
+    SGLANG_CONTEXT_LENGTH="$SGLANG_CONTEXT_LENGTH" \
+    SGLANG_TOOL_CALL_PARSER="$SGLANG_TOOL_CALL_PARSER" \
+    SGLANG_REASONING_PARSER="$SGLANG_REASONING_PARSER" \
+    SGLANG_ENABLE_HIERARCHICAL_CACHE="$SGLANG_ENABLE_HIERARCHICAL_CACHE" \
+    SGLANG_LOG_FILE="$SGLANG_LOG" \
+    SGLANG_PID_FILE="$SGLANG_PID_FILE" \
+    SGLANG_FOREGROUND=0 \
+    bash "$KIT_ROOT/backend/sglang/serve_singularity.sh" start \
+        || { LOG_PREFIX "FATAL: sglang launcher exited; tail of log:"; tail -40 "$SGLANG_LOG"; exit 3; }
+
+    LOG_PREFIX "  sglang launched; log=$SGLANG_LOG pid_file=$SGLANG_PID_FILE"
+
+    DEADLINE=$(( $(date +%s) + 1800 ))
+    until curl -fsS "http://127.0.0.1:$SGLANG_PORT/v1/models" >/dev/null 2>&1; do
+        if [[ -f "$SGLANG_PID_FILE" ]]; then
+            pid="$(cat "$SGLANG_PID_FILE" || true)"
+            if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
+                LOG_PREFIX "FATAL: sglang process $pid died; tail of log:"
+                tail -60 "$SGLANG_LOG"
+                exit 3
+            fi
+        fi
+        if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+            LOG_PREFIX "FATAL: sglang not ready after 1800s"
+            tail -60 "$SGLANG_LOG"
+            exit 3
+        fi
+        sleep 10
+    done
+    LOG_PREFIX "  sglang ready on http://127.0.0.1:$SGLANG_PORT"
+
+    OC_ENGINE="${OC_ENGINE:-sglang}"
+    ENGINE_METRICS_LOG="${OC_ENGINE_METRICS_LOG:-$LOG_DIR/engine_metrics.jsonl}"
+    ENGINE_TAILER_LOG="$LOG_DIR/engine_log_tailer.log"
+    OC_ENGINE_INTERVAL="${OC_ENGINE_INTERVAL:-0.1}"
+    python3 "$KIT_ROOT/backend/engine_log_tailer.py" \
+        --engine "$OC_ENGINE" \
+        --source metrics \
+        --base-url "http://127.0.0.1:$SGLANG_PORT" \
+        --interval "$OC_ENGINE_INTERVAL" \
+        --output "$ENGINE_METRICS_LOG" \
+        > "$ENGINE_TAILER_LOG" 2>&1 &
+    ENGINE_TAILER_PID=$!
+    LOG_PREFIX "  engine metrics tailer pid=$ENGINE_TAILER_PID -> $ENGINE_METRICS_LOG"
+fi
+
+# ============================================================================
+# Stage 3: check OC runtime sif
+# ============================================================================
+if [[ "$STAGE_OC_CHECK" == "1" ]]; then
+    LOG_PREFIX "==== STAGE 3: verify oc_runtime.sif ===="
+    if [[ ! -f "$OC_RUNTIME_SIF" ]]; then
+        LOG_PREFIX "FATAL: $OC_RUNTIME_SIF not found."
+        LOG_PREFIX "  Build it once on a login node:"
+        LOG_PREFIX "    bash $KIT_ROOT/scripts/execution_pbs/build_oc_sif.sh \\"
+        LOG_PREFIX "        --out $OC_RUNTIME_SIF --kit-root $KIT_ROOT"
+        exit 5
+    fi
+    LOG_PREFIX "  oc_runtime.sif = $OC_RUNTIME_SIF ($(du -h "$OC_RUNTIME_SIF" | awk '{print $1}'))"
+fi
+
+# SingularityHarness consumes these via os.environ. OC_SCORING_SIF_DIR is the
+# per-instance .sif dir (Stage 1 output); OC_OC_SIF is the runtime sif.
+export OC_OC_SIF="$OC_RUNTIME_SIF"
+export OC_SCORING_SIF_DIR="$SIF_DIR"
+
+# ============================================================================
+# Stage 3.5: OTel collector
+# ============================================================================
+if [[ "$STAGE_OTEL" == "1" ]]; then
+    LOG_PREFIX "==== STAGE 3.5: start OTel collector ===="
+    if bash "$KIT_ROOT/scripts/execution_pbs/otel_collector.sh" start; then
+        LOG_PREFIX "  OTel collector ready at 127.0.0.1:${OC_OTEL_PORT:-4318}"
+        LOG_PREFIX "  trace file -> $OC_OTEL_TRACE_FILE"
+    else
+        LOG_PREFIX "  WARN: OTel collector failed to start; spans.jsonl will be missing"
+    fi
+fi
+
+# ============================================================================
+# Stage 4: run benchmark (HARNESS_BACKEND=singularity)
+# ============================================================================
+RUN_RC=0
+if [[ "$STAGE_RUN" == "1" ]]; then
+    LOG_PREFIX "==== STAGE 4: run benchmark (singularity) ===="
+    export KIT_ROOT
+    export HARNESS_BACKEND=singularity
+    export OC_HOST_WORKSPACE_BASE="$SCRATCH/oc-eval/workspaces"
+    mkdir -p "$OC_HOST_WORKSPACE_BASE"
+
+    # Per-component CPU split: hand sglang's pid to the sampler so cpu.by_group
+    # in util.jsonl attributes engine work to "llm_engine".
+    if [[ -f "$SGLANG_PID_FILE" ]]; then
+        export OC_LLM_PID="$(cat "$SGLANG_PID_FILE" || true)"
+    fi
+
+    python3 -m orchestration.runner.driver \
+        --app "$APP" \
+        --harness "$HARNESS_CONFIG" \
+        --backend "$BACKEND_CONFIG" \
+        --swebench-root "$SWEBENCH_ROOT" \
+        --instance-data "$DATASET" \
+        2>&1 | tee -a "$LOG_DIR/run.log"
+    RUN_RC=${PIPESTATUS[0]}
+    LOG_PREFIX "  driver exit rc=$RUN_RC"
+fi
+
+# ============================================================================
+# Stage 5: cleanup
+# ============================================================================
+if [[ "$STAGE_CLEANUP" == "1" ]]; then
+    LOG_PREFIX "==== STAGE 5: cleanup ===="
+    if [[ "$STAGE_OTEL" == "1" ]]; then
+        bash "$KIT_ROOT/scripts/execution_pbs/otel_collector.sh" stop || true
+    fi
+    if [[ -n "${ENGINE_TAILER_PID:-}" ]] && kill -0 "$ENGINE_TAILER_PID" 2>/dev/null; then
+        kill -TERM "$ENGINE_TAILER_PID" 2>/dev/null || true
+        for _ in {1..10}; do
+            sleep 0.5
+            kill -0 "$ENGINE_TAILER_PID" 2>/dev/null || break
+        done
+        kill -KILL "$ENGINE_TAILER_PID" 2>/dev/null || true
+    fi
+    if [[ "$STAGE_SGLANG" == "1" ]]; then
+        SGLANG_PID_FILE="$SGLANG_PID_FILE" \
+        bash "$KIT_ROOT/backend/sglang/serve_singularity.sh" stop || true
+    fi
+fi
+
+LOG_PREFIX "==== done; rc=$RUN_RC ===="
+LOG_PREFIX "==== artifacts: $SWEEP_DIR ===="
+LOG_PREFIX "  logs/      → sglang.log, run.log, engine_metrics.jsonl, otel/"
+LOG_PREFIX "  <run_id>/  → verdict.json, spans.jsonl, step_trace.jsonl"
+exit $RUN_RC

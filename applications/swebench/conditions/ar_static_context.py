@@ -1,7 +1,7 @@
 """AR-static-context baseline: issue + offline static context.
 
 Builds context offline from the repo container using:
-  1. Top-2-level file tree (via `docker exec find`)
+  1. Top-2-level file tree (via `Container.exec` running `find`)
   2. BM25 retrieval over .py file CONTENT to pick top-K relevant files
 
 The "offline" framing is important: this context is constructed BEFORE the LLM
@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from applications.conditions._llm_client import call_llm, extract_patch
+from orchestration.container.base import Container, ContainerHandle
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +47,25 @@ _MAX_SNIPPET_BYTES = 2000
 class ARStaticContextCondition:
     """AR generation with offline static context (file tree + BM25 top-K)."""
 
-    def __init__(self, model_config, max_turns: int = 1, top_k_files: int = 5):
+    def __init__(
+        self,
+        model_config,
+        max_turns: int = 1,
+        top_k_files: int = 5,
+        container: Optional[Container] = None,
+    ):
         self.model_config = model_config
         self.max_turns = max_turns
         self.top_k_files = top_k_files
+        self.container = container
+
+    def _handle(self, container_id: Optional[str]) -> Optional[ContainerHandle]:
+        if container_id is None or self.container is None:
+            return None
+        return ContainerHandle(
+            id=container_id, name=container_id,
+            backend=self.container.backend_id,
+        )
 
     def run(
         self,
@@ -172,18 +188,35 @@ class ARStaticContextCondition:
 
         return "\n".join(parts) if parts else "(no context available)"
 
+    def _container_exec(
+        self,
+        container_id: str,
+        argv: List[str],
+        timeout: int,
+    ) -> subprocess.CompletedProcess:
+        """Route an exec through self.container when present; fall back to docker."""
+        handle = self._handle(container_id)
+        if self.container is not None and handle is not None:
+            return self.container.exec(
+                handle, argv, check=False, timeout=timeout,
+            )
+        return subprocess.run(
+            ["docker", "exec", container_id, *argv],
+            capture_output=True, text=True, timeout=timeout,
+        )
+
     def _get_file_tree(self, container_id: str, workspace_root: str) -> str:
         """Use find inside the container to get a 2-level directory listing."""
-        r = subprocess.run(
+        r = self._container_exec(
+            container_id,
             [
-                "docker", "exec", container_id,
                 "find", workspace_root,
                 "-maxdepth", "2",
                 "-not", "-path", "*/.*",       # skip hidden
                 "-not", "-path", "*/__pycache__*",
                 "-type", "f", "-o", "-type", "d",
             ],
-            capture_output=True, text=True, timeout=60,
+            timeout=60,
         )
         if r.returncode != 0:
             logger.warning("File tree listing failed: %s", r.stderr[:200])
@@ -196,16 +229,16 @@ class ARStaticContextCondition:
 
     def _list_py_files(self, container_id: str, workspace_root: str) -> List[str]:
         """Return relative paths of .py files in the repo."""
-        r = subprocess.run(
+        r = self._container_exec(
+            container_id,
             [
-                "docker", "exec", container_id,
                 "find", workspace_root,
                 "-name", "*.py",
                 "-not", "-path", "*/.*",
                 "-not", "-path", "*/__pycache__*",
                 "-type", "f",
             ],
-            capture_output=True, text=True, timeout=60,
+            timeout=60,
         )
         if r.returncode != 0:
             return []
@@ -213,10 +246,7 @@ class ARStaticContextCondition:
 
     def _read_file(self, container_id: str, path: str) -> str:
         """Read a single file from the container; return empty string on failure."""
-        r = subprocess.run(
-            ["docker", "exec", container_id, "cat", path],
-            capture_output=True, text=True, timeout=30,
-        )
+        r = self._container_exec(container_id, ["cat", path], timeout=30)
         if r.returncode != 0:
             return ""
         if len(r.stdout) > _MAX_FILE_BYTES:

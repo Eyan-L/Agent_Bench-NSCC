@@ -85,7 +85,8 @@
       "providers": {
         "vllm": {
           "baseUrl": "http://localhost:8000/v1",
-          "apiKey": "sk-dummy"
+          "apiKey": "sk-dummy",
+          "api": "openai-completions"
         }
       }
     },

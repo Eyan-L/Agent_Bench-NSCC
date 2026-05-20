@@ -1,0 +1,18 @@
+--- dist/docker-CHUNK.js
++++ dist/docker-CHUNK.js
+@@ -795,6 +795,15 @@
+ async function ensureSandboxContainer(params) {
++	/* OC_PATCH_ENSURE_BRIDGE_BYPASS_BEGIN */
++	if (process.env.OPENCLAW_BYPASS_ENSURE_SANDBOX) {
++		const __scopeKey = resolveSandboxScopeKey(params.cfg.scope, params.sessionKey);
++		const __slug = params.cfg.scope === "shared" ? "shared" : slugifySessionKey(__scopeKey);
++		const __containerName = `${params.cfg.docker.containerPrefix}${__slug}`.slice(0, 63);
++		console.error("[oc-patch] ensureSandboxContainer bypass; container=" + __containerName);
++		return __containerName;
++	}
++	/* OC_PATCH_ENSURE_BRIDGE_BYPASS_END */
+ 	const scopeKey = resolveSandboxScopeKey(params.cfg.scope, params.sessionKey);
+ 	const slug = params.cfg.scope === "shared" ? "shared" : slugifySessionKey(scopeKey);
+ 	const containerName = `${params.cfg.docker.containerPrefix}${slug}`.slice(0, 63);
+ 	const expectedHash = computeSandboxConfigHash({
+ 		docker: params.cfg.docker,

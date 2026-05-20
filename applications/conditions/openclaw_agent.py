@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import ClassVar, Dict, List, Optional, Tuple
 
 from applications.conditions.util_sampler import UtilSampler
+from orchestration.container.base import Container, ContainerHandle
 
 logger = logging.getLogger(__name__)
 
@@ -68,13 +69,19 @@ class OpenClawAgentCondition:
     # session-archive paths under state_dir/agents/<id>/.
     agent_id: ClassVar[str] = ""
 
-    def __init__(self, model_config, agent_config):
+    def __init__(self, model_config, agent_config, container: Optional[Container] = None):
         if not self.agent_id:
             raise NotImplementedError(
                 f"{type(self).__name__} must define a class-level `agent_id`"
             )
         self.model_config = model_config
         self.agent_config = agent_config
+        # Injected by the driver. Required in singularity mode; in docker mode
+        # the driver also passes a DockerContainer so this code path stays
+        # uniform. None should not occur in practice for openclaw conditions,
+        # but we defensively fall back to the legacy `docker exec` path so
+        # callers that haven't been updated still work.
+        self.container = container
 
     # ------------------------------------------------------------------
     # Subclass hooks
@@ -158,11 +165,19 @@ class OpenClawAgentCondition:
         # next agent run reusing this container — the harness rebuilds per run.
         if container_id is not None:
             try:
-                subprocess.run(
-                    ["docker", "exec", container_id,
-                     "pkill", "-TERM", "-f", "openclaw-gateway"],
-                    capture_output=True, timeout=10,
-                )
+                handle = self._handle(container_id)
+                if self.container is not None and handle is not None:
+                    self.container.exec(
+                        handle,
+                        ["pkill", "-TERM", "-f", "openclaw-gateway"],
+                        check=False, timeout=10,
+                    )
+                else:
+                    subprocess.run(
+                        ["docker", "exec", container_id,
+                         "pkill", "-TERM", "-f", "openclaw-gateway"],
+                        capture_output=True, timeout=10,
+                    )
             except Exception as e:
                 logger.warning("gateway SIGTERM failed: %s", e)
         time.sleep(_OTEL_FLUSH_WAIT_SECONDS)
@@ -423,32 +438,102 @@ class OpenClawAgentCondition:
                 )
             run_kwargs = {"cwd": workspace_root, "env": env}
         else:
+            # Tee stderr live to a state_dir-side log so we can tail it from
+            # the host while the agent is running — `subprocess.run` with
+            # capture_output only flushes when the child exits, which makes
+            # diagnosis of hangs impossible. /root/.openclaw is bind-mounted
+            # to <state_dir> on the host, so /root/.openclaw/logs/agent.live.stderr
+            # appears immediately at <state_dir>/logs/agent.live.stderr.
+            # Stdout is the agent's --json payload; we still capture it
+            # exclusively to parse, no need to split.
             inner = (
+                "mkdir -p /root/.openclaw/logs && "
                 "source /tmp/oc_gateway_env && "
-                "openclaw agent "
+                "exec openclaw agent "
                 f"--agent {shlex.quote(self.agent_id)} "
                 f"--session-id {shlex.quote(session_id)} "
                 f"--message {shlex.quote(message)} "
                 f"--timeout {int(timeout_seconds)} "
-                "--json"
+                "--json "
+                "2> >(tee /root/.openclaw/logs/agent.live.stderr >&2)"
             )
-            argv = ["docker", "exec", container_id, "bash", "-lc", inner]
+            argv = None  # signalled below: use self.container.exec when available
             run_kwargs = {}
 
         subprocess_timeout = timeout_seconds + 120
-        try:
-            proc = subprocess.run(
-                argv,
-                capture_output=True,
-                text=True,
-                timeout=subprocess_timeout,
-                **run_kwargs,
+        # Log what we're about to launch — line is visible in run.log
+        # immediately, so when the user sees the driver "stuck waiting for
+        # agent" they can tell exactly which command is blocking.
+        logger.info(
+            "  openclaw agent dispatch: backend=%s container_id=%s "
+            "agent=%s session=%s timeout=%ds wait_budget=%ds",
+            (self.container.backend_id if self.container else "subprocess"),
+            (container_id[:12] if container_id else None),
+            self.agent_id, session_id, int(timeout_seconds), subprocess_timeout,
+        )
+        if container_id is None:
+            logger.info(
+                "    host-mode argv=%r (env keys: OPENCLAW_GATEWAY_URL=%s, "
+                "OPENCLAW_GATEWAY_TOKEN=<%d chars>, OPENCLAW_STATE_DIR=%s)",
+                argv[:6] + ["...truncated..."] if argv and len(argv) > 6 else argv,
+                env.get("OPENCLAW_GATEWAY_URL"),
+                len(env.get("OPENCLAW_GATEWAY_TOKEN", "")),
+                env.get("OPENCLAW_STATE_DIR"),
             )
+        else:
+            logger.info(
+                "    in-container inner=%r (token comes from /tmp/oc_gateway_env)",
+                inner[:200] + ("..." if len(inner) > 200 else ""),
+            )
+        dispatch_t0 = time.time()
+        try:
+            if argv is None:
+                # In-container path. Route through the Container abstraction
+                # so docker and singularity backends share one call site.
+                handle = self._handle(container_id)
+                if self.container is None or handle is None:
+                    # Legacy fallback — driver hasn't been updated to inject
+                    # self.container, but we still have a docker container id.
+                    argv = ["docker", "exec", container_id, "bash", "-lc", inner]
+                    proc = subprocess.run(
+                        argv,
+                        capture_output=True, text=True,
+                        timeout=subprocess_timeout,
+                        **run_kwargs,
+                    )
+                else:
+                    proc = self.container.exec(
+                        handle,
+                        ["bash", "-lc", inner],
+                        check=False,
+                        timeout=subprocess_timeout,
+                    )
+            else:
+                proc = subprocess.run(
+                    argv,
+                    capture_output=True,
+                    text=True,
+                    timeout=subprocess_timeout,
+                    **run_kwargs,
+                )
         except subprocess.TimeoutExpired:
+            elapsed = time.time() - dispatch_t0
+            logger.warning(
+                "  openclaw agent SUBPROCESS TIMEOUT after %.1fs "
+                "(budget was %ds). The child is still alive in the container; "
+                "check <state_dir>/logs/agent.live.stderr for what it was doing.",
+                elapsed, subprocess_timeout,
+            )
             return None, "openclaw agent wall-clock timeout (subprocess)"
 
+        elapsed = time.time() - dispatch_t0
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
+        logger.info(
+            "  openclaw agent returned: rc=%s elapsed=%.1fs "
+            "stdout=%d bytes stderr=%d bytes",
+            proc.returncode, elapsed, len(stdout), len(stderr),
+        )
 
         if proc.returncode != 0:
             self._last_stdout = stdout
@@ -774,6 +859,9 @@ class OpenClawAgentCondition:
 
         sessions_subpath = f"agents/{self.agent_id}/sessions"
         cache_subpath = "logs/cache-trace.jsonl"
+        # Raw per-LLM-call response stream (pi-ai patch writes here when
+        # OPENCLAW_RAW_RESPONSE_LOG points at it). Each line = one HTTP request.
+        raw_resp_subpath = "logs/llm-raw-responses.jsonl"
 
         if container_id is None:
             ei = getattr(self, "_env_info", {}) or {}
@@ -783,6 +871,7 @@ class OpenClawAgentCondition:
             for src, dst in [
                 (state / sessions_subpath, out_dir / "sessions"),
                 (state / cache_subpath, out_dir / "cache-trace.jsonl"),
+                (state / raw_resp_subpath, out_dir / "llm-raw-responses.jsonl"),
             ]:
                 if not src.exists():
                     continue
@@ -795,23 +884,53 @@ class OpenClawAgentCondition:
                     logger.debug("host session archive skipped %s: %s", src, e)
             return
 
+        handle = self._handle(container_id)
         for src, dst in [
             (f"/root/.openclaw/{sessions_subpath}", "sessions"),
             (f"/root/.openclaw/{cache_subpath}", "cache-trace.jsonl"),
+            (f"/root/.openclaw/{raw_resp_subpath}", "llm-raw-responses.jsonl"),
         ]:
-            r = subprocess.run(
-                ["docker", "cp", f"{container_id}:{src}", str(out_dir / dst)],
-                capture_output=True, text=True,
+            try:
+                if self.container is not None and handle is not None:
+                    self.container.copy_out(handle, src, out_dir / dst)
+                else:
+                    r = subprocess.run(
+                        ["docker", "cp", f"{container_id}:{src}", str(out_dir / dst)],
+                        capture_output=True, text=True,
+                    )
+                    if r.returncode != 0:
+                        logger.debug(
+                            "session archive skipped %s: %s",
+                            src, r.stderr.strip(),
+                        )
+            except Exception as e:
+                logger.debug("session archive skipped %s: %s", src, e)
+
+    # ------------------------------------------------------------------
+    # In-container exec helper — routes through self.container when present.
+    # ------------------------------------------------------------------
+
+    def _handle(self, container_id: Optional[str]) -> Optional[ContainerHandle]:
+        """Build a ContainerHandle for the in-container ops.
+
+        In singularity mode `container_id` is the instance name (not a docker
+        id); the Container.exec implementation addresses instances by name,
+        so this is fine.
+        """
+        if container_id is None or self.container is None:
+            return None
+        return ContainerHandle(
+            id=container_id, name=container_id,
+            backend=self.container.backend_id,
+        )
+
+    def _exec(self, container_id: str, argv: List[str], check: bool = True, timeout: int = 60):
+        handle = self._handle(container_id)
+        if self.container is not None and handle is not None:
+            return self.container.exec(
+                handle, argv, check=check, timeout=timeout,
             )
-            if r.returncode != 0:
-                logger.debug("session archive skipped %s: %s", src, r.stderr.strip())
-
-    # ------------------------------------------------------------------
-    # docker exec helper
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _exec(container_id: str, argv: List[str], check: bool = True, timeout: int = 60):
+        # Legacy fallback when no container is injected.
         cmd = ["docker", "exec", container_id] + argv
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if check and r.returncode != 0:

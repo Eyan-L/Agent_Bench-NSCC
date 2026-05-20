@@ -14,9 +14,8 @@ from typing import List, Optional
 from orchestration.runner.config import load_composed_config, RunConfig
 from orchestration.runner.manifest import RunManifest, get_manifest_path, load_or_create_manifest
 from applications.swebench.app import validate_fairness_constraints
-from applications.swebench.openclaw.app import (
-    SWEBenchHarness, SingularityHarness,
-)
+from applications.swebench.openclaw.app import SWEBenchHarness
+from orchestration.container import DockerContainer, SingularityContainer
 # Condition classes are lazy-imported in `execute_run` so the driver can boot
 # without pulling every app's condition tree (and so an app that adds a new
 # condition class doesn't force a driver edit). Harness classes that are only
@@ -133,6 +132,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             condition = ARStaticContextCondition(
                 model_config=run_config.condition.model,
                 max_turns=1,
+                container=getattr(harness, "container", None),
             )
             result = condition.run(
                 instance_data, run_dir, run_config.seed,
@@ -143,20 +143,29 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
 
         elif condition_type == "openclaw_agent":
             # Pick the per-app subclass by benchmark — same `condition_type`
-            # in both SWE-bench and TB harness JSONs; instance_data is the
+            # in SWE-bench / TB / DR harness JSONs; instance_data is the
             # discriminator.
             benchmark = instance_data.get("benchmark", "swebench")
             if benchmark == "terminal_bench":
                 from applications.terminal_bench.conditions.openclaw_agent import (
                     TerminalBenchOpenClawCondition as _Cls,
                 )
+            elif benchmark == "deepresearch_bench":
+                from applications.deepresearch_bench.conditions.openclaw_agent import (
+                    DeepResearchOpenClawCondition as _Cls,
+                )
             else:
                 from applications.swebench.conditions.openclaw_agent import (
                     SWEBenchOpenClawCondition as _Cls,
                 )
+            # `harness` here is whichever per-benchmark harness `_one` picked
+            # (SWE-bench openclaw / openhands / TB / DR). Only `SWEBenchHarness`
+            # currently exposes `.container`; the others fall through to None
+            # and the condition keeps its legacy `docker exec` path.
             condition = _Cls(
                 model_config=run_config.condition.model,
                 agent_config=run_config.condition.agent,
+                container=getattr(harness, "container", None),
             )
             result = condition.run(
                 instance_data, run_dir, run_config.seed,
@@ -174,6 +183,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             condition = OpenHandsAgentCondition(
                 model_config=run_config.condition.model,
                 agent_config=run_config.condition.agent,
+                container=getattr(harness, "container", None),
             )
             result = condition.run(
                 instance_data, run_dir, run_config.seed,
@@ -210,7 +220,9 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         # task container — so we skip the patch-presence gate for it.
         patch_path = Path(result["patch_path"])
         benchmark_kind = instance_data.get("benchmark", "swebench")
-        skip_patch_gate = benchmark_kind == "terminal_bench"
+        # TB and DR-Bench have no git-patch artifact — the agent's work lives
+        # inside the task container (TB: services + files; DR: /workspace/report.md).
+        skip_patch_gate = benchmark_kind in ("terminal_bench", "deepresearch_bench")
 
         if skip_patch_gate or (patch_path.exists() and patch_path.stat().st_size > 0):
             verdict = harness.run_tests(
@@ -233,6 +245,19 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         import json
         with open(verdict_path, "w") as f:
             json.dump(verdict, f, indent=2)
+
+        # Persist any agent-produced report (e.g. DR-Bench /workspace/report.md)
+        # alongside the verdict, so it survives harness cleanup. report_path in
+        # the verdict points at the harness's scratch dir which gets wiped.
+        report_src = verdict.get("report_path") if isinstance(verdict, dict) else None
+        if report_src:
+            try:
+                src_p = Path(report_src)
+                if src_p.is_file() and src_p.stat().st_size > 0:
+                    import shutil
+                    shutil.copyfile(src_p, run_dir / "report.md")
+            except OSError as e:
+                logger.warning("persist report.md failed for %s: %s", run_id, e)
         
         # Update manifest
         manifest.status = verdict["status"]
@@ -307,14 +332,18 @@ def run_sweep(app_path: Path, harness_path: Path, backend_path: Path,
     #                            on a shared docker network. Host runs only vLLM.
     #   singularity            — SingularityHarness; openclaw .sif + task .sif (peer
     #                            instances). Same isolation model in singularity-land.
-    # Terminal-Bench instances are auto-routed to TerminalBenchHarness regardless
-    # of HARNESS_BACKEND (per-instance dispatch in _one below).
+    # Terminal-Bench / DR-Bench instances are auto-routed to their respective
+    # harnesses regardless of HARNESS_BACKEND (per-instance dispatch in _one below).
+    _NON_SWE_BENCHMARKS = ("terminal_bench", "deepresearch_bench")
     needs_swe = any(
-        inst.get("benchmark", "swebench") != "terminal_bench"
+        inst.get("benchmark", "swebench") not in _NON_SWE_BENCHMARKS
         for inst in instances.values()
     )
     needs_tb = any(
         inst.get("benchmark") == "terminal_bench" for inst in instances.values()
+    )
+    needs_dr = any(
+        inst.get("benchmark") == "deepresearch_bench" for inst in instances.values()
     )
 
     # Peek at the harness config to learn which agent runtime this sweep
@@ -346,11 +375,19 @@ def run_sweep(app_path: Path, harness_path: Path, backend_path: Path,
             )
             harness = SWEBenchOpenHandsHarness(swebench_root)
         elif backend == "docker":
-            logger.info("Using SWEBenchHarness (docker: openclaw container + task container).")
-            harness = SWEBenchHarness(swebench_root)
+            logger.info(
+                "Using SWEBenchHarness with DockerContainer "
+                "(openclaw container + task container, shared docker network)."
+            )
+            harness = SWEBenchHarness(swebench_root, container=DockerContainer())
         elif backend == "singularity":
-            logger.info("Using SingularityHarness (singularity: openclaw .sif + task .sif).")
-            harness = SingularityHarness(swebench_root)
+            logger.info(
+                "Using SWEBenchHarness with SingularityContainer "
+                "(openclaw .sif + task .sif instances)."
+            )
+            harness = SWEBenchHarness(
+                swebench_root, container=SingularityContainer(),
+            )
         else:
             raise ValueError(
                 f"Unknown HARNESS_BACKEND={backend!r}; expected docker|singularity. "
@@ -358,6 +395,27 @@ def run_sweep(app_path: Path, harness_path: Path, backend_path: Path,
             )
     else:
         logger.info("Sweep is pure terminal-bench; skipping SWE-bench harness build.")
+
+    # Lazy-build the DR harness only if any instance in this sweep is DR-Bench.
+    # Same two-container model as TB but with a fixed lightweight sandbox image
+    # and host-side LLM-as-judge scoring (RACE + FACT via DeepSeek-V4).
+    dr_harness = None
+    if needs_dr:
+        from applications.deepresearch_bench.app import DeepResearchHarness
+        dr_backend = os.environ.get("HARNESS_BACKEND", "docker").lower()
+        if dr_backend != "docker":
+            raise ValueError(
+                f"deepresearch_bench only supports HARNESS_BACKEND=docker "
+                f"(got {dr_backend!r}); singularity backend not implemented."
+            )
+        if harness is not None:
+            logger.info(
+                "Sweep contains deepresearch_bench instances; constructing "
+                "DeepResearchHarness alongside %s.", type(harness).__name__,
+            )
+        else:
+            logger.info("Constructing DeepResearchHarness.")
+        dr_harness = DeepResearchHarness(swebench_root)
 
     # Lazy-build the TB harness only if any instance in this sweep is TB.
     # Same HARNESS_BACKEND env var as SWE-bench:
@@ -397,11 +455,17 @@ def run_sweep(app_path: Path, harness_path: Path, backend_path: Path,
     def _one(rc):
         try:
             inst = instances[rc.instance_id]
-            h = tb_harness if inst.get("benchmark") == "terminal_bench" else harness
+            bm = inst.get("benchmark")
+            if bm == "terminal_bench":
+                h = tb_harness
+            elif bm == "deepresearch_bench":
+                h = dr_harness
+            else:
+                h = harness
             if h is None:
                 raise RuntimeError(
-                    f"instance {rc.instance_id} requires terminal_bench harness "
-                    "but it was not constructed (loader bug?)"
+                    f"instance {rc.instance_id} (benchmark={bm!r}) requires a "
+                    "harness that was not constructed (loader bug?)"
                 )
             return execute_run(rc, h, inst, retry_errors)
         except Exception as e:

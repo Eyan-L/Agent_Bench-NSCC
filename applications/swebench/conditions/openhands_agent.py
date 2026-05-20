@@ -3,7 +3,8 @@
 Runtime contract: the harness (SWEBenchOpenHandsHarness) has prepared an
 OpenHands container (oh-<rid>) with the driver baked at
 /opt/openhands_driver.py and OPENHANDS_EXEC_BRIDGE_* env set. We invoke
-the driver via `docker exec`, wait for it to finish, then parse the
+the driver via the injected `Container` (docker exec / singularity exec
+depending on backend), wait for it to finish, then parse the
 events.jsonl it persisted to <state_dir>/events.jsonl (host-visible).
 
 The events follow openhands-sdk 1.21 schema:
@@ -31,6 +32,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+from orchestration.container.base import Container, ContainerHandle
 
 logger = logging.getLogger(__name__)
 
@@ -65,11 +68,12 @@ def _ns_to_iso(ns: int) -> Optional[str]:
 
 
 class OpenHandsAgentCondition:
-    """Run the OpenHands SDK driver against a SWE-bench task via docker exec."""
+    """Run the OpenHands SDK driver against a SWE-bench task inside the container."""
 
-    def __init__(self, model_config, agent_config):
+    def __init__(self, model_config, agent_config, container: Optional[Container] = None):
         self.model_config = model_config
         self.agent_config = agent_config
+        self.container = container
 
     def run(
         self,
@@ -103,14 +107,24 @@ class OpenHandsAgentCondition:
             f"--events {shlex.quote(events_path_in)} "
             f"--workspace {shlex.quote(workspace_root)}"
         )
-        argv = ["docker", "exec", container_id, "bash", "-lc", inner]
-
         timeout = getattr(self.agent_config, "max_time_seconds", 1800)
         step_start_ns = time.time_ns()
         try:
-            proc = subprocess.run(
-                argv, capture_output=True, text=True, timeout=timeout + 120,
-            )
+            if self.container is not None:
+                handle = ContainerHandle(
+                    id=container_id, name=container_id,
+                    backend=self.container.backend_id,
+                )
+                proc = self.container.exec(
+                    handle, ["bash", "-lc", inner],
+                    check=False, timeout=timeout + 120,
+                )
+            else:
+                # Legacy fallback when no container injected.
+                argv = ["docker", "exec", container_id, "bash", "-lc", inner]
+                proc = subprocess.run(
+                    argv, capture_output=True, text=True, timeout=timeout + 120,
+                )
             rc = proc.returncode
             stdout_tail = (proc.stdout or "")[-2000:]
             stderr_tail = (proc.stderr or "")[-2000:]

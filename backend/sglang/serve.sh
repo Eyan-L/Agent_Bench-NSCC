@@ -3,26 +3,98 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+KIT_ROOT="${KIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}"
 
 ACTION="${1:-start}"
 
+# 1) HARNESS config — model selection (single source of truth, shared with vllm/serve.sh).
+HARNESS_CFG="${SGLANG_HARNESS_YAML:-}"
+if [[ -z "$HARNESS_CFG" && -n "${HARNESS:-}" ]]; then
+    HARNESS_CFG="$KIT_ROOT/config/harness/${HARNESS}.json"
+fi
+if [[ -n "$HARNESS_CFG" && -f "$HARNESS_CFG" ]]; then
+    eval "$(python3 "$KIT_ROOT/scripts/load_harness_env.py" "$HARNESS_CFG")"
+fi
+
+# 2) BACKEND config — engine knobs (TP / PORT / GPU_MEM_UTIL / MAX_MODEL_LEN / CUDA_VISIBLE_DEVICES).
+BACKEND_CFG="${SGLANG_BACKEND_YAML:-}"
+if [[ -z "$BACKEND_CFG" && -n "${BACKEND:-}" ]]; then
+    BACKEND_CFG="$KIT_ROOT/config/backend/${BACKEND}.json"
+fi
+if [[ -n "$BACKEND_CFG" && -f "$BACKEND_CFG" ]]; then
+    eval "$(python3 "$KIT_ROOT/scripts/load_backend_env.py" "$BACKEND_CFG")"
+fi
+
 SGLANG_PID_FILE="${SGLANG_PID_FILE:-${PROJECT_ROOT}/.sglang.pid}"
-SGLANG_LOG_FILE="${SGLANG_LOG_FILE:-${PROJECT_ROOT}/sglang.log}"
+# Empty default — when unset, engine output is inherited from the parent's
+# stdout/stderr (Makefile's _ensure_serve redirects those to the per-sweep
+# SERVE_LOG path). Set explicitly only if you want a fixed standalone path.
+SGLANG_LOG_FILE="${SGLANG_LOG_FILE:-}"
 
 # Runtime-configurable knobs. Top-level scripts should export these before
 # invoking sglang_launcher.sh so port / GPU / model can vary between runs.
+# Harness/backend config values (MODEL, PORT, CUDA_VISIBLE_DEVICES, GPU_MEM_UTIL,
+# MAX_MODEL_LEN) are mapped onto the SGLANG_* knobs below when the matching
+# SGLANG_* env var is not already set, so a single HARNESS/BACKEND pair drives
+# both vllm and sglang.
 SGLANG_HOST="${SGLANG_HOST:-0.0.0.0}"
-SGLANG_PORT="${SGLANG_PORT:-30000}"
-SGLANG_MODEL_PATH="${SGLANG_MODEL_PATH:-Qwen/Qwen3-30B-A3B-Instruct-2507}"
+SGLANG_PORT="${SGLANG_PORT:-${PORT:-30000}}"
+SGLANG_MODEL_PATH="${SGLANG_MODEL_PATH:-${MODEL:-Qwen/Qwen3-30B-A3B-Instruct-2507}}"
 SGLANG_CUDA_VISIBLE_DEVICES="${SGLANG_CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-0}}"
-SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-0.85}"
+SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-${GPU_MEM_UTIL:-0.85}}"
+SGLANG_CONTEXT_LENGTH="${SGLANG_CONTEXT_LENGTH:-${MAX_MODEL_LEN:-}}"
 SGLANG_PAGE_SIZE="${SGLANG_PAGE_SIZE:-64}"
 SGLANG_HICACHE_SIZE="${SGLANG_HICACHE_SIZE:-60}"
 SGLANG_TOOL_CALL_PARSER="${SGLANG_TOOL_CALL_PARSER:-qwen}"
+# Optional. When set (e.g. "qwen3", "deepseekv3"), pass --reasoning-parser so
+# sglang extracts <think>...</think> spans into `reasoning_content` instead of
+# leaving them embedded in `content`. Empty = omit the flag.
+SGLANG_REASONING_PARSER="${SGLANG_REASONING_PARSER:-}"
 # Extra flags appended verbatim to the launch command (space-separated).
 SGLANG_EXTRA_ARGS="${SGLANG_EXTRA_ARGS:-}"
 # "1" (default) = pass --enable-hierarchical-cache; anything else = omit it.
 SGLANG_ENABLE_HIERARCHICAL_CACHE="${SGLANG_ENABLE_HIERARCHICAL_CACHE:-1}"
+# "1" (default) = block until sglang dies (matches vllm/serve.sh, required by
+# the Makefile's _ensure_serve poll loop). "0" = fire-and-forget daemon mode
+# (writes PID file then exits, useful for `bash serve.sh start` from a TTY).
+SGLANG_FOREGROUND="${SGLANG_FOREGROUND:-1}"
+
+# Auto-activate a conda env if sglang isn't importable on the default python
+# and SGLANG_CONDA_ENV is set. We can't rely on `conda activate` here — under
+# non-interactive shells it inserts the env bin in the *middle* of PATH (after
+# /usr/bin), so `python3` still resolves to the system one. Prepend the env's
+# bin dir directly to PATH for a deterministic resolve.
+if ! python3 -c "import sglang" >/dev/null 2>&1 && [[ -n "${SGLANG_CONDA_ENV:-}" ]]; then
+    for env_bin in \
+        "$HOME/anaconda3/envs/${SGLANG_CONDA_ENV}/bin" \
+        "$HOME/miniconda3/envs/${SGLANG_CONDA_ENV}/bin" \
+        "/opt/conda/envs/${SGLANG_CONDA_ENV}/bin"; do
+        if [[ -x "${env_bin}/python3" ]]; then
+            export PATH="${env_bin}:${PATH}"
+            export CONDA_PREFIX="$(dirname "${env_bin}")"
+            export CONDA_DEFAULT_ENV="${SGLANG_CONDA_ENV}"
+            break
+        fi
+    done
+fi
+
+# Wire the env's bundled NVIDIA CUDA libs into LD_LIBRARY_PATH. sgl_kernel's
+# SM90 binary is linked against CUDA 13 (libnvrtc.so.13), shipped via the
+# nvidia-* pip wheels under site-packages/nvidia/*/lib. Without this the
+# launcher dies with "libnvrtc.so.13: cannot open shared object file". `torch`
+# does this in its __init__ for its own libs, but `python -m sglang.launch_server`
+# imports sgl_kernel before any torch path setup.
+if [[ -n "${CONDA_PREFIX:-}" ]]; then
+    _nvidia_libs=""
+    for _lib_dir in "${CONDA_PREFIX}"/lib/python*/site-packages/nvidia/*/lib; do
+        [[ -d "${_lib_dir}" ]] || continue
+        _nvidia_libs+="${_lib_dir}:"
+    done
+    if [[ -n "${_nvidia_libs}" ]]; then
+        export LD_LIBRARY_PATH="${_nvidia_libs}${LD_LIBRARY_PATH:-}"
+    fi
+    unset _nvidia_libs _lib_dir
+fi
 
 _gpu_count() {
     local devs="$1"
@@ -51,7 +123,9 @@ start_sglang() {
         rm -f "${SGLANG_PID_FILE}"
     fi
 
-    mkdir -p "$(dirname "${SGLANG_LOG_FILE}")"
+    if [[ -n "${SGLANG_LOG_FILE}" ]]; then
+        mkdir -p "$(dirname "${SGLANG_LOG_FILE}")"
+    fi
     mkdir -p "$(dirname "${SGLANG_PID_FILE}")"
 
     local gpu_count
@@ -69,7 +143,7 @@ start_sglang() {
     # shellcheck disable=SC2206
     local extra_args=(${SGLANG_EXTRA_ARGS})
 
-    echo "sglang launch: port=${SGLANG_PORT} gpus=${SGLANG_CUDA_VISIBLE_DEVICES} (tp=${gpu_count}) model=${SGLANG_MODEL_PATH}"
+    echo "sglang launch: port=${SGLANG_PORT} gpus=${SGLANG_CUDA_VISIBLE_DEVICES} (tp=${gpu_count}) model=${SGLANG_MODEL_PATH}${SGLANG_CONTEXT_LENGTH:+ ctx=${SGLANG_CONTEXT_LENGTH}} fg=${SGLANG_FOREGROUND}"
 
     (
         # Save all values before unsetting, so they don't leak into sglang's
@@ -79,17 +153,30 @@ start_sglang() {
         _host="${SGLANG_HOST}"
         _port="${SGLANG_PORT}"
         _mem="${SGLANG_MEM_FRACTION_STATIC}"
+        _ctx="${SGLANG_CONTEXT_LENGTH}"
         _pgsz="${SGLANG_PAGE_SIZE}"
         _hicache="${SGLANG_HICACHE_SIZE}"
         _tool="${SGLANG_TOOL_CALL_PARSER}"
+        _reason="${SGLANG_REASONING_PARSER}"
         _hier="${SGLANG_ENABLE_HIERARCHICAL_CACHE}"
         unset SGLANG_PORT SGLANG_HOST SGLANG_MODEL_PATH SGLANG_CUDA_VISIBLE_DEVICES \
-              SGLANG_MEM_FRACTION_STATIC SGLANG_PAGE_SIZE SGLANG_HICACHE_SIZE \
-              SGLANG_TOOL_CALL_PARSER SGLANG_EXTRA_ARGS SGLANG_ENABLE_HIERARCHICAL_CACHE
+              SGLANG_MEM_FRACTION_STATIC SGLANG_CONTEXT_LENGTH SGLANG_PAGE_SIZE \
+              SGLANG_HICACHE_SIZE SGLANG_TOOL_CALL_PARSER SGLANG_REASONING_PARSER \
+              SGLANG_EXTRA_ARGS SGLANG_ENABLE_HIERARCHICAL_CACHE SGLANG_FOREGROUND
 
         hier_args=()
         if [[ "${_hier}" == "1" ]]; then
             hier_args=(--enable-hierarchical-cache --hicache-size "${_hicache}")
+        fi
+
+        ctx_args=()
+        if [[ -n "${_ctx}" ]]; then
+            ctx_args=(--context-length "${_ctx}")
+        fi
+
+        reason_args=()
+        if [[ -n "${_reason}" ]]; then
+            reason_args=(--reasoning-parser "${_reason}")
         fi
 
         SGLANG_KV_MEMTRACE=0 \
@@ -99,19 +186,32 @@ start_sglang() {
             --host "${_host}" \
             --port "${_port}" \
             "${tp_args[@]}" \
+            "${ctx_args[@]}" \
             --enable-metrics \
             --enable-cache-report \
             --mem-fraction-static "${_mem}" \
             "${hier_args[@]}" \
             --page-size "${_pgsz}" \
             --tool-call-parser "${_tool}" \
+            "${reason_args[@]}" \
             "${extra_args[@]}"
-    ) >>"${SGLANG_LOG_FILE}" 2>&1 &
+    ) >>"${SGLANG_LOG_FILE:-/dev/stdout}" 2>&1 &
 
     sglang_pid=$!
     echo "${sglang_pid}" > "${SGLANG_PID_FILE}"
     echo "sglang started, pid=${sglang_pid}"
-    echo "sglang log=${SGLANG_LOG_FILE}"
+    if [[ -n "${SGLANG_LOG_FILE}" ]]; then
+        echo "sglang log=${SGLANG_LOG_FILE}"
+    else
+        echo "sglang log=<inherits parent stdout>"
+    fi
+
+    # When invoked through Makefile's _ensure_serve (the default), block on
+    # the child so `kill -0 $bash_pid` stays true while sglang is up. Manual
+    # daemon mode keeps the fire-and-forget behavior via SGLANG_FOREGROUND=0.
+    if [[ "${SGLANG_FOREGROUND}" == "1" ]]; then
+        wait "${sglang_pid}"
+    fi
 }
 
 stop_sglang() {

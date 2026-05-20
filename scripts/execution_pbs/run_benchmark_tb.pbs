@@ -9,7 +9,7 @@
 #PBS -q normal
 #PBS -j oe
 #PBS -N oc_tb_bench
-#PBS -o /scratch/users/ntu/chengzh2/github/Agent_Bench/data/logs/pbs_tb.log
+#PBS -o /home/users/ntu/n2505289/Agent_Bench/data/logs/pbs_tb.log
 #
 # Stages (each can be skipped via env flag):
 #   0. STAGE_TB_PULL=1   — singularity pull the TB task .sif from docker hub

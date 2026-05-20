@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from orchestration.container.base import Mount
 from orchestration.dispatcher.base import Dispatcher
 
 logger = logging.getLogger(__name__)
@@ -145,24 +146,34 @@ class OpenClawRemoteDispatcher(Dispatcher):
     # Agent runtime wiring
     # ------------------------------------------------------------------
 
-    def agent_container_args(self) -> List[str]:
+    def agent_mounts_and_env(self) -> tuple[list[Mount], dict[str, str]]:
+        """Runtime-agnostic bridge wiring for the OC container.
+
+        Returns the mounts (just bridge.py, read-only) and env vars
+        (`OPENCLAW_EXEC_BRIDGE*`) the harness must inject into the OC
+        container's `ContainerSpec`. The actual translation to
+        `docker run -v/-e` or `singularity --bind/--env` happens inside
+        the `Container` subclass.
+        """
         if self.token is None:
             raise RuntimeError(
-                "OpenClawRemoteDispatcher.agent_container_args() called "
+                "OpenClawRemoteDispatcher.agent_mounts_and_env() called "
                 "before start()"
             )
-        return [
-            # The bridge script the patched OC will spawn when it
-            # encounters OPENCLAW_EXEC_BRIDGE in env. Read-only is fine —
-            # the bridge talks to the socket, doesn't write to itself.
-            "-v", f"{self.bridge_script}:{_BRIDGE_PATH_IN_OC}:ro",
-            # Trigger the patched exec runtime. When OPENCLAW_EXEC_BRIDGE is
-            # set, OC's spawnSpec returns the bridge argv instead of the
-            # built-in `["docker", "exec", ...]`.
-            "-e", f"OPENCLAW_EXEC_BRIDGE={_BRIDGE_PATH_IN_OC}",
-            "-e", f"OPENCLAW_EXEC_BRIDGE_SOCKET={_BRIDGE_SOCKET_IN_OC}",
-            "-e", f"OPENCLAW_EXEC_BRIDGE_TOKEN={self.token}",
+        mounts = [
+            # bridge.py is read-only — it talks to the socket, doesn't
+            # write to itself. OC's patched spawnSpec spawns this file
+            # when it sees OPENCLAW_EXEC_BRIDGE in env.
+            Mount(host=Path(self.bridge_script), container=_BRIDGE_PATH_IN_OC, mode="ro"),
         ]
+        env = {
+            # Trigger the patched exec runtime; OC's spawnSpec returns the
+            # bridge argv instead of the built-in `["docker", "exec", ...]`.
+            "OPENCLAW_EXEC_BRIDGE": _BRIDGE_PATH_IN_OC,
+            "OPENCLAW_EXEC_BRIDGE_SOCKET": _BRIDGE_SOCKET_IN_OC,
+            "OPENCLAW_EXEC_BRIDGE_TOKEN": self.token,
+        }
+        return mounts, env
 
     def env_info(self) -> Dict[str, Any]:
         if self.pid is None or self.socket_path is None:

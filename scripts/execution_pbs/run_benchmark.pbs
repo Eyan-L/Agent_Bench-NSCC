@@ -9,7 +9,7 @@
 #PBS -N oc_swebench_bench
 # All logs land under $KIT_ROOT/data/logs/. PBS directives can't read shell vars, so
 # the absolute path is hard-coded; edit this line if your KIT_ROOT differs.
-#PBS -o /scratch/users/ntu/chengzh2/github/Agent_Bench/data/logs/pbs.log
+#PBS -o /home/users/ntu/n2505289/Agent_Bench/data/logs/pbs.log
 #
 # End-to-end benchmark on the cluster (no docker).
 #
@@ -36,7 +36,7 @@
 #                    Selects model + agent runtime (openclaw / openhands).
 #   BACKEND_CONFIG — backend JSON  (default: $KIT_ROOT/config/backend/vllm/tp1.json)
 #                    vLLM/SGLang runtime knobs + serving_configs presets.
-#   OC_PKG         — host openclaw npm pkg (default: /scratch/users/ntu/chengzh2/openclaw)
+#   OC_PKG         — (deprecated, unused) host openclaw npm pkg location
 #   SIF_DIR        — instance .sif dir (default: /scratch/users/ntu/$USER/swebench)
 #   VLLM_SIF       — vllm sif path (default: /scratch/users/ntu/$USER/sif_images/vllm_openai.sif)
 #   VLLM_MODEL     — model id (default: Qwen/Qwen3.6-35B-A3B)
@@ -67,7 +67,12 @@ APP="${APP:-$KIT_ROOT/config/application/swebench/phase1.json}"
 HARNESS_CONFIG="${HARNESS_CONFIG:-$KIT_ROOT/config/harness/openclaw_27b.json}"
 BACKEND_CONFIG="${BACKEND_CONFIG:-$KIT_ROOT/config/backend/vllm/tp1.json}"
 
-OC_PKG="${OC_PKG:-/scratch/users/ntu/chengzh2/openclaw}"
+# OC_PKG is a vestige — nothing in this script (or the harness) consumes
+# it. Stage 3 bakes patches into a singularity overlay against the alpine/
+# openclaw sif's own /usr/local/lib/node_modules/openclaw, no host-side
+# pkg dir needed. Stage 4 (driver) goes through the Container abstraction
+# (orchestration/container/) which doesn't read OC_PKG either.
+OC_PKG="${OC_PKG:-}"
 SIF_DIR="${SIF_DIR:-$SCRATCH/swebench}"
 SINGULARITY_CACHE="${SINGULARITY_CACHE:-$SCRATCH/.singularity}"
 

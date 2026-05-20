@@ -76,18 +76,21 @@ echo "  patch dir   : $PATCH_DIR"
 
 # Run the patcher inside the container, against the sif's openclaw install,
 # with the overlay mounted rw so changes persist into the overlay file.
+#
+# apply_patch.py resolves MANIFEST.json via its own SCRIPT_DIR (../patch/),
+# so bind the whole harnesses/openclaw/ tree as one. Keeps the layout the
+# .py expects; no hard-coded inside paths to keep in sync.
+OC_HARNESS_DIR="$(dirname "$APPLY_SCRIPT")"
 singularity exec \
     --overlay "$OVERLAY:rw" \
-    --bind "$PATCH_DIR:/oc-patches:ro" \
-    --bind "$APPLY_SCRIPT:/oc-apply.py:ro" \
+    --bind "$OC_HARNESS_DIR:/oc-harness:ro" \
     "$SIF" \
     bash -c "
         set -e
-        cd /oc-patches
         export OC_HOST_OPENCLAW='$INSIDE_PKG'
         export OC_PATCH_MODE=runtime
-        python3 /oc-apply.py apply
-        python3 /oc-apply.py status
+        python3 /oc-harness/apply_patch.py apply
+        python3 /oc-harness/apply_patch.py status
     "
 
 echo "[build-oc-overlay] done -> $OVERLAY"

@@ -1,0 +1,31 @@
+{
+  "_doc": "DeepResearch-Bench smoke run: 3 tasks (1 ZH Finance + 1 EN Finance + 1 EN Health). Loader: applications/deepresearch_bench/loader.py materializes instance_data from the vendored query.jsonl. Harness: DeepResearchHarness (auto-selected by driver when instance_data['benchmark'] == 'deepresearch_bench'). repo_mapping is SWE-bench specific but RunConfig.compute_run_id requires it for deterministic hashing — placeholders fine, DR harness ignores them. container_image is unused (DR harness reads its own DR_SANDBOX_IMAGE) but required by SweepConfig schema.",
+  "sweep_name": "dr_smoke3",
+  "plan_version": "v1.0",
+  "application": "deepresearch_bench",
+  "instances": [
+    "dr_001",
+    "dr_051",
+    "dr_075"
+  ],
+  "repo_mapping": {
+    "dr_001": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_051": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_075": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    }
+  },
+  "container_image": "hongrui0/dr-sandbox:1.0",
+  "wall_clock_budget_seconds": 3600,
+  "output_dir": "data/runs/dr_smoke3",
+  "seeds": [42],
+  "parallel_limit_gpu": 1,
+  "parallel_limit_cpu_cores": 8
+}

@@ -1,0 +1,124 @@
+--- node_modules/@mariozechner/pi-ai/dist/providers/openai-completions.js
++++ node_modules/@mariozechner/pi-ai/dist/providers/openai-completions.js
+@@ -78,10 +78,120 @@
+             if (nextParams !== undefined) {
+                 params = nextParams;
+             }
+-            const { data: openaiStream, response } = await client.chat.completions
++            /* OC_PATCH_RAW_RESPONSE_LOG_BEGIN */
++            const __ocReqStartMs = Date.now();
++            /* OC_PATCH_RAW_RESPONSE_LOG_END */
++            const { data: __openaiStreamOriginal, response } = await client.chat.completions
+                 .create(params, { signal: options?.signal })
+                 .withResponse();
+             await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
++            /* OC_PATCH_RAW_RESPONSE_LOG_BEGIN_2 */
++            let openaiStream = __openaiStreamOriginal;
++            const __ocRawLogPath = process.env.OPENCLAW_RAW_RESPONSE_LOG;
++            if (__ocRawLogPath) {
++                const __ocHeadersDoneMs = Date.now();
++                const __ocChunkTs = [];
++                const __ocChunks = [];
++                const __ocStatus = response.status;
++                const __ocModel = model;
++                openaiStream = (async function*() {
++                    try {
++                        for await (const __ocChunk of __openaiStreamOriginal) {
++                            __ocChunkTs.push(Date.now() - __ocReqStartMs);
++                            __ocChunks.push(__ocChunk);
++                            yield __ocChunk;
++                        }
++                    } finally {
++                        try {
++                            const __ocAgg = (() => {
++                                if (__ocChunks.length === 0) return { response: null, metrics: { error: "no chunks" } };
++                                const first = __ocChunks[0];
++                                const msg = { role: "assistant", content: "", reasoning_content: "" };
++                                const toolCalls = {};
++                                let finishReason = null;
++                                let usage = null;
++                                let metadata = null;
++                                for (const c of __ocChunks) {
++                                    if (c.usage) usage = c.usage;
++                                    if (c.metadata) metadata = c.metadata;
++                                    const ch = c.choices && c.choices[0];
++                                    if (!ch) continue;
++                                    if (ch.finish_reason) finishReason = ch.finish_reason;
++                                    const d = ch.delta || {};
++                                    if (d.content) msg.content += d.content;
++                                    if (d.reasoning_content) msg.reasoning_content += d.reasoning_content;
++                                    if (Array.isArray(d.tool_calls)) {
++                                        for (const tc of d.tool_calls) {
++                                            const idx = tc.index != null ? tc.index : 0;
++                                            if (!toolCalls[idx]) toolCalls[idx] = { index: idx, id: tc.id, type: tc.type || "function", function: { name: "", arguments: "" } };
++                                            if (tc.id) toolCalls[idx].id = tc.id;
++                                            if (tc.type) toolCalls[idx].type = tc.type;
++                                            if (tc.function && tc.function.name) toolCalls[idx].function.name += tc.function.name;
++                                            if (tc.function && tc.function.arguments) toolCalls[idx].function.arguments += tc.function.arguments;
++                                        }
++                                    }
++                                }
++                                const toolCallArr = Object.values(toolCalls);
++                                if (toolCallArr.length > 0) msg.tool_calls = toolCallArr;
++                                if (!msg.reasoning_content) delete msg.reasoning_content;
++                                if (!msg.content) msg.content = null;
++                                const aggResp = {
++                                    id: first.id, object: "chat.completion", created: first.created, model: first.model,
++                                    choices: [{ index: 0, message: msg, finish_reason: finishReason }],
++                                    usage: usage,
++                                };
++                                if (metadata) aggResp.metadata = metadata;
++                                const ttftMs = __ocChunkTs.length > 0 ? __ocChunkTs[0] : 0;
++                                const totalMs = __ocChunkTs.length > 0 ? __ocChunkTs[__ocChunkTs.length - 1] : 0;
++                                const decodeMs = totalMs - ttftMs;
++                                const headersMs = __ocHeadersDoneMs - __ocReqStartMs;
++                                const u = usage || {};
++                                const completionTokens = u.completion_tokens || 0;
++                                const tbts = [];
++                                for (let i = 1; i < __ocChunkTs.length; i++) tbts.push(__ocChunkTs[i] - __ocChunkTs[i - 1]);
++                                const sorted = tbts.slice().sort((a, b) => a - b);
++                                const pct = (arr, p) => arr.length ? arr[Math.min(arr.length - 1, Math.floor(arr.length * p))] : null;
++                                const sum = tbts.reduce((a, b) => a + b, 0);
++                                const metrics = {
++                                    ttft_ms: Math.round(ttftMs),
++                                    headers_ms: Math.round(headersMs),
++                                    total_ms: Math.round(totalMs),
++                                    decode_ms: Math.round(decodeMs),
++                                    chunks_count: __ocChunks.length,
++                                    completion_tps: decodeMs > 0 ? Number((completionTokens / (decodeMs / 1000)).toFixed(2)) : null,
++                                    tbt_avg_ms: tbts.length ? Number((sum / tbts.length).toFixed(2)) : null,
++                                    tbt_p50_ms: pct(sorted, 0.5),
++                                    tbt_p95_ms: pct(sorted, 0.95),
++                                    tbt_max_ms: tbts.length ? Math.max.apply(null, tbts) : null,
++                                    prompt_tokens: u.prompt_tokens != null ? u.prompt_tokens : null,
++                                    completion_tokens: u.completion_tokens != null ? u.completion_tokens : null,
++                                    reasoning_tokens: u.reasoning_tokens != null ? u.reasoning_tokens : null,
++                                    cached_tokens: (u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens != null) ? u.prompt_tokens_details.cached_tokens : (u.cached_tokens != null ? u.cached_tokens : null),
++                                    total_tokens: u.total_tokens != null ? u.total_tokens : null,
++                                };
++                                return { response: aggResp, metrics };
++                            })();
++                            const __ocFs = await import("node:fs");
++                            const __ocPath = await import("node:path");
++                            __ocFs.mkdirSync(__ocPath.dirname(__ocRawLogPath), { recursive: true });
++                            const __ocLine = JSON.stringify({
++                                ts: new Date(__ocReqStartMs).toISOString(),
++                                agentId: process.env.OPENCLAW_AGENT_ID || null,
++                                sessionId: process.env.OPENCLAW_SESSION_ID || null,
++                                runId: process.env.OPENCLAW_RUN_ID || null,
++                                model: __ocModel && __ocModel.id,
++                                provider: __ocModel && __ocModel.provider,
++                                api: __ocModel && __ocModel.api,
++                                httpStatus: __ocStatus,
++                                response: __ocAgg.response,
++                                metrics: __ocAgg.metrics,
++                            });
++                            __ocFs.appendFileSync(__ocRawLogPath, __ocLine + "\n");
++                        } catch (_) {}
++                    }
++                })();
++            }
++            /* OC_PATCH_RAW_RESPONSE_LOG_END_2 */
+             stream.push({ type: "start", partial: output });
+             let currentBlock = null;
+             const blocks = output.content;

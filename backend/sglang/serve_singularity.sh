@@ -54,6 +54,11 @@ SGLANG_SIF_IMAGE="${SGLANG_SIF_IMAGE:-}"
 SGLANG_MOUNTS="${SGLANG_MOUNTS:-}"
 SGLANG_MODULES="${SGLANG_MODULES:-singularity}"
 SGLANG_PATCH_DIR="${SGLANG_PATCH_DIR:-}"
+# Optional host dir bound 1:1 + prepended to in-container PYTHONPATH. Use this
+# to layer missing/extra Python packages on top of the sif without rebuilding
+# the image (e.g. the official lmsysorg/sglang sif misses `distro` because
+# openai SDK gets installed via pip --no-deps).
+SGLANG_EXTRAS_DIR="${SGLANG_EXTRAS_DIR:-}"
 
 _gpu_count() {
     local devs="$1"
@@ -143,19 +148,31 @@ _build_singularity_cmd() {
     if [[ -n "${gpu_devs}" ]]; then
         env_args+=" --env CUDA_VISIBLE_DEVICES=${gpu_devs}"
     fi
-    env_args+=" --env SGLANG_KV_MEMTRACE=0 --env SGLANG_KV_MEMTRACE_STRICT=0"
+    # NSCC compute nodes are heterogeneous on driver release: some have R555+
+    # (native CUDA 12.5+), some are stuck on R550 (CUDA 12.4 cap). For the
+    # latter, the image's forward-compat shim at /usr/local/cuda/compat must
+    # be on LD_LIBRARY_PATH BEFORE singularity --nv's bind of host libcuda.so
+    # wins. The image's Dockerfile sets this via ENV, but --cleanenv strips
+    # host env AND can shadow image ENV; passing --env here makes it explicit.
+    env_args+=" --env LD_LIBRARY_PATH=/usr/local/cuda/compat:/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64"
 
-    # Forward HuggingFace-related env into the container so the HF cache on
-    # NSCC $HF_HOME (same-path bound) is reachable from inside. Only forward
-    # variables that are actually set on the host to avoid `--env FOO=` which
-    # would shadow any default.
-    for v in HF_HOME HF_HUB_OFFLINE HF_TOKEN TRANSFORMERS_CACHE; do
-        if [[ -n "${!v:-}" ]]; then
-            env_args+=" --env ${v}=${!v}"
-        fi
-    done
+    # If SGLANG_EXTRAS_DIR is set, bind it 1:1 and put it first on PYTHONPATH
+    # so its packages shadow the sif's site-packages (or fill in gaps like
+    # the missing `distro` package).
+    if [[ -n "${SGLANG_EXTRAS_DIR}" ]]; then
+        bind_args+=" --bind ${SGLANG_EXTRAS_DIR}:${SGLANG_EXTRAS_DIR}"
+        env_args+=" --env PYTHONPATH=${SGLANG_EXTRAS_DIR}"
+    fi
 
-    echo "${module_prefix}singularity run --nv${env_args}${bind_args} ${SGLANG_SIF_IMAGE} ${python_cmd}"
+    # `exec` (not `run`) skips the sif's runscript — on some sifs (e.g. NVIDIA
+    # CUDA base images) the runscript prints a banner then shell-execs the
+    # caller's command, and on NSCC this combination has SIGBUS'd singularity
+    # 4.3.1 with `--nv` (469 bind mounts WARN). `exec` runs python3 directly.
+    # `--cleanenv` scrubs host env so host ~/.local site-packages don't leak
+    # in (we saw pydantic-core version mismatch from that). Avoided
+    # `--containall` because some NSCC compute nodes lack the user-namespace
+    # support needed to remount /proc — would fail with EPERM.
+    echo "${module_prefix}singularity exec --nv --cleanenv${env_args}${bind_args} ${SGLANG_SIF_IMAGE} ${python_cmd}"
 }
 
 start_sglang() {
