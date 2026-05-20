@@ -1,0 +1,25 @@
+model:
+  default: "$MODEL"
+  provider: "$PROVIDER"
+  base_url: "$BASE_URL"
+  api_key: "$API_KEY"
+  api_mode: "chat_completions"
+
+terminal:
+  backend: "docker"
+  cwd: "/testbed"
+  timeout: $TERMINAL_TIMEOUT
+  docker_image: "$SANDBOX_IMAGE"
+
+agent:
+  max_turns: $MAX_TURNS
+
+display:
+  streaming: false
+  compact: true
+
+platform_toolsets:
+  cli:
+    - terminal
+    - file
+    - code_execution

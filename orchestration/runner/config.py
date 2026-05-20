@@ -198,7 +198,9 @@ def load_composed_config(
     selection in lockstep.
 
     Each call timestamps the output directory under the app JSON's
-    `output_dir`. Override via `OC_RUN_STAMP` for stable / human-named runs.
+    `output_dir`. Override via `AB_RUN_STAMP` for stable / human-named runs.
+    On cluster runs, `AB_EXPERIMENT_DIR` can group all phase outputs under
+    `<experiment>/runs/<app-output-leaf>`.
 
     `_doc` keys at the top level of any file are ignored — they're a
     JSON-friendly stand-in for the comments YAML would otherwise allow.
@@ -266,12 +268,17 @@ def load_composed_config(
 
     # --- application-level (instances/budget/output) -----------------
     # Singapore time so experiment folder names match wall-clock on this host.
-    # Override OC_RUN_STAMP to pin / resume.
+    # Override AB_RUN_STAMP to pin / resume.
     stamp = (
-        _os.environ.get("OC_RUN_STAMP")
+        _os.environ.get("AB_RUN_STAMP")
         or datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y-%m-%d_%H-%M-%S")
     )
-    output_dir = Path(app["output_dir"]) / stamp
+    app_output_dir = Path(app["output_dir"])
+    experiment_dir = _os.environ.get("AB_EXPERIMENT_DIR")
+    if experiment_dir:
+        output_dir = Path(experiment_dir) / "runs" / app_output_dir.name
+    else:
+        output_dir = app_output_dir / stamp
 
     return SweepConfig(
         sweep_name=app["sweep_name"],

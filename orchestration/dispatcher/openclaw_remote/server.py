@@ -132,14 +132,17 @@ def docker_backend(container: str) -> Backend:
 def singularity_backend(instance: str) -> Backend:
     """Send each ExecRequest to a pre-started singularity instance via `singularity exec`.
 
-    Placeholder for the future singularity harness — keep here so the
-    addition is mechanical when SingularityHarness lands.
+    PATH is filtered for the same reason as docker_backend: the agent runtime
+    may forward its own PATH, but the task instance was started with the
+    benchmark image's PATH (including the SWE-bench testbed env).
     """
     def run(req: ExecRequest) -> ExecResult:
         argv = ["singularity", "exec"]
         if req.cwd:
             argv += ["--pwd", req.cwd]
         for key, value in (req.env or {}).items():
+            if key == "PATH":
+                continue
             argv += ["--env", f"{key}={value}"]
         argv += [f"instance://{instance}"]
         argv += list(req.command)

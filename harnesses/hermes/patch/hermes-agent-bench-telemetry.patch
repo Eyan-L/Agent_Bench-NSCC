@@ -1,0 +1,203 @@
+--- a/hermes_cli/oneshot.py
++++ b/hermes_cli/oneshot.py
+@@ -24,0 +25,1 @@
++import json
+@@ -28,0 +30,1 @@
++import time
+@@ -121,1 +123,187 @@
+     return valid, None
++
++
++# HM_PATCH_AGENT_BENCH_TELEMETRY_BEGIN
++def _hm_ab_events_path() -> str:
++    return os.getenv("HERMES_AGENT_BENCH_EVENTS", "").strip()
++
++
++def _hm_ab_write_event(event: dict) -> None:
++    path = _hm_ab_events_path()
++    if not path:
++        return
++    try:
++        parent = os.path.dirname(path)
++        if parent:
++            os.makedirs(parent, exist_ok=True)
++        with open(path, "a", encoding="utf-8") as fh:
++            fh.write(json.dumps(event, ensure_ascii=False) + "\n")
++    except Exception:
++        logging.debug("Agent_Bench Hermes telemetry event write failed", exc_info=True)
++
++
++def _hm_ab_schema_expects_compound(schema: object) -> tuple[bool, bool]:
++    if not isinstance(schema, dict):
++        return False, False
++    typ = schema.get("type")
++    types = set()
++    if isinstance(typ, str):
++        types.add(typ)
++    elif isinstance(typ, list):
++        types.update(t for t in typ if isinstance(t, str))
++    expects_object = "object" in types
++    expects_array = "array" in types
++    for key in ("anyOf", "oneOf", "allOf"):
++        variants = schema.get(key)
++        if not isinstance(variants, list):
++            continue
++        for variant in variants:
++            v_obj, v_arr = _hm_ab_schema_expects_compound(variant)
++            expects_object = expects_object or v_obj
++            expects_array = expects_array or v_arr
++    return expects_object, expects_array
++
++
++def _hm_ab_coerce_json_string_args(tool_name: str, args: object) -> int:
++    """Coerce JSON-stringified object/array tool args before execution.
++
++    Some OpenAI-compatible parsers hand back nested object/array arguments as
++    JSON strings. Mirror OpenClaw's validation patch at the Hermes oneshot
++    boundary: consult the registered tool schema and parse only fields whose
++    schema expects an object or array. Best-effort: leave values unchanged on
++    parse/type mismatch.
++    """
++    if not isinstance(args, dict):
++        return 0
++    try:
++        from tools.registry import registry
++
++        schema = registry.get_schema(tool_name) or {}
++    except Exception:
++        schema = {}
++    params = schema.get("parameters") if isinstance(schema, dict) else None
++    props = params.get("properties") if isinstance(params, dict) else None
++    if not isinstance(props, dict):
++        return 0
++
++    coerced = 0
++    for key, value in list(args.items()):
++        if not isinstance(value, str):
++            continue
++        prop = props.get(key)
++        expects_object, expects_array = _hm_ab_schema_expects_compound(prop)
++        if not (expects_object or expects_array):
++            continue
++        raw = value.strip()
++        if not raw or raw[0] not in "[{":
++            continue
++        try:
++            parsed = json.loads(raw)
++        except Exception:
++            continue
++        if expects_object and isinstance(parsed, dict):
++            args[key] = parsed
++            coerced += 1
++        elif expects_array and isinstance(parsed, list):
++            args[key] = parsed
++            coerced += 1
++    return coerced
++
++
++def _hm_ab_tool_result_is_error(tool_name: str, result: object) -> bool:
++    try:
++        from agent.display import _detect_tool_failure
++
++        is_error, _ = _detect_tool_failure(tool_name, result)
++        return bool(is_error)
++    except Exception:
++        if isinstance(result, str):
++            lowered = result.lower()
++            return '\"error\"' in lowered or lowered.startswith("error")
++        return False
++
++
++def _hm_ab_attach_agent_bench_telemetry(agent):
++    if not _hm_ab_events_path():
++        return None
++
++    run_id = os.getenv("HERMES_RUN_ID") or os.getenv("OPENCLAW_RUN_ID") or ""
++    session_id = str(getattr(agent, "session_id", "") or run_id)
++    starts: dict[str, int] = {}
++    prior_start = getattr(agent, "tool_start_callback", None)
++    prior_complete = getattr(agent, "tool_complete_callback", None)
++
++    def on_tool_start(call_id, tool_name, args):
++        coerced = _hm_ab_coerce_json_string_args(str(tool_name or ""), args)
++        now_ns = time.time_ns()
++        key = str(call_id or f"{tool_name}:{now_ns}")
++        starts[key] = now_ns
++        _hm_ab_write_event({
++            "type": "tool.start",
++            "ts_ns": now_ns,
++            "run_id": run_id,
++            "session_id": session_id,
++            "tool_name": str(tool_name or "unknown"),
++            "tool_call_id": key,
++            "args_coerced": coerced,
++        })
++        if prior_start:
++            prior_start(call_id, tool_name, args)
++
++    def on_tool_complete(call_id, tool_name, args, result):
++        end_ns = time.time_ns()
++        key = str(call_id or f"{tool_name}:{end_ns}")
++        start_ns = starts.pop(key, end_ns)
++        _hm_ab_write_event({
++            "type": "tool.call",
++            "start_ns": start_ns,
++            "end_ns": end_ns,
++            "duration_ms": max((end_ns - start_ns) / 1e6, 0.0),
++            "run_id": run_id,
++            "session_id": session_id,
++            "tool_name": str(tool_name or "unknown"),
++            "tool_call_id": key,
++            "is_error": _hm_ab_tool_result_is_error(str(tool_name or ""), result),
++            "result_chars": len(str(result)) if result is not None else 0,
++        })
++        if prior_complete:
++            prior_complete(call_id, tool_name, args, result)
++
++    agent.tool_start_callback = on_tool_start
++    agent.tool_complete_callback = on_tool_complete
++
++    def emit_model_usage(start_ns: int, end_ns: int) -> None:
++        input_tokens = int(getattr(agent, "session_input_tokens", 0) or 0)
++        output_tokens = int(getattr(agent, "session_output_tokens", 0) or 0)
++        prompt_tokens = int(getattr(agent, "session_prompt_tokens", 0) or 0)
++        completion_tokens = int(getattr(agent, "session_completion_tokens", 0) or 0)
++        cache_read = int(getattr(agent, "session_cache_read_tokens", 0) or 0)
++        cache_write = int(getattr(agent, "session_cache_write_tokens", 0) or 0)
++        total_tokens = int(getattr(agent, "session_total_tokens", 0) or 0)
++        if input_tokens == 0:
++            input_tokens = prompt_tokens
++        if output_tokens == 0:
++            output_tokens = completion_tokens
++        if total_tokens == 0:
++            total_tokens = input_tokens + output_tokens
++        _hm_ab_write_event({
++            "type": "model.usage",
++            "start_ns": start_ns,
++            "end_ns": end_ns,
++            "duration_ms": max((end_ns - start_ns) / 1e6, 0.0),
++            "run_id": run_id,
++            "session_id": session_id,
++            "provider": str(getattr(agent, "provider", "") or ""),
++            "model": str(getattr(agent, "model", "") or ""),
++            "input_tokens": input_tokens,
++            "output_tokens": output_tokens,
++            "prompt_tokens": prompt_tokens,
++            "completion_tokens": completion_tokens,
++            "cache_read_tokens": cache_read,
++            "cache_write_tokens": cache_write,
++            "total_tokens": total_tokens,
++            "api_calls": int(getattr(agent, "session_api_calls", 0) or 0),
++        })
++
++    return emit_model_usage
++# HM_PATCH_AGENT_BENCH_TELEMETRY_END
+@@ -336,1 +524,7 @@
+-    return agent.chat(prompt) or ""
++    hm_ab_emit_model_usage = _hm_ab_attach_agent_bench_telemetry(agent)
++    hm_ab_start_ns = time.time_ns()
++    try:
++        return agent.chat(prompt) or ""
++    finally:
++        if hm_ab_emit_model_usage is not None:
++            hm_ab_emit_model_usage(hm_ab_start_ns, time.time_ns())

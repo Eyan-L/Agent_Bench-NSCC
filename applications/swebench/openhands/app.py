@@ -20,7 +20,7 @@ Layered model:
     │ - oh-exec-bridge (mounted)           │ ← from dispatcher
     └────────┬─────────────────────────────┘
              │  every tool call via the bridge
-             │  (unix socket → host server → docker exec)
+             │  (unix socket -> host server -> backend exec)
              ↓
     ┌──────────────────────────────────────┐
     │ oc-sbx-<rid>  swebench instance      │
@@ -54,14 +54,19 @@ from applications.swebench.app import (
     _oc_sandbox_name,
     _slugify_session_key,
 )
+from orchestration.container import (
+    Container,
+    ContainerHandle,
+    ContainerSpec,
+    DockerContainer,
+    Mount,
+)
 from orchestration.dispatcher.openhands import OpenHandsDispatcher
 
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_OH_IMAGE = os.environ.get(
-    "OH_IMAGE", "agent-bench/openhands:1.21.0",
-)
+DEFAULT_OH_DOCKER_IMAGE = "agent-bench/openhands:1.21.0"
 
 # Canonical in-container paths (must match orchestration/dispatcher/openhands.py
 # and harnesses/openhands/docker/Dockerfile).
@@ -70,14 +75,15 @@ _WORKSPACE_IN_OH = "/workspace"
 
 
 class SWEBenchOpenHandsHarness:
-    """Per-run harness for OpenHands × SWE-bench (docker backend).
+    """Per-run harness for OpenHands × SWE-bench.
 
     Constructor + prepare_environment + run_tests + cleanup mirror the
     `SWEBenchHarness` interface. The driver dispatches between the two based
-    on the harness config's `"harness"` field.
+    on the harness config's `"harness"` field and injects a docker or
+    singularity `Container` backend.
     """
 
-    backend_id = "docker"
+    backend_id = "container-agnostic"
 
     _OH_SCAFFOLD_FILES = ".openhands_instructions .openhands.json"
     _OH_SCAFFOLD_DIRS = ".openhands"
@@ -87,9 +93,11 @@ class SWEBenchOpenHandsHarness:
         swebench_root: Path,
         oh_image: Optional[str] = None,
         workspace_base: Optional[Path] = None,
+        container: Optional[Container] = None,
     ):
         self.swebench_root = Path(swebench_root)
-        self.oh_image = oh_image or DEFAULT_OH_IMAGE
+        self.container = container or DockerContainer()
+        self.oh_image = oh_image or self._default_oh_image()
 
         try:
             import swebench  # noqa: F401
@@ -99,21 +107,8 @@ class SWEBenchOpenHandsHarness:
                 "install in the driver env: pip install swebench"
             ) from e
 
-        r = subprocess.run(
-            ["docker", "version", "--format", "{{.Server.Version}}"],
-            capture_output=True, text=True,
-        )
-        if r.returncode != 0:
-            raise RuntimeError(f"docker not available: {r.stderr.strip()}")
-        r = subprocess.run(
-            ["docker", "image", "inspect", self.oh_image],
-            capture_output=True, text=True,
-        )
-        if r.returncode != 0:
-            raise RuntimeError(
-                f"openhands harness image not found: {self.oh_image}\n"
-                "Build it first: bash harnesses/openhands/docker/build.sh"
-            )
+        self.container.check_available()
+        self.container.check_image(self.oh_image)
 
         self.workspace_base = Path(
             workspace_base
@@ -125,6 +120,17 @@ class SWEBenchOpenHandsHarness:
         self.workspace_base.mkdir(parents=True, exist_ok=True)
         self.state_base = self.workspace_base.parent / "states"
         self.state_base.mkdir(parents=True, exist_ok=True)
+
+    def _default_oh_image(self) -> str:
+        if self.container.backend_id == "singularity":
+            scratch = os.environ.get("SCRATCH") or os.path.expanduser("~")
+            return (
+                os.environ.get("OH_RUNTIME_SIF")
+                or os.environ.get("OH_SIF")
+                or os.environ.get("OH_IMAGE")
+                or str(Path(scratch) / "sif_images" / "openhands_runtime.sif")
+            )
+        return os.environ.get("OH_IMAGE", DEFAULT_OH_DOCKER_IMAGE)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -140,6 +146,13 @@ class SWEBenchOpenHandsHarness:
         run_id: Optional[str] = None,
         instance_data: Optional[Dict] = None,
     ) -> Dict:
+        if "UNUSED" in container_image:
+            container_image = (
+                f"swebench/sweb.eval.x86_64.{instance_id.lower()}:latest"
+                .replace("__", "_1776_")
+            )
+        task_image = self._resolve_task_image(container_image)
+
         run_id = run_id or instance_id
         rid_short = run_id[:12]
         net_name = f"oh-eval-net-{rid_short}"
@@ -149,9 +162,9 @@ class SWEBenchOpenHandsHarness:
         task_container_name = _oc_sandbox_name(sandbox_prefix, scope_key)
 
         logger.info(
-            "Preparing run %s (oh=%s, sandbox=%s, repo=%s@%s, task=%s)",
-            run_id, self.oh_image, container_image, repo_id, base_commit[:12],
-            task_container_name,
+            "Preparing run %s [runtime=%s] (oh=%s, sandbox=%s, repo=%s@%s, task=%s)",
+            run_id, self.container.backend_id, self.oh_image, container_image,
+            repo_id, base_commit[:12], task_container_name,
         )
 
         # 1. Host workspace, primed from the task image's /testbed.
@@ -159,18 +172,13 @@ class SWEBenchOpenHandsHarness:
         if ws_host.exists():
             _force_rmtree(ws_host, ignore_errors=True)
         ws_host.mkdir(parents=True)
-        self._prime_workspace(container_image, ws_host)
+        self._prime_workspace(task_image, ws_host)
 
         # 2. Per-run state dir with config.toml rendered from harness JSON.
         state_dir = self._build_state_dir(run_id=run_id)
 
-        # 3. Docker network so OH harness can reach vLLM at vllm-host:8000.
-        r = subprocess.run(
-            ["docker", "network", "create", "--driver", "bridge", net_name],
-            capture_output=True, text=True, timeout=60,
-        )
-        if r.returncode != 0 and "already exists" not in r.stderr:
-            raise RuntimeError(f"docker network create failed: {r.stderr.strip()}")
+        # 3. Per-run network. Docker creates a bridge; singularity no-ops.
+        self.container.create_network(net_name)
 
         # 4. Task (sandbox) container. The agent's tool calls land here via
         #    the bridge. SWE-bench images put the test env under
@@ -180,35 +188,37 @@ class SWEBenchOpenHandsHarness:
             "/opt/miniconda3/bin:"
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         )
-        task_cmd = [
-            "docker", "run", "-d",
-            "--name", task_container_name,
-            "--network", net_name,
-            "--user", "0",
-            "--label", "openhands.sandbox=1",
-            "--label", f"oc-eval.run_id={run_id}",
-            "-v", f"{ws_host}:/testbed:rw",
-            "-w", "/testbed",
-            "-e", f"PATH={task_path}",
-            "--entrypoint", "sleep",
-            container_image,
-            "infinity",
-        ]
-        r = subprocess.run(task_cmd, capture_output=True, text=True, timeout=600)
-        if r.returncode != 0:
+        task_spec = ContainerSpec(
+            name=task_container_name,
+            image=task_image,
+            network=net_name,
+            user="0",
+            labels={
+                "openhands.sandbox": "1",
+                "oc-eval.run_id": run_id,
+            },
+            mounts=(Mount(host=ws_host, container="/testbed", mode="rw"),),
+            workdir="/testbed",
+            env={"PATH": task_path},
+            entrypoint="sleep",
+            command=("infinity",),
+        )
+        try:
+            task_handle = self.container.start(task_spec)
+        except Exception:
             self._best_effort_cleanup(net_name, oh_name, task_container_name)
-            raise RuntimeError(f"task container start failed: {r.stderr.strip()}")
-        task_container_id = r.stdout.strip()
+            raise
+        task_container_id = task_handle.id
 
         # 5. Exec-bridge dispatcher (host process). Server listens on a unix
         #    socket inside state_dir; the OH driver inside the harness
-        #    container shells out to oh-exec-bridge → socket → docker exec
-        #    into the sandbox we just started.
+        #    container shells out to oh-exec-bridge -> socket -> the active
+        #    backend execs into the sandbox we just started.
         dispatcher = OpenHandsDispatcher()
         try:
             dispatcher.start(
                 state_dir=state_dir,
-                backend="docker",
+                backend=self.container.backend_id,
                 target=task_container_name,
             )
         except Exception:
@@ -219,34 +229,36 @@ class SWEBenchOpenHandsHarness:
             dispatcher.pid, dispatcher.socket_path,
         )
 
-        # 6. OpenHands harness container. `sleep infinity` + condition does
-        #    `docker exec oh-<rid> python /opt/openhands_driver.py ...`.
-        oh_cmd = [
-            "docker", "run", "-d",
-            "--name", oh_name,
-            "--network", net_name,
-            "--add-host", "vllm-host:host-gateway",
-            "--user", "0",
-            # state_dir holds the rendered config.toml (read-only-ish) *and*
-            # events.jsonl which the OH driver appends to from inside the
-            # container — so the mount must be rw.
-            "-v", f"{state_dir}:{_STATE_DIR_IN_OH}:rw",
-            "-v", f"{ws_host}:{_WORKSPACE_IN_OH}:rw",
-            "-w", _WORKSPACE_IN_OH,
-            "-e", f"OPENHANDS_RUN_ID={run_id}",
-            "-e", f"OTEL_RESOURCE_ATTRIBUTES=oh.run_id={run_id}",
-            # Sandbox routing — OH driver reads these to wrap tool executors.
-            *dispatcher.agent_container_args(),
-            self.oh_image,
-            # No special entrypoint — image's default `tini sleep infinity`
-            # keeps the container alive for `docker exec`.
+        # 6. OpenHands harness container/instance. The condition later execs
+        #    `/opt/openhands_driver.py` inside it through the active backend.
+        oh_mounts: list[Mount] = [
+            Mount(host=state_dir, container=_STATE_DIR_IN_OH, mode="rw"),
+            Mount(host=ws_host, container=_WORKSPACE_IN_OH, mode="rw"),
         ]
-        r = subprocess.run(oh_cmd, capture_output=True, text=True, timeout=600)
-        if r.returncode != 0:
+        b_mounts, b_env = dispatcher.agent_mounts_and_env()
+        oh_mounts.extend(b_mounts)
+        oh_env = {
+            "OPENHANDS_RUN_ID": run_id,
+            "OTEL_RESOURCE_ATTRIBUTES": f"oh.run_id={run_id}",
+            **b_env,
+        }
+        oh_spec = ContainerSpec(
+            name=oh_name,
+            image=self.oh_image,
+            network=net_name,
+            extra_hosts={"vllm-host": "host-gateway"},
+            user="0",
+            mounts=tuple(oh_mounts),
+            workdir=_WORKSPACE_IN_OH,
+            env=oh_env,
+        )
+        try:
+            oh_handle = self.container.start(oh_spec)
+        except Exception:
             dispatcher.stop()
             self._best_effort_cleanup(net_name, oh_name, task_container_name)
-            raise RuntimeError(f"oh container start failed: {r.stderr.strip()}")
-        oh_container_id = r.stdout.strip()
+            raise
+        oh_container_id = oh_handle.id
 
         logger.info(
             "  ready: oh=%s task=%s bridge_pid=%s net=%s",
@@ -256,7 +268,7 @@ class SWEBenchOpenHandsHarness:
         return {
             "container_id": oh_container_id,
             "container_name": oh_name,
-            "backend": "docker",
+            "backend": self.container.backend_id,
             "harness": "openhands",
             "oh_container_id": oh_container_id,
             "task_container_id": task_container_id,
@@ -269,37 +281,40 @@ class SWEBenchOpenHandsHarness:
             "events_path_in_container": f"{_STATE_DIR_IN_OH}/events.jsonl",
             "events_path_on_host": str(state_dir / "events.jsonl"),
             "sandbox_image": container_image,
+            "agent_env": oh_env,
             **dispatcher.env_info(),
         }
 
     # ------------------------------------------------------------------
 
-    def _prime_workspace(self, container_image: str, ws_host: Path) -> None:
+    def _resolve_task_image(self, container_image: str) -> str:
+        if self.container.backend_id == "docker":
+            return container_image
+        sif_dir = os.environ.get("OC_SCORING_SIF_DIR")
+        if not sif_dir:
+            raise RuntimeError(
+                "OC_SCORING_SIF_DIR not set; the singularity backend needs "
+                "the per-instance .sif directory."
+            )
+        tag = container_image.split(":")[0]
+        slug = tag.split(".")[-1]
+        instance_id = slug.replace("_1776_", "__")
+        return str(Path(sif_dir) / f"{instance_id}.sif")
+
+    def _prime_workspace(self, task_image: str, ws_host: Path) -> None:
         """Same recipe as SWEBenchHarness._prime_workspace_from_image, but
         local to avoid the cross-class private-method dependency."""
-        scratch_name = f"oh-eval-prime-{ws_host.name[:12]}-{os.urandom(2).hex()}"
-        r = subprocess.run(
-            ["docker", "create", "--name", scratch_name,
-             "--entrypoint", "true", container_image],
-            capture_output=True, text=True, timeout=600,
-        )
-        if r.returncode != 0:
-            raise RuntimeError(f"docker create scratch failed: {r.stderr.strip()}")
-        try:
-            r = subprocess.run(
-                ["docker", "cp", f"{scratch_name}:/testbed/.", str(ws_host) + "/"],
-                capture_output=True, text=True, timeout=600,
-            )
-            if r.returncode != 0:
-                raise RuntimeError(
-                    f"docker cp from {container_image}:/testbed failed: "
-                    f"{r.stderr.strip()}"
-                )
-        finally:
-            subprocess.run(
-                ["docker", "rm", "-f", scratch_name],
-                capture_output=True, check=False,
-            )
+        self.container.copy_from_image(task_image, "/testbed", ws_host)
+
+    def _runtime_base_url(self, configured: Optional[str]) -> str:
+        raw = os.environ.get("OPENAI_BASE_URL") or configured or "http://localhost:8000/v1"
+        host = self.container.host_address
+        for marker in ("://vllm-host:", "://localhost:", "://127.0.0.1:"):
+            if marker in raw:
+                scheme, rest = raw.split("://", 1)
+                _, tail = rest.split(":", 1)
+                return f"{scheme}://{host}:{tail}"
+        return raw
 
     # ------------------------------------------------------------------
 
@@ -360,7 +375,7 @@ class SWEBenchOpenHandsHarness:
         )
         values = {
             "MODEL": _model_resolved,
-            "BASE_URL": model_cfg.get("endpoint") or "http://vllm-host:8000/v1",
+            "BASE_URL": self._runtime_base_url(model_cfg.get("endpoint")),
             "API_KEY": model_cfg.get("api_key") or "EMPTY",
             "TEMPERATURE": str(model_cfg.get("temperature") or 0.0),
             "MAX_TOKENS": str(model_cfg.get("max_tokens") or 4096),
@@ -387,17 +402,29 @@ class SWEBenchOpenHandsHarness:
         *,
         check: bool = True,
         timeout: Optional[int] = None,
+        env: Optional[Dict[str, str]] = None,
     ) -> subprocess.CompletedProcess:
-        r = subprocess.run(
-            ["docker", "exec", container_id, *argv],
-            capture_output=True, text=True, timeout=timeout,
+        h = ContainerHandle(
+            id=container_id,
+            name=container_id,
+            backend=self.container.backend_id,
         )
-        if check and r.returncode != 0:
-            raise RuntimeError(
-                f"docker exec {argv[0]} failed (rc={r.returncode}): "
-                f"{r.stderr.strip()}"
-            )
-        return r
+        return self.container.exec(
+            h, argv, check=check, timeout=timeout, env=env,
+        )
+
+    def exec_in_container(
+        self,
+        container_id: str,
+        argv: List[str],
+        *,
+        timeout: Optional[int] = None,
+        env: Optional[Dict[str, str]] = None,
+        check: bool = False,
+    ) -> subprocess.CompletedProcess:
+        return self._exec(
+            container_id, argv, check=check, timeout=timeout, env=env,
+        )
 
     # ------------------------------------------------------------------
     # Patch collection — the agent's edits live in ws_host (bind-mounted at
@@ -594,32 +621,36 @@ class SWEBenchOpenHandsHarness:
         for cid in {oh_container_id, container_id}:
             if not cid:
                 continue
-            subprocess.run(
-                ["docker", "exec", cid, "chown", "-R",
-                 f"{uid}:{gid}", _STATE_DIR_IN_OH],
-                capture_output=True, check=False, timeout=30,
-            )
+            try:
+                self._exec(
+                    cid,
+                    ["chown", "-R", f"{uid}:{gid}", _STATE_DIR_IN_OH],
+                    check=False,
+                    timeout=30,
+                )
+            except Exception:
+                pass
 
         targets = [t for t in (
             oh_container_id, container_id,
             task_container_id, task_container_name,
         ) if t]
         for cid in dict.fromkeys(targets):
-            subprocess.run(
-                ["docker", "rm", "-f", "-v", cid],
-                capture_output=True, check=False,
+            h = ContainerHandle(
+                id=cid,
+                name=cid,
+                backend=self.container.backend_id,
             )
+            try:
+                self.container.stop(h)
+            except Exception:
+                pass
 
         if network_name:
-            r = subprocess.run(
-                ["docker", "ps", "-aq", "--filter", f"network={network_name}"],
-                capture_output=True, text=True,
-            )
-            for cid in (r.stdout or "").split():
-                subprocess.run(["docker", "rm", "-f", "-v", cid],
-                               capture_output=True, check=False)
-            subprocess.run(["docker", "network", "rm", network_name],
-                           capture_output=True, check=False)
+            try:
+                self.container.remove_network(network_name)
+            except Exception:
+                pass
 
         keep = os.environ.get("OC_HOST_KEEP_WORKSPACE", "0") == "1"
         if not keep and workspace_host_path and os.path.isdir(workspace_host_path):
@@ -632,20 +663,16 @@ class SWEBenchOpenHandsHarness:
     ) -> None:
         for name in (oh, task):
             if name:
-                subprocess.run(
-                    ["docker", "rm", "-f", "-v", name],
-                    capture_output=True, check=False,
+                h = ContainerHandle(
+                    id=name,
+                    name=name,
+                    backend=self.container.backend_id,
                 )
-        r = subprocess.run(
-            ["docker", "ps", "-aq", "--filter", f"network={net}"],
-            capture_output=True, text=True,
-        )
-        for cid in (r.stdout or "").split():
-            subprocess.run(
-                ["docker", "rm", "-f", "-v", cid],
-                capture_output=True, check=False,
-            )
-        subprocess.run(
-            ["docker", "network", "rm", net],
-            capture_output=True, check=False,
-        )
+                try:
+                    self.container.stop(h)
+                except Exception:
+                    pass
+        try:
+            self.container.remove_network(net)
+        except Exception:
+            pass

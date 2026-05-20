@@ -7,9 +7,9 @@
 #PBS -q normal
 #PBS -j oe
 #PBS -N oc_swebench_bench
-# All logs land under $KIT_ROOT/data/logs/. PBS directives can't read shell vars, so
-# the absolute path is hard-coded; edit this line if your KIT_ROOT differs.
-#PBS -o /home/users/ntu/n2505289/Agent_Bench/data/logs/pbs.log
+# The script redirects stdout/stderr into
+# data/experiments/$AB_RUN_STAMP/logs/pbs.log after resolving KIT_ROOT.
+# Until then, PBS uses its job-id-based default output path.
 #
 # End-to-end benchmark on the cluster (no docker).
 #
@@ -33,7 +33,7 @@
 #   APP            — application JSON (default: $KIT_ROOT/config/application/swebench/phase1.json)
 #                    Drives the instance list + scoring image + output_dir.
 #   HARNESS_CONFIG — harness JSON  (default: $KIT_ROOT/config/harness/openclaw_27b.json)
-#                    Selects model + agent runtime (openclaw / openhands).
+#                    Selects model + agent runtime (openclaw / openhands / hermes).
 #   BACKEND_CONFIG — backend JSON  (default: $KIT_ROOT/config/backend/vllm/tp1.json)
 #                    vLLM/SGLang runtime knobs + serving_configs presets.
 #   OC_PKG         — (deprecated, unused) host openclaw npm pkg location
@@ -42,6 +42,10 @@
 #   VLLM_MODEL     — model id (default: Qwen/Qwen3.6-35B-A3B)
 #   VLLM_PORT      — vllm port (default: 8000)
 #   VLLM_TP        — tensor parallel (default: 2 = ngpus)
+#   AB_RUN_STAMP   — stable experiment directory name
+#                    (default: Singapore wall time plus PBS_JOBID when present)
+#   AB_EXPERIMENT_DIR — experiment root (default: $KIT_ROOT/data/experiments/$AB_RUN_STAMP)
+#   OC_LOG_DIR     — log directory (default: $AB_EXPERIMENT_DIR/logs)
 #   STAGE_*        — set to 0 to skip a stage
 #
 # Submit:
@@ -80,6 +84,10 @@ OC_RUNTIME_SIF="${OC_RUNTIME_SIF:-$SCRATCH/sif_images/oc_runtime.sif}"
 OC_RUNTIME_DOCKER="${OC_RUNTIME_DOCKER:-docker://alpine/openclaw:main}"
 OC_RUNTIME_OVERLAY="${OC_RUNTIME_OVERLAY:-$SCRATCH/sif_images/oc_runtime_patches.img}"
 OC_INSIDE_PKG="${OC_INSIDE_PKG:-/usr/local/lib/node_modules/openclaw}"
+OH_RUNTIME_SIF="${OH_RUNTIME_SIF:-$SCRATCH/sif_images/openhands_runtime.sif}"
+OH_RUNTIME_DOCKER="${OH_RUNTIME_DOCKER:-docker://agent-bench/openhands:1.21.0}"
+HM_RUNTIME_SIF="${HM_RUNTIME_SIF:-$SCRATCH/sif_images/hermes_runtime.sif}"
+HM_RUNTIME_DOCKER="${HM_RUNTIME_DOCKER:-docker://agent-bench/hermes:v2026.5.16}"
 
 # VLLM_PROFILE = test | bench
 #   test  : small model (Qwen2.5-0.5B-Instruct), single GPU (or cpu). Smokes
@@ -153,31 +161,51 @@ STAGE_OTEL="${STAGE_OTEL:-1}"
 STAGE_RUN="${STAGE_RUN:-1}"
 STAGE_CLEANUP="${STAGE_CLEANUP:-1}"
 
-# OTel collector — local sidecar that catches OC gateway spans and writes
-# them to $OC_OTEL_DATA_DIR/otel-traces.jsonl, which openclaw_agent.py
-# slices into per-run spans.jsonl files. See pbs/otel_collector.sh for the
-# full set of OC_OTEL_* env knobs.
-OC_OTEL_DATA_DIR="${OC_OTEL_DATA_DIR:-$SCRATCH/oc-orchestration/otel}"
-export OC_OTEL_DATA_DIR
-# Tell openclaw_agent.py where to read the trace file from. Default in code
-# is /tmp/otel/otel-traces.jsonl which doesn't survive HPC tmpfs limits.
-export OC_OTEL_TRACE_FILE="${OC_OTEL_TRACE_FILE:-$OC_OTEL_DATA_DIR/otel-traces.jsonl}"
-
 # Persistent pip cache. Single dir holds every package pulled in by stage 0 so
 # subsequent jobs skip download. Located on scratch so it's cluster-shared
 # and big.
 OC_PYLIB="${OC_PYLIB:-$SCRATCH/pylib}"
 OC_PIP_CACHE="${OC_PIP_CACHE:-$SCRATCH/.pip-cache}"
 
-LOG_DIR="${OC_LOG_DIR:-$KIT_ROOT/logs}"
+if [[ -z "${AB_RUN_STAMP:-}" ]]; then
+    AB_RUN_STAMP="$(TZ=Asia/Singapore date +%Y-%m-%d_%H-%M-%S)"
+    if [[ -n "${PBS_JOBID:-}" ]]; then
+        AB_JOB_SUFFIX="${PBS_JOBID//[^A-Za-z0-9._-]/_}"
+        AB_RUN_STAMP="${AB_RUN_STAMP}_${AB_JOB_SUFFIX}"
+    fi
+fi
+export AB_RUN_STAMP
+
+EXPERIMENT_DIR="${AB_EXPERIMENT_DIR:-$KIT_ROOT/data/experiments/$AB_RUN_STAMP}"
+export AB_EXPERIMENT_DIR="$EXPERIMENT_DIR"
+
+LOG_DIR="${OC_LOG_DIR:-$EXPERIMENT_DIR/logs}"
 export OC_LOG_DIR="$LOG_DIR"
-mkdir -p "$LOG_DIR" "$SIF_DIR" "$SINGULARITY_CACHE" "$OC_OTEL_DATA_DIR"
+
+# OTel collector — local sidecar that catches OC gateway spans and writes
+# them to $OC_OTEL_DATA_DIR/otel-traces.jsonl, which openclaw_agent.py
+# slices into per-run spans.jsonl files. See pbs/otel_collector.sh for the
+# full set of OC_OTEL_* env knobs.
+OC_OTEL_DATA_DIR="${OC_OTEL_DATA_DIR:-$LOG_DIR/otel}"
+export OC_OTEL_DATA_DIR
+# Tell openclaw_agent.py where to read the trace file from. Default in code
+# is /tmp/otel/otel-traces.jsonl which doesn't survive HPC tmpfs limits.
+export OC_OTEL_TRACE_FILE="${OC_OTEL_TRACE_FILE:-$OC_OTEL_DATA_DIR/otel-traces.jsonl}"
+
+mkdir -p "$EXPERIMENT_DIR/runs" "$LOG_DIR" "$SIF_DIR" "$SINGULARITY_CACHE" "$OC_OTEL_DATA_DIR"
 cd "$KIT_ROOT"
 
 LOG_PREFIX() { echo "[$(date -u +%FT%TZ)] $*"; }
 
+# Keep a stable per-run copy of the whole job log. PBS's default job output is
+# only a bootstrap fallback after this point.
+exec >>"$LOG_DIR/pbs.log" 2>&1
+
 LOG_PREFIX "kit_root      = $KIT_ROOT"
 LOG_PREFIX "swebench_root = $SWEBENCH_ROOT"
+LOG_PREFIX "run_stamp     = $AB_RUN_STAMP"
+LOG_PREFIX "experiment    = $AB_EXPERIMENT_DIR"
+LOG_PREFIX "log_dir       = $LOG_DIR"
 LOG_PREFIX "app           = $APP"
 LOG_PREFIX "harness       = $HARNESS_CONFIG"
 LOG_PREFIX "backend       = $BACKEND_CONFIG"
@@ -198,6 +226,18 @@ export SINGULARITY_CACHEDIR="$SINGULARITY_CACHE"
 module load python/3.12.1-gcc11 2>/dev/null || module load python 2>/dev/null || true
 command -v python3 >/dev/null 2>&1 || { LOG_PREFIX "FATAL: python3 not found"; exit 1; }
 # command -v node    >/dev/null 2>&1 || { LOG_PREFIX "FATAL: node not found"; exit 1; }
+
+HARNESS_CHOICE="$(
+python3 - "$HARNESS_CONFIG" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        print((json.load(fh).get("harness") or "openclaw").lower())
+except Exception:
+    print("openclaw")
+PY
+)"
+LOG_PREFIX "harness_choice = $HARNESS_CHOICE"
 
 # ============================================================================
 # Stage 0: ensure SWE-bench checkout + python install
@@ -508,94 +548,100 @@ if [[ "$STAGE_VLLM" == "1" ]]; then
 fi
 
 # ============================================================================
-# Stage 3: pull OC runtime sif (alpine/openclaw)
+# Stage 3: pull agent runtime sif + OpenClaw overlay/cache when needed
 # ============================================================================
-if [[ "$STAGE_OC_CHECK" == "1" ]]; then
-    LOG_PREFIX "==== STAGE 3: ensure OC runtime sif + patch overlay ===="
-    mkdir -p "$(dirname "$OC_RUNTIME_SIF")"
-    if [[ ! -f "$OC_RUNTIME_SIF" ]]; then
-        LOG_PREFIX "  pulling $OC_RUNTIME_DOCKER -> $OC_RUNTIME_SIF"
-        singularity pull --dir "$(dirname "$OC_RUNTIME_SIF")" \
-            --name "$(basename "$OC_RUNTIME_SIF")" "$OC_RUNTIME_DOCKER"
+ensure_runtime_sif() {
+    local label="$1" sif="$2" docker_ref="$3"
+    mkdir -p "$(dirname "$sif")"
+    if [[ ! -f "$sif" ]]; then
+        LOG_PREFIX "  pulling $label runtime: $docker_ref -> $sif"
+        singularity pull --dir "$(dirname "$sif")" \
+            --name "$(basename "$sif")" "$docker_ref"
     else
-        LOG_PREFIX "  oc runtime sif already present at $OC_RUNTIME_SIF"
+        LOG_PREFIX "  $label runtime sif already present at $sif"
     fi
+}
 
-    # Bake harnesses/openclaw/patch/*.patch into a Singularity overlay,
-    # one-time per host. Subsequent execs mount it read-only.
-    LOG_PREFIX "  building OC patch overlay at $OC_RUNTIME_OVERLAY"
-    bash "$KIT_ROOT/scripts/execution_pbs/build_oc_overlay.sh" \
-        --sif "$OC_RUNTIME_SIF" \
-        --overlay "$OC_RUNTIME_OVERLAY" \
-        --kit-root "$KIT_ROOT" \
-        --inside-pkg "$OC_INSIDE_PKG" \
-        || { LOG_PREFIX "FATAL: build_oc_overlay.sh failed"; exit 4; }
-fi
-
-# Wire SingularityHarness: openclaw runs inside the OC runtime sif.
-# - OC_OC_SIF          : OC runtime image (alpine/openclaw)
-# - OC_OC_OVERLAY      : read-only overlay carrying the patched dist/*.js
-# - OC_SCORING_SIF_DIR : per-instance SWE-bench .sif used by run_tests
-# - OC_PLUGIN_CACHE    : shared host dir bound at <state>/plugin-runtime-deps;
-#                       must be pre-populated on a network-equipped node — HPC
-#                       compute nodes cannot reach npmjs.org (see
-#                       pbs/warm_oc_plugins.sh).
-export OC_OC_SIF="$OC_RUNTIME_SIF"
-export OC_OC_OVERLAY="$OC_RUNTIME_OVERLAY"
 export OC_SCORING_SIF_DIR="$SIF_DIR"
-: "${OC_PLUGIN_CACHE:=$SCRATCH/oc-eval/plugin-cache}"
-export OC_PLUGIN_CACHE
-mkdir -p "$OC_PLUGIN_CACHE"
 
-# Direct egress to registry.npmjs.org is blocked from this cluster; route the
-# in-sif npm at the Taobao mirror (npmmirror.com is the official successor of
-# registry.npm.taobao.org). Override via OC_NPM_MIRROR if needed.
-NPM_MIRROR_URL="${OC_NPM_MIRROR:-https://registry.npmmirror.com}"
-LOG_PREFIX "  using npm registry mirror: $NPM_MIRROR_URL"
-export SINGULARITYENV_NPM_CONFIG_REGISTRY="$NPM_MIRROR_URL"
-# Cluster IPv6 egress is unreliable; Node 18+ honours this hint.
-export SINGULARITYENV_NODE_OPTIONS="--dns-result-order=ipv4first"
-
-# Build a merged OpenClaw state-template dir for warm_oc_plugins.sh.
-# (The repo split the legacy pre-merged frontend/openclaw/state/ into
-#  harnesses/openclaw/state/openclaw.json + applications/swebench/openclaw/agents/*.)
-OC_STATE_TEMPLATE_TMP="$(mktemp -d -t oc-state-XXXXXX)"
-trap 'rm -rf "$OC_STATE_TEMPLATE_TMP"' EXIT
-cp "$KIT_ROOT/harnesses/openclaw/state/openclaw.json" "$OC_STATE_TEMPLATE_TMP/openclaw.json"
-mkdir -p "$OC_STATE_TEMPLATE_TMP/agents/swebench"
-cp "$KIT_ROOT/applications/swebench/openclaw/agents/"*.md "$OC_STATE_TEMPLATE_TMP/agents/swebench/"
-
-# Stage 3.5: ensure plugin cache is warm. If empty (first run on this host),
-# attempt to populate it via warm_oc_plugins.sh — this requires network and
-# only succeeds on the login node. On compute nodes a cold cache is fatal.
-if ! find "$OC_PLUGIN_CACHE" -mindepth 2 -name package.json -print -quit | grep -q .; then
-    LOG_PREFIX "  plugin cache cold at $OC_PLUGIN_CACHE; warming..."
-    if bash "$KIT_ROOT/scripts/execution_pbs/warm_oc_plugins.sh" \
-            --sif "$OC_OC_SIF" \
-            --overlay "$OC_OC_OVERLAY" \
-            --cache "$OC_PLUGIN_CACHE" \
-            --state-template "$OC_STATE_TEMPLATE_TMP"; then
-        LOG_PREFIX "  plugin cache warmed"
-    else
-        LOG_PREFIX "FATAL: plugin cache warm failed."
-        LOG_PREFIX "  Compute node likely has no npm egress (this run probed ipv4=$NPM_IPV4_OK ipv6=$NPM_IPV6_OK)."
-        LOG_PREFIX "  Run on a node with internet access (e.g. login node):"
-        LOG_PREFIX "    bash $KIT_ROOT/scripts/execution_pbs/warm_oc_plugins.sh \\"
-        LOG_PREFIX "        --sif $OC_OC_SIF --overlay $OC_OC_OVERLAY \\"
-        LOG_PREFIX "        --cache $OC_PLUGIN_CACHE \\"
-        LOG_PREFIX "        --state-template <merged: harnesses/openclaw/state + applications/swebench/openclaw/agents>"
-        exit 5
-    fi
-else
-    LOG_PREFIX "  plugin cache already warm at $OC_PLUGIN_CACHE"
+if [[ "$STAGE_OC_CHECK" == "1" ]]; then
+    LOG_PREFIX "==== STAGE 3: ensure $HARNESS_CHOICE runtime sif ===="
+    case "$HARNESS_CHOICE" in
+        openclaw)
+            ensure_runtime_sif "openclaw" "$OC_RUNTIME_SIF" "$OC_RUNTIME_DOCKER"
+            LOG_PREFIX "  building OC patch overlay at $OC_RUNTIME_OVERLAY"
+            bash "$KIT_ROOT/scripts/execution_pbs/build_oc_overlay.sh" \
+                --sif "$OC_RUNTIME_SIF" \
+                --overlay "$OC_RUNTIME_OVERLAY" \
+                --kit-root "$KIT_ROOT" \
+                --inside-pkg "$OC_INSIDE_PKG" \
+                || { LOG_PREFIX "FATAL: build_oc_overlay.sh failed"; exit 4; }
+            export OC_OC_SIF="$OC_RUNTIME_SIF"
+            export OC_OC_OVERLAY="$OC_RUNTIME_OVERLAY"
+            ;;
+        openhands)
+            ensure_runtime_sif "openhands" "$OH_RUNTIME_SIF" "$OH_RUNTIME_DOCKER"
+            export OH_RUNTIME_SIF
+            export OH_IMAGE="$OH_RUNTIME_SIF"
+            ;;
+        hermes)
+            ensure_runtime_sif "hermes" "$HM_RUNTIME_SIF" "$HM_RUNTIME_DOCKER"
+            export HM_RUNTIME_SIF
+            export HM_IMAGE="$HM_RUNTIME_SIF"
+            ;;
+        *)
+            LOG_PREFIX "FATAL: unsupported harness_choice=$HARNESS_CHOICE"
+            exit 4
+            ;;
+    esac
 fi
 
-# Sweep partial / disabled plugin dirs from the cache. OC has no clobber flag,
-# so an interrupted prior extract leaves a half-populated dist/extensions/<p>/
-# that crashes the next gateway start with ENOTEMPTY. This is idempotent.
-bash "$KIT_ROOT/scripts/execution_pbs/oc_plugin_cache_clean.sh" \
-    "$OC_PLUGIN_CACHE" "$KIT_ROOT/harnesses/openclaw/state/openclaw.json" \
-    2>&1 | sed "s|^|$(date +%H:%M:%S) [run_benchmark] |" || true
+if [[ "$HARNESS_CHOICE" == "openclaw" ]]; then
+    # Wire Singularity OpenClaw: runtime sif + read-only patch overlay.
+    export OC_OC_SIF="${OC_OC_SIF:-$OC_RUNTIME_SIF}"
+    export OC_OC_OVERLAY="${OC_OC_OVERLAY:-$OC_RUNTIME_OVERLAY}"
+    : "${OC_PLUGIN_CACHE:=$SCRATCH/oc-eval/plugin-cache}"
+    export OC_PLUGIN_CACHE
+    mkdir -p "$OC_PLUGIN_CACHE"
+
+    # Direct egress to registry.npmjs.org is blocked from this cluster; route
+    # the in-sif npm at the Taobao mirror. Override via OC_NPM_MIRROR if needed.
+    NPM_MIRROR_URL="${OC_NPM_MIRROR:-https://registry.npmmirror.com}"
+    LOG_PREFIX "  using npm registry mirror: $NPM_MIRROR_URL"
+    export SINGULARITYENV_NPM_CONFIG_REGISTRY="$NPM_MIRROR_URL"
+    export SINGULARITYENV_NODE_OPTIONS="--dns-result-order=ipv4first"
+
+    OC_STATE_TEMPLATE_TMP="$(mktemp -d -t oc-state-XXXXXX)"
+    trap 'rm -rf "$OC_STATE_TEMPLATE_TMP"' EXIT
+    cp "$KIT_ROOT/harnesses/openclaw/state/openclaw.json" "$OC_STATE_TEMPLATE_TMP/openclaw.json"
+    mkdir -p "$OC_STATE_TEMPLATE_TMP/agents/swebench"
+    cp "$KIT_ROOT/applications/swebench/openclaw/agents/"*.md "$OC_STATE_TEMPLATE_TMP/agents/swebench/"
+
+    if ! find "$OC_PLUGIN_CACHE" -mindepth 2 -name package.json -print -quit | grep -q .; then
+        LOG_PREFIX "  plugin cache cold at $OC_PLUGIN_CACHE; warming..."
+        if bash "$KIT_ROOT/scripts/execution_pbs/warm_oc_plugins.sh" \
+                --sif "$OC_OC_SIF" \
+                --overlay "$OC_OC_OVERLAY" \
+                --cache "$OC_PLUGIN_CACHE" \
+                --state-template "$OC_STATE_TEMPLATE_TMP"; then
+            LOG_PREFIX "  plugin cache warmed"
+        else
+            LOG_PREFIX "FATAL: plugin cache warm failed."
+            LOG_PREFIX "  Run on a node with internet access:"
+            LOG_PREFIX "    bash $KIT_ROOT/scripts/execution_pbs/warm_oc_plugins.sh \\"
+            LOG_PREFIX "        --sif $OC_OC_SIF --overlay $OC_OC_OVERLAY \\"
+            LOG_PREFIX "        --cache $OC_PLUGIN_CACHE \\"
+            LOG_PREFIX "        --state-template <merged: harnesses/openclaw/state + applications/swebench/openclaw/agents>"
+            exit 5
+        fi
+    else
+        LOG_PREFIX "  plugin cache already warm at $OC_PLUGIN_CACHE"
+    fi
+
+    bash "$KIT_ROOT/scripts/execution_pbs/oc_plugin_cache_clean.sh" \
+        "$OC_PLUGIN_CACHE" "$KIT_ROOT/harnesses/openclaw/state/openclaw.json" \
+        2>&1 | sed "s|^|$(date +%H:%M:%S) [run_benchmark] |" || true
+fi
 
 # ============================================================================
 # Stage 3.5: start local OTel collector (optional but the only way spans.jsonl

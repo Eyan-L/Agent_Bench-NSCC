@@ -1,0 +1,32 @@
+{
+  "_doc": {
+    "purpose": "Hermes patch manifest. Apply in listed order via apply_patch.py.",
+    "fields": {
+      "file": "relative path under patch/ to the unified diff",
+      "idempotent_marker": "literal string in patched output; if present under HERMES_AGENT_ROOT, the patch is treated as already applied",
+      "summary": "human-readable description"
+    }
+  },
+  "upstream": {
+    "pin": "see VERSION"
+  },
+  "patches": [
+    {
+      "file": "hermes-external-exec-bridge.patch",
+      "target_paths": [
+        "tools/environments/docker.py",
+        "tools/terminal_tool.py"
+      ],
+      "idempotent_marker": "HM_PATCH_EXEC_BRIDGE_BEGIN",
+      "summary": "hijack Hermes docker terminal exec to Agent_Bench's external exec bridge when HERMES_EXEC_BRIDGE is set"
+    },
+    {
+      "file": "hermes-agent-bench-telemetry.patch",
+      "target_paths": [
+        "hermes_cli/oneshot.py"
+      ],
+      "idempotent_marker": "HM_PATCH_AGENT_BENCH_TELEMETRY_BEGIN",
+      "summary": "emit Agent_Bench model usage/tool-call events from Hermes oneshot and coerce JSON-stringified compound tool args"
+    }
+  ]
+}

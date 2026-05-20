@@ -28,8 +28,10 @@ executors in-process).
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, List
 
+from orchestration.container.base import Mount
 from orchestration.dispatcher.openclaw_remote import (
     OpenClawRemoteDispatcher,
 )
@@ -48,26 +50,32 @@ class OpenHandsDispatcher(OpenClawRemoteDispatcher):
 
     backend_id = "openhands"
 
-    def agent_container_args(self) -> List[str]:
+    def agent_mounts_and_env(self) -> tuple[list[Mount], dict[str, str]]:
         if self.token is None:
             raise RuntimeError(
-                "OpenHandsDispatcher.agent_container_args() called before start()"
+                "OpenHandsDispatcher.agent_mounts_and_env() called before start()"
             )
-        return [
-            # Bridge CLI binary the OH driver invokes when its tool executors
-            # are wrapped (see harnesses/openhands/driver.py).
-            "-v", f"{self.bridge_script}:{_BRIDGE_PATH_IN_OH}:ro",
-            # OPENHANDS_-prefixed env so the driver knows it's running in
-            # bridged mode without colliding with OC's namespace.
-            "-e", f"OPENHANDS_EXEC_BRIDGE={_BRIDGE_PATH_IN_OH}",
-            "-e", f"OPENHANDS_EXEC_BRIDGE_SOCKET={_BRIDGE_SOCKET_IN_OH}",
-            "-e", f"OPENHANDS_EXEC_BRIDGE_TOKEN={self.token}",
-            # bridge.py itself reads token + socket from OPENCLAW_EXEC_BRIDGE_*
-            # env (it was originally written for OC's JS patch). Export the
-            # canonical names too so the binary just works when invoked.
-            "-e", f"OPENCLAW_EXEC_BRIDGE_SOCKET={_BRIDGE_SOCKET_IN_OH}",
-            "-e", f"OPENCLAW_EXEC_BRIDGE_TOKEN={self.token}",
+        mounts = [
+            Mount(host=Path(self.bridge_script), container=_BRIDGE_PATH_IN_OH, mode="ro"),
         ]
+        env = {
+            "OPENHANDS_EXEC_BRIDGE": _BRIDGE_PATH_IN_OH,
+            "OPENHANDS_EXEC_BRIDGE_SOCKET": _BRIDGE_SOCKET_IN_OH,
+            "OPENHANDS_EXEC_BRIDGE_TOKEN": self.token,
+            # bridge.py itself reads the historical OPENCLAW_* names.
+            "OPENCLAW_EXEC_BRIDGE_SOCKET": _BRIDGE_SOCKET_IN_OH,
+            "OPENCLAW_EXEC_BRIDGE_TOKEN": self.token,
+        }
+        return mounts, env
+
+    def agent_container_args(self) -> List[str]:
+        mounts, env = self.agent_mounts_and_env()
+        args: List[str] = []
+        for mount in mounts:
+            args += ["-v", f"{mount.host}:{mount.container}:{mount.mode}"]
+        for key, value in env.items():
+            args += ["-e", f"{key}={value}"]
+        return args
 
     def env_info(self) -> Dict[str, Any]:
         info = super().env_info()

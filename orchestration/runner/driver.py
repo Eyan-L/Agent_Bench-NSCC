@@ -192,6 +192,21 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 env_info=env_info
             )
 
+        elif condition_type == "hermes_agent":
+            from applications.swebench.conditions.hermes_agent import (
+                HermesAgentCondition,
+            )
+            condition = HermesAgentCondition(
+                model_config=run_config.condition.model,
+                agent_config=run_config.condition.agent,
+            )
+            result = condition.run(
+                instance_data, run_dir, run_config.seed,
+                workspace_root=env_info["workspace_root"],
+                container_id=container_id,
+                env_info=env_info
+            )
+
         elif condition_type == "tb_react":
             # Terminal-Bench ReAct loop — app-specific, no OpenClaw.
             from applications.terminal_bench.conditions.react import (
@@ -347,7 +362,7 @@ def run_sweep(app_path: Path, harness_path: Path, backend_path: Path,
     )
 
     # Peek at the harness config to learn which agent runtime this sweep
-    # targets — openclaw (default) or openhands. Each picks a different
+    # targets — openclaw (default), openhands, or hermes. Each picks a different
     # Layer-1 class even though they share the SWE-bench application.
     harness_choice = "openclaw"
     try:
@@ -365,33 +380,42 @@ def run_sweep(app_path: Path, harness_path: Path, backend_path: Path,
                 "not provided"
             )
         backend = os.environ.get("HARNESS_BACKEND", "docker").lower()
-        if backend == "docker" and harness_choice == "openhands":
-            # Lazy import — the OpenHands app subtree is only required when a
-            # harness JSON explicitly opts in via "harness": "openhands".
-            from applications.swebench.openhands.app import SWEBenchOpenHandsHarness
-            logger.info(
-                "Using SWEBenchOpenHandsHarness "
-                "(docker: openhands container + task container + exec-bridge)."
-            )
-            harness = SWEBenchOpenHandsHarness(swebench_root)
-        elif backend == "docker":
-            logger.info(
-                "Using SWEBenchHarness with DockerContainer "
-                "(openclaw container + task container, shared docker network)."
-            )
-            harness = SWEBenchHarness(swebench_root, container=DockerContainer())
+        if backend == "docker":
+            container = DockerContainer()
         elif backend == "singularity":
-            logger.info(
-                "Using SWEBenchHarness with SingularityContainer "
-                "(openclaw .sif + task .sif instances)."
-            )
-            harness = SWEBenchHarness(
-                swebench_root, container=SingularityContainer(),
-            )
+            container = SingularityContainer()
         else:
             raise ValueError(
                 f"Unknown HARNESS_BACKEND={backend!r}; expected docker|singularity. "
-                "Host mode was removed — openclaw must always be containerized."
+                "Host mode was removed — agent runtimes must always be containerized."
+            )
+
+        if harness_choice == "openhands":
+            from applications.swebench.openhands.app import SWEBenchOpenHandsHarness
+            logger.info(
+                "Using SWEBenchOpenHandsHarness with %s "
+                "(openhands runtime + task container + exec-bridge).",
+                type(container).__name__,
+            )
+            harness = SWEBenchOpenHandsHarness(swebench_root, container=container)
+        elif harness_choice == "hermes":
+            from applications.swebench.hermes.app import SWEBenchHermesHarness
+            logger.info(
+                "Using SWEBenchHermesHarness with %s "
+                "(hermes runtime + task container + exec-bridge).",
+                type(container).__name__,
+            )
+            harness = SWEBenchHermesHarness(swebench_root, container=container)
+        elif harness_choice == "openclaw":
+            logger.info(
+                "Using SWEBenchHarness with %s "
+                "(openclaw runtime + task container + exec-bridge).",
+                type(container).__name__,
+            )
+            harness = SWEBenchHarness(swebench_root, container=container)
+        else:
+            raise ValueError(
+                f"Unknown harness={harness_choice!r}; expected openclaw|openhands|hermes."
             )
     else:
         logger.info("Sweep is pure terminal-bench; skipping SWE-bench harness build.")
