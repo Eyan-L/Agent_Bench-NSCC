@@ -47,6 +47,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -69,6 +70,20 @@ from orchestration.container import (
 from orchestration.dispatcher.openclaw_remote import OpenClawRemoteDispatcher
 
 logger = logging.getLogger(__name__)
+
+
+# Gateway warmup is serialized across concurrent runs. OC npm-installs ~11
+# bundled plugins *in parallel* between container start and "[gateway] ready".
+# In singularity mode every run shares the host net + filesystems, so N runs
+# warming up at once fire ~11*N parallel npm installs that race on shared
+# transitive deps (e.g. typebox) and crash with ENOTEMPTY. Limiting how many
+# gateways warm up at a time (default 1 = one-by-one) keeps each warmup at
+# single-run load, which is reliable; the agent loops still run fully
+# concurrent afterward, and the agent CLI reuses the gateway's now-complete
+# plugin-runtime-deps (same instance) so it won't re-install/race.
+_OC_WARMUP_SEM = threading.BoundedSemaphore(
+    int(os.environ.get("OC_WARMUP_CONCURRENCY", "1"))
+)
 
 
 # Static SWE-bench agent prompt filenames mounted from
@@ -323,6 +338,14 @@ class SWEBenchHarness:
             # send OC looking for state in the wrong place. Pin HOME=/root
             # so both runtimes land on the same path.
             "HOME": "/root",
+            # Bind the gateway to its per-run port (reserved by
+            # pick_free_gateway_port; the browser sidecar takes port+2, also
+            # reserved). Docker gives each container its own net namespace, so
+            # the default 18789 never collides there. Singularity shares the
+            # host net namespace — concurrent runs MUST each bind a distinct
+            # host port, otherwise all but the first gateway die with
+            # EADDRINUSE on 18789 and their agents never start.
+            "OPENCLAW_GATEWAY_PORT": str(gateway_port),
             "OPENCLAW_GATEWAY_TOKEN": gateway_token,
             "OPENCLAW_GATEWAY_OTEL_ENDPOINT": os.environ.get(
                 "OC_OTEL_ENDPOINT",
@@ -372,6 +395,24 @@ class SWEBenchHarness:
         # OPENCLAW_EXEC_BRIDGE patch into bridge.py → singularity exec.
         if self.container.backend_id == "singularity":
             oc_env["OPENCLAW_BYPASS_ENSURE_SANDBOX"] = "1"
+            # Plugin runtime-deps install defaults to <state_dir>/
+            # plugin-runtime-deps, i.e. /root/.openclaw/... which singularity
+            # mode backs with networked scratch. The install's final step
+            # (bundled-runtime-deps.ts replaceNodeModulesDir) does
+            # rmSync(node_modules) → rename. On a networked FS, rmSync of a
+            # tree whose files are still held open by the already-running
+            # gateway triggers NFS silly-rename (.nfs* placeholders left
+            # behind) → rmdir sees a non-empty dir → ENOTEMPTY → the agent
+            # CLI's plugin load throws → agent never starts (no session log,
+            # "No patch generated"). Non-deterministic: it only fires when the
+            # gateway still holds those files, which concurrent-run I/O load
+            # makes more likely. Redirect the whole install to a node-local,
+            # per-run /tmp dir (OPENCLAW_PLUGIN_STAGE_DIR, read in
+            # bundled-runtime-deps.ts:resolveBundledRuntimeDepsExternalBaseDir):
+            # local FS unlinks open files cleanly, so rmSync/rename can't
+            # ENOTEMPTY. Per-run subdir keeps concurrent runs from colliding on
+            # the shared host /tmp.
+            oc_env["OPENCLAW_PLUGIN_STAGE_DIR"] = f"/tmp/oc-plugin-deps/{run_id}"
 
         oc_spec = ContainerSpec(
             name=oc_name,
@@ -385,31 +426,61 @@ class SWEBenchHarness:
             entrypoint="/usr/local/bin/openclaw",
             command=("gateway", "--allow-unconfigured"),
         )
-        try:
-            oc_handle = self.container.start(oc_spec)
-        except Exception:
-            _release_gateway_port(gateway_port)
-            dispatcher.stop()
-            self._best_effort_cleanup(net_name, oc_name, task_container_name)
-            raise
-        oc_container_id = oc_handle.id
+        # Serialize the gateway warmup window (start → plugin npm install →
+        # "[gateway] ready") via _OC_WARMUP_SEM so concurrent runs don't fire
+        # ~11*N parallel npm installs that ENOTEMPTY-race. See the semaphore
+        # definition above. Agent loops run concurrently outside this block.
+        logger.info("  [warmup] waiting for gateway-warmup slot (run=%s)", run_id)
+        with _OC_WARMUP_SEM:
+            logger.info("  [warmup] slot acquired; starting gateway (run=%s)", run_id)
+            try:
+                oc_handle = self.container.start(oc_spec)
+            except Exception:
+                _release_gateway_port(gateway_port)
+                dispatcher.stop()
+                self._best_effort_cleanup(net_name, oc_name, task_container_name)
+                raise
+            oc_container_id = oc_handle.id
 
-        # 6. Wait for gateway readiness.
-        try:
-            self._wait_for_gateway_ready(oc_handle)
-        except Exception:
-            _release_gateway_port(gateway_port)
-            dispatcher.stop()
-            self._best_effort_cleanup(net_name, oc_name, task_container_name)
-            raise
+            # 6. Wait for gateway readiness (plugin install completes here).
+            try:
+                self._wait_for_gateway_ready(oc_handle)
+            except Exception:
+                _release_gateway_port(gateway_port)
+                dispatcher.stop()
+                self._best_effort_cleanup(net_name, oc_name, task_container_name)
+                raise
+        logger.info("  [warmup] gateway ready; slot released (run=%s)", run_id)
 
         # 7. Drop a /tmp/oc_gateway_env so the condition layer can `source`
         #    it before `openclaw agent ...`.
         gw_env = (
-            f"export OPENCLAW_GATEWAY_URL=ws://127.0.0.1:18789\n"
+            f"export OPENCLAW_GATEWAY_URL=ws://127.0.0.1:{gateway_port}\n"
             f"export OPENCLAW_GATEWAY_TOKEN={gateway_token}\n"
             f"export OPENCLAW_RUN_ID={run_id}\n"
         )
+        if self.container.backend_id == "singularity":
+            # Give the agent CLI its OWN plugin stage dir, distinct from the
+            # gateway's (oc_env sets the gateway's to
+            # /tmp/oc-plugin-deps/<run_id>). Both processes mirror bundled
+            # plugins via mirrorBundledPluginRuntimeRoot
+            # (bundled-runtime-root.ts), which does an UNGUARDED
+            # rmSync+renameSync of dist/extensions/<id> — no lock, no
+            # skip-if-present. Sharing one stage dir lets the gateway (it
+            # mirrors e.g. vllm — deps=0, so no npm log — when resolving the
+            # provider on the first model call) and the CLI (its startup plugin
+            # load) rename dist/extensions/vllm concurrently → "ENOTEMPTY:
+            # rename ... -> .../vllm" → CLI plugin load throws → agent never
+            # starts (no session log, "No patch generated"). Non-deterministic;
+            # concurrent-run I/O load makes the overlap likelier. This env is
+            # sourced from /tmp/oc_gateway_env right before `openclaw agent`
+            # (conditions/openclaw_agent.py), so it overrides the gateway value
+            # the singularity exec env-replay would otherwise carry in. Separate
+            # per-process roots remove the shared path so the mirrors can't
+            # collide.
+            gw_env += (
+                f"export OPENCLAW_PLUGIN_STAGE_DIR=/tmp/oc-plugin-deps/{run_id}-cli\n"
+            )
         self.container.exec(
             oc_handle,
             ["bash", "-c", f"cat > /tmp/oc_gateway_env <<'EOF'\n{gw_env}EOF"],
@@ -432,7 +503,7 @@ class SWEBenchHarness:
             "state_dir": str(state_dir),
             "gateway_port": gateway_port,
             "gateway_token": gateway_token,
-            "gateway_url": "ws://127.0.0.1:18789",
+            "gateway_url": f"ws://127.0.0.1:{gateway_port}",
             "sandbox_image": container_image,
             **dispatcher.env_info(),
         }
@@ -602,6 +673,12 @@ class SWEBenchHarness:
         providers = cfg.setdefault("models", {}).setdefault("providers", {})
         if "vllm" in providers:
             providers["vllm"]["baseUrl"] = vllm_endpoint
+            # API-backed providers (e.g. DeepSeek) need a real key; inject it
+            # from env so the secret isn't committed in the harness config.
+            # sglang/local leaves OC_VLLM_API_KEY unset and keeps the dummy key.
+            _api_key = os.environ.get("OC_VLLM_API_KEY")
+            if _api_key:
+                providers["vllm"]["apiKey"] = _api_key
         # OTel collector lives on the host too — same rewrite story.
         otel_cfg = (cfg.get("diagnostics") or {}).get("otel") or {}
         if otel_cfg.get("enabled"):
