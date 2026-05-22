@@ -35,9 +35,9 @@ cp .env.example .env && $EDITOR .env
 set -a && . .env && set +a
 ```
 
-Two modes — `docker` and `singularity`. In both, openclaw and the SWE-bench
-task each run in their **own** container (or .sif). The host runs **only
-vLLM**.
+Two modes — `docker` and `singularity`. In both, the agent runtime and the
+benchmark task each run in their **own** container (or .sif). The host runs
+only the serving backend.
 
 **Local Docker** (default) — needs a running Docker daemon and the
 patched OpenClaw image:
@@ -46,7 +46,7 @@ patched OpenClaw image:
 bash harnesses/openclaw/docker/build.sh   # one-time: agent-bench/openclaw:<v>
 make serve &                              # vLLM on the host
 HARNESS_BACKEND=docker \
-    make eval EVAL_ARGS="--sweep config/sweeps/phase1.yaml"
+    make eval APP=swebench/phase1 HARNESS=openclaw_swebench MODEL_PROFILE=qwen36_27b SERVING=vllm/default
 ```
 
 Per-run docker layout: a private docker network, a `task-<run_id>` container
@@ -61,9 +61,8 @@ serving; the job spins it up on the compute node.
 qsub scripts/execution_pbs/run_benchmark.pbs
 ```
 
-**Singularity** — analogous to docker but using two `singularity instance`s
-(openclaw .sif + task .sif) on the same private mount tree. Currently
-under rework — fall back to docker mode for now.
+**Singularity** — analogous to docker but using `singularity instance`s for
+the agent runtime and task .sif on the same private mount tree.
 
 Then aggregate + render:
 
@@ -72,8 +71,9 @@ make analyze
 make report
 ```
 
-Outputs land in `data/runs/<sweep_id>/<run_id>/` (per-run verdicts,
-trajectories, spans, telemetry) and `data/figures/<sweep_id>/`.
+Outputs land in `data/experiments/<stamp>/runs/<sweep_id>/<run_id>/`
+(per-run verdicts, trajectories, spans, telemetry). Engine/PBS logs live in
+`data/experiments/<stamp>/logs/`.
 
 ## Tests
 

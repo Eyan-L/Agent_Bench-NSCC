@@ -64,10 +64,10 @@ make run_dr_smoke           # 3 tasks (dr_001 ZH + dr_051 EN + dr_075 EN)
 make run_dr_full            # all 100 tasks
 ```
 
-Override the harness JSON to swap models:
+Override model/serving separately from the harness:
 
 ```
-make run_dr_smoke HARNESS=deepresearch_some_other_model
+make run_dr_smoke HARNESS=openclaw_deepresearch_bench_brave MODEL_PROFILE=qwen36_35b_a3b_local_research SERVING=vllm/nscc
 ```
 
 Override `HARNESS_BACKEND` is **not** supported — DR-Bench is docker-only
@@ -75,7 +75,8 @@ Override `HARNESS_BACKEND` is **not** supported — DR-Bench is docker-only
 
 ## Outputs
 
-Per task, the harness writes to `data/runs/dr_<sweep>/<run_id>/`:
+Per task, the harness writes to
+`data/experiments/<stamp>/runs/dr_<sweep>/<run_id>/`:
 
 ```
 <run_id>/

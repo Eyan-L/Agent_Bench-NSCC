@@ -7,7 +7,7 @@ annotations (the core RQ3 probe), and completion-rate bars.
 
 Run:
     python -m orchestration.analysis.plots.rq3_metrics \
-        --runs-dir data/runs --out-dir data/figures/rq3
+        --runs-dir data/experiments/<stamp>/runs --out-dir data/figures/rq3
 """
 from __future__ import annotations
 

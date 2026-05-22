@@ -149,7 +149,7 @@ PYTHONPATH=. python3 -c "from applications.<app>.conditions.<name> import YourCo
 make eval APP=<app>/<exp> HARNESS=<harness_with_your_condition> ...
 ```
 
-Inspect `data/runs/<sweep>/<ts>/<run_id>/`:
+Inspect `data/experiments/<stamp>/runs/<sweep>/<run_id>/`:
 - `steps.jsonl` — agent steps with timings
 - `verdict.json` — harness scoring result
 - `manifest.json` — run state

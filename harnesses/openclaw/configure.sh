@@ -4,17 +4,16 @@
 # Configure OpenClaw to use vLLM as the model provider and register a coding
 # agent. Idempotent — safe to re-run.
 #
-# Sources model + endpoint from the active harness config (HARNESS env var
-# or explicit VLLM_HARNESS_YAML), keeping OC and serve.sh in lockstep. Env
+# Sources model + endpoint from the active model/serving configs, keeping
+# OC and serve.sh in lockstep. Env
 # overrides still win.
 #
 # Env:
 #   OC_BIN              openclaw CLI to use (default: from PATH)
-#   HARNESS             config/harness/$HARNESS.json (default: openclaw_27b)
-#   VLLM_HARNESS_YAML   explicit harness config path (skips $HARNESS lookup;
-#                       var name kept for back-compat)
+#   MODEL_PROFILE       config/model/$MODEL_PROFILE.json (default: qwen36_27b)
+#   SERVING             config/serving/$SERVING.json (default: vllm/tp1_128k)
 #   VLLM_BASE           vLLM OpenAI-compat URL (overrides config model.endpoint)
-#   VLLM_MODEL          model id (overrides config model.name)
+#   VLLM_MODEL          model id (overrides config/model)
 #   OC_AGENT_ID         agent id to register (default: swebench)
 #   OC_WORKSPACE        agent workspace dir (default: /testbed)
 
@@ -23,16 +22,24 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KIT_ROOT="${KIT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 
-# Source MODEL/endpoint from the active harness config (single source of
-# truth for model selection). Env override still wins.
-HARNESS_CFG="${VLLM_HARNESS_YAML:-}"
-if [[ -z "$HARNESS_CFG" ]]; then
-    HARNESS_CFG="$KIT_ROOT/config/harness/${HARNESS:-openclaw_27b}.json"
+# Source MODEL/endpoint from the active model/serving configs.
+MODEL_CFG="${VLLM_MODEL_CONFIG:-${AB_MODEL_CONFIG:-}}"
+if [[ -z "$MODEL_CFG" ]]; then
+    MODEL_CFG="$KIT_ROOT/config/model/${MODEL_PROFILE:-qwen36_27b}.json"
 fi
-if [[ -f "$HARNESS_CFG" ]]; then
-    eval "$(python3 "$KIT_ROOT/scripts/load_harness_env.py" "$HARNESS_CFG")"
+if [[ -f "$MODEL_CFG" ]]; then
+    eval "$(python3 "$KIT_ROOT/scripts/load_model_env.py" "$MODEL_CFG")"
 else
-    echo "WARN: harness config not found: $HARNESS_CFG — using built-in defaults" >&2
+    echo "WARN: model config not found: $MODEL_CFG — using built-in defaults" >&2
+fi
+SERVING_CFG="${VLLM_SERVING_CONFIG:-${AB_SERVING_CONFIG:-}}"
+if [[ -z "$SERVING_CFG" ]]; then
+    SERVING_CFG="$KIT_ROOT/config/serving/${SERVING:-vllm/tp1_128k}.json"
+fi
+if [[ -f "$SERVING_CFG" ]]; then
+    eval "$(python3 "$KIT_ROOT/scripts/load_serving_env.py" "$SERVING_CFG")"
+else
+    echo "WARN: serving config not found: $SERVING_CFG — using built-in endpoint defaults" >&2
 fi
 
 OC="${OC_BIN:-$(command -v openclaw || true)}"
@@ -65,6 +72,7 @@ echo
 # OpenClaw's OpenAI-compat adapter will use baseUrl + any auth headers to reach it.
 
 "$OC" config set models.providers.vllm.baseUrl "$VLLM_BASE"
+"$OC" config set models.providers.vllm.api openai-completions
 
 # vLLM ignores the API key but OpenClaw's provider adapter may demand one.
 # Set a dummy — any non-empty string works for the HTTP handshake.
@@ -74,8 +82,13 @@ VLLM_PROVIDER_JSON=$(VLLM_BASE="$VLLM_BASE" VLLM_MODEL="$VLLM_MODEL" python3 -c 
 import json, os
 print(json.dumps({
     "baseUrl": os.environ["VLLM_BASE"],
+    "api": "openai-completions",
     "apiKey": "sk-dummy",
-    "models": [{"id": os.environ["VLLM_MODEL"], "name": os.environ["VLLM_MODEL"]}],
+    "models": [{
+        "id": os.environ["VLLM_MODEL"],
+        "name": os.environ["VLLM_MODEL"],
+        "api": "openai-completions",
+    }],
 }))
 ')
 "$OC" config set --strict-json 'models.providers.vllm' "$VLLM_PROVIDER_JSON"

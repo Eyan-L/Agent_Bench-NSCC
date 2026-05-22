@@ -4,7 +4,7 @@
 # The OC gateway emits OTLP/HTTP spans + metrics + logs to
 # http://localhost:$PORT (configured in config/harness/&lt;name&gt;.json (openclaw block) →
 # diagnostics.otel.endpoint). Without a collector listening, every span is
-# dropped on the floor and `data/runs/<run>/spans.jsonl` is never produced
+# dropped on the floor and the run's `spans.jsonl` is never produced
 # (it's a slice of the collector's on-disk trace file —
 # orchestration/conditions/code_agent/openclaw_agent.py:_snapshot_otel_spans).
 #

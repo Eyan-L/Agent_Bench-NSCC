@@ -7,12 +7,13 @@ RACE + FACT. This script then walks the sweep dir and grades each report.
 
 Usage:
     python -m applications.deepresearch_bench.eval.runner \\
-        --sweep data/runs/dr_smoke1 \\
+        --sweep data/experiments --app-leaf dr_smoke1 \\
         --instance-data data/deepresearch_bench/instances.json
 
-By default picks the most recent stamped subdir under ``--sweep``; pass
-``--stamp 2026-05-13_20-23-43`` to pin one. With ``--force`` it re-grades
-even if a non-DEFERRED ``verdict.json`` already exists.
+By default, ``--sweep data/experiments --app-leaf <leaf>`` picks the most
+recent experiment containing ``runs/<leaf>``. You can also point ``--sweep``
+directly at a run directory parent. With ``--force`` it re-grades even if a
+non-DEFERRED ``verdict.json`` already exists.
 """
 from __future__ import annotations
 
@@ -37,19 +38,56 @@ def _load_instance_map(path: Path) -> Dict[str, Dict]:
     return {r["instance_id"]: r for r in rows}
 
 
-def _pick_stamp_dir(sweep_dir: Path, stamp: Optional[str]) -> Path:
+def _has_run_dirs(path: Path) -> bool:
+    try:
+        return any(
+            p.is_dir() and (p / "manifest.json").is_file()
+            for p in path.iterdir()
+        )
+    except OSError:
+        return False
+
+
+def _resolve_run_parent(path: Path, app_leaf: Optional[str]) -> Optional[Path]:
+    if _has_run_dirs(path):
+        return path
+    runs_dir = path / "runs"
+    if not runs_dir.is_dir():
+        return None
+    if app_leaf:
+        candidate = runs_dir / app_leaf
+        return candidate if _has_run_dirs(candidate) else None
+    candidates = [p for p in runs_dir.iterdir() if p.is_dir() and _has_run_dirs(p)]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def _pick_stamp_dir(sweep_dir: Path, stamp: Optional[str], app_leaf: Optional[str]) -> Path:
+    direct = _resolve_run_parent(sweep_dir, app_leaf)
+    if direct is not None:
+        return direct
     if stamp:
         p = sweep_dir / stamp
         if not p.is_dir():
             raise SystemExit(f"--stamp {stamp} not under {sweep_dir}")
-        return p
+        resolved = _resolve_run_parent(p, app_leaf)
+        if resolved is None:
+            suffix = f"/runs/{app_leaf}" if app_leaf else "/runs/<app-leaf>"
+            raise SystemExit(f"no run dirs under {p}{suffix}")
+        return resolved
     candidates = sorted(
         [p for p in sweep_dir.iterdir() if p.is_dir() and p.name[0].isdigit()],
         reverse=True,
     )
+    for candidate in candidates:
+        resolved = _resolve_run_parent(candidate, app_leaf)
+        if resolved is not None:
+            return resolved
     if not candidates:
-        raise SystemExit(f"no stamped subdirs under {sweep_dir}")
-    return candidates[0]
+        raise SystemExit(f"no stamped subdirs or run dirs under {sweep_dir}")
+    suffix = f" containing runs/{app_leaf}" if app_leaf else " containing run dirs"
+    raise SystemExit(f"no experiment under {sweep_dir}{suffix}")
 
 
 def _needs_grading(verdict_path: Path, force: bool) -> bool:
@@ -145,7 +183,9 @@ def grade_run(run_dir: Path, inst: Dict, *, force: bool, workers: Optional[int])
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sweep", required=True, type=Path,
-                        help="sweep dir, e.g. data/runs/dr_smoke1")
+                        help="experiment root, legacy sweep root, or run-dir parent")
+    parser.add_argument("--app-leaf", default=None,
+                        help="app output leaf under data/experiments/<stamp>/runs/")
     parser.add_argument("--instance-data", required=True, type=Path,
                         help="instances.json from the loader")
     parser.add_argument("--stamp", default=None,
@@ -164,7 +204,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     inst_map = _load_instance_map(args.instance_data)
-    stamp_dir = _pick_stamp_dir(args.sweep, args.stamp)
+    stamp_dir = _pick_stamp_dir(args.sweep, args.stamp, args.app_leaf)
     logger.info("Grading sweep %s", stamp_dir)
 
     run_dirs = [p for p in stamp_dir.iterdir() if p.is_dir() and (p / "manifest.json").is_file()]

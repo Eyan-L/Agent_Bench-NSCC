@@ -15,7 +15,7 @@
 #
 # Optional:
 #   --inside-pkg <path>   path of the openclaw npm pkg inside the sif
-#                         (default: /usr/local/lib/node_modules/openclaw)
+#                         (default: /app)
 #   --size MB             overlay size in MB (default: 512)
 #   --force               rebuild even if the overlay already exists
 #
@@ -28,7 +28,7 @@ set -euo pipefail
 SIF=""
 OVERLAY=""
 KIT_ROOT=""
-INSIDE_PKG="/usr/local/lib/node_modules/openclaw"
+INSIDE_PKG="/app"
 SIZE_MB=512
 FORCE=0
 
@@ -62,12 +62,16 @@ if [[ -f "$OVERLAY" && "$FORCE" -ne 1 ]]; then
     echo "[build-oc-overlay] overlay already exists at $OVERLAY (use --force to rebuild)"
     exit 0
 fi
-rm -f "$OVERLAY"
-
 mkdir -p "$(dirname "$OVERLAY")"
+TMP_OVERLAY="${OVERLAY}.tmp.$$"
+rm -f "$TMP_OVERLAY"
+cleanup_tmp() {
+    rm -f "$TMP_OVERLAY"
+}
+trap cleanup_tmp EXIT
 
-echo "[build-oc-overlay] creating ${SIZE_MB}MB overlay at $OVERLAY"
-singularity overlay create --size "$SIZE_MB" "$OVERLAY"
+echo "[build-oc-overlay] creating ${SIZE_MB}MB overlay at $TMP_OVERLAY"
+singularity overlay create --size "$SIZE_MB" "$TMP_OVERLAY"
 
 echo "[build-oc-overlay] applying patches inside container"
 echo "  sif         : $SIF"
@@ -82,7 +86,7 @@ echo "  patch dir   : $PATCH_DIR"
 # .py expects; no hard-coded inside paths to keep in sync.
 OC_HARNESS_DIR="$(dirname "$APPLY_SCRIPT")"
 singularity exec \
-    --overlay "$OVERLAY:rw" \
+    --overlay "$TMP_OVERLAY:rw" \
     --bind "$OC_HARNESS_DIR:/oc-harness:ro" \
     "$SIF" \
     bash -c "
@@ -93,4 +97,6 @@ singularity exec \
         python3 /oc-harness/apply_patch.py status
     "
 
+mv -f "$TMP_OVERLAY" "$OVERLAY"
+trap - EXIT
 echo "[build-oc-overlay] done -> $OVERLAY"

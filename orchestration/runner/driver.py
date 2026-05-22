@@ -90,8 +90,8 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         # Prepare environment. Passing instance_data lets benchmark-specific
         # harnesses (e.g. TerminalBenchHarness) read task.toml-derived fields
         # without re-loading the dataset; SWE-bench harnesses ignore the kwarg.
-        # OC_HARNESS_YAML (set in main()) is the authoritative model source —
-        # _build_state_dir reads model.name from there.
+        # AB_*_CONFIG paths (set in main()) are the authoritative config sources
+        # used by harness adapters when rendering per-run runtime config.
         env_info = harness.prepare_environment(
             instance_id=run_config.instance_id,
             repo_id=run_config.repo_id,
@@ -311,7 +311,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
     return manifest
 
 
-def run_sweep(app_path: Path, harness_path: Path, backend_path: Path,
+def run_sweep(app_path: Path, harness_path: Path, model_path: Path, serving_path: Path,
               swebench_root: Optional[Path], instance_data_path: Path,
               retry_errors: bool = True, max_workers: int = 1):
     """Run full sweep, composed from app / harness / backend JSON configs.
@@ -323,8 +323,8 @@ def run_sweep(app_path: Path, harness_path: Path, backend_path: Path,
     vLLM throughput (single endpoint).
     """
 
-    # Load sweep config by composing the three axes
-    sweep_config = load_composed_config(app_path, harness_path, backend_path)
+    # Load sweep config by composing the four axes.
+    sweep_config = load_composed_config(app_path, harness_path, model_path, serving_path)
 
     # Generate all run configs
     run_configs = sweep_config.generate_runs()
@@ -522,13 +522,15 @@ def run_sweep(app_path: Path, harness_path: Path, backend_path: Path,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="OpenClaw experiment driver (composed config)")
+    parser = argparse.ArgumentParser(description="Agent_Bench experiment driver (composed config)")
     parser.add_argument("--app", type=Path, required=True,
                        help="Application config (config/application/<app>/<exp>.json)")
     parser.add_argument("--harness", type=Path, required=True,
                        help="Harness config (config/harness/<name>.json)")
-    parser.add_argument("--backend", type=Path, required=True,
-                       help="Backend config (config/backend/<engine>/<name>.json)")
+    parser.add_argument("--model", type=Path, required=True,
+                       help="Model config (config/model/<name>.json)")
+    parser.add_argument("--serving", type=Path, required=True,
+                       help="Serving config (config/serving/<engine>/<name>.json)")
     # swebench-root is only required when the sweep contains SWE-bench
     # instances — pure terminal_bench sweeps don't use it.
     parser.add_argument("--swebench-root", type=Path, required=False,
@@ -543,19 +545,19 @@ def main():
 
     args = parser.parse_args()
 
-    # Stash the composed-config paths in env so harness code (e.g.
-    # applications/swebench/app.py:_build_state_dir, which synthesizes the
-    # per-run openclaw.json) can locate the source config without re-parsing
-    # CLI args. Variable names retain the _YAML suffix for back-compat with
-    # shell scripts that already source them.
-    os.environ["OC_APP_YAML"] = str(args.app.resolve())
-    os.environ["OC_HARNESS_YAML"] = str(args.harness.resolve())
-    os.environ["OC_BACKEND_YAML"] = str(args.backend.resolve())
+    # Stash the composed-config paths in env so harness code can render
+    # per-run runtime config without re-parsing CLI args.
+    os.environ["AB_APP_CONFIG"] = str(args.app.resolve())
+    os.environ["AB_HARNESS_CONFIG"] = str(args.harness.resolve())
+    os.environ["AB_MODEL_CONFIG"] = str(args.model.resolve())
+    os.environ["AB_SERVING_CONFIG"] = str(args.serving.resolve())
+    os.environ["AB_INSTANCE_DATA"] = str(args.instance_data.resolve())
 
     run_sweep(
         app_path=args.app,
         harness_path=args.harness,
-        backend_path=args.backend,
+        model_path=args.model,
+        serving_path=args.serving,
         swebench_root=args.swebench_root,
         instance_data_path=args.instance_data,
         retry_errors=not args.no_retry_errors,

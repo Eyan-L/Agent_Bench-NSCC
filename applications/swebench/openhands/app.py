@@ -54,6 +54,7 @@ from applications.swebench.app import (
     _oc_sandbox_name,
     _slugify_session_key,
 )
+from applications.swebench.scoring import score_via_scoring_server, score_via_singularity
 from orchestration.container import (
     Container,
     ContainerHandle,
@@ -62,6 +63,7 @@ from orchestration.container import (
     Mount,
 )
 from orchestration.dispatcher.openhands import OpenHandsDispatcher
+from orchestration.runner.config import endpoint_for_container, load_active_model_and_serving
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +122,7 @@ class SWEBenchOpenHandsHarness:
         self.workspace_base.mkdir(parents=True, exist_ok=True)
         self.state_base = self.workspace_base.parent / "states"
         self.state_base.mkdir(parents=True, exist_ok=True)
+        self._workspace_by_container: Dict[str, Path] = {}
 
     def _default_oh_image(self) -> str:
         if self.container.backend_id == "singularity":
@@ -199,7 +202,7 @@ class SWEBenchOpenHandsHarness:
             },
             mounts=(Mount(host=ws_host, container="/testbed", mode="rw"),),
             workdir="/testbed",
-            env={"PATH": task_path},
+            env={"PATH": task_path, "HOME": "/root"},
             entrypoint="sleep",
             command=("infinity",),
         )
@@ -259,6 +262,7 @@ class SWEBenchOpenHandsHarness:
             self._best_effort_cleanup(net_name, oh_name, task_container_name)
             raise
         oh_container_id = oh_handle.id
+        self._workspace_by_container[oh_container_id] = ws_host
 
         logger.info(
             "  ready: oh=%s task=%s bridge_pid=%s net=%s",
@@ -308,20 +312,14 @@ class SWEBenchOpenHandsHarness:
 
     def _runtime_base_url(self, configured: Optional[str]) -> str:
         raw = os.environ.get("OPENAI_BASE_URL") or configured or "http://localhost:8000/v1"
-        host = self.container.host_address
-        for marker in ("://vllm-host:", "://localhost:", "://127.0.0.1:"):
-            if marker in raw:
-                scheme, rest = raw.split("://", 1)
-                _, tail = rest.split(":", 1)
-                return f"{scheme}://{host}:{tail}"
-        return raw
+        return endpoint_for_container(raw, self.container.host_address)
 
     # ------------------------------------------------------------------
 
     def _build_state_dir(self, *, run_id: str) -> Path:
         """Materialize <state_base>/<run_id>/ with the rendered config.toml.
 
-        The harness config (`config/harness/openhands_*.json`, picked by the
+        The harness config (`config/harness/openhands_swebench.json`, picked by the
         driver) carries an `openhands` block with model + agent + run
         knobs. We substitute those into harnesses/openhands/state/config.toml.template
         and drop the result at <state_dir>/config.toml. The OH driver reads
@@ -333,22 +331,21 @@ class SWEBenchOpenHandsHarness:
         state_dir.mkdir(parents=True)
 
         kit_root = os.environ.get("KIT_ROOT", os.getcwd())
-        # Driver sets OC_HARNESS_YAML to the resolved harness config path
-        # (kept name for back-compat with the openclaw side); same lookup.
+        # Driver sets AB_HARNESS_CONFIG to the resolved harness config path.
         harness_path = os.environ.get(
-            "OC_HARNESS_YAML",
-            os.path.join(kit_root, "config/harness/openhands_27b.json"),
+            "AB_HARNESS_CONFIG",
+            os.path.join(kit_root, "config/harness/openhands_swebench.json"),
         )
         if not os.path.isfile(harness_path):
             raise FileNotFoundError(
                 f"openhands harness config not found at {harness_path} "
-                "(set OC_HARNESS_YAML)."
+                "(set AB_HARNESS_CONFIG)."
             )
         with open(harness_path) as fh:
             harness_cfg = json.load(fh) or {}
 
         oh_cfg = harness_cfg.get("openhands") or {}
-        model_cfg = harness_cfg.get("model") or {}
+        model_cfg, _serving_cfg = load_active_model_and_serving(kit_root=kit_root)
 
         template_path = (
             Path(kit_root) / "harnesses" / "openhands" / "state" / "config.toml.template"
@@ -363,7 +360,7 @@ class SWEBenchOpenHandsHarness:
         # Path-style (e.g. `/mnt/.../Qwen2.5-7B-Instruct`) is what we use when
         # `--model <local-dir>` is fed to vLLM; LiteLLM forwards that string
         # verbatim to the endpoint, so `openai/<path>` ends up correct.
-        _model_raw = model_cfg.get("name") or "Qwen/Qwen3.6-35B-A3B"
+        _model_raw = model_cfg.litellm_model or model_cfg.name
         _LITELLM_PROVIDERS = (
             "openai/", "anthropic/", "vllm/", "hosted_vllm/", "azure/",
             "bedrock/", "gemini/", "groq/", "together_ai/", "huggingface/",
@@ -375,10 +372,11 @@ class SWEBenchOpenHandsHarness:
         )
         values = {
             "MODEL": _model_resolved,
-            "BASE_URL": self._runtime_base_url(model_cfg.get("endpoint")),
-            "API_KEY": model_cfg.get("api_key") or "EMPTY",
-            "TEMPERATURE": str(model_cfg.get("temperature") or 0.0),
-            "MAX_TOKENS": str(model_cfg.get("max_tokens") or 4096),
+            "BASE_URL": self._runtime_base_url(model_cfg.endpoint),
+            "API_KEY": model_cfg.api_key or "EMPTY",
+            "TEMPERATURE": str(model_cfg.temperature),
+            "MAX_TOKENS": str(model_cfg.max_tokens),
+            "CONTEXT_WINDOW": str(model_cfg.context_window),
             "MAX_ITERATIONS": str(
                 (oh_cfg.get("run") or {}).get("max_iterations") or 100
             ),
@@ -432,6 +430,25 @@ class SWEBenchOpenHandsHarness:
     # ------------------------------------------------------------------
 
     def collect_patch(self, container_id: str, workspace_root: str) -> str:
+        ws_host = self._workspace_by_container.get(container_id)
+        if self.container.backend_id == "singularity" and ws_host:
+            try:
+                for name in self._OH_SCAFFOLD_FILES.split():
+                    path = ws_host / name
+                    if path.is_dir():
+                        _force_rmtree(path, ignore_errors=True)
+                    elif path.exists():
+                        path.unlink()
+                for name in self._OH_SCAFFOLD_DIRS.split():
+                    _force_rmtree(ws_host / name, ignore_errors=True)
+                r = subprocess.run(
+                    ["git", "-C", str(ws_host), "diff", "HEAD"],
+                    capture_output=True, text=True, check=True,
+                )
+                return r.stdout
+            except Exception as e:
+                logger.warning("host-side patch collection failed: %s", e)
+
         # Strip OH scaffold + diff against base_commit. We do this via the
         # task container (where /testbed has the right git env) — not the
         # OH harness container — because the OH image doesn't carry the
@@ -480,6 +497,7 @@ class SWEBenchOpenHandsHarness:
         timeout_seconds: int,
         patch: Optional[str] = None,
         run_id: Optional[str] = None,
+        instance_data: Optional[Dict] = None,
         **_kw,
     ) -> Dict:
         logger.info("Scoring %s", instance_id)
@@ -504,6 +522,27 @@ class SWEBenchOpenHandsHarness:
 
         if run_id is None:
             run_id = f"oh-eval-{instance_id}-{os.urandom(3).hex()}"
+
+        singularity_verdict = score_via_singularity(
+            instance_id=instance_id,
+            patch=patch,
+            model_name_or_path="oh-eval",
+            timeout_seconds=timeout_seconds,
+            run_id=run_id,
+            swebench_root=self.swebench_root,
+            instance_data=instance_data,
+        )
+        if singularity_verdict is not None:
+            return singularity_verdict
+
+        remote_verdict = score_via_scoring_server(
+            instance_id=instance_id,
+            patch=patch,
+            model_name_or_path="oh-eval",
+            timeout_seconds=timeout_seconds,
+        )
+        if remote_verdict is not None:
+            return remote_verdict
 
         import tempfile  # local import to keep top-level slim
         with tempfile.TemporaryDirectory(prefix="oh_pred_") as tmp:
@@ -621,6 +660,7 @@ class SWEBenchOpenHandsHarness:
         for cid in {oh_container_id, container_id}:
             if not cid:
                 continue
+            self._workspace_by_container.pop(cid, None)
             try:
                 self._exec(
                     cid,

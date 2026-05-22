@@ -1,0 +1,14 @@
+{
+  "_doc": "Small smoke-test model for cheap end-to-end pipeline checks.",
+  "model": {
+    "config_id": "qwen25_05b",
+    "name": "Qwen/Qwen2.5-0.5B-Instruct",
+    "provider": "custom",
+    "api_key": "EMPTY",
+    "temperature": 0.0,
+    "max_tokens": 2048,
+    "context_window": 32768,
+    "tool_call_parser": "hermes",
+    "reasoning_parser": ""
+  }
+}

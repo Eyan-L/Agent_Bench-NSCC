@@ -1,7 +1,8 @@
 #!/bin/bash
-# bench profile (Qwen3.6-35B-A3B, tp=4) needs 4 GPUs.
+# The header asks for 4 GPUs; set VLLM_TP=4 at qsub time when the served model
+# should actually use all of them.
 # This script runs the Terminal-Bench 2 sweep (kv-store-grpc by default).
-# It is a sibling of pbs/run_benchmark.pbs — most of the vLLM stage is
+# It is a sibling of scripts/execution_pbs/run_benchmark.pbs — most of the vLLM stage is
 # copied verbatim because it's identical between SWE-bench and TB.
 #
 #PBS -l select=1:ncpus=1:ngpus=4:mem=64gb
@@ -9,21 +10,26 @@
 #PBS -q normal
 #PBS -j oe
 #PBS -N oc_tb_bench
-#PBS -o /home/users/ntu/n2505289/Agent_Bench/data/logs/pbs_tb.log
+# The script redirects stdout/stderr into
+# data/experiments/$AB_RUN_STAMP/logs/pbs_tb.log after resolving KIT_ROOT.
+# Until then, PBS uses its job-id-based default output path.
 #
 # Stages (each can be skipped via env flag):
 #   0. STAGE_TB_PULL=1   — singularity pull the TB task .sif from docker hub
 #                          (one-time per docker tag; cached under $OC_TB_SIF_DIR)
 #   1. STAGE_TB_DATA=1   — materialize $DATASET from vendored TB tasks/
-#   2. STAGE_VLLM=1      — start vLLM singularity, serve Qwen3.6
+#   2. STAGE_SERVING=1   — start local serving sidecar (vLLM in this script)
 #   3. STAGE_RUN=1       — invoke orchestration/runner/driver against the TB sweep
-#   4. STAGE_CLEANUP=1   — kill vLLM
+#   4. STAGE_CLEANUP=1   — kill serving sidecar
 #
 # Env (override via `qsub -v K1=V1,K2=V2 ...`):
 #   KIT_ROOT       — repo root
 #   APP            — application JSON (default: $KIT_ROOT/config/application/terminal_bench/kv_store.json)
-#   HARNESS_CONFIG — harness JSON     (default: $KIT_ROOT/config/harness/tb_react_27b.json)
-#   BACKEND_CONFIG — backend JSON     (default: $KIT_ROOT/config/backend/vllm/tp1.json)
+#   HARNESS_CONFIG — harness JSON     (default: $KIT_ROOT/config/harness/tb_react_terminal_bench.json)
+#   MODEL_CONFIG   — model JSON       (default: $KIT_ROOT/config/model/qwen36_35b_a3b.json)
+#   SERVING_CONFIG — serving JSON     (default: $KIT_ROOT/config/serving/vllm/nscc.json)
+#   AB_RUN_STAMP   — stable experiment directory name
+#   AB_EXPERIMENT_DIR — experiment root (default: $KIT_ROOT/data/experiments/$AB_RUN_STAMP)
 #   TB_TASK_IDS    — space-separated TB task ids; default = all under
 #                    config/benchmarks/terminal_bench/
 #   DATASET        — path to materialized TB instance JSON
@@ -33,53 +39,111 @@ set -uo pipefail
 
 # ---- Resolve paths ---------------------------------------------------------
 USER_NAME="${USER:-$(whoami)}"
-SCRATCH="/scratch/users/ntu/$USER_NAME"
 HOME="/home/users/ntu/${USER_NAME}"
+SCRATCH="${SCRATCH:-/scratch/users/ntu/$USER_NAME}"
+if [[ ! -d "$SCRATCH" ]]; then
+    echo "FATAL: SCRATCH=$SCRATCH does not exist. Set SCRATCH to a writable large filesystem via qsub -v SCRATCH=/path/to/scratch,..." >&2
+    exit 1
+fi
 PBS_O_WORKDIR=${SCRATCH}/github/Agent_Bench
 KIT_ROOT="${KIT_ROOT:-${PBS_O_WORKDIR:-$HOME/Agent_Bench}}"
+export SCRATCH HOME KIT_ROOT
 
 APP="${APP:-$KIT_ROOT/config/application/terminal_bench/kv_store.json}"
-HARNESS_CONFIG="${HARNESS_CONFIG:-$KIT_ROOT/config/harness/tb_react_27b.json}"
-BACKEND_CONFIG="${BACKEND_CONFIG:-$KIT_ROOT/config/backend/vllm/tp1.json}"
+HARNESS_CONFIG="${HARNESS_CONFIG:-$KIT_ROOT/config/harness/tb_react_terminal_bench.json}"
+MODEL_CONFIG="${MODEL_CONFIG:-$KIT_ROOT/config/model/qwen36_35b_a3b.json}"
+SERVING_CONFIG="${SERVING_CONFIG:-$KIT_ROOT/config/serving/vllm/nscc.json}"
 DATASET="${DATASET:-$KIT_ROOT/data/terminal_bench/tasks.json}"
 
 OC_TB_SIF_DIR="${OC_TB_SIF_DIR:-$SCRATCH/tb-sif}"
 SINGULARITY_CACHE="${SINGULARITY_CACHE:-$SCRATCH/.singularity}"
 
-# vLLM bench profile defaults — same as run_benchmark.pbs.
+export AB_MODEL_CONFIG="$MODEL_CONFIG"
+export AB_SERVING_CONFIG="$SERVING_CONFIG"
+eval "$(python3 "$KIT_ROOT/scripts/load_model_env.py" "$MODEL_CONFIG")"
+eval "$(python3 "$KIT_ROOT/scripts/load_serving_env.py" "$SERVING_CONFIG")"
+
+if [[ -n "${MODEL_ENDPOINT:-}" ]]; then
+    export OPENAI_BASE_URL="${OPENAI_BASE_URL:-$MODEL_ENDPOINT}"
+fi
+if [[ -n "${MODEL_API_KEY:-}" && "$MODEL_API_KEY" != "EMPTY" ]]; then
+    export OPENAI_API_KEY="${OPENAI_API_KEY:-$MODEL_API_KEY}"
+    export OC_VLLM_API_KEY="${OC_VLLM_API_KEY:-$MODEL_API_KEY}"
+fi
+
+# vLLM bench profile defaults — from MODEL_CONFIG + SERVING_CONFIG.
 VLLM_DEVICE="${VLLM_DEVICE:-cuda}"
-VLLM_MODEL="${VLLM_MODEL:-Qwen/Qwen3.6-35B-A3B}"
-VLLM_TP="${VLLM_TP:-4}"
-VLLM_MAX_LEN="${VLLM_MAX_LEN:-32768}"
-VLLM_PORT="${VLLM_PORT:-8000}"
-VLLM_GPU_UTIL="${VLLM_GPU_UTIL:-0.93}"
-VLLM_SIF="${VLLM_SIF:-$SCRATCH/sif_images/vllm_openai_cu128.sif}"
-VLLM_DOCKER="${VLLM_DOCKER:-docker://vllm/vllm-openai:latest}"
+VLLM_MODEL="${VLLM_MODEL:-$MODEL}"
+VLLM_TP="${VLLM_TP:-${TP:-1}}"
+VLLM_MAX_LEN="${VLLM_MAX_LEN:-${MAX_MODEL_LEN:-${MODEL_CONTEXT_WINDOW:-131072}}}"
+VLLM_PORT="${VLLM_PORT:-$PORT}"
+VLLM_GPU_UTIL="${VLLM_GPU_UTIL:-$GPU_MEM_UTIL}"
+VLLM_SIF="${VLLM_SIF:-${SERVING_SIF:-$SCRATCH/sif_images/vllm_openai_cu128.sif}}"
+VLLM_DOCKER="${VLLM_DOCKER:-${SERVING_IMAGE:-docker://vllm/vllm-openai:latest}}"
 
 STAGE_TB_PULL="${STAGE_TB_PULL:-1}"
 STAGE_TB_DATA="${STAGE_TB_DATA:-1}"
-STAGE_VLLM="${STAGE_VLLM:-1}"
+STAGE_SERVING="${STAGE_SERVING:-1}"
+export STAGE_SERVING
 STAGE_RUN="${STAGE_RUN:-1}"
 STAGE_CLEANUP="${STAGE_CLEANUP:-1}"
 
 OC_PYLIB="${OC_PYLIB:-$SCRATCH/pylib}"
 OC_PIP_CACHE="${OC_PIP_CACHE:-$SCRATCH/.pip-cache}"
 
-LOG_DIR="${OC_LOG_DIR:-$KIT_ROOT/logs}"
+if [[ -z "${AB_RUN_STAMP:-}" ]]; then
+    AB_RUN_STAMP="$(TZ=Asia/Singapore date +%Y-%m-%d_%H-%M-%S)"
+    if [[ -n "${PBS_JOBID:-}" ]]; then
+        AB_JOB_SUFFIX="${PBS_JOBID//[^A-Za-z0-9._-]/_}"
+        AB_RUN_STAMP="${AB_RUN_STAMP}_${AB_JOB_SUFFIX}"
+    fi
+fi
+export AB_RUN_STAMP
+
+EXPERIMENT_DIR="${AB_EXPERIMENT_DIR:-$KIT_ROOT/data/experiments/$AB_RUN_STAMP}"
+export AB_EXPERIMENT_DIR="$EXPERIMENT_DIR"
+
+APP_OUTPUT_DIR="$(python3 -c "import json; print(json.load(open('$APP'))['output_dir'])" 2>/dev/null)"
+[[ -z "$APP_OUTPUT_DIR" ]] && APP_OUTPUT_DIR="_unknown"
+RUNS_DIR="$EXPERIMENT_DIR/runs/$(basename "$APP_OUTPUT_DIR")"
+
+LOG_DIR="${OC_LOG_DIR:-$EXPERIMENT_DIR/logs}"
 export OC_LOG_DIR="$LOG_DIR"
-mkdir -p "$LOG_DIR" "$OC_TB_SIF_DIR" "$SINGULARITY_CACHE"
+mkdir -p "$EXPERIMENT_DIR/runs" "$LOG_DIR" "$OC_TB_SIF_DIR" "$SINGULARITY_CACHE"
 cd "$KIT_ROOT"
 
 LOG_PREFIX() { echo "[$(date -u +%FT%TZ)] $*"; }
 
+# Keep a stable per-run copy of the whole job log. PBS's default job output is
+# only a bootstrap fallback after this point.
+exec >>"$LOG_DIR/pbs_tb.log" 2>&1
+
 LOG_PREFIX "kit_root      = $KIT_ROOT"
+LOG_PREFIX "run_stamp     = $AB_RUN_STAMP"
+LOG_PREFIX "experiment    = $AB_EXPERIMENT_DIR"
+LOG_PREFIX "log_dir       = $LOG_DIR"
+LOG_PREFIX "runs_dir      = $RUNS_DIR"
 LOG_PREFIX "app           = $APP"
 LOG_PREFIX "harness       = $HARNESS_CONFIG"
-LOG_PREFIX "backend       = $BACKEND_CONFIG"
+LOG_PREFIX "model         = $MODEL_CONFIG"
+LOG_PREFIX "serving       = $SERVING_CONFIG"
+LOG_PREFIX "serving backend = ${SERVING_BACKEND:-unknown}  provider=${SERVING_PROVIDER_NAME:-none}"
+LOG_PREFIX "model endpoint  = ${MODEL_ENDPOINT:-unset}"
 LOG_PREFIX "dataset       = $DATASET"
 LOG_PREFIX "tb_sif_dir    = $OC_TB_SIF_DIR"
-LOG_PREFIX "vllm          = device=$VLLM_DEVICE model=$VLLM_MODEL tp=$VLLM_TP max_len=$VLLM_MAX_LEN"
-LOG_PREFIX "stages: tb_pull=$STAGE_TB_PULL tb_data=$STAGE_TB_DATA vllm=$STAGE_VLLM run=$STAGE_RUN cleanup=$STAGE_CLEANUP"
+if [[ "${STAGE_SERVING:-1}" == "1" ]]; then
+    case "${SERVING_BACKEND:-vllm}" in
+        vllm)
+            LOG_PREFIX "vllm          = device=$VLLM_DEVICE model=$VLLM_MODEL tp=$VLLM_TP max_len=$VLLM_MAX_LEN"
+            ;;
+        *)
+            LOG_PREFIX "serving       = selected backend=${SERVING_BACKEND:-unknown} (launcher not wired in this TB script yet)"
+            ;;
+    esac
+else
+    LOG_PREFIX "serving       = skipped (serving backend=${SERVING_BACKEND:-unknown})"
+fi
+LOG_PREFIX "stages: tb_pull=$STAGE_TB_PULL tb_data=$STAGE_TB_DATA serving=$STAGE_SERVING run=$STAGE_RUN cleanup=$STAGE_CLEANUP"
 
 module load singularity 2>/dev/null || LOG_PREFIX "WARN: 'module load singularity' failed; assuming binary on PATH"
 command -v singularity >/dev/null 2>&1 || { LOG_PREFIX "FATAL: singularity not found"; exit 1; }
@@ -140,11 +204,17 @@ PY
 fi
 
 # ============================================================================
-# Stage 2: vLLM singularity (verbatim from run_benchmark.pbs)
+# Stage 2: serving sidecar (vLLM currently; SGLang/LiteLLM should get their own branches)
 # ============================================================================
 VLLM_LOG="$LOG_DIR/vllm.log"
 VLLM_PID=""
-if [[ "$STAGE_VLLM" == "1" ]]; then
+if [[ "$STAGE_SERVING" == "1" && "${SERVING_BACKEND:-vllm}" != "vllm" ]]; then
+    LOG_PREFIX "FATAL: SERVING_BACKEND=${SERVING_BACKEND:-unset} is not supported by run_benchmark_tb.pbs Stage 2 yet."
+    LOG_PREFIX "  Add a backend-specific serving branch before using it here."
+    exit 2
+fi
+
+if [[ "$STAGE_SERVING" == "1" && "${SERVING_BACKEND:-vllm}" == "vllm" ]]; then
     LOG_PREFIX "==== STAGE 2: start vLLM singularity (device=$VLLM_DEVICE) ===="
     if [[ ! -f "$VLLM_SIF" ]]; then
         LOG_PREFIX "  vllm sif not found; pulling $VLLM_DOCKER"
@@ -173,17 +243,20 @@ if [[ "$STAGE_VLLM" == "1" ]]; then
     fi
 
     VLLM_SERVE_FLAGS=(
-        --host 0.0.0.0 --port "$VLLM_PORT"
+        --host "${BIND_HOST:-0.0.0.0}" --port "$VLLM_PORT"
         --tensor-parallel-size "$VLLM_TP"
         --max-model-len "$VLLM_MAX_LEN"
         --trust-remote-code
         --enable-prefix-caching
         --gpu-memory-utilization "$VLLM_GPU_UTIL"
-        --reasoning-parser qwen3
-        --enable-auto-tool-choice
-        --tool-call-parser qwen3_coder
-        --max-num-seqs 128
+        --max-num-seqs "${MAX_NUM_SEQS:-128}"
     )
+    if [[ -n "${REASONING_PARSER:-}" ]]; then
+        VLLM_SERVE_FLAGS+=(--reasoning-parser "$REASONING_PARSER")
+    fi
+    if [[ -n "${TOOL_CALL_PARSER:-}" ]]; then
+        VLLM_SERVE_FLAGS+=(--enable-auto-tool-choice --tool-call-parser "$TOOL_CALL_PARSER")
+    fi
 
     SING_GPU_FLAG=()
     [[ "$VLLM_DEVICE" == "cuda" ]] && SING_GPU_FLAG=(--nv)
@@ -191,7 +264,7 @@ if [[ "$STAGE_VLLM" == "1" ]]; then
     singularity exec "${SING_GPU_FLAG[@]}" --containall \
         --bind "$SCRATCH/.cache:$SCRATCH/.cache:rw" \
         --bind "$OC_TMPDIR:$OC_TMPDIR:rw" \
-        --bind "$KIT_ROOT/logs:/logs" \
+        --bind "$LOG_DIR:/logs:rw" \
         "$VLLM_SIF" \
         vllm serve "$VLLM_MODEL" "${VLLM_SERVE_FLAGS[@]}" \
         > "$VLLM_LOG" 2>&1 &
@@ -241,7 +314,8 @@ if [[ "$STAGE_RUN" == "1" ]]; then
     python3 -m orchestration.runner.driver \
         --app "$APP" \
         --harness "$HARNESS_CONFIG" \
-        --backend "$BACKEND_CONFIG" \
+        --model "$MODEL_CONFIG" \
+        --serving "$SERVING_CONFIG" \
         --swebench-root "$SWEBENCH_ROOT" \
         --instance-data "$DATASET" \
         2>&1 | tee -a "$LOG_DIR/run_tb.log"

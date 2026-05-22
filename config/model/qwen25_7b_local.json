@@ -1,0 +1,14 @@
+{
+  "_doc": "Locally mounted Qwen2.5-7B-Instruct. The name is the exact path passed to the serving engine and the OpenAI-compatible model id sent by agents.",
+  "model": {
+    "config_id": "qwen25_7b_local",
+    "name": "/mnt/network_drive/models/Qwen2.5-7B-Instruct",
+    "provider": "custom",
+    "api_key": "EMPTY",
+    "temperature": 0.0,
+    "max_tokens": 2048,
+    "context_window": 32768,
+    "tool_call_parser": "hermes",
+    "reasoning_parser": ""
+  }
+}

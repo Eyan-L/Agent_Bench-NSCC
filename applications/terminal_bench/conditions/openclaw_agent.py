@@ -2,7 +2,7 @@
 
 Overrides:
   - ``agent_id = "terminal_bench"`` — OC registers the agent under this id
-    in the per-run openclaw.json (see ``config/harness/tb_openclaw_27b.json``).
+    in the per-run openclaw.json (see ``config/harness/openclaw_terminal_bench.json``).
   - ``_build_message`` — TB-flavoured task framing ("Carry out this terminal
     task ... Use the verify skill before declaring DONE") instead of SWE-bench's
     "fixing a bug" framing.

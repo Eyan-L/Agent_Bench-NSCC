@@ -52,12 +52,16 @@ Two distinct concerns:
 
 For each harness, decide:
 
-- **Where does the binary live?** OpenClaw uses
-  `$SCRATCH/sif_images/oc_runtime.sif` pulled from `docker://alpine/openclaw:main`.
-  PBS handles the pull (see `scripts/execution_pbs/run_benchmark.pbs:STAGE_OC_CHECK`).
-- **Does it need patching?** OpenClaw applies four patches to its bundled JS
-  (see `harnesses/openclaw/patch/MANIFEST.json`). The patch overlay is built
-  by `scripts/execution_pbs/build_oc_overlay.sh` once per host.
+- **Where does the binary live?** On NSCC, each harness starts from a
+  base/upstream SIF and bakes an Agent_Bench runtime SIF locally:
+  OpenClaw via `build_oc_sif.sh`, OpenHands via `build_oh_sif.sh`, and
+  Hermes via `build_hm_sif.sh`. PBS handles the pull/build step for the
+  selected harness (see `scripts/execution_pbs/run_benchmark.pbs:STAGE_OC_CHECK`).
+- **Does it need patching?** OpenClaw applies runtime patches to its bundled JS
+  (see `harnesses/openclaw/patch/MANIFEST.json`). Hermes applies Python patches
+  from `harnesses/hermes/patch/MANIFEST.json`. OpenHands does not patch upstream
+  code; its builder installs the pinned SDK/tools and bakes
+  `/opt/openhands_driver.py`.
 - **What state does it read?** OpenClaw reads `state/openclaw.json` (gateway
   config + plugin enable/disable + agent definitions). The per-app slice
   (agent prompts, skills) lives under `applications/<app>/<name>/` and is

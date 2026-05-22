@@ -1,46 +1,86 @@
 """Configuration schema for experiment runs."""
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import hashlib
 import json
 from pathlib import Path
+import os
+from urllib.parse import urlunparse
 
 
 @dataclass
 class ModelConfig:
-    """LLM model configuration."""
+    """LLM identity and model-level limits."""
+    config_id: str
     name: str
-    endpoint: str  # e.g., "anthropic://claude-sonnet-4.6" or "vllm://localhost:8000/v1"
+    endpoint: str  # OpenAI-compatible base URL from the active serving config.
     temperature: float = 0.0
-    max_tokens: int = 4096
+    max_tokens: int = 8192
+    context_window: int = 0
+    provider: str = "custom"
+    api_key: str = "EMPTY"
+    litellm_model: Optional[str] = None
+    tool_call_parser: Optional[str] = None
+    reasoning_parser: Optional[str] = None
     
     def to_dict(self) -> dict:
         return {
+            "config_id": self.config_id,
             "name": self.name,
             "endpoint": self.endpoint,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
+            "context_window": self.context_window,
+            "provider": self.provider,
+            "api_key": self.api_key,
+            "litellm_model": self.litellm_model,
+            "tool_call_parser": self.tool_call_parser,
+            "reasoning_parser": self.reasoning_parser,
         }
 
 
 @dataclass
 class ServingConfig:
-    """Serving engine configuration."""
-    config_id: str  # e.g. sglang-default, vllm-latency
-    preset: str  # default, latency, throughput, context
+    """Concrete serving deployment for a model."""
+    config_id: str
+    backend: str  # vllm | sglang | litellm
+    endpoint: str
+    bind_host: str
+    client_host: str
+    port: int
+    gpu_mem_util: float
     max_num_seqs: int
     enable_prefix_caching: bool
-    backend: str = "vllm"  # vllm | sglang
-    additional_flags: Dict[str, any] = field(default_factory=dict)
+    preset: str = "default"
+    image: Optional[str] = None
+    sif: Optional[str] = None
+    provider_name: Optional[str] = None
+    provider_base_url: Optional[str] = None
+    provider_api_key_env: Optional[str] = None
+    proxy_api_key: Optional[str] = None
+    proxy_agent_provider: Optional[str] = None
+    additional_flags: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
             "config_id": self.config_id,
+            "backend": self.backend,
+            "endpoint": self.endpoint,
+            "bind_host": self.bind_host,
+            "client_host": self.client_host,
+            "port": self.port,
+            "gpu_mem_util": self.gpu_mem_util,
             "preset": self.preset,
             "max_num_seqs": self.max_num_seqs,
             "enable_prefix_caching": self.enable_prefix_caching,
-            "backend": self.backend,
+            "image": self.image,
+            "sif": self.sif,
+            "provider_name": self.provider_name,
+            "provider_base_url": self.provider_base_url,
+            "provider_api_key_env": self.provider_api_key_env,
+            "proxy_api_key": self.proxy_api_key,
+            "proxy_agent_provider": self.proxy_agent_provider,
             "additional_flags": self.additional_flags,
         }
 
@@ -74,7 +114,7 @@ class ConditionConfig:
     description: str
     model: ModelConfig
     agent: Optional[AgentConfig] = None
-    ablation_flags: Dict[str, any] = field(default_factory=dict)
+    ablation_flags: Dict[str, Any] = field(default_factory=dict)
     
     def to_dict(self) -> dict:
         d = {
@@ -104,7 +144,7 @@ class RunConfig:
     wall_clock_budget_seconds: int
     
     workspace_root: str = "/testbed"
-    output_dir: Path = Path("data/runs")
+    output_dir: Path = Path("data/experiments/_manual/runs/_unknown")
     
     def compute_run_id(self) -> str:
         """Deterministic run ID from hash of key parameters."""
@@ -180,27 +220,23 @@ class SweepConfig:
 def load_composed_config(
     app_path: Path,
     harness_path: Path,
-    backend_path: Path,
+    model_path: Path,
+    serving_path: Path,
 ) -> SweepConfig:
-    """Compose a SweepConfig from three independent JSON configs.
+    """Compose a SweepConfig from four independent JSON configs.
 
     Folder convention:
         config/application/<app>/<exp>.json   instances/repo_mapping/container/budget/output
-        config/harness/<name>.json             model + (optional) openclaw block +
-                                                conditions[] (condition_id/type + agent)
-        config/backend/<engine>/<name>.json   engine runtime knobs (TP/GPU/port/...)
-                                                + serving_configs presets; no model
+        config/harness/<name>.json             harness/runtime behavior + conditions[]
+        config/model/<name>.json               model identity and model-level limits
+        config/serving/<engine>/<name>.json    serving endpoint / engine deployment
 
-    Model selection lives ONLY in the harness JSON — single source of truth
-    for which model the run targets. The driver passes model.name down to
-    every Condition; serve.sh and applications/swebench/app.py also read
-    it from there to keep vLLM, OC provider config, and the agent's model
-    selection in lockstep.
+    Each call writes under:
 
-    Each call timestamps the output directory under the app JSON's
-    `output_dir`. Override via `AB_RUN_STAMP` for stable / human-named runs.
-    On cluster runs, `AB_EXPERIMENT_DIR` can group all phase outputs under
-    `<experiment>/runs/<app-output-leaf>`.
+        data/experiments/<AB_RUN_STAMP>/runs/<app-output-leaf>/
+
+    Override `AB_RUN_STAMP` for stable / human-named runs, or
+    `AB_EXPERIMENT_DIR` to move the experiment root.
 
     `_doc` keys at the top level of any file are ignored — they're a
     JSON-friendly stand-in for the comments YAML would otherwise allow.
@@ -209,38 +245,19 @@ def load_composed_config(
     from zoneinfo import ZoneInfo
     import os as _os
 
-    with open(app_path) as f:
-        app = json.load(f) or {}
-    with open(harness_path) as f:
-        harness = json.load(f) or {}
-    with open(backend_path) as f:
-        backend = json.load(f) or {}
+    app = _read_json(app_path)
+    harness = _read_json(harness_path)
+    serving = load_serving_config(serving_path)
+    model = load_model_config(model_path, serving=serving)
 
-    # --- model (from harness) ----------------------------------------
-    if "model" not in harness:
+    if "model" in harness:
         raise ValueError(
-            f"harness config {harness_path} is missing a top-level `model` block "
-            "(model selection lives in the harness config, not the backend)"
+            f"harness config {harness_path} still has a top-level `model` block; "
+            "model identity now belongs in config/model/*.json"
         )
-    model_data = harness["model"]
-    model = ModelConfig(
-        name=model_data["name"],
-        endpoint=model_data["endpoint"],
-        temperature=model_data.get("temperature", 0.0),
-        max_tokens=model_data.get("max_tokens", 4096),
-    )
 
-    # --- serving configs (from backend) ------------------------------
-    serving_configs = []
-    for sc in backend.get("serving_configs", []):
-        serving_configs.append(ServingConfig(
-            config_id=sc["config_id"],
-            preset=sc["preset"],
-            max_num_seqs=sc["max_num_seqs"],
-            enable_prefix_caching=sc["enable_prefix_caching"],
-            backend=backend.get("backend", "vllm"),
-            additional_flags=sc.get("additional_flags", {}),
-        ))
+    _validate_model_config(model, model_path=model_path)
+    serving_configs = [serving]
 
     # --- conditions (from harness) -----------------------------------
     conditions = []
@@ -278,7 +295,7 @@ def load_composed_config(
     if experiment_dir:
         output_dir = Path(experiment_dir) / "runs" / app_output_dir.name
     else:
-        output_dir = app_output_dir / stamp
+        output_dir = Path("data/experiments") / stamp / "runs" / app_output_dir.name
 
     return SweepConfig(
         sweep_name=app["sweep_name"],
@@ -294,3 +311,196 @@ def load_composed_config(
         parallel_limit_gpu=app.get("parallel_limit_gpu", 1),
         parallel_limit_cpu_cores=app.get("parallel_limit_cpu_cores", 8),
     )
+
+
+def _read_json(path: Path) -> dict:
+    with open(path) as f:
+        return json.load(f) or {}
+
+
+def _endpoint_value(value: Any) -> Optional[str]:
+    if not value:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        direct = value.get("base_url") or value.get("url")
+        if direct:
+            return direct
+        scheme = value.get("scheme", "http")
+        host = value.get("client_host") or value.get("host")
+        if not host:
+            return None
+        port = int(value.get("port", 443 if scheme == "https" else 80))
+        path = value.get("path", "/v1")
+        if not path.startswith("/"):
+            path = "/" + path
+        return urlunparse((scheme, f"{host}:{port}", path, "", "", ""))
+    return None
+
+
+def _active_provider(serving_data: dict) -> dict:
+    provider = serving_data.get("provider") or {}
+    if not isinstance(provider, dict):
+        return {}
+    providers = provider.get("providers")
+    if isinstance(providers, dict):
+        active = provider.get("active") or provider.get("name")
+        if active:
+            selected = providers.get(active)
+            if isinstance(selected, dict):
+                merged = dict(selected)
+                merged.setdefault("name", active)
+                return merged
+    return provider
+
+
+def _endpoint_from_serving(serving_data: dict) -> str:
+    endpoint = serving_data.get("endpoint") or {}
+    endpoint_direct = _endpoint_value(endpoint)
+    if endpoint_direct:
+        return endpoint_direct
+    if not isinstance(endpoint, dict):
+        endpoint = {}
+    scheme = endpoint.get("scheme", "http")
+    client_host = endpoint.get("client_host") or endpoint.get("host") or "127.0.0.1"
+    port = int(endpoint.get("port", 443 if scheme == "https" else 8000))
+    path = endpoint.get("path", "/v1")
+    if not path.startswith("/"):
+        path = "/" + path
+    return urlunparse((scheme, f"{client_host}:{port}", path, "", "", ""))
+
+
+def load_serving_config(serving_path: Path) -> ServingConfig:
+    data = _read_json(serving_path)
+    serving_data = data.get("serving")
+    if not isinstance(serving_data, dict):
+        raise ValueError(f"serving config {serving_path} is missing `serving`")
+
+    endpoint = serving_data.get("endpoint") or {}
+    endpoint_obj = endpoint if isinstance(endpoint, dict) else {}
+    runtime = serving_data.get("runtime") or {}
+    scheduler = serving_data.get("scheduler") or {}
+    proxy = serving_data.get("proxy") or {}
+    provider = _active_provider(serving_data)
+    backend = serving_data["backend"]
+    if backend in {"provider", "api"}:
+        raise ValueError(
+            f"serving config {serving_path} uses unsupported backend "
+            f"{backend!r}; use backend 'litellm' for provider-backed models"
+        )
+
+    port = int(endpoint_obj.get("port", runtime.get("port", 8000)))
+    bind_host = endpoint_obj.get("bind_host", endpoint_obj.get("host", "0.0.0.0"))
+    client_host = endpoint_obj.get("client_host", "127.0.0.1")
+
+    return ServingConfig(
+        config_id=serving_data["config_id"],
+        backend=backend,
+        endpoint=_endpoint_from_serving(serving_data),
+        bind_host=bind_host,
+        client_host=client_host,
+        port=port,
+        gpu_mem_util=float(runtime.get("gpu_mem_util", 0.90)),
+        preset=serving_data.get("preset", "default"),
+        max_num_seqs=int(scheduler.get("max_num_seqs", 128)),
+        enable_prefix_caching=bool(scheduler.get("enable_prefix_caching", True)),
+        image=serving_data.get("image"),
+        sif=serving_data.get("sif"),
+        provider_name=provider.get("name") or provider.get("provider"),
+        provider_base_url=provider.get("base_url") or provider.get("url"),
+        provider_api_key_env=provider.get("api_key_env"),
+        proxy_api_key=(
+            proxy.get("api_key", "sk-agent-bench-local")
+            if backend == "litellm" else None
+        ),
+        proxy_agent_provider=proxy.get("agent_provider"),
+        additional_flags=serving_data.get("additional_flags", {}),
+    )
+
+
+def load_model_config(model_path: Path, *, serving: Optional[ServingConfig] = None) -> ModelConfig:
+    data = _read_json(model_path)
+    model_data = data.get("model")
+    if not isinstance(model_data, dict):
+        raise ValueError(f"model config {model_path} is missing `model`")
+
+    provider = model_data.get("provider", "custom")
+    if serving and serving.provider_name and (not provider or provider == "custom"):
+        provider = serving.provider_name
+    api_key = model_data.get("api_key", "EMPTY")
+    if serving and serving.proxy_api_key:
+        api_key = serving.proxy_api_key
+    if serving and serving.proxy_agent_provider:
+        provider = serving.proxy_agent_provider
+
+    return ModelConfig(
+        config_id=model_data["config_id"],
+        name=model_data["name"],
+        endpoint=serving.endpoint if serving else model_data.get("endpoint", ""),
+        temperature=float(model_data.get("temperature", 0.0)),
+        max_tokens=int(model_data.get("max_tokens", 8192)),
+        context_window=int(model_data.get("context_window", 0)),
+        provider=provider,
+        api_key=api_key,
+        litellm_model=model_data.get("litellm_model"),
+        tool_call_parser=model_data.get("tool_call_parser"),
+        reasoning_parser=model_data.get("reasoning_parser"),
+    )
+
+
+def _validate_model_config(
+    model: ModelConfig,
+    *,
+    model_path: Path,
+) -> None:
+    if model.context_window <= 0:
+        raise ValueError(
+            f"{model_path} model.context_window must be set to a positive integer"
+        )
+    if model.max_tokens > model.context_window:
+        raise ValueError(
+            f"{model_path} model.max_tokens={model.max_tokens} exceeds "
+            f"model.context_window={model.context_window}"
+        )
+
+
+def load_active_model_and_serving(
+    *,
+    kit_root: Optional[str] = None,
+) -> tuple[ModelConfig, ServingConfig]:
+    """Load model + serving paths injected by the driver or shell launcher."""
+    import os
+
+    root = Path(kit_root or os.environ.get("KIT_ROOT", os.getcwd()))
+
+    def _resolve(path: str) -> Path:
+        p = Path(path)
+        return p if p.is_absolute() else root / p
+
+    model_path = os.environ.get("AB_MODEL_CONFIG")
+    serving_path = os.environ.get("AB_SERVING_CONFIG")
+    if not model_path:
+        model_profile = os.environ.get("MODEL_PROFILE", "qwen36_27b")
+        model_path = str(root / "config" / "model" / f"{model_profile}.json")
+    if not serving_path:
+        serving_profile = os.environ.get("SERVING", "vllm/default")
+        serving_path = str(root / "config" / "serving" / f"{serving_profile}.json")
+
+    model_path_p = _resolve(model_path)
+    serving_path_p = _resolve(serving_path)
+
+    serving = load_serving_config(serving_path_p)
+    model = load_model_config(model_path_p, serving=serving)
+    _validate_model_config(model, model_path=model_path_p)
+    return model, serving
+
+
+def endpoint_for_container(endpoint: str, host_address: str) -> str:
+    """Rewrite a host-perspective endpoint for use inside a harness container."""
+    for marker in ("://localhost:", "://127.0.0.1:", "://0.0.0.0:"):
+        if marker in endpoint:
+            scheme, rest = endpoint.split("://", 1)
+            _, tail = rest.split(":", 1)
+            return f"{scheme}://{host_address}:{tail}"
+    return endpoint

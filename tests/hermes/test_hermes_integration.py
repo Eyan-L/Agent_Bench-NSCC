@@ -50,7 +50,7 @@ def test_hermes_app_uses_external_task_container_and_bridge():
     assert '"HERMES_INFERENCE_PROVIDER": provider' in app
     assert "HERMES_AGENT_BENCH_EVENTS" in app
     assert 'f"{_STATE_DIR_IN_HERMES}/events.jsonl"' in app
-    assert "MINIMAX_CN_API_KEY" in app
+    assert "MINIMAX_API_KEY" in app
     assert "/var/run/docker.sock" not in app
 
 
@@ -61,9 +61,9 @@ def test_hermes_driver_and_condition_are_registered():
     assert "SingularityContainer()" in driver
     assert "SWEBenchHermesHarness(swebench_root, container=container)" in driver
     condition = (ROOT / "applications/swebench/conditions/hermes_agent.py").read_text()
-    assert '_resolve_provider()' in condition
+    assert '_resolve_provider(self.model_config)' in condition
     assert '"--provider", provider' in condition
-    cfg = (ROOT / "config/harness/hermes_27b.json").read_text()
+    cfg = (ROOT / "config/harness/hermes_swebench.json").read_text()
     assert '"harness": "hermes"' in cfg
     assert '"condition_type": "hermes_agent"' in cfg
 
@@ -82,7 +82,7 @@ def test_hermes_condition_writes_agent_namespace_spans(tmp_path):
         start_ns=1_000_000_000,
         end_ns=2_000_000_000,
         model_name="MiniMax-M2.7",
-        provider="minimax-cn",
+        provider="minimax",
         exit_code=1,
     )
 
@@ -93,7 +93,7 @@ def test_hermes_condition_writes_agent_namespace_spans(tmp_path):
     ]
 
     model_attrs = spans[0]["attrs"]
-    assert model_attrs["agent.provider"] == "minimax-cn"
+    assert model_attrs["agent.provider"] == "minimax"
     assert model_attrs["agent.model"] == "MiniMax-M2.7"
     assert model_attrs["agent.tokens.total"] == 0
 
@@ -116,7 +116,7 @@ def test_hermes_condition_turns_agent_events_into_usage_and_tool_spans(tmp_path)
             "type": "model.usage",
             "start_ns": 1_000_000_000,
             "end_ns": 2_000_000_000,
-            "provider": "minimax-cn",
+            "provider": "minimax",
             "model": "MiniMax-M2.7",
             "input_tokens": 11,
             "output_tokens": 7,
@@ -158,7 +158,7 @@ def test_hermes_condition_turns_agent_events_into_usage_and_tool_spans(tmp_path)
         "agent.model.usage",
         "agent.tool.call",
     ]
-    assert spans[0]["attrs"]["agent.provider"] == "minimax-cn"
+    assert spans[0]["attrs"]["agent.provider"] == "minimax"
     assert spans[0]["attrs"]["agent.model"] == "MiniMax-M2.7"
     assert spans[0]["attrs"]["agent.tokens.input"] == 11
     assert spans[0]["attrs"]["agent.tokens.output"] == 7

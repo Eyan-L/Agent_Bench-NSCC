@@ -32,12 +32,31 @@
 
 set -euo pipefail
 
-PRESET="default"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+KIT_ROOT="${KIT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+
+MODEL_CFG="${VLLM_MODEL_CONFIG:-${AB_MODEL_CONFIG:-}}"
+if [[ -z "$MODEL_CFG" && -n "${MODEL_PROFILE:-}" ]]; then
+    MODEL_CFG="$KIT_ROOT/config/model/${MODEL_PROFILE}.json"
+fi
+if [[ -n "$MODEL_CFG" && -f "$MODEL_CFG" ]]; then
+    eval "$(python3 "$KIT_ROOT/scripts/load_model_env.py" "$MODEL_CFG")"
+fi
+SERVING_CFG="${VLLM_SERVING_CONFIG:-${AB_SERVING_CONFIG:-}}"
+if [[ -z "$SERVING_CFG" && -n "${SERVING:-}" ]]; then
+    SERVING_CFG="$KIT_ROOT/config/serving/${SERVING}.json"
+fi
+if [[ -n "$SERVING_CFG" && -f "$SERVING_CFG" ]]; then
+    eval "$(python3 "$KIT_ROOT/scripts/load_serving_env.py" "$SERVING_CFG")"
+fi
+
+PRESET="${SERVING_PRESET:-default}"
 MODEL="${MODEL:-Qwen/Qwen3.6-35B-A3B}"
 TP="${TP:-2}"
 PORT="${PORT:-8000}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-${MODEL_CONTEXT_WINDOW:-131072}}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"
+BIND_HOST="${BIND_HOST:-0.0.0.0}"
 
 VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.11.0}"
 VLLM_CONTAINER_NAME="${VLLM_CONTAINER_NAME:-oc-vllm-serve}"
@@ -150,9 +169,10 @@ fi
 #   hermes        Qwen2.5-Instruct, Hermes models — `<tool_call>{...}</tool_call>`
 #   ""            no parser; tools markers stay in `content` (OC plugin parses them)
 TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen3_coder}"
+REASONING_PARSER="${REASONING_PARSER-}"
 
 BASE_FLAGS=(
-    --host 0.0.0.0
+    --host "$BIND_HOST"
     --port "$PORT"
     --tensor-parallel-size "$TP"
     --max-model-len "$MAX_MODEL_LEN"
@@ -161,6 +181,9 @@ BASE_FLAGS=(
 )
 if [[ -n "$TOOL_CALL_PARSER" ]]; then
     BASE_FLAGS+=(--enable-auto-tool-choice --tool-call-parser "$TOOL_CALL_PARSER")
+fi
+if [[ -n "$REASONING_PARSER" ]]; then
+    BASE_FLAGS+=(--reasoning-parser "$REASONING_PARSER")
 fi
 # Qwen3 thinking-mode routes the model's chain-of-thought to a separate
 # `reasoning` field. Most agent harnesses read `content` only, so they see
@@ -181,8 +204,9 @@ declare -a PRESET_FLAGS
 CONFIG_ID=""
 case "$PRESET" in
     default)
-        CONFIG_ID="vllm-default"
-        PRESET_FLAGS=(--max-num-seqs 128 --enable-prefix-caching) ;;
+        CONFIG_ID="${SERVING_CONFIG_ID:-vllm-default}"
+        PRESET_FLAGS=(--max-num-seqs "${MAX_NUM_SEQS:-128}")
+        [[ "${ENABLE_PREFIX_CACHING:-1}" == "1" ]] && PRESET_FLAGS+=(--enable-prefix-caching) ;;
     latency)
         CONFIG_ID="vllm-latency"
         PRESET_FLAGS=(--max-num-seqs 8 --enable-prefix-caching --scheduling-policy priority) ;;

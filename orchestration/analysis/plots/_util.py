@@ -1,7 +1,8 @@
 """Shared helpers for the RQ1/RQ2/RQ3 plotting scripts.
 
 Bridges three things:
-  1. Per-run output files under data/runs/<sweep>/<run_id>/ (steps.jsonl,
+  1. Per-run output files under
+     data/experiments/<stamp>/runs/<sweep>/<run_id>/ (steps.jsonl,
      util.jsonl, verdict.json, manifest.json).
   2. The metric computers in orchestration/analysis/{composition,resource,evaluation}.py
      which already produce the right metrics from a (steps_df, telemetry_df,
@@ -239,8 +240,8 @@ def load_util_telemetry(run_dir: Path) -> pd.DataFrame:
 
 def list_run_dirs(runs_dir: Path) -> List[Path]:
     """Walk under runs_dir and return any directory containing a steps.jsonl
-    — works for both flat layouts (data/runs/<run_id>/) and nested-by-sweep
-    layouts (data/runs/phase1/<run_id>/)."""
+    — works for direct sweep dirs and experiment-level
+    data/experiments/<stamp>/runs trees."""
     runs_dir = Path(runs_dir)
     if not runs_dir.exists():
         return []

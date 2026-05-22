@@ -10,8 +10,8 @@
 #
 # Usage:
 #   pbs/warm_oc_plugins.sh \
-#     --sif <oc_runtime.sif> \
-#     --overlay <oc_runtime_patches.img> \
+#     --sif <openclaw_patched_runtime.sif> \
+#     [--overlay <optional_patch_overlay.img>] \
 #     [--cache <dir>] \
 #     [--timeout-seconds 240]
 #

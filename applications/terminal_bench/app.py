@@ -67,6 +67,7 @@ from applications.swebench.app import (
     _oc_sandbox_name,
 )
 from orchestration.dispatcher.openclaw_remote import OpenClawRemoteDispatcher
+from orchestration.runner.config import endpoint_for_container, load_active_model_and_serving
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,7 @@ logger = logging.getLogger(__name__)
 _THIS_DIR = Path(__file__).resolve().parent
 _BOOTSTRAP_SRC = _THIS_DIR / "openclaw" / "agents" / "BOOTSTRAP.md"
 _VALIDATE_SRC = _THIS_DIR / "openclaw" / "skills" / "verify" / "_oc_validate.sh"
+_OPENAI_CHAT_COMPLETIONS_API = "openai-completions"
 
 
 def _seed_workspace_helpers(app_dir: Path, instance_data: Dict) -> None:
@@ -179,7 +181,7 @@ class TerminalBenchDockerHarness:
         """Pull the first registered agent's id out of the active harness
         config's `openclaw.agents.list[]`. Returns None when the config has
         no openclaw block or no agents."""
-        p = os.environ.get("OC_HARNESS_YAML")
+        p = os.environ.get("AB_HARNESS_CONFIG")
         if not p or not os.path.isfile(p):
             return None
         try:
@@ -254,7 +256,7 @@ class TerminalBenchDockerHarness:
 
         # Whether to bring up the OC container + bridge — driven by whether
         # the active harness config has an `openclaw` block.
-        harness_cfg_path = os.environ.get("OC_HARNESS_YAML")
+        harness_cfg_path = os.environ.get("AB_HARNESS_CONFIG")
         use_openclaw = self._has_openclaw_block(harness_cfg_path)
         if use_openclaw:
             r = subprocess.run(
@@ -506,13 +508,13 @@ class TerminalBenchDockerHarness:
             shutil.copytree(override, state_dir)
         else:
             harness_path = os.environ.get(
-                "OC_HARNESS_YAML",
-                os.path.join(kit_root, "config/harness/openclaw_27b.json"),
+                "AB_HARNESS_CONFIG",
+                os.path.join(kit_root, "config/harness/openclaw_terminal_bench.json"),
             )
             if not os.path.isfile(harness_path):
                 raise FileNotFoundError(
                     f"harness config not found at {harness_path} "
-                    "(set OC_HARNESS_YAML or OC_HOST_STATE_TEMPLATE)."
+                    "(set AB_HARNESS_CONFIG or OC_HOST_STATE_TEMPLATE)."
                 )
             with open(harness_path) as fh:
                 harness_cfg = json.load(fh) or {}
@@ -522,13 +524,20 @@ class TerminalBenchDockerHarness:
                     f"harness config {harness_path} has no `openclaw` block "
                     "(required when use_openclaw=True)."
                 )
-            model_name = (harness_cfg.get("model") or {}).get("name")
-            if model_name:
-                providers = oc_cfg.setdefault("models", {}).setdefault("providers", {})
-                vllm_p = providers.setdefault("vllm", {})
-                vllm_p["models"] = [{"id": model_name, "name": model_name}]
-                agents_d = oc_cfg.setdefault("agents", {}).setdefault("defaults", {})
-                agents_d.setdefault("model", {})["primary"] = f"vllm/{model_name}"
+            model_cfg, _serving_cfg = load_active_model_and_serving(kit_root=kit_root)
+            providers = oc_cfg.setdefault("models", {}).setdefault("providers", {})
+            vllm_p = providers.setdefault("vllm", {})
+            vllm_p["api"] = _OPENAI_CHAT_COMPLETIONS_API
+            vllm_p.setdefault("apiKey", model_cfg.api_key or "sk-dummy")
+            vllm_p["models"] = [{
+                "id": model_cfg.name,
+                "name": model_cfg.name,
+                "api": _OPENAI_CHAT_COMPLETIONS_API,
+                "contextWindow": model_cfg.context_window,
+                "maxTokens": model_cfg.max_tokens,
+            }]
+            agents_d = oc_cfg.setdefault("agents", {}).setdefault("defaults", {})
+            agents_d.setdefault("model", {})["primary"] = f"vllm/{model_cfg.name}"
             with open(state_dir / "openclaw.json", "w") as fh:
                 json.dump(oc_cfg, fh, indent=2)
 
@@ -584,12 +593,18 @@ class TerminalBenchDockerHarness:
             cfg.setdefault("skills", {}).setdefault("load", {})["extraDirs"] = [
                 "/root/.openclaw/skills"
             ]
+        model_cfg, _serving_cfg = load_active_model_and_serving(kit_root=kit_root)
         vllm_endpoint = os.environ.get(
-            "OC_VLLM_BASE_URL", "http://vllm-host:8000/v1"
+            "OC_VLLM_BASE_URL",
+            endpoint_for_container(model_cfg.endpoint, "vllm-host"),
         )
         providers = cfg.setdefault("models", {}).setdefault("providers", {})
-        if "vllm" in providers:
-            providers["vllm"]["baseUrl"] = vllm_endpoint
+        vllm_provider = providers.setdefault("vllm", {})
+        vllm_provider["api"] = _OPENAI_CHAT_COMPLETIONS_API
+        vllm_provider["baseUrl"] = vllm_endpoint
+        for model in vllm_provider.get("models") or []:
+            if isinstance(model, dict):
+                model["api"] = _OPENAI_CHAT_COMPLETIONS_API
         otel_cfg = (cfg.get("diagnostics") or {}).get("otel") or {}
         if otel_cfg.get("enabled"):
             cfg["diagnostics"]["otel"]["endpoint"] = os.environ.get(

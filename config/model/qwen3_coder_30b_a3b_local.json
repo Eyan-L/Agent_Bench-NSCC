@@ -1,0 +1,14 @@
+{
+  "_doc": "Locally mounted Qwen3-Coder-30B-A3B-Instruct profile.",
+  "model": {
+    "config_id": "qwen3_coder_30b_a3b_local",
+    "name": "/mnt/network_drive/shared_models/Qwen3-Coder-30B-A3B-Instruct",
+    "provider": "custom",
+    "api_key": "EMPTY",
+    "temperature": 0.0,
+    "max_tokens": 8192,
+    "context_window": 262144,
+    "tool_call_parser": "qwen3_coder",
+    "reasoning_parser": "qwen3"
+  }
+}

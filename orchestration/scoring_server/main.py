@@ -139,15 +139,8 @@ def _run_evaluation(job: _Job, swebench_root: Path, dataset: str) -> None:
             job.state.finished_at = time.time()
             return
 
-        if proc.returncode != 0:
-            job.state.status = "failed"
-            job.state.error = (
-                f"run_evaluation exit {proc.returncode}: {proc.stderr[-800:]}"
-            )
-            job.state.finished_at = time.time()
-            return
-
-        # Locate report.
+        # Locate report even if run_evaluation exits non-zero. SWE-bench can
+        # write a valid report and then fail during container teardown.
         candidates = [
             swebench_root / "logs" / "run_evaluation" / run_id /
             req.model_name_or_path / req.instance_id / "report.json",
@@ -166,6 +159,14 @@ def _run_evaluation(job: _Job, swebench_root: Path, dataset: str) -> None:
                     if matches:
                         report_path = matches[0]
                         break
+
+        if proc.returncode != 0 and report_path is None:
+            job.state.status = "failed"
+            job.state.error = (
+                f"run_evaluation exit {proc.returncode}: {proc.stderr[-800:]}"
+            )
+            job.state.finished_at = time.time()
+            return
 
         if report_path is None:
             job.state.status = "failed"

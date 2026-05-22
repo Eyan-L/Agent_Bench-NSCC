@@ -48,6 +48,38 @@ logger = logging.getLogger(__name__)
 # The startscript shim. Runs as the instance's main process; the instance
 # stays alive while sleep is running.
 _KEEPALIVE_STARTSCRIPT = "#!/bin/sh\nexec sleep infinity\n"
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _set_singularity_env(out: dict[str, str], k: str, v: str) -> None:
+    """Inject one env var through SINGULARITYENV_*.
+
+    `singularity exec --env` parses commas as assignment separators on some
+    NSCC installs; OTEL_RESOURCE_ATTRIBUTES and similar values then become
+    broken shell fragments inside /.inject-singularity-env.sh. The parent
+    environment form preserves the value verbatim.
+    """
+    if k == "HOME":
+        return
+    if not _ENV_NAME_RE.match(k):
+        raise ValueError(f"invalid environment variable name for singularity: {k!r}")
+    out[f"SINGULARITYENV_{k}"] = str(v)
+
+
+def _subprocess_env(extra: Optional[dict[str, str]] = None) -> dict[str, str]:
+    """Environment for singularity subprocesses.
+
+    Keep most caller-provided environment intact, but never let
+    SINGULARITYENV_HOME leak in from a parent shell. Singularity refuses that
+    variable and prints a warning on every exec; HOME is handled explicitly by
+    the instance `--home` flag instead.
+    """
+    env = os.environ.copy()
+    env.pop("SINGULARITYENV_HOME", None)
+    if extra:
+        env.update(extra)
+        env.pop("SINGULARITYENV_HOME", None)
+    return env
 
 
 class SingularityContainer(Container):
@@ -79,7 +111,7 @@ class SingularityContainer(Container):
         # singularity backend matches docker semantics: env set at container
         # creation is visible to subsequent execs. `singularity exec
         # instance://<name>` does *not* inherit the instance's start-time
-        # env on its own, so we stash and re-pass via --env. (Distinct
+        # env on its own, so we stash and re-pass via SINGULARITYENV_*. (Distinct
         # from `_instance_env()` below, which produces SINGULARITYENV_*
         # for the initial instance start.)
         self._handle_env: dict[str, dict[str, str]] = {}
@@ -101,7 +133,10 @@ class SingularityContainer(Container):
         if not p.is_file():
             raise RuntimeError(
                 f"singularity image not found: {image}\n"
-                "For OC: build it once with `bash scripts/execution_pbs/build_oc_sif.sh`.\n"
+                "For agent runtime SIFs: build with "
+                "`build_oc_sif.sh`, `build_oh_sif.sh`, or `build_hm_sif.sh` "
+                "under `scripts/execution_pbs/`, or enable STAGE_OC_CHECK in "
+                "`run_benchmark.pbs`.\n"
                 "For SWE-bench task sifs: pull with `scripts/execution_pbs/pull_images.sh`."
             )
 
@@ -147,11 +182,9 @@ class SingularityContainer(Container):
         ignores it; we set HOME via --home <hostdir>:<containerpath> in start()
         instead.
         """
-        out = os.environ.copy()
+        out = _subprocess_env()
         for k, v in env.items():
-            if k == "HOME":
-                continue
-            out[f"SINGULARITYENV_{k}"] = v
+            _set_singularity_env(out, k, v)
         return out
 
     def start(self, spec: ContainerSpec) -> ContainerHandle:
@@ -210,12 +243,9 @@ class SingularityContainer(Container):
             exec_cmd: list[str] = ["singularity", "exec"]
             if spec.workdir:
                 exec_cmd += ["--pwd", spec.workdir]
+            exec_env = _subprocess_env()
             for k, v in spec.env.items():
-                # HOME is taken care of by --home on the instance; passing it
-                # again on exec just produces the "not permitted" warning.
-                if k == "HOME":
-                    continue
-                exec_cmd += ["--env", f"{k}={v}"]
+                _set_singularity_env(exec_env, k, v)
             exec_cmd += [f"instance://{spec.name}"]
             if spec.entrypoint:
                 exec_cmd += [spec.entrypoint]
@@ -226,6 +256,7 @@ class SingularityContainer(Container):
                     exec_cmd,
                     stdout=logf, stderr=logf, stdin=subprocess.DEVNULL,
                     start_new_session=True,  # own PGID so we can SIGTERM the tree
+                    env=exec_env,
                 )
             self._main_pids[spec.name] = proc.pid
 
@@ -245,6 +276,7 @@ class SingularityContainer(Container):
         subprocess.run(
             ["singularity", "instance", "stop", h.name],
             capture_output=True, check=False, timeout=60,
+            env=_subprocess_env(),
         )
         self._handle_env.pop(h.name, None)
 
@@ -274,15 +306,13 @@ class SingularityContainer(Container):
             merged.update(stashed)
         if env:
             merged.update(env)
+        exec_env = _subprocess_env()
         for k, v in merged.items():
-            # HOME comes from the instance's --home flag — passing it
-            # again produces a noisy "not permitted" warning per exec.
-            if k == "HOME":
-                continue
-            cmd += ["--env", f"{k}={v}"]
+            _set_singularity_env(exec_env, k, v)
         cmd += [f"instance://{h.name}", *argv]
         r = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, input=input_text,
+            env=exec_env,
         )
         if check and r.returncode != 0:
             raise RuntimeError(
@@ -342,6 +372,7 @@ class SingularityContainer(Container):
                 ["singularity", "exec", f"instance://{h.name}",
                  "tar", "-C", src_parent, "-cf", "-", src_base],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=_subprocess_env(),
             )
             consumer = subprocess.Popen(
                 ["tar", "-C", str(tmp_extract), "-xf", "-"],
@@ -394,6 +425,7 @@ class SingularityContainer(Container):
             ["singularity", "exec", image,
              "tar", "-C", src, "-cf", "-", "."],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=_subprocess_env(),
         )
         consumer = subprocess.Popen(
             ["tar", "-C", str(dst_host), "-xf", "-"],
@@ -429,6 +461,7 @@ class SingularityContainer(Container):
         r = subprocess.run(
             ["singularity", "instance", "list", "--json", h.name],
             capture_output=True, text=True,
+            env=_subprocess_env(),
         )
         if r.returncode != 0:
             return False

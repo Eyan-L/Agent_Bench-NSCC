@@ -509,7 +509,7 @@
   },
   "container_image": "hongrui0/dr-sandbox:1.0",
   "wall_clock_budget_seconds": 3600,
-  "output_dir": "data/runs/dr_full100",
+  "output_dir": "dr_full100",
   "seeds": [
     42
   ],

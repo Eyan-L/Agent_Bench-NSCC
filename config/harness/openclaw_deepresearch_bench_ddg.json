@@ -1,12 +1,6 @@
 {
-  "_doc": "OpenClaw harness for DeepResearch-Bench against the locally-mounted Qwen3.6-35B-A3B (MoE, 3B active, 256K context). Web search via DuckDuckGo HTML scraping plugin — zero-config, no API key, but unstable: DDG aggressively challenges burst traffic from a single IP (3/8 fail in our smoke baseline; IP can enter a multi-hour cooldown after sustained challenges). The harnesses/openclaw/patch/openclaw-ddg-serial.patch serializes requests with a 400-800ms jittered gap to stay under DDG's burst threshold; even so, expect occasional failures and IP cooldowns under heavy use. For production/long runs, use deepresearch_35b_brave.json instead. DR-specific: agents.defaults.workspace=/workspace, agent id `deep_researcher`, no `verify` skill, agent.max_time_seconds=3000s.",
+  "_doc": "OpenClaw DeepResearch-Bench harness using DuckDuckGo HTML search. Key-free but less stable under burst traffic.",
   "harness": "openclaw",
-  "model": {
-    "name": "/mnt/network_drive/shared_models/hub/models--Qwen--Qwen3.6-35B-A3B/snapshots/995ad96eacd98c81ed38be0c5b274b04031597b0",
-    "endpoint": "http://localhost:8000/v1",
-    "temperature": 0.3,
-    "max_tokens": 4096
-  },
   "openclaw": {
     "gateway": {
       "mode": "local",
@@ -70,34 +64,17 @@
     },
     "plugins": {
       "entries": {
-        "vllm":             {"enabled": true},
-        "memory-core":      {"enabled": true},
+        "vllm": {"enabled": true},
+        "memory-core": {"enabled": true},
         "diagnostics-otel": {"enabled": true},
-        "duckduckgo":       {"enabled": true, "config": {"webSearch": {"region": "us-en", "safeSearch": "moderate"}}},
-        "anthropic":        {"enabled": false},
-        "openai":           {"enabled": false},
-        "openrouter":       {"enabled": false},
-        "litellm":          {"enabled": false},
-        "lmstudio":         {"enabled": false},
-        "xai":              {"enabled": false},
-        "groq":             {"enabled": false},
-        "together":         {"enabled": false},
-        "fireworks":        {"enabled": false},
-        "deepseek":         {"enabled": false},
-        "moonshot":         {"enabled": false},
-        "mistral":          {"enabled": false},
-        "ollama":           {"enabled": false},
-        "huggingface":      {"enabled": false},
-        "minimax":          {"enabled": false},
-        "perplexity":       {"enabled": false},
-        "qwen":             {"enabled": false}
-      }
-    },
-    "models": {
-      "providers": {
-        "vllm": {
-          "baseUrl": "http://localhost:8000/v1",
-          "apiKey": "sk-dummy"
+        "duckduckgo": {
+          "enabled": true,
+          "config": {
+            "webSearch": {
+              "region": "us-en",
+              "safeSearch": "moderate"
+            }
+          }
         }
       }
     },

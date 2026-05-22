@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from applications.swebench.app import _force_rmtree, _oc_sandbox_name
+from applications.swebench.scoring import score_via_scoring_server, score_via_singularity
 from orchestration.container import (
     Container,
     ContainerHandle,
@@ -46,6 +47,7 @@ from orchestration.container import (
     Mount,
 )
 from orchestration.dispatcher.hermes import HermesDispatcher
+from orchestration.runner.config import endpoint_for_container, load_active_model_and_serving
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +101,7 @@ class SWEBenchHermesHarness:
         self.workspace_base.mkdir(parents=True, exist_ok=True)
         self.state_base = self.workspace_base.parent / "states"
         self.state_base.mkdir(parents=True, exist_ok=True)
+        self._workspace_by_container: Dict[str, Path] = {}
 
     def _default_hm_image(self) -> str:
         if self.container.backend_id == "singularity":
@@ -171,7 +174,7 @@ class SWEBenchHermesHarness:
             },
             mounts=(Mount(host=ws_host, container=_TASK_WORKSPACE, mode="rw"),),
             workdir=_TASK_WORKSPACE,
-            env={"PATH": task_path},
+            env={"PATH": task_path, "HOME": "/root"},
             entrypoint="sleep",
             command=("infinity",),
         )
@@ -194,11 +197,11 @@ class SWEBenchHermesHarness:
             raise
         logger.info("  exec-bridge: pid=%s sock=%s", dispatcher.pid, dispatcher.socket_path)
 
-        model_cfg = self._load_harness_config().get("model") or {}
-        model_name = os.environ.get("HERMES_MODEL") or model_cfg.get("name") or "Qwen/Qwen3.6-27B"
-        provider = os.environ.get("HERMES_INFERENCE_PROVIDER") or model_cfg.get("provider") or "custom"
-        base_url = self._runtime_base_url(model_cfg.get("endpoint"))
-        api_key = os.environ.get("OPENAI_API_KEY") or model_cfg.get("api_key") or "EMPTY"
+        model_cfg, _serving_cfg = load_active_model_and_serving()
+        model_name = os.environ.get("HERMES_MODEL") or model_cfg.name
+        provider = os.environ.get("HERMES_INFERENCE_PROVIDER") or model_cfg.provider
+        base_url = self._runtime_base_url(model_cfg.endpoint)
+        api_key = os.environ.get("OPENAI_API_KEY") or model_cfg.api_key
 
         hm_mounts: list[Mount] = [
             Mount(host=state_dir, container=_STATE_DIR_IN_HERMES, mode="rw"),
@@ -216,14 +219,12 @@ class SWEBenchHermesHarness:
             "OPENAI_BASE_URL": base_url,
             "MINIMAX_API_KEY": api_key,
             "MINIMAX_BASE_URL": base_url,
-            "MINIMAX_CN_API_KEY": api_key,
-            "MINIMAX_CN_BASE_URL": base_url,
             # Hermes still thinks its terminal backend is docker; our patch
             # intercepts the docker exec path and routes through the bridge.
             "TERMINAL_ENV": "docker",
             "TERMINAL_CWD": _TASK_WORKSPACE,
             "TERMINAL_DOCKER_IMAGE": container_image,
-            "OTEL_RESOURCE_ATTRIBUTES": f"oc.run_id={run_id},hm.run_id={run_id}",
+            "OTEL_RESOURCE_ATTRIBUTES": f"agent.run_id={run_id}",
             **b_env,
         }
         hm_spec = ContainerSpec(
@@ -243,6 +244,7 @@ class SWEBenchHermesHarness:
             self._best_effort_cleanup(net_name, hm_name, task_container_name)
             raise
         hm_container_id = hm_handle.id
+        self._workspace_by_container[hm_container_id] = ws_host
 
         logger.info(
             "  ready: hm=%s task=%s bridge_pid=%s net=%s",
@@ -271,13 +273,13 @@ class SWEBenchHermesHarness:
     def _load_harness_config(self) -> Dict:
         kit_root = os.environ.get("KIT_ROOT", os.getcwd())
         harness_path = os.environ.get(
-            "OC_HARNESS_YAML",
-            os.path.join(kit_root, "config/harness/hermes_27b.json"),
+            "AB_HARNESS_CONFIG",
+            os.path.join(kit_root, "config/harness/hermes_swebench.json"),
         )
         if not os.path.isfile(harness_path):
             raise FileNotFoundError(
                 f"hermes harness config not found at {harness_path} "
-                "(set OC_HARNESS_YAML)."
+                "(set AB_HARNESS_CONFIG)."
             )
         with open(harness_path) as fh:
             return json.load(fh) or {}
@@ -291,7 +293,7 @@ class SWEBenchHermesHarness:
         kit_root = os.environ.get("KIT_ROOT", os.getcwd())
         harness_cfg = self._load_harness_config()
         hm_cfg = harness_cfg.get("hermes") or {}
-        model_cfg = harness_cfg.get("model") or {}
+        model_cfg, _serving_cfg = load_active_model_and_serving(kit_root=kit_root)
 
         template_path = (
             Path(kit_root) / "harnesses" / "hermes" / "state" / "config.yaml.template"
@@ -300,12 +302,13 @@ class SWEBenchHermesHarness:
             raise FileNotFoundError(f"hermes config.yaml.template missing at {template_path}")
 
         values = {
-            "MODEL": os.environ.get("HERMES_MODEL") or model_cfg.get("name") or "Qwen/Qwen3.6-27B",
-            "PROVIDER": os.environ.get("HERMES_INFERENCE_PROVIDER") or model_cfg.get("provider") or "custom",
-            "BASE_URL": self._runtime_base_url(model_cfg.get("endpoint")),
-            "API_KEY": os.environ.get("OPENAI_API_KEY") or model_cfg.get("api_key") or "EMPTY",
-            "TEMPERATURE": str(model_cfg.get("temperature") or 0.0),
-            "MAX_TOKENS": str(model_cfg.get("max_tokens") or 4096),
+            "MODEL": os.environ.get("HERMES_MODEL") or model_cfg.name,
+            "PROVIDER": os.environ.get("HERMES_INFERENCE_PROVIDER") or model_cfg.provider,
+            "BASE_URL": self._runtime_base_url(model_cfg.endpoint),
+            "API_KEY": os.environ.get("OPENAI_API_KEY") or model_cfg.api_key,
+            "TEMPERATURE": str(model_cfg.temperature),
+            "MAX_TOKENS": str(model_cfg.max_tokens),
+            "CONTEXT_LENGTH": str(model_cfg.context_window),
             "MAX_TURNS": str((hm_cfg.get("run") or {}).get("max_turns") or 90),
             "TERMINAL_TIMEOUT": str((hm_cfg.get("run") or {}).get("terminal_timeout") or 180),
             "SANDBOX_IMAGE": sandbox_image,
@@ -333,13 +336,7 @@ class SWEBenchHermesHarness:
 
     def _runtime_base_url(self, configured: Optional[str]) -> str:
         raw = os.environ.get("OPENAI_BASE_URL") or configured or "http://localhost:8000/v1"
-        host = self.container.host_address
-        for marker in ("://vllm-host:", "://localhost:", "://127.0.0.1:"):
-            if marker in raw:
-                scheme, rest = raw.split("://", 1)
-                _, tail = rest.split(":", 1)
-                return f"{scheme}://{host}:{tail}"
-        return raw
+        return endpoint_for_container(raw, self.container.host_address)
 
     def _exec(
         self,
@@ -349,6 +346,7 @@ class SWEBenchHermesHarness:
         check: bool = True,
         timeout: Optional[int] = None,
         env: Optional[Dict[str, str]] = None,
+        workdir: Optional[str] = None,
     ) -> subprocess.CompletedProcess:
         h = ContainerHandle(
             id=container_id,
@@ -356,7 +354,7 @@ class SWEBenchHermesHarness:
             backend=self.container.backend_id,
         )
         return self.container.exec(
-            h, argv, check=check, timeout=timeout, env=env,
+            h, argv, check=check, timeout=timeout, env=env, workdir=workdir,
         )
 
     def exec_in_container(
@@ -366,13 +364,33 @@ class SWEBenchHermesHarness:
         *,
         timeout: Optional[int] = None,
         env: Optional[Dict[str, str]] = None,
+        workdir: Optional[str] = None,
         check: bool = False,
     ) -> subprocess.CompletedProcess:
         return self._exec(
-            container_id, argv, check=check, timeout=timeout, env=env,
+            container_id, argv, check=check, timeout=timeout, env=env, workdir=workdir,
         )
 
     def collect_patch(self, container_id: str, workspace_root: str) -> str:
+        ws_host = self._workspace_by_container.get(container_id)
+        if self.container.backend_id == "singularity" and ws_host:
+            try:
+                for name in self._HM_SCAFFOLD_FILES.split():
+                    path = ws_host / name
+                    if path.is_dir():
+                        _force_rmtree(path, ignore_errors=True)
+                    elif path.exists():
+                        path.unlink()
+                for name in self._HM_SCAFFOLD_DIRS.split():
+                    _force_rmtree(ws_host / name, ignore_errors=True)
+                r = subprocess.run(
+                    ["git", "-C", str(ws_host), "diff", "HEAD"],
+                    capture_output=True, text=True, check=True,
+                )
+                return r.stdout
+            except Exception as e:
+                logger.warning("host-side patch collection failed: %s", e)
+
         ws = workspace_root
         self._exec(
             container_id,
@@ -397,6 +415,7 @@ class SWEBenchHermesHarness:
         timeout_seconds: int,
         patch: Optional[str] = None,
         run_id: Optional[str] = None,
+        instance_data: Optional[Dict] = None,
         **_kw,
     ) -> Dict:
         logger.info("Scoring %s", instance_id)
@@ -420,6 +439,27 @@ class SWEBenchHermesHarness:
 
         if run_id is None:
             run_id = f"hm-eval-{instance_id}-{os.urandom(3).hex()}"
+
+        singularity_verdict = score_via_singularity(
+            instance_id=instance_id,
+            patch=patch,
+            model_name_or_path="hm-eval",
+            timeout_seconds=timeout_seconds,
+            run_id=run_id,
+            swebench_root=self.swebench_root,
+            instance_data=instance_data,
+        )
+        if singularity_verdict is not None:
+            return singularity_verdict
+
+        remote_verdict = score_via_scoring_server(
+            instance_id=instance_id,
+            patch=patch,
+            model_name_or_path="hm-eval",
+            timeout_seconds=timeout_seconds,
+        )
+        if remote_verdict is not None:
+            return remote_verdict
 
         with tempfile.TemporaryDirectory(prefix="hm_pred_") as tmp:
             tmp_path = Path(tmp)
@@ -529,6 +569,7 @@ class SWEBenchHermesHarness:
         for cid in {hm_container_id, container_id}:
             if not cid:
                 continue
+            self._workspace_by_container.pop(cid, None)
             try:
                 self._exec(
                     cid,

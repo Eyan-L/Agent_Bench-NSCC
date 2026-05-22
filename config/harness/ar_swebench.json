@@ -1,0 +1,16 @@
+{
+  "_doc": "AR baselines for SWE-bench. Model identity is selected separately via config/model/*.json.",
+  "harness": "ar",
+  "conditions": [
+    {
+      "condition_id": "ar_issue_only",
+      "condition_type": "ar_issue_only",
+      "description": "AR baseline: issue text only, single-shot"
+    },
+    {
+      "condition_id": "ar_static_context",
+      "condition_type": "ar_static_context",
+      "description": "AR baseline: issue + offline static context"
+    }
+  ]
+}

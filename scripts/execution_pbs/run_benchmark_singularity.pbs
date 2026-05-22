@@ -1,14 +1,12 @@
 #!/bin/bash
 # Resources (`-l select=...`, `-l walltime=...`) must be supplied at qsub
-# time — they aren't pinned in the header. Examples for the 14B default:
+# time — they aren't pinned in the header. Examples:
 #   qsub -l select=1:ncpus=8:ngpus=1:mem=64gb -l walltime=08:00:00 \
-#        -o $KIT_ROOT/data/runs/phase0/<stamp>/pbs.log <pbs>
-# For the 35B / TP=4 path: ngpus=4, mem=128gb.
-# Note: the PBS -o frame log can't easily go inside the per-sweep dir at
-# directive time (stamp is computed inside the script). Either pass -o on
-# qsub explicitly, or accept PBS default (writes <jobname>.o<jobid> in
-# qsub's cwd). All other logs (sglang, run, otel, engine_metrics) go into
-# $SWEEP_DIR/logs/.
+#        scripts/execution_pbs/run_benchmark_singularity.pbs
+# For a 35B / TP=4 path: request ngpus=4, mem=128gb, and set SGLANG_TP=4.
+# The script redirects stdout/stderr into
+# data/experiments/$AB_RUN_STAMP/logs/pbs_singularity.log after resolving
+# KIT_ROOT. Until then, PBS uses its job-id-based default output path.
 #PBS -q normal
 #PBS -j oe
 #PBS -N oc_swebench_sglang
@@ -42,20 +40,21 @@
 # Env (override via `qsub -v K1=V1,K2=V2 ...`):
 #   KIT_ROOT          repo root (default: $SCRATCH/github/Agent_Bench or $HOME/Agent_Bench)
 #   APP               application JSON  (default: $KIT_ROOT/config/application/swebench/phase0.json)
-#   HARNESS_CONFIG    harness JSON      (default: $KIT_ROOT/config/harness/openclaw_qwen3_14b_sglang.json)
-#   BACKEND_CONFIG    backend JSON      (default: $KIT_ROOT/config/backend/sglang/tp1.json)
+#   HARNESS_CONFIG    harness JSON      (default: $KIT_ROOT/config/harness/openclaw_swebench.json)
+#   MODEL_CONFIG      model JSON        (default: $KIT_ROOT/config/model/qwen36_27b.json)
+#   SERVING_CONFIG    serving JSON      (default: $KIT_ROOT/config/serving/sglang/default.json)
 #   DATASET           instance JSON     (default: $KIT_ROOT/config/benchmarks/swebench/verified.json)
 #   SIF_DIR           per-instance .sif dir (default: $SCRATCH/swebench)
 #   OC_RUNTIME_SIF    oc_runtime.sif path (default: $SCRATCH/sif_image/oc_runtime.sif)
 #   SGLANG_SIF        sglang sif path   (default: $SCRATCH/sif_image/sglang_v0.5.11-cu128-sm80.sif —
 #                      the patched hongrui0/sglang:v0.5.11 image which adds `distro`)
-#   SGLANG_MODEL_DIR  host dir holding the HF snapshot; bound 1:1 into the container
-#                      (default: /scratch/users/ntu/$USER/model/hub/models--Qwen--Qwen3-14B/
-#                                snapshots/40c069824f4251a91eefaf281ebe4c544efd3e18)
+#   MODEL_CONFIG      owns the model id/path passed to SGLang and recorded by the driver
 #   SGLANG_PORT       (default: 8000 — must match the OC harness's hardcoded endpoint)
 #   SGLANG_TP         (default: 1)
 #   SGLANG_TOOL_CALL_PARSER  (default: qwen25)
 #   SGLANG_REASONING_PARSER  (default: qwen3)
+#   AB_RUN_STAMP      stable experiment directory name
+#   AB_EXPERIMENT_DIR experiment root (default: $KIT_ROOT/data/experiments/$AB_RUN_STAMP)
 #   STAGE_*           set to 0 to skip a stage
 
 set -uo pipefail
@@ -70,8 +69,9 @@ KIT_ROOT="${KIT_ROOT:-${PBS_O_WORKDIR:-$HOME/Agent_Bench}}"
 SWEBENCH_ROOT="${SWEBENCH_ROOT:-$SCRATCH/pylib}"
 
 APP="${APP:-$KIT_ROOT/config/application/swebench/phase0.json}"
-HARNESS_CONFIG="${HARNESS_CONFIG:-$KIT_ROOT/config/harness/openclaw_qwen3_14b_sglang.json}"
-BACKEND_CONFIG="${BACKEND_CONFIG:-$KIT_ROOT/config/backend/sglang/tp1.json}"
+HARNESS_CONFIG="${HARNESS_CONFIG:-$KIT_ROOT/config/harness/openclaw_swebench.json}"
+MODEL_CONFIG="${MODEL_CONFIG:-$KIT_ROOT/config/model/qwen36_27b.json}"
+SERVING_CONFIG="${SERVING_CONFIG:-$KIT_ROOT/config/serving/sglang/default.json}"
 DATASET="${DATASET:-$KIT_ROOT/config/benchmarks/swebench/verified.json}"
 
 SIF_DIR="${SIF_DIR:-$SCRATCH/swebench}"
@@ -80,17 +80,26 @@ SINGULARITY_CACHE="${SINGULARITY_CACHE:-$SCRATCH/singularity_cache}"
 OC_RUNTIME_SIF="${OC_RUNTIME_SIF:-$SCRATCH/sif_image/oc_runtime.sif}"
 
 SGLANG_SIF="${SGLANG_SIF:-$SCRATCH/sif_image/sglang_v0.5.11-cu128-sm80.sif}"
-SGLANG_MODEL_DIR="${SGLANG_MODEL_DIR:-$SCRATCH/model/hub/models--Qwen--Qwen3-14B/snapshots/40c069824f4251a91eefaf281ebe4c544efd3e18}"
-SGLANG_PORT="${SGLANG_PORT:-8000}"
-SGLANG_TP="${SGLANG_TP:-1}"
+export AB_MODEL_CONFIG="$MODEL_CONFIG"
+export AB_SERVING_CONFIG="$SERVING_CONFIG"
+eval "$(python3 "$KIT_ROOT/scripts/load_model_env.py" "$MODEL_CONFIG")"
+eval "$(python3 "$KIT_ROOT/scripts/load_serving_env.py" "$SERVING_CONFIG")"
+if [[ -n "${SGLANG_MODEL_DIR:-}" && "$SGLANG_MODEL_DIR" != "$MODEL" ]]; then
+    echo "FATAL: SGLANG_MODEL_DIR is no longer a separate model source." >&2
+    echo "       Put that path in MODEL_CONFIG (config/model/*.json) instead." >&2
+    exit 2
+fi
+SGLANG_MODEL_DIR="$MODEL"
+SGLANG_PORT="${SGLANG_PORT:-$PORT}"
+SGLANG_TP="${SGLANG_TP:-${TP:-1}}"
 # serve_singularity.sh derives --tp from the *count* of visible GPU ids, not
 # from SGLANG_TP. Default the visible-device list to 0..TP-1 so tp=4 actually
 # sees 4 GPUs; still overridable via `qsub -v SGLANG_CUDA_VISIBLE_DEVICES=...`.
 SGLANG_CUDA_VISIBLE_DEVICES="${SGLANG_CUDA_VISIBLE_DEVICES:-$(seq -s, 0 $((SGLANG_TP - 1)))}"
-SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-0.85}"
-SGLANG_CONTEXT_LENGTH="${SGLANG_CONTEXT_LENGTH:-32768}"
-SGLANG_TOOL_CALL_PARSER="${SGLANG_TOOL_CALL_PARSER:-qwen}"
-SGLANG_REASONING_PARSER="${SGLANG_REASONING_PARSER:-qwen3}"
+SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-$GPU_MEM_UTIL}"
+SGLANG_CONTEXT_LENGTH="${SGLANG_CONTEXT_LENGTH:-${MAX_MODEL_LEN:-${MODEL_CONTEXT_WINDOW:-}}}"
+SGLANG_TOOL_CALL_PARSER="${SGLANG_TOOL_CALL_PARSER:-${TOOL_CALL_PARSER:-qwen}}"
+SGLANG_REASONING_PARSER="${SGLANG_REASONING_PARSER:-${REASONING_PARSER:-}}"
 SGLANG_ENABLE_HIERARCHICAL_CACHE="${SGLANG_ENABLE_HIERARCHICAL_CACHE:-1}"
 
 OC_PULL_PARALLEL="${OC_PULL_PARALLEL:-2}"
@@ -106,39 +115,45 @@ STAGE_CLEANUP="${STAGE_CLEANUP:-1}"
 OC_PYLIB="${OC_PYLIB:-$SCRATCH/pylib}"
 OC_PIP_CACHE="${OC_PIP_CACHE:-$SCRATCH/.pip-cache}"
 
-# All logs for one experiment go under the same per-sweep dir as the driver's
-# per-run output, mirroring the docker mode's layout:
-#   $KIT_ROOT/<app.output_dir>/<OC_RUN_STAMP>/
-#       ├── logs/           ← sglang.log, run.log, engine_metrics.jsonl,
-#       │                     pip-swebench.log, otel/...
-#       └── <run_id>/       ← driver per-run output (verdict.json, spans, …)
-#
-# OC_RUN_STAMP is picked here and exported so the driver writes its run dirs
-# into the same parent dir. Defaults to Singapore-local timestamp.
+# AB_RUN_STAMP is picked here and exported so the driver writes its run dirs
+# under $AB_EXPERIMENT_DIR/runs/<app-output-leaf>/.
 APP_OUTPUT_DIR="$(python3 -c "import json; print(json.load(open('$APP'))['output_dir'])" 2>/dev/null)"
-[[ -z "$APP_OUTPUT_DIR" ]] && APP_OUTPUT_DIR="data/runs/_unknown"
-export OC_RUN_STAMP="${OC_RUN_STAMP:-$(TZ=Asia/Singapore date '+%Y-%m-%d_%H-%M-%S')}"
-SWEEP_DIR="$KIT_ROOT/$APP_OUTPUT_DIR/$OC_RUN_STAMP"
-LOG_DIR="$SWEEP_DIR/logs"
+[[ -z "$APP_OUTPUT_DIR" ]] && APP_OUTPUT_DIR="_unknown"
+if [[ -z "${AB_RUN_STAMP:-}" ]]; then
+    AB_RUN_STAMP="$(TZ=Asia/Singapore date +%Y-%m-%d_%H-%M-%S)"
+    if [[ -n "${PBS_JOBID:-}" ]]; then
+        AB_JOB_SUFFIX="${PBS_JOBID//[^A-Za-z0-9._-]/_}"
+        AB_RUN_STAMP="${AB_RUN_STAMP}_${AB_JOB_SUFFIX}"
+    fi
+fi
+export AB_RUN_STAMP
+EXPERIMENT_DIR="${AB_EXPERIMENT_DIR:-$KIT_ROOT/data/experiments/$AB_RUN_STAMP}"
+export AB_EXPERIMENT_DIR="$EXPERIMENT_DIR"
+RUNS_DIR="$EXPERIMENT_DIR/runs/$(basename "$APP_OUTPUT_DIR")"
+LOG_DIR="$EXPERIMENT_DIR/logs"
 export OC_LOG_DIR="$LOG_DIR"
 
 OC_OTEL_DATA_DIR="${OC_OTEL_DATA_DIR:-$LOG_DIR/otel}"
 export OC_OTEL_DATA_DIR
 export OC_OTEL_TRACE_FILE="${OC_OTEL_TRACE_FILE:-$OC_OTEL_DATA_DIR/otel-traces.jsonl}"
 
-mkdir -p "$LOG_DIR" "$SIF_DIR" "$SINGULARITY_CACHE" "$OC_OTEL_DATA_DIR"
+mkdir -p "$EXPERIMENT_DIR/runs" "$LOG_DIR" "$SIF_DIR" "$SINGULARITY_CACHE" "$OC_OTEL_DATA_DIR"
 cd "$KIT_ROOT"
 
 LOG_PREFIX() { echo "[$(date -u +%FT%TZ)] $*"; }
 
+exec >>"$LOG_DIR/pbs_singularity.log" 2>&1
+
 LOG_PREFIX "kit_root        = $KIT_ROOT"
-LOG_PREFIX "sweep_dir       = $SWEEP_DIR"
+LOG_PREFIX "experiment      = $AB_EXPERIMENT_DIR"
 LOG_PREFIX "log_dir         = $LOG_DIR"
-LOG_PREFIX "run_stamp       = $OC_RUN_STAMP"
+LOG_PREFIX "runs_dir        = $RUNS_DIR"
+LOG_PREFIX "run_stamp       = $AB_RUN_STAMP"
 LOG_PREFIX "swebench_root   = $SWEBENCH_ROOT"
 LOG_PREFIX "app             = $APP"
 LOG_PREFIX "harness         = $HARNESS_CONFIG"
-LOG_PREFIX "backend         = $BACKEND_CONFIG"
+LOG_PREFIX "model           = $MODEL_CONFIG"
+LOG_PREFIX "serving         = $SERVING_CONFIG"
 LOG_PREFIX "dataset         = $DATASET"
 LOG_PREFIX "sif_dir         = $SIF_DIR"
 LOG_PREFIX "oc_runtime_sif  = $OC_RUNTIME_SIF"
@@ -375,7 +390,8 @@ if [[ "$STAGE_RUN" == "1" ]]; then
     python3 -m orchestration.runner.driver \
         --app "$APP" \
         --harness "$HARNESS_CONFIG" \
-        --backend "$BACKEND_CONFIG" \
+        --model "$MODEL_CONFIG" \
+        --serving "$SERVING_CONFIG" \
         --swebench-root "$SWEBENCH_ROOT" \
         --instance-data "$DATASET" \
         2>&1 | tee -a "$LOG_DIR/run.log"
@@ -406,7 +422,7 @@ if [[ "$STAGE_CLEANUP" == "1" ]]; then
 fi
 
 LOG_PREFIX "==== done; rc=$RUN_RC ===="
-LOG_PREFIX "==== artifacts: $SWEEP_DIR ===="
+LOG_PREFIX "==== artifacts: $AB_EXPERIMENT_DIR ===="
 LOG_PREFIX "  logs/      → sglang.log, run.log, engine_metrics.jsonl, otel/"
-LOG_PREFIX "  <run_id>/  → verdict.json, spans.jsonl, step_trace.jsonl"
+LOG_PREFIX "  runs/$(basename "$APP_OUTPUT_DIR")/<run_id>/  → verdict.json, spans.jsonl, step_trace.jsonl"
 exit $RUN_RC

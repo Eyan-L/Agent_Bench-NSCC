@@ -24,7 +24,8 @@ def load_run(
 
     Args:
         run_id: Unique run identifier
-        runs_dir: Root directory containing run data (data/runs/)
+        runs_dir: Directory containing run data
+            (data/experiments/<stamp>/runs/<sweep>/)
 
     Returns:
         (steps, telemetry, verdict) where:

@@ -1,0 +1,14 @@
+{
+  "_doc": "Locally mounted Qwen3.6-35B-A3B with a higher temperature used by DeepResearch-Bench.",
+  "model": {
+    "config_id": "qwen36_35b_a3b_local_research",
+    "name": "/mnt/network_drive/shared_models/hub/models--Qwen--Qwen3.6-35B-A3B/snapshots/995ad96eacd98c81ed38be0c5b274b04031597b0",
+    "provider": "custom",
+    "api_key": "EMPTY",
+    "temperature": 0.3,
+    "max_tokens": 8192,
+    "context_window": 262144,
+    "tool_call_parser": "qwen3_coder",
+    "reasoning_parser": "qwen3"
+  }
+}

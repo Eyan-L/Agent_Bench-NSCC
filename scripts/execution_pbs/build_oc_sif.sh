@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Standardised rebuild of oc_runtime.sif with all OpenClaw patches applied.
+# Standardised build of an OpenClaw runtime SIF with all Agent_Bench patches applied.
 #
-# Why this exists: the upstream sif (docker://hongrui0/openclaw:<tag>) ships
-# with whatever patches were baked at docker-push time. When we add a new
-# patch under harnesses/openclaw/patch/, the only way to make it visible at
-# runtime is to bake it into a fresh sif — singularity overlays on this
-# cluster run via FUSE in unprivileged mode and cannot write to image-side
-# directories (`Read-only file system` on `/app/...`).
+# Why this exists: the upstream sif (docker://ghcr.io/openclaw/openclaw:<tag>)
+# ships without Agent_Bench's runtime patches. When we add a new patch under
+# harnesses/openclaw/patch/, the robust NSCC path is to bake it into a fresh
+# sif — singularity overlays on this cluster run via FUSE in unprivileged mode
+# and cannot write to image-side directories (`Permission denied` on `/app/...`).
 #
 # Pipeline:
 #   1. `singularity build --sandbox sb/ <base.sif>`  — writable rootfs copy
@@ -22,19 +21,19 @@
 #
 # Submit (login node):
 #   bash scripts/execution_pbs/build_oc_sif.sh \
-#       --base /scratch/users/ntu/$USER/sif_image/oc_runtime.sif \
-#       --out  /scratch/users/ntu/$USER/sif_image/oc_runtime.sif
+#       --base /scratch/users/ntu/$USER/sif_images/openclaw_2026.4.22.sif \
+#       --out  /scratch/users/ntu/$USER/sif_images/openclaw_2026.4.22_patched.sif
 #
 # Or override per-invocation:
 #   bash scripts/execution_pbs/build_oc_sif.sh \
-#       --base $SCRATCH/sif_image/oc_upstream.sif \
-#       --out  $SCRATCH/sif_image/oc_runtime.sif \
+#       --base $SCRATCH/sif_images/openclaw_2026.4.22.sif \
+#       --out  $SCRATCH/sif_images/openclaw_2026.4.22_patched.sif \
 #       --inside-pkg /app \
 #       --sandbox-dir $SCRATCH/sif_image/_oc_sb_build
 #
 # Defaults (override via flags):
-#   --base        $SCRATCH/sif_image/oc_runtime.sif  (input; can equal --out)
-#   --out         $SCRATCH/sif_image/oc_runtime.sif  (atomic-swapped at end)
+#   --base        $SCRATCH/sif_images/openclaw_2026.4.22.sif
+#   --out         $SCRATCH/sif_images/openclaw_2026.4.22_patched.sif
 #   --inside-pkg  /app                                (OC pkg root inside sif)
 #   --sandbox-dir <tmpdir>/oc_sb_build                (deleted on success)
 #   --keep-sandbox                                    (skip cleanup, for debug)
@@ -44,8 +43,8 @@ set -euo pipefail
 USER_NAME="${USER:-$(whoami)}"
 SCRATCH="${SCRATCH:-/scratch/users/ntu/$USER_NAME}"
 
-BASE_SIF="$SCRATCH/sif_image/oc_runtime.sif"
-OUT_SIF="$SCRATCH/sif_image/oc_runtime.sif"
+BASE_SIF="$SCRATCH/sif_images/openclaw_2026.4.22.sif"
+OUT_SIF="$SCRATCH/sif_images/openclaw_2026.4.22_patched.sif"
 INSIDE_PKG="/app"
 SANDBOX_DIR=""
 KEEP_SANDBOX=0

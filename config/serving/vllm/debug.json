@@ -1,0 +1,23 @@
+{
+  "_doc": "Small-batch vLLM endpoint profile for quick harness debugging. Context length still comes from the model config.",
+  "serving": {
+    "config_id": "vllm-debug",
+    "backend": "vllm",
+    "preset": "default",
+    "endpoint": {
+      "scheme": "http",
+      "bind_host": "0.0.0.0",
+      "client_host": "127.0.0.1",
+      "port": 8000,
+      "path": "/v1"
+    },
+    "runtime": {
+      "gpu_mem_util": 0.90
+    },
+    "scheduler": {
+      "max_num_seqs": 16,
+      "enable_prefix_caching": true
+    },
+    "additional_flags": {}
+  }
+}

@@ -2,7 +2,7 @@
 
 Run:
     python -m orchestration.analysis.plots.plot_all \
-        --runs-dir data/runs --out-dir data/figures
+        --runs-dir data/experiments/<stamp>/runs --out-dir data/figures
 """
 from __future__ import annotations
 

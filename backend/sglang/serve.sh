@@ -7,22 +7,22 @@ KIT_ROOT="${KIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}"
 
 ACTION="${1:-start}"
 
-# 1) HARNESS config — model selection (single source of truth, shared with vllm/serve.sh).
-HARNESS_CFG="${SGLANG_HARNESS_YAML:-}"
-if [[ -z "$HARNESS_CFG" && -n "${HARNESS:-}" ]]; then
-    HARNESS_CFG="$KIT_ROOT/config/harness/${HARNESS}.json"
+# 1) MODEL config — model identity and model-level limits.
+MODEL_CFG="${SGLANG_MODEL_CONFIG:-${AB_MODEL_CONFIG:-}}"
+if [[ -z "$MODEL_CFG" && -n "${MODEL_PROFILE:-}" ]]; then
+    MODEL_CFG="$KIT_ROOT/config/model/${MODEL_PROFILE}.json"
 fi
-if [[ -n "$HARNESS_CFG" && -f "$HARNESS_CFG" ]]; then
-    eval "$(python3 "$KIT_ROOT/scripts/load_harness_env.py" "$HARNESS_CFG")"
+if [[ -n "$MODEL_CFG" && -f "$MODEL_CFG" ]]; then
+    eval "$(python3 "$KIT_ROOT/scripts/load_model_env.py" "$MODEL_CFG")"
 fi
 
-# 2) BACKEND config — engine knobs (TP / PORT / GPU_MEM_UTIL / MAX_MODEL_LEN / CUDA_VISIBLE_DEVICES).
-BACKEND_CFG="${SGLANG_BACKEND_YAML:-}"
-if [[ -z "$BACKEND_CFG" && -n "${BACKEND:-}" ]]; then
-    BACKEND_CFG="$KIT_ROOT/config/backend/${BACKEND}.json"
+# 2) SERVING config — engine endpoint/scheduler knobs.
+SERVING_CFG="${SGLANG_SERVING_CONFIG:-${AB_SERVING_CONFIG:-}}"
+if [[ -z "$SERVING_CFG" && -n "${SERVING:-}" ]]; then
+    SERVING_CFG="$KIT_ROOT/config/serving/${SERVING}.json"
 fi
-if [[ -n "$BACKEND_CFG" && -f "$BACKEND_CFG" ]]; then
-    eval "$(python3 "$KIT_ROOT/scripts/load_backend_env.py" "$BACKEND_CFG")"
+if [[ -n "$SERVING_CFG" && -f "$SERVING_CFG" ]]; then
+    eval "$(python3 "$KIT_ROOT/scripts/load_serving_env.py" "$SERVING_CFG")"
 fi
 
 SGLANG_PID_FILE="${SGLANG_PID_FILE:-${PROJECT_ROOT}/.sglang.pid}"
@@ -33,23 +33,22 @@ SGLANG_LOG_FILE="${SGLANG_LOG_FILE:-}"
 
 # Runtime-configurable knobs. Top-level scripts should export these before
 # invoking sglang_launcher.sh so port / GPU / model can vary between runs.
-# Harness/backend config values (MODEL, PORT, CUDA_VISIBLE_DEVICES, GPU_MEM_UTIL,
-# MAX_MODEL_LEN) are mapped onto the SGLANG_* knobs below when the matching
-# SGLANG_* env var is not already set, so a single HARNESS/BACKEND pair drives
-# both vllm and sglang.
-SGLANG_HOST="${SGLANG_HOST:-0.0.0.0}"
+# Model/serving config values (MODEL, PORT, GPU_MEM_UTIL, MODEL_CONTEXT_WINDOW)
+# are mapped onto the SGLANG_* knobs below when the matching
+# SGLANG_* env var is not already set.
+SGLANG_HOST="${SGLANG_HOST:-${BIND_HOST:-0.0.0.0}}"
 SGLANG_PORT="${SGLANG_PORT:-${PORT:-30000}}"
 SGLANG_MODEL_PATH="${SGLANG_MODEL_PATH:-${MODEL:-Qwen/Qwen3-30B-A3B-Instruct-2507}}"
 SGLANG_CUDA_VISIBLE_DEVICES="${SGLANG_CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-0}}"
 SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-${GPU_MEM_UTIL:-0.85}}"
-SGLANG_CONTEXT_LENGTH="${SGLANG_CONTEXT_LENGTH:-${MAX_MODEL_LEN:-}}"
+SGLANG_CONTEXT_LENGTH="${SGLANG_CONTEXT_LENGTH:-${MAX_MODEL_LEN:-${MODEL_CONTEXT_WINDOW:-}}}"
 SGLANG_PAGE_SIZE="${SGLANG_PAGE_SIZE:-64}"
 SGLANG_HICACHE_SIZE="${SGLANG_HICACHE_SIZE:-60}"
-SGLANG_TOOL_CALL_PARSER="${SGLANG_TOOL_CALL_PARSER:-qwen}"
+SGLANG_TOOL_CALL_PARSER="${SGLANG_TOOL_CALL_PARSER:-${TOOL_CALL_PARSER:-qwen}}"
 # Optional. When set (e.g. "qwen3", "deepseekv3"), pass --reasoning-parser so
 # sglang extracts <think>...</think> spans into `reasoning_content` instead of
 # leaving them embedded in `content`. Empty = omit the flag.
-SGLANG_REASONING_PARSER="${SGLANG_REASONING_PARSER:-}"
+SGLANG_REASONING_PARSER="${SGLANG_REASONING_PARSER:-${REASONING_PARSER:-}}"
 # Extra flags appended verbatim to the launch command (space-separated).
 SGLANG_EXTRA_ARGS="${SGLANG_EXTRA_ARGS:-}"
 # "1" (default) = pass --enable-hierarchical-cache; anything else = omit it.

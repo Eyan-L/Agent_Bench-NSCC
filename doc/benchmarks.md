@@ -20,7 +20,7 @@ applications/<name>/
 applications/<name>/tasks/           # per-task assets vendored under the app
 └── ... (instance JSONs / task definitions / per-instance assets)
 
-config/sweeps/<name>_<sweep>.yaml   # at least one sweep that targets it
+config/application/<name>/<sweep>.json  # at least one application sweep that targets it
 ```
 
 ## 1. The harness
@@ -150,25 +150,21 @@ skip_patch_gate = benchmark_kind in ("terminal_bench", "your_benchmark")
 
 if applicable.
 
-## 5. Add a sweep YAML
+## 5. Add Application/Harness Configs
 
-`config/sweeps/<name>_phase1.yaml`. Mirror an existing sweep
-(`config/sweeps/tb_kv_store.yaml` is the smallest example). At minimum:
+Add `config/application/<name>/phase1.json` for instances/budgets/output, and
+`config/harness/<harness>_<name>.json` for framework behavior + conditions.
+Model identity and serving deployment are selected separately from
+`config/model/*.json` and `config/serving/*/*.json`.
 
-```yaml
-sweep_id: your_benchmark_phase1
-instances:
-  - your_first_instance_id
-conditions:
-  - condition_id: openclaw_agent           # or any other registered condition
-    condition_type: openclaw_agent
-    model: { ... }
-    agent: { ... }
-serving:
-  config_id: vllm_default
-  ...
-seeds: [0]
-output_dir: data/runs/your_benchmark_phase1
+```json
+{
+  "sweep_name": "your_benchmark_phase1",
+  "application": "your_benchmark",
+  "instances": ["your_first_instance_id"],
+  "seeds": [0],
+  "output_dir": "your_benchmark_phase1"
+}
 ```
 
 ## 6. Smoke test
@@ -180,12 +176,16 @@ from applications.your_benchmark.loader import load_instances
 print('OK')
 "
 PYTHONPATH=. python3 -m orchestration.runner.driver \
-    --sweep config/sweeps/your_benchmark_phase1.yaml \
-    --max-runs 1
+    --app config/application/your_benchmark/phase1.json \
+    --harness config/harness/openclaw_your_benchmark.json \
+    --model config/model/qwen36_27b.json \
+    --serving config/serving/vllm/default.json \
+    --instance-data data/your_benchmark/instances.json
 ```
 
-Then inspect `data/runs/your_benchmark_phase1/<run_id>/` for `verdict.json`,
-`step_trace.jsonl`, and (if applicable) `spans.jsonl`.
+Then inspect
+`data/experiments/<stamp>/runs/your_benchmark_phase1/<run_id>/` for
+`verdict.json`, `steps.jsonl`, and (if applicable) `spans.jsonl`.
 
 ## Checklist
 
@@ -196,5 +196,5 @@ Then inspect `data/runs/your_benchmark_phase1/<run_id>/` for `verdict.json`,
 - [ ] `applications/<name>/tasks/` populated (or external dataset path documented)
 - [ ] Driver dispatch branches on `instance_data["benchmark"]`
 - [ ] Patch-gate exemption added (only if your benchmark has no patch artifact)
-- [ ] At least one sweep YAML in `config/sweeps/`
+- [ ] At least one application JSON in `config/application/<name>/`
 - [ ] Smoke test produces a verdict file

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # backend/vllm/serve.sh — start a vLLM endpoint for the OpenClaw study.
 #
-# Reads its defaults from two JSON configs (composed-config model):
-#   HARNESS config (model selection)
-#     - HARNESS env var, resolved to $KIT_ROOT/config/harness/$HARNESS.json; or
-#     - VLLM_HARNESS_YAML for an explicit path (var name kept for back-compat).
-#   BACKEND config (engine knobs: TP/port/gpu_mem/max_len/cuda_devices/presets)
-#     - BACKEND env var, resolved to $KIT_ROOT/config/backend/$BACKEND.json; or
-#     - VLLM_BACKEND_YAML for an explicit path (var name kept for back-compat).
+# Reads its defaults from two JSON config axes:
+#   MODEL config   (model identity + model-level limits)
+#     - AB_MODEL_CONFIG / VLLM_MODEL_CONFIG explicit path; or
+#     - MODEL_PROFILE resolved to $KIT_ROOT/config/model/$MODEL_PROFILE.json.
+#   SERVING config (engine/port/scheduler/preset)
+#     - AB_SERVING_CONFIG / VLLM_SERVING_CONFIG explicit path; or
+#     - SERVING resolved to $KIT_ROOT/config/serving/$SERVING.json.
 # Any value can still be overridden with a matching env var:
 #   MODEL TP PORT MAX_MODEL_LEN GPU_MEM_UTIL CUDA_VISIBLE_DEVICES
 # Env override wins over the config; config wins over the hardcoded fallbacks.
@@ -29,35 +29,38 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KIT_ROOT="${KIT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 
-# 1) Harness config: MODEL + MODEL_ENDPOINT (single source of truth).
-HARNESS_CFG="${VLLM_HARNESS_YAML:-}"
-if [[ -z "$HARNESS_CFG" && -n "${HARNESS:-}" ]]; then
-    HARNESS_CFG="$KIT_ROOT/config/harness/${HARNESS}.json"
+# 1) Model config: MODEL + parser hints.
+MODEL_CFG="${VLLM_MODEL_CONFIG:-${AB_MODEL_CONFIG:-}}"
+if [[ -z "$MODEL_CFG" && -n "${MODEL_PROFILE:-}" ]]; then
+    MODEL_CFG="$KIT_ROOT/config/model/${MODEL_PROFILE}.json"
 fi
-if [[ -n "$HARNESS_CFG" && -f "$HARNESS_CFG" ]]; then
-    eval "$(python3 "$KIT_ROOT/scripts/load_harness_env.py" "$HARNESS_CFG")"
-elif [[ -n "$HARNESS_CFG" ]]; then
-    echo "WARN: harness config not found: $HARNESS_CFG — relying on env/fallbacks" >&2
+if [[ -n "$MODEL_CFG" && -f "$MODEL_CFG" ]]; then
+    eval "$(python3 "$KIT_ROOT/scripts/load_model_env.py" "$MODEL_CFG")"
+elif [[ -n "$MODEL_CFG" ]]; then
+    echo "WARN: model config not found: $MODEL_CFG — relying on env/fallbacks" >&2
 fi
 
-# 2) Backend config: engine runtime knobs + first serving preset.
-BACKEND_CFG="${VLLM_BACKEND_YAML:-}"
-if [[ -z "$BACKEND_CFG" && -n "${BACKEND:-}" ]]; then
-    BACKEND_CFG="$KIT_ROOT/config/backend/${BACKEND}.json"
+# 2) Serving config: engine runtime knobs + serving preset.
+SERVING_CFG="${VLLM_SERVING_CONFIG:-${AB_SERVING_CONFIG:-}}"
+if [[ -z "$SERVING_CFG" && -n "${SERVING:-}" ]]; then
+    SERVING_CFG="$KIT_ROOT/config/serving/${SERVING}.json"
 fi
-if [[ -n "$BACKEND_CFG" && -f "$BACKEND_CFG" ]]; then
-    eval "$(python3 "$KIT_ROOT/scripts/load_backend_env.py" "$BACKEND_CFG")"
-elif [[ -n "$BACKEND_CFG" ]]; then
-    echo "WARN: backend config not found: $BACKEND_CFG — using built-in defaults" >&2
+if [[ -n "$SERVING_CFG" && -f "$SERVING_CFG" ]]; then
+    eval "$(python3 "$KIT_ROOT/scripts/load_serving_env.py" "$SERVING_CFG")"
+elif [[ -n "$SERVING_CFG" ]]; then
+    echo "WARN: serving config not found: $SERVING_CFG — using built-in defaults" >&2
 fi
 
 PRESET="${SERVING_PRESET:-default}"
 MODEL="${MODEL:-Qwen/Qwen3.6-27B}"
 TP="${TP:-1}"
 PORT="${PORT:-8000}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
+BIND_HOST="${BIND_HOST:-0.0.0.0}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-${MODEL_CONTEXT_WINDOW:-131072}}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
+TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen3_coder}"
+REASONING_PARSER="${REASONING_PARSER-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -112,21 +115,25 @@ fi
 # without them, tool calls won't parse and thinking tokens bleed into tool args.
 BASE_FLAGS=(
     "$MODEL"
-    --host 0.0.0.0
+    --host "$BIND_HOST"
     --port "$PORT"
     --tensor-parallel-size "$TP"
     --max-model-len "$MAX_MODEL_LEN"
     --gpu-memory-utilization "$GPU_MEM_UTIL"
-    --reasoning-parser qwen3
     --enable-auto-tool-choice
-    --tool-call-parser qwen3_coder
     --trust-remote-code
     # Fix for Mamba cache block count < default max_num_seqs on Qwen3.6 GDN layers.
     # Each preset overrides --max-num-seqs below; 512 is a safe ceiling.
 )
+if [[ -n "$REASONING_PARSER" ]]; then
+    BASE_FLAGS+=(--reasoning-parser "$REASONING_PARSER")
+fi
+if [[ -n "$TOOL_CALL_PARSER" ]]; then
+    BASE_FLAGS+=(--tool-call-parser "$TOOL_CALL_PARSER")
+fi
 
 # ---- Preset-specific flags -----------------------------------------
-# These three map directly to the RQ3 sweep points in config/backend/vllm/tp2_rq3.json.
+# Non-default presets map to serving-experiment sweep points.
 # Document them so config_id in manifests matches what was actually served.
 
 declare -a PRESET_FLAGS
@@ -135,11 +142,11 @@ CONFIG_ID=""
 case "$PRESET" in
     default)
         # Phase 0/1 baseline — balanced, before RQ3 sweep.
-        CONFIG_ID="vllm-default"
+        CONFIG_ID="${SERVING_CONFIG_ID:-vllm-default}"
         PRESET_FLAGS=(
-            --max-num-seqs 128
-            --enable-prefix-caching
+            --max-num-seqs "${MAX_NUM_SEQS:-128}"
         )
+        [[ "${ENABLE_PREFIX_CACHING:-1}" == "1" ]] && PRESET_FLAGS+=(--enable-prefix-caching)
         ;;
 
     latency)

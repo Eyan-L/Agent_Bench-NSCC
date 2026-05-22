@@ -136,7 +136,7 @@ def main():
         "--runs-dir",
         type=Path,
         required=True,
-        help="Directory containing run data (data/runs/)",
+        help="Directory containing run data (data/experiments/<stamp>/runs/<sweep>/)",
     )
     parser.add_argument(
         "--out-dir",

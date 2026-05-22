@@ -1,0 +1,16 @@
+{
+  "_doc": "Terminal-Bench ReAct harness. The loop in applications/terminal_bench/conditions/react.py talks to the active model endpoint from config/serving.",
+  "harness": "tb_react",
+  "conditions": [
+    {
+      "condition_id": "tb_react",
+      "condition_type": "tb_react",
+      "description": "Multi-turn ReAct agent driving bash inside the TB task container",
+      "agent": {
+        "max_steps": 20,
+        "max_time_seconds": 900,
+        "retry_limit": 1
+      }
+    }
+  ]
+}

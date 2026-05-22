@@ -1,12 +1,6 @@
 {
-  "_doc": "OpenClaw harness for DeepResearch-Bench against the locally-mounted Qwen3.6-35B-A3B (MoE, 3B active, 256K context). Web search via Brave Search API — requires BRAVE_API_KEY env; recommended default (stable, official API, ~6-7 search queries per dr_001 task). DR-specific: agents.defaults.workspace=/workspace, agent id `deep_researcher`, no `verify` skill (RACE+FACT runs host-side after DONE), agent.max_time_seconds bumped to 3000s. Per-app prompts come from applications/deepresearch_bench/openclaw/agents/.",
+  "_doc": "OpenClaw DeepResearch-Bench harness using Brave Search. Model/deployment selected separately.",
   "harness": "openclaw",
-  "model": {
-    "name": "/mnt/network_drive/shared_models/hub/models--Qwen--Qwen3.6-35B-A3B/snapshots/995ad96eacd98c81ed38be0c5b274b04031597b0",
-    "endpoint": "http://localhost:8000/v1",
-    "temperature": 0.3,
-    "max_tokens": 4096
-  },
   "openclaw": {
     "gateway": {
       "mode": "local",
@@ -70,34 +64,9 @@
     },
     "plugins": {
       "entries": {
-        "vllm":             {"enabled": true},
-        "memory-core":      {"enabled": true},
-        "diagnostics-otel": {"enabled": true},
-        "anthropic":        {"enabled": false},
-        "openai":           {"enabled": false},
-        "openrouter":       {"enabled": false},
-        "litellm":          {"enabled": false},
-        "lmstudio":         {"enabled": false},
-        "xai":              {"enabled": false},
-        "groq":             {"enabled": false},
-        "together":         {"enabled": false},
-        "fireworks":        {"enabled": false},
-        "deepseek":         {"enabled": false},
-        "moonshot":         {"enabled": false},
-        "mistral":          {"enabled": false},
-        "ollama":           {"enabled": false},
-        "huggingface":      {"enabled": false},
-        "minimax":          {"enabled": false},
-        "perplexity":       {"enabled": false},
-        "qwen":             {"enabled": false}
-      }
-    },
-    "models": {
-      "providers": {
-        "vllm": {
-          "baseUrl": "http://localhost:8000/v1",
-          "apiKey": "sk-dummy"
-        }
+        "vllm": {"enabled": true},
+        "memory-core": {"enabled": true},
+        "diagnostics-otel": {"enabled": true}
       }
     },
     "agents": {

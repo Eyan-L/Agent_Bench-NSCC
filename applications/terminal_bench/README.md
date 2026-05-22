@@ -14,7 +14,7 @@ applications/terminal_bench/
 ├── README.md          # this file
 ├── __init__.py
 ├── loader.py          # tasks/<id>/ -> instance_data dicts
-├── app.py             # TerminalBenchHarness (singularity-backed)
+├── app.py             # TerminalBenchDockerHarness + TerminalBenchSingularityHarness
 ├── conditions/        # TB-specific experimental conditions
 │   └── react.py       # TerminalBenchReactCondition (multi-turn ReAct loop)
 ├── openclaw/          # OpenClaw customization for Terminal-Bench (per-app × per-harness)
@@ -34,15 +34,15 @@ compute nodes without internet. Add a new task by dropping its `instruction.md`
 
 ## How a TB run flows
 
-1. Sweep YAML (`config/sweeps/tb_kv_store.yaml`) lists `instances:` =
-   task ids, `condition_type: tb_react`, points at the vLLM endpoint.
-2. PBS pipeline (`pbs/run_benchmark_tb.pbs`):
+1. Application config (`config/application/terminal_bench/kv_store.json`) lists
+   task ids. Harness/model/serving are selected separately.
+2. PBS pipeline (`scripts/execution_pbs/run_benchmark_tb.pbs`):
    - **Stage 0**: `singularity pull` each task's `docker_image` (from
      `task.toml`) into `$OC_TB_SIF_DIR`. One-time, cached across jobs.
    - **Stage 1**: materialize `data/terminal_bench/tasks.json` from the
      vendored task tree using `loader.materialize_dataset`.
-   - **Stage 2**: start vLLM (Qwen3.6 by default).
-   - **Stage 3**: run `python -m orchestration.runner.driver --sweep ... --instance-data ...`.
+   - **Stage 2**: start the serving sidecar (currently vLLM in this TB PBS script).
+   - **Stage 3**: run `python -m orchestration.runner.driver --app ... --harness ... --model ... --serving ... --instance-data ...`.
 3. Driver auto-detects `instance_data["benchmark"] == "terminal_bench"` and
    routes to `TerminalBenchHarness` for that instance (the SWE-bench harness
    is unaffected).
@@ -73,12 +73,15 @@ No other SWE-bench code paths are touched.
 ## Running
 
 ```bash
-# Submit the TB job. ngpus=4 to match the bench-profile vLLM (TP=4).
-qsub pbs/run_benchmark_tb.pbs
+# Submit the TB job. Set VLLM_TP/SGLANG_TP/TP at launch to match ngpus.
+qsub scripts/execution_pbs/run_benchmark_tb.pbs
 
 # Local (non-PBS) smoke run, assuming vLLM is already up at :8000:
 python -m orchestration.runner.driver \
-  --sweep config/sweeps/tb_kv_store.yaml \
+  --app config/application/terminal_bench/kv_store.json \
+  --harness config/harness/tb_react_terminal_bench.json \
+  --model config/model/qwen36_27b.json \
+  --serving config/serving/vllm/default.json \
   --swebench-root /tmp/dummy \
   --instance-data data/terminal_bench/tasks.json
 ```

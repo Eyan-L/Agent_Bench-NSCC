@@ -61,6 +61,7 @@ from applications.swebench.app import (
     _force_rmtree,
     _oc_sandbox_name,
 )
+from applications.swebench.scoring import score_via_scoring_server, score_via_singularity
 from orchestration.container import (
     Container,
     ContainerHandle,
@@ -68,6 +69,7 @@ from orchestration.container import (
     Mount,
 )
 from orchestration.dispatcher.openclaw_remote import OpenClawRemoteDispatcher
+from orchestration.runner.config import endpoint_for_container, load_active_model_and_serving
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +93,8 @@ _OC_WARMUP_SEM = threading.BoundedSemaphore(
 _SWEBENCH_AGENT_PROMPTS = (
     "AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md", "HEARTBEAT.md",
 )
+
+_OPENAI_CHAT_COMPLETIONS_API = "openai-completions"
 
 
 class SWEBenchHarness:
@@ -272,7 +276,7 @@ class SWEBenchHarness:
             },
             mounts=(Mount(host=ws_host, container="/testbed", mode="rw"),),
             workdir="/testbed",
-            env={"PATH": task_path},
+            env={"PATH": task_path, "HOME": "/root"},
             entrypoint="sleep",
             command=("infinity",),
         )
@@ -574,17 +578,16 @@ class SWEBenchHarness:
             shutil.copytree(override, state_dir)
         else:
             # Compose the per-run openclaw.json from the active harness
-            # config's `openclaw` block. The driver injects OC_HARNESS_YAML
-            # (kept name for back-compat with shell scripts); for standalone
-            # runs we fall back to the default 27B harness.
+            # config's `openclaw` block. Model identity and endpoint come
+            # from the separate model/serving axes.
             harness_path = os.environ.get(
-                "OC_HARNESS_YAML",
-                os.path.join(kit_root, "config/harness/openclaw_27b.json"),
+                "AB_HARNESS_CONFIG",
+                os.path.join(kit_root, "config/harness/openclaw_swebench.json"),
             )
             if not os.path.isfile(harness_path):
                 raise FileNotFoundError(
                     f"harness config not found at {harness_path} "
-                    "(set OC_HARNESS_YAML or OC_HOST_STATE_TEMPLATE)."
+                    "(set AB_HARNESS_CONFIG or OC_HOST_STATE_TEMPLATE)."
                 )
             with open(harness_path) as fh:
                 harness_cfg = json.load(fh) or {}
@@ -594,16 +597,20 @@ class SWEBenchHarness:
                     f"harness config {harness_path} has no `openclaw` block "
                     "(required for the openclaw harness)."
                 )
-            # Auto-derive provider's `models[]` and agent's `model.primary`
-            # from the harness config's top-level model.name so they can't
-            # drift from what vLLM serves.
-            model_name = (harness_cfg.get("model") or {}).get("name")
-            if model_name:
-                providers = oc_cfg.setdefault("models", {}).setdefault("providers", {})
-                vllm_p = providers.setdefault("vllm", {})
-                vllm_p["models"] = [{"id": model_name, "name": model_name}]
-                agents_d = oc_cfg.setdefault("agents", {}).setdefault("defaults", {})
-                agents_d.setdefault("model", {})["primary"] = f"vllm/{model_name}"
+            model_cfg, _serving_cfg = load_active_model_and_serving(kit_root=kit_root)
+            providers = oc_cfg.setdefault("models", {}).setdefault("providers", {})
+            vllm_p = providers.setdefault("vllm", {})
+            vllm_p["api"] = _OPENAI_CHAT_COMPLETIONS_API
+            vllm_p.setdefault("apiKey", model_cfg.api_key or "sk-dummy")
+            vllm_p["models"] = [{
+                "id": model_cfg.name,
+                "name": model_cfg.name,
+                "api": _OPENAI_CHAT_COMPLETIONS_API,
+                "contextWindow": model_cfg.context_window,
+                "maxTokens": model_cfg.max_tokens,
+            }]
+            agents_d = oc_cfg.setdefault("agents", {}).setdefault("defaults", {})
+            agents_d.setdefault("model", {})["primary"] = f"vllm/{model_cfg.name}"
             with open(state_dir / "openclaw.json", "w") as fh:
                 json.dump(oc_cfg, fh, indent=2)
 
@@ -666,24 +673,39 @@ class SWEBenchHarness:
         # hostname; singularity: `127.0.0.1` shared net namespace). Harness
         # yamls ship with `baseUrl: http://localhost:8000/v1` (host
         # perspective); rewrite per-run.
-        host = self.container.host_address
-        vllm_endpoint = os.environ.get(
-            "OC_VLLM_BASE_URL", f"http://{host}:8000/v1"
+        model_cfg, _serving_cfg = load_active_model_and_serving(kit_root=kit_root)
+        # The serving config is static, but PBS may pick a per-job dynamic
+        # LiteLLM port and publish it through OPENAI_BASE_URL/MODEL_ENDPOINT.
+        # Use those runtime values so OpenClaw follows the same endpoint as
+        # OpenHands/Hermes.
+        runtime_endpoint = (
+            os.environ.get("OC_VLLM_BASE_URL")
+            or os.environ.get("OPENAI_BASE_URL")
+            or os.environ.get("MODEL_ENDPOINT")
+            or model_cfg.endpoint
+        )
+        vllm_endpoint = endpoint_for_container(
+            runtime_endpoint,
+            self.container.host_address,
         )
         providers = cfg.setdefault("models", {}).setdefault("providers", {})
-        if "vllm" in providers:
-            providers["vllm"]["baseUrl"] = vllm_endpoint
-            # API-backed providers (e.g. DeepSeek) need a real key; inject it
-            # from env so the secret isn't committed in the harness config.
-            # sglang/local leaves OC_VLLM_API_KEY unset and keeps the dummy key.
-            _api_key = os.environ.get("OC_VLLM_API_KEY")
-            if _api_key:
-                providers["vllm"]["apiKey"] = _api_key
+        vllm_provider = providers.setdefault("vllm", {})
+        vllm_provider["api"] = _OPENAI_CHAT_COMPLETIONS_API
+        vllm_provider["baseUrl"] = vllm_endpoint
+        for model in vllm_provider.get("models") or []:
+            if isinstance(model, dict):
+                model["api"] = _OPENAI_CHAT_COMPLETIONS_API
+        # API-backed providers (e.g. DeepSeek) need a real key; inject it
+        # from env so the secret isn't committed in the harness config.
+        # sglang/local leaves OC_VLLM_API_KEY unset and keeps the dummy key.
+        _api_key = os.environ.get("OC_VLLM_API_KEY")
+        if _api_key:
+            vllm_provider["apiKey"] = _api_key
         # OTel collector lives on the host too — same rewrite story.
         otel_cfg = (cfg.get("diagnostics") or {}).get("otel") or {}
         if otel_cfg.get("enabled"):
             cfg["diagnostics"]["otel"]["endpoint"] = os.environ.get(
-                "OC_OTEL_ENDPOINT", f"http://{host}:4318",
+                "OC_OTEL_ENDPOINT", f"http://{self.container.host_address}:4318",
             )
         with open(cfg_path, "w") as fh:
             json.dump(cfg, fh, indent=2)
@@ -810,6 +832,7 @@ class SWEBenchHarness:
         timeout_seconds: int,
         patch: Optional[str] = None,
         run_id: Optional[str] = None,
+        instance_data: Optional[Dict] = None,
         **_kw,
     ) -> Dict:
         logger.info("Scoring %s", instance_id)
@@ -836,6 +859,27 @@ class SWEBenchHarness:
 
         if run_id is None:
             run_id = f"oc-eval-{instance_id}-{os.urandom(3).hex()}"
+
+        singularity_verdict = score_via_singularity(
+            instance_id=instance_id,
+            patch=patch,
+            model_name_or_path="oc-eval",
+            timeout_seconds=timeout_seconds,
+            run_id=run_id,
+            swebench_root=self.swebench_root,
+            instance_data=instance_data,
+        )
+        if singularity_verdict is not None:
+            return singularity_verdict
+
+        remote_verdict = score_via_scoring_server(
+            instance_id=instance_id,
+            patch=patch,
+            model_name_or_path="oc-eval",
+            timeout_seconds=timeout_seconds,
+        )
+        if remote_verdict is not None:
+            return remote_verdict
 
         with tempfile.TemporaryDirectory(prefix="oc_pred_") as tmp:
             tmp = Path(tmp)

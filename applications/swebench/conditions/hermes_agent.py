@@ -35,20 +35,23 @@ def _ns_to_iso(ns: int) -> Optional[str]:
     return datetime.fromtimestamp(ns / 1e9, tz=timezone.utc).isoformat()
 
 
-def _resolve_provider() -> str:
+def _resolve_provider(model_config: Any = None) -> str:
     provider = os.environ.get("HERMES_INFERENCE_PROVIDER")
     if provider:
         return provider
-    harness_path = os.environ.get("OC_HARNESS_YAML")
-    if harness_path:
+    provider = (getattr(model_config, "provider", "") or "").strip()
+    if provider:
+        return provider
+    model_path = os.environ.get("AB_MODEL_CONFIG")
+    if model_path:
         try:
-            with open(harness_path) as fh:
+            with open(model_path) as fh:
                 cfg = json.load(fh) or {}
             provider = ((cfg.get("model") or {}).get("provider") or "").strip()
             if provider:
                 return provider
         except Exception:
-            logger.debug("Could not read Hermes provider from %s", harness_path, exc_info=True)
+            logger.debug("Could not read Hermes provider from %s", model_path, exc_info=True)
     return "custom"
 
 
@@ -77,7 +80,7 @@ class HermesAgentCondition:
 
         message = _build_message(instance_data["problem_statement"])
         model_name = getattr(self.model_config, "name", None) or "Qwen/Qwen3.6-27B"
-        provider = _resolve_provider()
+        provider = _resolve_provider(self.model_config)
         timeout = getattr(self.agent_config, "max_time_seconds", 1800)
         argv = [
             "hermes",
@@ -98,6 +101,7 @@ class HermesAgentCondition:
                     argv,
                     timeout=timeout + 120,
                     env=env_info.get("agent_env"),
+                    workdir=workspace_root,
                     check=False,
                 )
             else:
@@ -231,6 +235,7 @@ class HermesAgentCondition:
         resource = {
             "oc.run_id": run_id,
             "hm.run_id": run_id,
+            "agent.run_id": run_id,
             "service.name": "agent-bench-hermes",
         }
         model_start_ns = int(usage.get("start_ns") or start_ns)

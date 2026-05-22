@@ -6,7 +6,7 @@ workloads shift away from pure GPU-centric inference.
 
 Run:
     python -m orchestration.analysis.plots.rq2_resources \
-        --runs-dir data/runs --out-dir data/figures/rq2
+        --runs-dir data/experiments/<stamp>/runs --out-dir data/figures/rq2
 """
 from __future__ import annotations
 

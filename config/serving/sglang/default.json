@@ -1,0 +1,23 @@
+{
+  "_doc": "Default SGLang endpoint profile. Model context length comes from config/model/*.json; tensor parallelism is selected at launch time via SGLANG_TP or TP.",
+  "serving": {
+    "config_id": "sglang-default",
+    "backend": "sglang",
+    "preset": "default",
+    "endpoint": {
+      "scheme": "http",
+      "bind_host": "0.0.0.0",
+      "client_host": "127.0.0.1",
+      "port": 8000,
+      "path": "/v1"
+    },
+    "runtime": {
+      "gpu_mem_util": 0.85
+    },
+    "scheduler": {
+      "max_num_seqs": 128,
+      "enable_prefix_caching": true
+    },
+    "additional_flags": {}
+  }
+}

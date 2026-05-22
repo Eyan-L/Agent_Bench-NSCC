@@ -7,7 +7,7 @@ additionally emits a vector copy.
 
 Run:
     python -m orchestration.analysis.plots.rq1_composition \
-        --runs-dir data/runs --out-dir data/figures/rq1
+        --runs-dir data/experiments/<stamp>/runs --out-dir data/figures/rq1
 """
 from __future__ import annotations
 

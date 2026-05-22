@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import inspect
 import json
 import logging
 import os
@@ -55,6 +56,17 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     stream=sys.stderr,
 )
+
+
+def _accepts_kwarg(callable_obj: Any, name: str) -> bool:
+    try:
+        sig = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return True
+    return (
+        name in sig.parameters
+        or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+    )
 
 
 # ----------------------------------------------------------------------
@@ -413,7 +425,39 @@ def main(argv: Optional[list] = None) -> int:
         }
         if llm_cfg.get("max_output_tokens"):
             llm_kwargs["max_output_tokens"] = int(llm_cfg["max_output_tokens"])
-        llm = LLM(**llm_kwargs)
+        context_param_name = None
+        if llm_cfg.get("max_input_tokens"):
+            max_input_tokens = int(llm_cfg["max_input_tokens"])
+            for param_name in (
+                "max_input_tokens",
+                "context_window",
+                "max_context_tokens",
+            ):
+                if _accepts_kwarg(LLM, param_name):
+                    llm_kwargs[param_name] = max_input_tokens
+                    context_param_name = param_name
+                    break
+            else:
+                _emit(
+                    sink,
+                    "llm_context_window_ignored",
+                    context_window=max_input_tokens,
+                    reason="unsupported_llm_parameter",
+                )
+        try:
+            llm = LLM(**llm_kwargs)
+        except TypeError as e:
+            if not context_param_name:
+                raise
+            max_input_tokens = llm_kwargs.pop(context_param_name)
+            _emit(
+                sink,
+                "llm_context_window_ignored",
+                context_window=max_input_tokens,
+                parameter=context_param_name,
+                reason=f"constructor_rejected: {e}",
+            )
+            llm = LLM(**llm_kwargs)
     except Exception as e:
         _emit_error(sink, "llm_init", f"{e}", traceback=traceback.format_exc())
         sink.close()

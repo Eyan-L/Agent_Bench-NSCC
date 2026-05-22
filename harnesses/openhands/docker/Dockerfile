@@ -28,7 +28,7 @@
 #   └─────────────────────────────────────┘
 #
 # We deliberately do NOT bake openhands' config.toml here — the harness
-# renders one per run on the host (from config/harness/openhands_*.json)
+# renders one per run on the host (from config/harness + config/model)
 # and bind-mounts it at /etc/agent-bench/state/config.toml.
 
 ARG OPENHANDS_VERSION=1.21.0

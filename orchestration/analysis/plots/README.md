@@ -2,7 +2,7 @@
 
 Renders matplotlib figures for the three research questions from per-run
 trace data already produced by the eval driver
-(`data/runs/<sweep>/<run_id>/`). Reuses the existing metric computers in
+(`data/experiments/<stamp>/runs/<sweep>/<run_id>/`). Reuses the existing metric computers in
 `orchestration/analysis/{composition,resource,evaluation}.py` — these scripts
 only handle file I/O, grouping, and plotting.
 
@@ -22,20 +22,19 @@ orchestration/analysis/plots/
 ```bash
 # Render everything in one shot.
 python -m orchestration.analysis.plots.plot_all \
-    --runs-dir data/runs \
+    --runs-dir data/experiments/<stamp>/runs \
     --out-dir  data/figures
 
 # Or run a single RQ.
-python -m orchestration.analysis.plots.rq1_composition --runs-dir data/runs --out-dir data/figures/rq1
-python -m orchestration.analysis.plots.rq2_resources   --runs-dir data/runs --out-dir data/figures/rq2
-python -m orchestration.analysis.plots.rq3_metrics     --runs-dir data/runs --out-dir data/figures/rq3
+python -m orchestration.analysis.plots.rq1_composition --runs-dir data/experiments/<stamp>/runs --out-dir data/figures/rq1
+python -m orchestration.analysis.plots.rq2_resources   --runs-dir data/experiments/<stamp>/runs --out-dir data/figures/rq2
+python -m orchestration.analysis.plots.rq3_metrics     --runs-dir data/experiments/<stamp>/runs --out-dir data/figures/rq3
 
 # Add --also-pdf to emit vector copies alongside PNGs.
 ```
 
 `--runs-dir` is walked recursively for any directory containing
-`steps.jsonl`, so `data/runs/phase1/` and `data/runs/tb_kv_store/` mix
-fine.
+`steps.jsonl`, so `runs/phase1/` and `runs/tb_kv_store/` mix fine.
 
 ## What each figure shows
 

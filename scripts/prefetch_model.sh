@@ -4,24 +4,23 @@
 # vllm serve will download on first run, but that makes the first 'make run_phase0'
 # take 10-20 minutes of silent 'waiting' before anything happens. Prefetch once.
 #
-# Resolves $MODEL from the active harness config (HARNESS env or
-# VLLM_HARNESS_YAML) — the single source of truth for "which model this
-# run uses", same as serve.sh. Pass MODEL=foo to override.
+# Resolves $MODEL from config/model/$MODEL_PROFILE.json (or AB_MODEL_CONFIG),
+# same as serve.sh. Pass MODEL=foo to override.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KIT_ROOT="${KIT_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
-HARNESS_CFG="${VLLM_HARNESS_YAML:-}"
-if [[ -z "$HARNESS_CFG" && -n "${HARNESS:-}" ]]; then
-    HARNESS_CFG="$KIT_ROOT/config/harness/${HARNESS}.json"
+MODEL_CFG="${VLLM_MODEL_CONFIG:-${AB_MODEL_CONFIG:-}}"
+if [[ -z "$MODEL_CFG" && -n "${MODEL_PROFILE:-}" ]]; then
+    MODEL_CFG="$KIT_ROOT/config/model/${MODEL_PROFILE}.json"
 fi
-if [[ -z "$HARNESS_CFG" ]]; then
-    HARNESS_CFG="$KIT_ROOT/config/harness/openclaw_27b.json"
+if [[ -z "$MODEL_CFG" ]]; then
+    MODEL_CFG="$KIT_ROOT/config/model/qwen36_27b.json"
 fi
-if [[ -f "$HARNESS_CFG" ]]; then
-    eval "$(python3 "$KIT_ROOT/scripts/load_harness_env.py" "$HARNESS_CFG")"
+if [[ -f "$MODEL_CFG" ]]; then
+    eval "$(python3 "$KIT_ROOT/scripts/load_model_env.py" "$MODEL_CFG")"
 fi
 
 MODEL="${MODEL:-Qwen/Qwen3.6-27B}"
