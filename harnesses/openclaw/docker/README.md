@@ -17,13 +17,22 @@ default tag is `agent-bench/openclaw:<version>`. Override the tag with
 
 What the build does:
 1. `FROM ghcr.io/openclaw/openclaw:<version>` (multi-arch).
-2. As root, `apt-get install python3 patch ca-certificates` so
-   `apply_patch.py` can run.
-3. `python3 apply_patch.py apply` (mode=runtime) — bakes the four diffs in
+2. As root, `apt-get install python3 patch ca-certificates docker.io` so
+   `apply_patch.py` can run and the gateway can spawn sandbox containers.
+3. Plugin runtime-deps pre-warm (as `node`): `openclaw plugins list` plus a
+   throwaway `openclaw agent --local` run against a dead endpoint. The agent
+   run is what forces the *provider* plugins (openai, xai, ollama, …) to load
+   and `npm install` their bundled deps (`@mariozechner/pi-ai`, `typebox`,
+   `ws`) into `dist/extensions/<plugin>/node_modules/`. Baking these at build
+   time (single process) prevents the gateway+agent ENOTEMPTY race that
+   crashes ~1/3 of agent starts at run time. The throwaway config is removed
+   afterwards. Must run before `apply_patch` so the per-plugin `pi-ai` copies
+   exist for `target_glob_all` to patch.
+4. `python3 apply_patch.py apply` (mode=runtime) — bakes the diffs in
    `../patch/*.patch` into upstream's `dist/*.js`.
-4. `python3 apply_patch.py status` (mode=baked) — fails the build if any
+5. `python3 apply_patch.py status` (mode=baked) — fails the build if any
    marker is missing.
-5. `chown -R node:node /opt/openclaw-tools` and switch back to `USER node`.
+6. `chown -R node:node /opt/openclaw-tools` and switch back to `USER node`.
 
 ## Smoke
 

@@ -154,6 +154,10 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 from applications.deepresearch_bench.conditions.openclaw_agent import (
                     DeepResearchOpenClawCondition as _Cls,
                 )
+            elif benchmark == "longbench":
+                from applications.longbench.conditions.openclaw_agent import (
+                    LongBenchOpenClawCondition as _Cls,
+                )
             else:
                 from applications.swebench.conditions.openclaw_agent import (
                     SWEBenchOpenClawCondition as _Cls,
@@ -237,7 +241,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         benchmark_kind = instance_data.get("benchmark", "swebench")
         # TB and DR-Bench have no git-patch artifact — the agent's work lives
         # inside the task container (TB: services + files; DR: /workspace/report.md).
-        skip_patch_gate = benchmark_kind in ("terminal_bench", "deepresearch_bench")
+        skip_patch_gate = benchmark_kind in ("terminal_bench", "deepresearch_bench", "longbench")
 
         if skip_patch_gate or (patch_path.exists() and patch_path.stat().st_size > 0):
             verdict = harness.run_tests(
@@ -349,7 +353,7 @@ def run_sweep(app_path: Path, harness_path: Path, model_path: Path, serving_path
     #                            instances). Same isolation model in singularity-land.
     # Terminal-Bench / DR-Bench instances are auto-routed to their respective
     # harnesses regardless of HARNESS_BACKEND (per-instance dispatch in _one below).
-    _NON_SWE_BENCHMARKS = ("terminal_bench", "deepresearch_bench")
+    _NON_SWE_BENCHMARKS = ("terminal_bench", "deepresearch_bench", "longbench")
     needs_swe = any(
         inst.get("benchmark", "swebench") not in _NON_SWE_BENCHMARKS
         for inst in instances.values()
@@ -359,6 +363,9 @@ def run_sweep(app_path: Path, harness_path: Path, model_path: Path, serving_path
     )
     needs_dr = any(
         inst.get("benchmark") == "deepresearch_bench" for inst in instances.values()
+    )
+    needs_lb = any(
+        inst.get("benchmark") == "longbench" for inst in instances.values()
     )
 
     # Peek at the harness config to learn which agent runtime this sweep
@@ -441,6 +448,20 @@ def run_sweep(app_path: Path, harness_path: Path, model_path: Path, serving_path
             logger.info("Constructing DeepResearchHarness.")
         dr_harness = DeepResearchHarness(swebench_root)
 
+    # Lazy-build the LongBench harness only if any instance is LongBench.
+    # Same two-container model as DR; per-subtask instance loops examples over
+    # warm containers, retrieving from the shared ClawRAG service.
+    lb_harness = None
+    if needs_lb:
+        from applications.longbench.app import LongBenchHarness
+        lb_backend = os.environ.get("HARNESS_BACKEND", "docker").lower()
+        if lb_backend != "docker":
+            raise ValueError(
+                f"longbench only supports HARNESS_BACKEND=docker (got {lb_backend!r})."
+            )
+        logger.info("Constructing LongBenchHarness.")
+        lb_harness = LongBenchHarness(swebench_root)
+
     # Lazy-build the TB harness only if any instance in this sweep is TB.
     # Same HARNESS_BACKEND env var as SWE-bench:
     #   docker      (default) — TerminalBenchDockerHarness
@@ -484,6 +505,8 @@ def run_sweep(app_path: Path, harness_path: Path, model_path: Path, serving_path
                 h = tb_harness
             elif bm == "deepresearch_bench":
                 h = dr_harness
+            elif bm == "longbench":
+                h = lb_harness
             else:
                 h = harness
             if h is None:

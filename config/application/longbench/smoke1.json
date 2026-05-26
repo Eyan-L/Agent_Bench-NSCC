@@ -1,0 +1,21 @@
+{
+  "_doc": "LongBench v1 RAG single-subtask smoke (multifieldqa_en: single-doc QA, qa_f1). Fastest plumbing check for the ClawRAG ingest->retrieve->answer path. See smoke3.json for field-by-field notes.",
+  "sweep_name": "longbench_smoke1",
+  "plan_version": "v1.0",
+  "application": "longbench",
+  "instances": [
+    "multifieldqa_en"
+  ],
+  "repo_mapping": {
+    "multifieldqa_en": {
+      "repo_id": "longbench",
+      "base_commit": "longbench-v1"
+    }
+  },
+  "container_image": "longbench/clawrag-sandbox.UNUSED:latest",
+  "wall_clock_budget_seconds": 3600,
+  "output_dir": "longbench_smoke1",
+  "seeds": [42],
+  "parallel_limit_gpu": 1,
+  "parallel_limit_cpu_cores": 8
+}

@@ -1,0 +1,75 @@
+{
+  "_doc": "OpenClaw LongBench harness — agent answers each question via ClawRAG retrieval (clawrag_retrieve skill -> /workspace/clawrag_search.py). RAG-only, no web tools. Model/serving selected separately (--model/--serving).",
+  "harness": "openclaw",
+  "openclaw": {
+    "gateway": {
+      "mode": "local",
+      "bind": "loopback",
+      "auth": {
+        "mode": "token",
+        "token": {"source": "env", "provider": "env", "id": "OPENCLAW_GATEWAY_TOKEN"}
+      }
+    },
+    "diagnostics": {
+      "enabled": true,
+      "otel": {
+        "enabled": true,
+        "endpoint": "http://localhost:4318",
+        "protocol": "http/protobuf",
+        "serviceName": "agent-bench-openclaw",
+        "traces": true, "metrics": true, "logs": true,
+        "sampleRate": 1, "flushIntervalMs": 20
+      },
+      "cacheTrace": {"enabled": true, "includeMessages": true, "includePrompt": true, "includeSystem": true}
+    },
+    "tools": {
+      "profile": "coding",
+      "web": {
+        "search": {"enabled": false},
+        "fetch": {"enabled": false}
+      },
+      "sandbox": {
+        "tools": {
+          "allow": [
+            "exec", "process", "read", "write", "edit",
+            "sessions_list", "sessions_history", "sessions_send",
+            "sessions_spawn", "sessions_yield", "subagents", "session_status",
+            "memory_get", "memory_search"
+          ]
+        }
+      }
+    },
+    "plugins": {
+      "entries": {
+        "vllm": {"enabled": true},
+        "memory-core": {"enabled": true},
+        "diagnostics-otel": {"enabled": true}
+      }
+    },
+    "agents": {
+      "defaults": {
+        "workspace": "/workspace",
+        "subagents": {"maxConcurrent": 2, "runTimeoutSeconds": 600}
+      },
+      "list": [
+        {
+          "id": "longbench_rag",
+          "default": true,
+          "name": "longbench-rag"
+        }
+      ]
+    }
+  },
+  "conditions": [
+    {
+      "condition_id": "openclaw_agent",
+      "condition_type": "openclaw_agent",
+      "description": "OpenClaw agent answering one LongBench question per session via ClawRAG retrieval",
+      "agent": {
+        "max_steps": 40,
+        "max_time_seconds": 300,
+        "retry_limit": 3
+      }
+    }
+  ]
+}
