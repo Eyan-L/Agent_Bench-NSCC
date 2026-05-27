@@ -1,0 +1,12 @@
+[deployment]
+name = "nscc_pbs_cpu"
+kind = "nscc_pbs"
+requires_gpu = false
+container_runtime = "singularity"
+queue = "normal"
+walltime = "02:00:00"
+nodes = 1
+cpus = 16
+gpus = 0
+memory = "64gb"
+description = "Render a CPU-only PBS job for provider-backed LiteLLM runs."

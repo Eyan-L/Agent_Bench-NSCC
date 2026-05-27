@@ -103,54 +103,43 @@ Inspect `data/experiments/<stamp>/runs/phase0/<run_id>/{verdict.json,steps.jsonl
 
 ## Mode 2 — PBS / singularity (cluster)
 
-Production sweeps on HPC. The PBS script orchestrates: pip install swebench,
-pull instance SIFs, start vLLM, prepare the selected harness runtime SIF, start
-the OTel collector, run the driver, tear everything down.
+Production sweeps on HPC. `run.py --render-job` emits a short PBS wrapper; the
+worker calls `agent_bench.deployments.pbs.run_job`, which materializes data,
+pulls task/runtime SIFs, starts serving, starts the OTel collector, runs the
+driver, and tears sidecars down.
 
 ### Submit
 
 ```bash
-# Default bench profile (4x A100, 24h walltime)
-qsub agent_bench/deployments/pbs/run_benchmark.pbs
+# SWE-bench smoke on NSCC
+python3 run.py --config experiments/nscc_vllm.toml --render-job > nscc_vllm.pbs
+qsub nscc_vllm.pbs
 
-# Override the app/harness/model/serving, skip stage 0 (assume pylib already populated)
-qsub -v STAGE_SWEBENCH=0,APP=$KIT_ROOT/profiles/benchmarks/swebench/phase0.json \
-    agent_bench/deployments/pbs/run_benchmark.pbs
-
-# Small local-model smoke with the four-axis configs
-qsub -l select=1:ncpus=16:ngpus=1:mem=64gb \
-    -v KIT_ROOT=$KIT_ROOT,APP=$KIT_ROOT/profiles/benchmarks/swebench/phase0.json,HARNESS_CONFIG=$KIT_ROOT/profiles/harnesses/openclaw_swebench.json,MODEL_CONFIG=$KIT_ROOT/profiles/models/qwen35_9b.json,SERVING_CONFIG=$KIT_ROOT/profiles/serving/vllm/nscc.json,VLLM_TP=1 \
-    agent_bench/deployments/pbs/run_benchmark.pbs
-
-# Provider-backed model API through a local LiteLLM proxy (no GPU request)
-qsub -l select=1:ncpus=16:mem=64gb \
-    -v KIT_ROOT=$KIT_ROOT,APP=$KIT_ROOT/profiles/benchmarks/swebench/phase0.json,HARNESS_CONFIG=$KIT_ROOT/profiles/harnesses/openclaw_swebench.json,MODEL_CONFIG=$KIT_ROOT/profiles/models/minimax_m2_7.json,SERVING_CONFIG=$KIT_ROOT/profiles/serving/litellm/minimax_global.json,MINIMAX_API_KEY=$MINIMAX_API_KEY \
-    agent_bench/deployments/pbs/run_benchmark.pbs
-
-# Terminal-Bench sweep
-qsub agent_bench/deployments/pbs/run_benchmark_tb.pbs
+# Terminal-Bench smoke on NSCC
+python3 run.py --config experiments/nscc_terminal_bench.toml --render-job > nscc_terminal_bench.pbs
+qsub nscc_terminal_bench.pbs
 ```
 
-### Stages (each toggleable via `STAGE_*=0`)
+### Stages
 
 | Stage | What it does |
 |---|---|
-| `STAGE_SWEBENCH` | pip-install swebench into a persistent scratch lib cache |
-| `STAGE_PULL`     | pull SWE-bench instance .sif images (one-time, network needed) |
-| `STAGE_SERVING`  | start the local serving sidecar: vLLM for local models, or LiteLLM proxy for provider-backed models |
-| `STAGE_OC_CHECK` | prepare the selected harness runtime SIF: OpenClaw/OpenHands/Hermes all build locally on NSCC from a base/upstream SIF unless you explicitly set a pullable final `*_RUNTIME_DOCKER` |
-| `STAGE_OTEL`     | start the local OTel collector that writes otel-traces.jsonl |
-| `STAGE_RUN`      | invoke `agent_bench/runtime/driver` with the sweep |
-| `STAGE_CLEANUP`  | kill the serving sidecar + OTel, free ports |
+| `prepare_environment` | create run/log/cache directories and export runtime env |
+| `materialize_benchmark` | materialize SWE-bench or Terminal-Bench instance JSON |
+| `prepare_images` | pull task SIFs and prepare OpenClaw/OpenHands/Hermes runtime SIFs |
+| `start_serving` | start vLLM, SGLang, or LiteLLM sidecar |
+| `start_otel` | start local OTel collector that writes `otel-traces.jsonl` |
+| `run_benchmark` | invoke the migrated runtime driver |
+| `cleanup` | stop sidecars and collectors |
 
-See the header comment in `agent_bench/deployments/pbs/run_benchmark.pbs` for the
-full env-var menu.
+Disable a stage with `qsub -v AB_STAGE_PREPARE_IMAGES=0 ...`. Legacy
+submission names such as `STAGE_PULL=0`, `STAGE_TB_PULL=0`, `STAGE_SERVING=0`,
+and `STAGE_RUN=0` are still accepted as compatibility overrides.
 
 ### Outputs on the cluster
 
-Per-run dirs land in
-`$KIT_ROOT/data/experiments/$AB_RUN_STAMP/runs/<sweep_id>/<run_id>/`.
-Logs go to `$KIT_ROOT/data/experiments/$AB_RUN_STAMP/logs/`:
+Per-run dirs land under the experiment `output_dir` plus stable run id, for
+example `runs/nscc_vllm/<run_id>/`. Logs go to `<run_dir>/logs/`:
 
 - `pbs.log` — top-level PBS job log
 - `vllm.log` — engine stdout (parsed by `engine_log_tailer`)
@@ -163,7 +152,8 @@ Logs go to `$KIT_ROOT/data/experiments/$AB_RUN_STAMP/logs/`:
 
 NSCC jobs cannot use Docker directly, so final SWE-bench scoring should be
 run through the same per-instance `.sif` images used by the task sandbox.
-`run_benchmark.pbs` exports `OC_SCORING_SIF_DIR="$SIF_DIR"` after Stage 1, so
+The PBS stage runner exports `OC_SCORING_SIF_DIR="$SIF_DIR"` after environment
+preparation, so
 OpenClaw/OpenHands/Hermes score patches by:
 
 1. copying `/testbed` out of `<instance_id>.sif` into a temporary writable dir,
@@ -182,9 +172,8 @@ python -m agent_bench.benchmarks.swebench.scoring_server.main \
   --host 0.0.0.0 \
   --port 8765
 
-# In the NSCC qsub environment:
-qsub -v OC_SCORING_URL=http://<docker-host>:8765,... \
-  agent_bench/deployments/pbs/run_benchmark.pbs
+# In the NSCC qsub environment, pass the scoring host to the generated job:
+qsub -v OC_SCORING_URL=http://<docker-host>:8765 nscc_vllm.pbs
 ```
 
 Scoring precedence is: `OC_SCORING_SIF_DIR` first, then `OC_SCORING_URL`, then

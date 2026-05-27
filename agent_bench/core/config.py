@@ -63,6 +63,7 @@ class ServingConfig:
     provider_name: Optional[str] = None
     provider_base_url: Optional[str] = None
     provider_api_key_env: Optional[str] = None
+    provider_model: Optional[str] = None
     proxy_api_key: Optional[str] = None
     proxy_agent_provider: Optional[str] = None
     additional_flags: Dict[str, Any] = field(default_factory=dict)
@@ -84,6 +85,7 @@ class ServingConfig:
             "provider_name": self.provider_name,
             "provider_base_url": self.provider_base_url,
             "provider_api_key_env": self.provider_api_key_env,
+            "provider_model": self.provider_model,
             "proxy_api_key": self.proxy_api_key,
             "proxy_agent_provider": self.proxy_agent_provider,
             "additional_flags": self.additional_flags,
@@ -422,6 +424,7 @@ def load_serving_config(serving_path: Path) -> ServingConfig:
         provider_name=provider.get("name") or provider.get("provider"),
         provider_base_url=provider.get("base_url") or provider.get("url"),
         provider_api_key_env=provider.get("api_key_env"),
+        provider_model=provider.get("model"),
         proxy_api_key=(
             proxy.get("api_key", "sk-agent-bench-local")
             if backend == "litellm" else None
@@ -494,10 +497,10 @@ def load_active_model_and_serving(
     serving_path = os.environ.get("AB_SERVING_CONFIG")
     if not model_path:
         model_profile = os.environ.get("MODEL_PROFILE", "qwen36_27b")
-        model_path = str(root / "config" / "model" / f"{model_profile}.json")
+        model_path = str(root / "profiles" / "models" / f"{model_profile}.json")
     if not serving_path:
         serving_profile = os.environ.get("SERVING", "vllm/default")
-        serving_path = str(root / "config" / "serving" / f"{serving_profile}.json")
+        serving_path = str(root / "profiles" / "serving" / f"{serving_profile}.json")
 
     model_path_p = _resolve(model_path)
     serving_path_p = _resolve(serving_path)

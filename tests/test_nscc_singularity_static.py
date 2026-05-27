@@ -2,6 +2,10 @@
 
 from pathlib import Path
 
+from agent_bench.core.spec import load_resolved_experiment
+from agent_bench.deployments.pbs.job_spec import build_pbs_job_spec
+from agent_bench.deployments.pbs.stages import prepare_environment
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -89,7 +93,7 @@ def test_openclaw_uses_runtime_serving_endpoint():
 
 
 def test_openclaw_forces_chat_completions_transport():
-    pbs = (ROOT / "agent_bench/deployments/pbs/run_benchmark.pbs").read_text()
+    stages = (ROOT / "agent_bench/deployments/pbs/stages.py").read_text()
     configure = (ROOT / "agent_bench/harnesses/openclaw/configure.sh").read_text()
 
     for rel in (
@@ -102,29 +106,26 @@ def test_openclaw_forces_chat_completions_transport():
         assert 'vllm_provider["api"] = _OPENAI_CHAT_COMPLETIONS_API' in app
         assert 'model["api"] = _OPENAI_CHAT_COMPLETIONS_API' in app
 
-    assert 'vllm_provider["api"] = "openai-completions"' in pbs
-    assert '"api": "openai-completions"' in pbs
+    assert 'vllm_provider["api"] = "openai-completions"' in stages
+    assert '"api": "openai-completions"' in stages
     assert "models.providers.vllm.api openai-completions" in configure
 
 
 def test_pbs_prepares_runtime_sif_by_harness_choice():
-    pbs = (ROOT / "agent_bench/deployments/pbs/run_benchmark.pbs").read_text()
+    stages = (ROOT / "agent_bench/deployments/pbs/stages.py").read_text()
 
-    assert "HARNESS_CHOICE=" in pbs
-    assert pbs.index("module load python/3.12.1-gcc11") < pbs.index("load_model_env.py")
-    assert "OH_RUNTIME_SIF" in pbs
-    assert "HM_RUNTIME_SIF" in pbs
-    assert "OH_RUNTIME_BASE_DOCKER" in pbs
-    assert "HM_RUNTIME_BASE_DOCKER" in pbs
-    assert "build_oh_sif.sh" in pbs
-    assert "build_hm_sif.sh" in pbs
-    assert 'openhands)' in pbs
-    assert 'hermes)' in pbs
-    assert 'export OH_IMAGE="$OH_RUNTIME_SIF"' in pbs
-    assert 'export HM_IMAGE="$HM_RUNTIME_SIF"' in pbs
-    assert "FATAL: failed to pull $label runtime" in pbs
-    assert "FATAL: OpenHands runtime sif missing" in pbs
-    assert "FATAL: Hermes runtime sif missing" in pbs
+    assert "OH_RUNTIME_SIF" in stages
+    assert "HM_RUNTIME_SIF" in stages
+    assert "OH_RUNTIME_BASE_DOCKER" in stages
+    assert "HM_RUNTIME_BASE_DOCKER" in stages
+    assert "build_oh_sif.sh" in stages
+    assert "build_hm_sif.sh" in stages
+    assert 'harness == "openhands"' in stages
+    assert 'harness == "hermes"' in stages
+    assert 'out["OH_IMAGE"] = env.get("OH_IMAGE") or out["OH_RUNTIME_SIF"]' in stages
+    assert 'out["HM_IMAGE"] = env.get("HM_IMAGE") or out["HM_RUNTIME_SIF"]' in stages
+    assert "pull OpenHands" in stages
+    assert "pull Hermes" in stages
 
 
 def test_nscc_runtime_sif_builders_exist():
@@ -177,14 +178,22 @@ def test_singularity_subprocess_env_drops_home_override(monkeypatch):
     assert env["SINGULARITYENV_NPM_CONFIG_REGISTRY"] == "https://registry.npmmirror.com"
 
 
-def test_pbs_groups_logs_under_experiment_dir():
-    pbs = (ROOT / "agent_bench/deployments/pbs/run_benchmark.pbs").read_text()
+def test_pbs_groups_logs_under_experiment_dir(tmp_path: Path):
+    resolved = load_resolved_experiment(ROOT / "experiments/nscc_vllm.toml", root=ROOT)
+    env = {
+        "KIT_ROOT": str(ROOT),
+        "USER": "alice",
+        "SCRATCH": str(tmp_path / "scratch"),
+        "AGENT_BENCH_RUN_DIR": str(tmp_path / "run"),
+        "AGENT_BENCH_LOG_DIR": str(tmp_path / "run/logs"),
+    }
+    spec = build_pbs_job_spec(resolved, env=env)
 
-    assert "$KIT_ROOT/data/experiments/$AB_RUN_STAMP" in pbs
-    assert "PBS_JOBID" in pbs
-    assert 'export AB_EXPERIMENT_DIR="$EXPERIMENT_DIR"' in pbs
-    assert 'LOG_DIR="${OC_LOG_DIR:-$EXPERIMENT_DIR/logs}"' in pbs
-    assert '$EXPERIMENT_DIR/runs' in pbs
+    prepare_environment(resolved, spec, env)
+
+    assert env["AB_EXPERIMENT_DIR"] == str(tmp_path / "run")
+    assert env["OC_LOG_DIR"] == str(tmp_path / "run/logs")
+    assert env["AGENT_BENCH_LOG_DIR"] == str(tmp_path / "run/logs")
 
 
 def test_runner_maps_app_output_under_experiment_dir(monkeypatch):

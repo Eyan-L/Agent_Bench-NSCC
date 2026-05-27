@@ -8,6 +8,8 @@ import subprocess
 import pytest
 
 from agent_bench.core.config import load_model_config, load_serving_config
+from agent_bench.core.spec import load_resolved_experiment
+from agent_bench.deployments.pbs.job_spec import build_pbs_job_spec
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -157,22 +159,18 @@ def test_litellm_config_renderer_includes_api_base_when_configured(tmp_path, mon
     assert "https://api.minimax.io/v1" not in rendered
 
 
-def test_pbs_uses_serving_stage_for_sidecars():
-    pbs = (ROOT / "agent_bench/deployments/pbs/run_benchmark.pbs").read_text()
-    tb_pbs = (ROOT / "agent_bench/deployments/pbs/run_benchmark_tb.pbs").read_text()
+def test_pbs_uses_shared_serving_plan_for_sidecars():
+    swe = load_resolved_experiment(ROOT / "experiments/nscc_vllm.toml", root=ROOT)
+    tb = load_resolved_experiment(ROOT / "experiments/nscc_terminal_bench.toml", root=ROOT)
 
-    assert "STAGE_VLLM" not in pbs
-    assert "VLLM_PROFILE" not in pbs
-    assert "STAGE_SERVING" in pbs
-    assert 'export OC_VLLM_API_KEY="${OC_VLLM_API_KEY:-$MODEL_API_KEY}"' in pbs
-    assert "litellm)" in pbs
-    assert "provider_proxy" not in pbs
-    assert "LITELLM_PORT_AUTO" in pbs
-    assert "LITELLM_UPSTREAM_API_KEY" in pbs
-    assert 'SERVING_BACKEND=sglang is recognized' in pbs
-    assert '! "${SERVING_BACKEND:-vllm}" == "litellm"' not in pbs
-    assert "provider|api)" not in pbs
-    assert "direct remote endpoint" not in pbs
-    assert "provider|api)" not in tb_pbs
-    assert "STAGE_VLLM" not in tb_pbs
-    assert "STAGE_SERVING" in tb_pbs
+    swe_spec = build_pbs_job_spec(swe, env={"KIT_ROOT": str(ROOT), "USER": "alice"})
+    tb_spec = build_pbs_job_spec(tb, env={"KIT_ROOT": str(ROOT), "USER": "alice"})
+
+    assert swe_spec.stages["start_serving"]
+    assert tb_spec.stages["start_serving"]
+    assert swe_spec.serving_plan is not None
+    assert tb_spec.serving_plan is not None
+    assert swe_spec.serving_plan.backend == "vllm"
+    assert tb_spec.serving_plan.backend == "vllm"
+    assert "run_benchmark.pbs" not in swe_spec.render_script()
+    assert "run_benchmark_tb.pbs" not in tb_spec.render_script()

@@ -14,22 +14,29 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize(
-    ("experiment", "deployment", "backend"),
+    ("experiment", "deployment", "backend", "deployment_profile"),
     [
-        ("client_only", "client_only", "litellm"),
-        ("local_vllm", "local_docker", "vllm"),
-        ("nscc_vllm", "nscc_pbs", "vllm"),
-        ("ccds_litellm", "ccds_cloud", "litellm"),
+        ("client_only", "client_only", "litellm", "client_only.toml"),
+        ("local_vllm", "local_docker", "vllm", "local_docker.toml"),
+        ("nscc_vllm", "nscc_pbs", "vllm", "nscc_pbs.toml"),
+        ("nscc_terminal_bench", "nscc_pbs", "vllm", "nscc_pbs.toml"),
+        ("nscc_litellm", "nscc_pbs", "litellm", "nscc_pbs_cpu.toml"),
+        ("ccds_litellm", "ccds_cloud", "litellm", "ccds_cloud.toml"),
     ],
 )
-def test_example_experiments_resolve(experiment: str, deployment: str, backend: str) -> None:
+def test_example_experiments_resolve(
+    experiment: str,
+    deployment: str,
+    backend: str,
+    deployment_profile: str,
+) -> None:
     resolved = load_resolved_experiment(ROOT / "experiments" / f"{experiment}.toml", root=ROOT)
 
     assert resolved.run_id
     assert resolved.deployment["kind"] == deployment
     assert resolved.serving["backend"] == backend
     assert resolved.profile_paths["model"].is_absolute()
-    assert resolved.to_dict()["profiles"]["deployment"].endswith(f"{deployment}.toml")
+    assert resolved.to_dict()["profiles"]["deployment"].endswith(deployment_profile)
 
 
 def test_legacy_wrapped_profiles_are_expanded() -> None:
@@ -85,7 +92,7 @@ def test_deployment_plans_render_static_scripts() -> None:
     assert nscc_plan.deployment == "nscc_pbs"
     assert nscc_plan.job_script is not None
     assert "#PBS -N agent-bench-nscc_vllm" in nscc_plan.job_script
-    assert "python3 run.py --config experiments/nscc_vllm.toml" in nscc_plan.job_script
+    assert "python3 -m agent_bench.deployments.pbs.run_job --config experiments/nscc_vllm.toml" in nscc_plan.job_script
     assert "--dry-run" not in nscc_plan.job_script
 
     ccds = load_resolved_experiment(ROOT / "experiments" / "ccds_litellm.toml", root=ROOT)

@@ -15,7 +15,7 @@ profile = "profiles/harnesses/openclaw_swebench.json"
 profile = "profiles/models/qwen35_9b.json"
 
 [serving]
-profile = "profiles/serving/vllm/default.json"
+profile = "profiles/serving/vllm/nscc.json"
 
 [deployment]
 profile = "profiles/deployments/nscc_pbs.toml"

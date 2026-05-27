@@ -67,12 +67,8 @@ export APP="$KIT_ROOT/profiles/benchmarks/swebench/phase1.json"
 export MODEL_CONFIG="$KIT_ROOT/profiles/models/qwen35_9b.json"
 export SERVING_CONFIG="$KIT_ROOT/profiles/serving/vllm/nscc.json"
 
-for h in openclaw openhands hermes; do
-  qsub -l select=1:ncpus=16:ngpus=1:mem=64gb \
-    -l walltime=24:00:00 \
-    -v "KIT_ROOT=$KIT_ROOT,AB_RUN_STAMP=swebench_phase1_${h}_qwen35_9b,APP=$APP,HARNESS_CONFIG=$KIT_ROOT/profiles/harnesses/${h}_swebench.json,MODEL_CONFIG=$MODEL_CONFIG,SERVING_CONFIG=$SERVING_CONFIG,VLLM_TP=1,STAGE_SERVING=1" \
-    agent_bench/deployments/pbs/run_benchmark.pbs
-done
+python3 run.py --config experiments/nscc_vllm.toml --render-job > nscc_vllm.pbs
+qsub -v KIT_ROOT=$KIT_ROOT,VLLM_TP=1 nscc_vllm.pbs
 ```
 
 Before first use on NSCC, ensure the harness runtime SIFs are available:
@@ -83,8 +79,8 @@ bash agent_bench/deployments/pbs/build_oh_sif.sh
 bash agent_bench/deployments/pbs/build_hm_sif.sh
 ```
 
-`run_benchmark.pbs` also prepares the selected runtime SIF when
-`STAGE_OC_CHECK=1`, but explicit build commands are useful for debugging.
+The generated PBS job also prepares the selected runtime SIF during the
+`prepare_images` stage, but explicit build commands are useful for debugging.
 
 ---
 
@@ -105,12 +101,8 @@ export MODEL_CONFIG="$KIT_ROOT/profiles/models/minimax_m2_7.json"
 export SERVING_CONFIG="$KIT_ROOT/profiles/serving/litellm/minimax_global.json"
 export MINIMAX_API_KEY="<your-minimax-key>"
 
-for h in openclaw openhands hermes; do
-  qsub -l select=1:ncpus=16:mem=64gb \
-    -l walltime=24:00:00 \
-    -v "KIT_ROOT=$KIT_ROOT,AB_RUN_STAMP=swebench_phase1_${h}_minimax_m2_7,APP=$APP,HARNESS_CONFIG=$KIT_ROOT/profiles/harnesses/${h}_swebench.json,MODEL_CONFIG=$MODEL_CONFIG,SERVING_CONFIG=$SERVING_CONFIG,MINIMAX_API_KEY=$MINIMAX_API_KEY,STAGE_SERVING=1" \
-    agent_bench/deployments/pbs/run_benchmark.pbs
-done
+python3 run.py --config experiments/nscc_litellm.toml --render-job > nscc_litellm.pbs
+qsub -v KIT_ROOT=$KIT_ROOT,MINIMAX_API_KEY=$MINIMAX_API_KEY nscc_litellm.pbs
 ```
 
 LiteLLM logs are written to:
@@ -142,15 +134,17 @@ Each stage can be disabled with `STAGE_*=0`.
 
 | Stage | Meaning |
 |---|---|
-| `STAGE_SWEBENCH` | install/import SWE-bench into the shared scratch Python cache |
-| `STAGE_PULL` | pull per-instance SWE-bench task SIFs |
-| `STAGE_SERVING` | start vLLM or LiteLLM sidecar |
-| `STAGE_OC_CHECK` | prepare the selected OpenClaw/OpenHands/Hermes runtime SIF |
-| `STAGE_OTEL` | start local OTel collector |
-| `STAGE_RUN` | invoke `agent_bench.runtime.driver` |
-| `STAGE_CLEANUP` | stop sidecars and collectors |
+| `prepare_environment` | create run/log/cache directories and export runtime env |
+| `materialize_benchmark` | materialize SWE-bench instance JSON |
+| `prepare_images` | pull task SIFs and prepare OpenClaw/OpenHands/Hermes runtime SIFs |
+| `start_serving` | start vLLM, SGLang, or LiteLLM sidecar |
+| `start_otel` | start local OTel collector |
+| `run_benchmark` | invoke `agent_bench.runtime.driver` |
+| `cleanup` | stop sidecars and collectors |
 
-Use `STAGE_SERVING` for the model-serving sidecar.
+Use `AB_STAGE_START_SERVING=0` to skip the model-serving sidecar. Legacy names
+such as `STAGE_SERVING=0` and `STAGE_PULL=0` are still accepted as submission
+overrides.
 
 ---
 
@@ -190,7 +184,7 @@ find data/experiments/<AB_RUN_STAMP>/runs -name verdict.json \
 
 ## 7. NSCC scoring
 
-NSCC jobs cannot use Docker directly. `run_benchmark.pbs` exports
+NSCC jobs cannot use Docker directly. The PBS stage runner exports
 `OC_SCORING_SIF_DIR="$SIF_DIR"` after task SIFs are available, so
 OpenClaw/OpenHands/Hermes score patches through the same per-instance SIFs.
 

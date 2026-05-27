@@ -5,15 +5,20 @@ from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
-import signal
 import subprocess
 import sys
-import time
 from typing import Any, Sequence
-from urllib import error, request
 
 from agent_bench.core.spec import ConfigError, load_resolved_experiment
 from agent_bench.deployments import plan_deployment
+from agent_bench.deployments.processes import ProcessError, http_ready, terminate_process_group, wait_for_http_ready
+from agent_bench.serving.launch_plan import (
+    LaunchPlanError,
+    ServingLaunchPlan,
+    build_launch_environment,
+    build_launch_plan,
+    prepare_launch_artifacts,
+)
 
 
 def validate_main(argv: Sequence[str] | None = None) -> int:
@@ -150,23 +155,19 @@ def _execute_experiment(resolved: Any, *, retry_errors: bool, max_workers: int) 
 
 
 def _export_serving_agent_env(resolved: Any) -> None:
-    backend = resolved.serving.get("backend")
-    endpoint = _serving_endpoint(resolved)
-    if endpoint:
-        os.environ.setdefault("MODEL_ENDPOINT", endpoint)
-        os.environ.setdefault("OPENAI_BASE_URL", endpoint)
-    if backend:
-        os.environ.setdefault("SERVING_BACKEND", str(backend))
-    if backend == "litellm":
-        proxy = resolved.serving.get("proxy") or {}
-        proxy_key = proxy.get("api_key") or "sk-agent-bench-local"
-        os.environ.setdefault("MODEL_API_KEY", proxy_key)
-        os.environ.setdefault("OPENAI_API_KEY", proxy_key)
-        os.environ.setdefault("OC_VLLM_API_KEY", proxy_key)
-        agent_provider = proxy.get("agent_provider")
+    plan = _serving_launch_plan(resolved)
+    if plan is None:
+        return
+    for key in ("MODEL_ENDPOINT", "OPENAI_BASE_URL", "SERVING_BACKEND"):
+        if key in plan.env:
+            os.environ.setdefault(key, plan.env[key])
+    if plan.backend == "litellm":
+        for key in ("MODEL_API_KEY", "OPENAI_API_KEY", "OC_VLLM_API_KEY", "HERMES_INFERENCE_PROVIDER"):
+            if key in plan.env:
+                os.environ.setdefault(key, plan.env[key])
+        agent_provider = (resolved.serving.get("proxy") or {}).get("agent_provider")
         if agent_provider:
             os.environ.setdefault("MODEL_PROVIDER", str(agent_provider))
-            os.environ.setdefault("HERMES_INFERENCE_PROVIDER", str(agent_provider))
 
 
 @contextmanager
@@ -181,105 +182,64 @@ def _serving_context(resolved: Any):
         yield
         return
 
-    endpoint = _serving_endpoint(resolved)
-    auth_key = _serving_auth_key(resolved)
-    if endpoint and _endpoint_ready(endpoint, auth_key=auth_key):
+    log_dir = resolved.spec.output_dir / resolved.run_id / "logs"
+    log_path = log_dir / f"{backend}.log"
+    plan = _serving_launch_plan(resolved, log_path=log_path)
+    if plan is None:
+        yield
+        return
+    if http_ready(plan.readiness_url, headers=plan.readiness_headers):
         yield
         return
 
-    log_dir = resolved.spec.output_dir / resolved.run_id / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"{backend}.log"
-    env = os.environ.copy()
-    env.setdefault("SERVING_BACKEND", str(backend))
-    env.setdefault("KIT_ROOT", str(Path.cwd()))
+    try:
+        env = build_launch_environment(plan, base_env=os.environ)
+        env.setdefault("KIT_ROOT", str(Path.cwd()))
+        prepare_launch_artifacts(plan, launch_env=env)
+    except LaunchPlanError as exc:
+        raise ConfigError(str(exc)) from exc
 
     with log_path.open("ab", buffering=0) as log:
-        proc = subprocess.Popen(
-            ["bash", "agent_bench/serving/common/serve.sh"],
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            env=env,
-            start_new_session=True,
-        )
         try:
-            _wait_for_endpoint(proc, endpoint, auth_key=auth_key, log_path=log_path)
+            proc = subprocess.Popen(
+                plan.argv,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                env=env,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise ConfigError(f"failed to launch serving backend {backend}: {exc}") from exc
+        try:
+            wait_for_http_ready(
+                url=plan.readiness_url,
+                headers=plan.readiness_headers,
+                proc=proc,
+                timeout_seconds=int(os.environ.get("SERVE_READY_TIMEOUT", "600")),
+                log_path=log_path,
+            )
             yield
+        except ProcessError as exc:
+            raise ConfigError(str(exc)) from exc
         finally:
-            _terminate_process_group(proc)
+            terminate_process_group(proc)
 
 
-def _serving_endpoint(resolved: Any) -> str | None:
-    endpoint = resolved.serving.get("endpoint") or {}
-    if isinstance(endpoint, str):
-        return endpoint.rstrip("/")
-    if not isinstance(endpoint, dict):
+def _serving_launch_plan(resolved: Any, *, log_path: Path | None = None) -> ServingLaunchPlan | None:
+    backend = resolved.serving.get("backend")
+    if backend not in {"vllm", "sglang", "litellm"}:
         return None
-    direct = endpoint.get("base_url") or endpoint.get("url")
-    if direct:
-        return str(direct).rstrip("/")
-    scheme = endpoint.get("scheme", "http")
-    host = endpoint.get("client_host") or endpoint.get("host") or "127.0.0.1"
-    port = endpoint.get("port", 443 if scheme == "https" else 8000)
-    path = endpoint.get("path", "/v1")
-    if not str(path).startswith("/"):
-        path = "/" + str(path)
-    return f"{scheme}://{host}:{port}{path}".rstrip("/")
-
-
-def _serving_auth_key(resolved: Any) -> str | None:
-    if resolved.serving.get("backend") != "litellm":
-        return None
-    proxy = resolved.serving.get("proxy") or {}
-    return proxy.get("api_key") or "sk-agent-bench-local"
-
-
-def _endpoint_ready(endpoint: str | None, *, auth_key: str | None) -> bool:
-    if not endpoint:
-        return False
-    req = request.Request(endpoint.rstrip("/") + "/models")
-    if auth_key:
-        req.add_header("Authorization", f"Bearer {auth_key}")
     try:
-        with request.urlopen(req, timeout=2) as resp:
-            return 200 <= resp.status < 300
-    except (OSError, error.URLError, error.HTTPError):
-        return False
-
-
-def _wait_for_endpoint(
-    proc: subprocess.Popen[bytes],
-    endpoint: str | None,
-    *,
-    auth_key: str | None,
-    log_path: Path,
-) -> None:
-    timeout = int(os.environ.get("SERVE_READY_TIMEOUT", "600"))
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            raise ConfigError(f"serving process exited before readiness; see {log_path}")
-        if _endpoint_ready(endpoint, auth_key=auth_key):
-            return
-        time.sleep(2)
-    raise ConfigError(f"serving endpoint was not ready after {timeout}s; see {log_path}")
-
-
-def _terminate_process_group(proc: subprocess.Popen[bytes]) -> None:
-    if proc.poll() is not None:
-        return
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except OSError:
-        proc.terminate()
-    try:
-        proc.wait(timeout=30)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except OSError:
-            proc.kill()
-        proc.wait(timeout=10)
+        return build_launch_plan(
+            model_path=resolved.profile_paths["model"],
+            serving_path=resolved.profile_paths["serving"],
+            backend=str(backend),
+            env=os.environ,
+            log_path=log_path,
+        )
+    except (LaunchPlanError, ValueError) as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def _instance_data_path(resolved: Any) -> Path:

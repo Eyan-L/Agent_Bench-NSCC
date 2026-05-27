@@ -36,12 +36,12 @@ compute nodes without internet. Add a new task by dropping its `instruction.md`
 
 1. Application config (`profiles/benchmarks/terminal_bench/kv_store.json`) lists
    task ids. Harness/model/serving are selected separately.
-2. PBS pipeline (`agent_bench/deployments/pbs/run_benchmark_tb.pbs`):
+2. PBS pipeline (`python3 run.py --config experiments/nscc_terminal_bench.toml --render-job`):
    - **Stage 0**: `singularity pull` each task's `docker_image` (from
      `task.toml`) into `$OC_TB_SIF_DIR`. One-time, cached across jobs.
    - **Stage 1**: materialize `data/terminal_bench/tasks.json` from the
      vendored task tree using `loader.materialize_dataset`.
-   - **Stage 2**: start the serving sidecar (currently vLLM in this TB PBS script).
+   - **Stage 2**: start the serving sidecar from the serving profile.
    - **Stage 3**: run `python -m agent_bench.runtime.driver --app ... --harness ... --model ... --serving ... --instance-data ...`.
 3. Driver auto-detects `instance_data["benchmark"] == "terminal_bench"` and
    routes to `TerminalBenchHarness` for that instance (the SWE-bench harness
@@ -74,7 +74,8 @@ No other SWE-bench code paths are touched.
 
 ```bash
 # Submit the TB job. Set VLLM_TP/SGLANG_TP/TP at launch to match ngpus.
-qsub agent_bench/deployments/pbs/run_benchmark_tb.pbs
+python3 run.py --config experiments/nscc_terminal_bench.toml --render-job > nscc_terminal_bench.pbs
+qsub -v VLLM_TP=1 nscc_terminal_bench.pbs
 
 # Local (non-PBS) smoke run, assuming vLLM is already up at :8000:
 python -m agent_bench.runtime.driver \

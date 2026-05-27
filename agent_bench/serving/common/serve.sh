@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Backend dispatcher. Set SERVING_BACKEND={vllm|sglang}, then forward args.
+# Backend dispatcher. Set SERVING_BACKEND={vllm|sglang|litellm}, then forward args.
 #
 # Supports a generic `stop` action: forwards to the backend's own stop
 # handler if it has one (sglang does), otherwise falls back to killing
@@ -7,7 +7,7 @@
 # the foreground and has no native stop subcommand.
 set -euo pipefail
 
-: "${SERVING_BACKEND:?must set SERVING_BACKEND to one of: vllm, sglang}"
+: "${SERVING_BACKEND:?must set SERVING_BACKEND to one of: vllm, sglang, litellm}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="${SCRIPT_DIR}/../${SERVING_BACKEND}/serve.sh"

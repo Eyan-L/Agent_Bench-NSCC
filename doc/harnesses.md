@@ -55,8 +55,8 @@ For each harness, decide:
 - **Where does the binary live?** On NSCC, each harness starts from a
   base/upstream SIF and bakes an Agent_Bench runtime SIF locally:
   OpenClaw via `build_oc_sif.sh`, OpenHands via `build_oh_sif.sh`, and
-  Hermes via `build_hm_sif.sh`. PBS handles the pull/build step for the
-  selected harness (see `agent_bench/deployments/pbs/run_benchmark.pbs:STAGE_OC_CHECK`).
+  Hermes via `build_hm_sif.sh`. The PBS `prepare_images` stage handles the
+  pull/build step for the selected harness.
 - **Does it need patching?** OpenClaw applies runtime patches to its bundled JS
   (see `agent_bench/harnesses/openclaw/patch/MANIFEST.json`). Hermes applies Python patches
   from `agent_bench/harnesses/hermes/patch/MANIFEST.json`. OpenHands does not patch upstream

@@ -53,12 +53,14 @@ Per-run docker layout: a private docker network, a `task-<run_id>` container
 (SWE-bench instance image), an `oc-<run_id>` container (`agent-bench/openclaw`
 running `gateway`). Workspace is bind-mounted into both at `/testbed`.
 
-**HPC cluster (PBS)** — the PBS script provisions everything itself
-(vLLM, OC sif, OTel collector, sweep, teardown). Don't pre-start
-serving; the job spins it up on the compute node.
+**HPC cluster (PBS)** — render a short PBS wrapper from an experiment TOML.
+The generated job provisions serving, runtime SIFs, OTel, the benchmark, and
+cleanup through the Python PBS runner. Don't pre-start serving; the job spins
+it up on the compute node.
 
 ```bash
-qsub agent_bench/deployments/pbs/run_benchmark.pbs
+python3 run.py --config experiments/nscc_vllm.toml --render-job > nscc_vllm.pbs
+qsub nscc_vllm.pbs
 ```
 
 **Singularity** — analogous to docker but using `singularity instance`s for

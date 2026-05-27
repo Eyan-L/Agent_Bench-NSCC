@@ -135,8 +135,9 @@ class SingularityContainer(Container):
                 f"singularity image not found: {image}\n"
                 "For agent runtime SIFs: build with "
                 "`build_oc_sif.sh`, `build_oh_sif.sh`, or `build_hm_sif.sh` "
-                "under `agent_bench/deployments/pbs/`, or enable STAGE_OC_CHECK in "
-                "`run_benchmark.pbs`.\n"
+                "under `agent_bench/deployments/pbs/`, or run "
+                "`python3 run.py --config experiments/nscc_vllm.toml --render-job` "
+                "and submit the generated PBS job with `prepare_images` enabled.\n"
                 "For SWE-bench task sifs: pull with `agent_bench/deployments/pbs/pull_images.sh`."
             )
 
