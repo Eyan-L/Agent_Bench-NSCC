@@ -1,0 +1,33 @@
+# OpenHands SDK 1.21 driver config — read by /opt/openhands_driver.py.
+# Rendered per-run by agent_bench.benchmarks.swebench.openhands.compose from a
+# profiles/harnesses/openhands_swebench.json + profiles/models/*.json files. Brace-form placeholders are
+# substituted before write; everything else is verbatim.
+#
+# Deployment model in agent-bench: the agent runs inside the OpenHands harness
+# container. Tool execs are re-routed through the shared exec-bridge into the
+# SWE-bench sandbox container (see agent_bench/harnesses/openhands/driver.py for the
+# wrap point and agent_bench/harnesses/openhands/dispatcher.py for the dispatcher).
+# RUNTIME=process forces the SDK off its built-in DockerRuntime (which would
+# try to spawn yet another container, defeating the bridge).
+
+[core]
+runtime = "${RUNTIME}"
+workspace_base = "${WORKSPACE}"
+max_iterations = ${MAX_ITERATIONS}
+
+[llm]
+model = "${MODEL}"
+base_url = "${BASE_URL}"
+api_key = "${API_KEY}"
+temperature = ${TEMPERATURE}
+max_output_tokens = ${MAX_TOKENS}
+max_input_tokens = ${CONTEXT_WINDOW}
+
+[agent]
+name = "${AGENT_NAME}"
+system_prompt = "You are a software engineering agent. Fix the issue described by the user by editing files in the working directory, then stop."
+
+[run]
+workspace = "${WORKSPACE}"
+max_iterations = ${MAX_ITERATIONS}
+events_path = "${EVENTS_PATH}"

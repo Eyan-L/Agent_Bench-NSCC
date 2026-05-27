@@ -47,13 +47,13 @@ doesn't accidentally re-entangle them.
 
 | Component | Where | Purpose |
 |---|---|---|
-| `bridge.py` (inside OC container) | `orchestration/dispatcher/openclaw_remote/bridge.py` | Client. OC `spawn`s it; it speaks the socket protocol to the host server. |
-| `server.py` (on host) | `orchestration/dispatcher/openclaw_remote/server.py` | Server. Listens on a unix socket, validates HMAC, dispatches into a backend. |
-| `OpenClawRemoteDispatcher` | `orchestration/dispatcher/openclaw_remote/__init__.py` | `Dispatcher` impl that owns the per-run lifecycle of the two scripts above (token, socket, server subprocess, agent-container injection, cleanup). |
-| `openclaw-external-exec-bridge.patch` | `harnesses/openclaw/patch/` | Patches OC's `bash-tools.exec-runtime` bundle so the `exec` tool's spawn argv points at `bridge.py` when `OPENCLAW_EXEC_BRIDGE` env is set. |
-| `openclaw-fs-bridge.patch` | `harnesses/openclaw/patch/` | Patches OC's `sandbox` bundle so the **fs-bridge** (`read`/`write`/`edit`/`stat`/etc.) ALSO routes through `bridge.py`, and the host-path safety check is skipped. |
-| `applications/swebench/app.py` | (modified) | Owns the lifecycle: pre-starts the task env container, spawns the server, mounts socket + bridge into OC, sets env vars, tears down. |
-| `applications/swebench/conditions/openclaw_agent.py` | (modified) | After the agent finishes, the SWE-bench subclass's `_collect_artifacts` harvests the patch by running `git diff --cached` on the **host** (not in any container) with scaffold-path exclusion. Base loop lives in `applications/conditions/openclaw_agent.py`. |
+| `bridge.py` (inside OC container) | `agent_bench/runtime/exec_bridge/bridge.py` | Client. OC `spawn`s it; it speaks the socket protocol to the host server. |
+| `server.py` (on host) | `agent_bench/runtime/exec_bridge/server.py` | Server. Listens on a unix socket, validates HMAC, dispatches into the selected container backend. |
+| `OpenClawRemoteDispatcher` | `agent_bench/harnesses/openclaw/dispatcher.py` | `Dispatcher` impl that owns the per-run lifecycle of the two scripts above (token, socket, server subprocess, agent-container injection, cleanup). |
+| `openclaw-external-exec-bridge.patch` | `agent_bench/harnesses/openclaw/patch/` | Patches OC's `bash-tools.exec-runtime` bundle so the `exec` tool's spawn argv points at `bridge.py` when `OPENCLAW_EXEC_BRIDGE` env is set. |
+| `openclaw-fs-bridge.patch` | `agent_bench/harnesses/openclaw/patch/` | Patches OC's `sandbox` bundle so the **fs-bridge** (`read`/`write`/`edit`/`stat`/etc.) ALSO routes through `bridge.py`, and the host-path safety check is skipped. |
+| `agent_bench/benchmarks/swebench/app.py` | (modified) | Owns the lifecycle: pre-starts the task env container, spawns the server, mounts socket + bridge into OC, sets env vars, tears down. |
+| `agent_bench/benchmarks/swebench/conditions/openclaw_agent.py` | (modified) | After the agent finishes, the SWE-bench subclass's `_collect_artifacts` harvests the patch by running `git diff --cached` on the **host** (not in any container) with scaffold-path exclusion. Base loop lives in `agent_bench/benchmarks/conditions/openclaw_agent.py`. |
 
 ## Run-time topology
 
@@ -61,9 +61,9 @@ doesn't accidentally re-entangle them.
                               host
         ┌─────────────────────────────────────────────────────────┐
         │                                                         │
-        │   driver.py (orchestration.runner)                      │
+        │   driver.py (agent_bench.runtime)                       │
         │     │                                                   │
-        │     ├─► prepare_environment (applications/swebench)     │
+        │     ├─► prepare_environment (agent_bench/benchmarks/swebench)     │
         │     │     1. prime ws_host from task image (docker cp)  │
         │     │     2. start task container ← swebench image      │
         │     │           -v ws_host:/testbed:rw                  │
@@ -200,8 +200,8 @@ timestamps off by more than 5 minutes are rejected (`auth-failed`).
 
 ## OC-side patches
 
-Two patches under `harnesses/openclaw/patch/`. Both are applied at OC
-image build time (`harnesses/openclaw/docker/build.sh` → `apply_patch.py`).
+Two patches under `agent_bench/harnesses/openclaw/patch/`. Both are applied at OC
+image build time (`agent_bench/harnesses/openclaw/docker/build.sh` → `apply_patch.py`).
 
 ### `openclaw-external-exec-bridge.patch`
 
@@ -331,7 +331,7 @@ container (`OPENCLAW_GATEWAY_TOKEN`, `OPENCLAW_RUN_ID`); this fits.
 ### "Why patch `runCommand` not the entry methods (`readFile`, `writeFile`, …)?"
 
 There are 6 fs-bridge entry methods (readFile, writeFile, mkdirp, remove,
-rename, stat). Patching all 6 would mean 6× the diff. They all funnel
+rename, stat). Patching all 6 would mean 6x the diff. They all funnel
 through `runCommand`/`runCheckedCommand` for the actual docker-exec
 call. Patching there covers everything in one spot.
 
@@ -400,7 +400,7 @@ report.json when present, log the non-zero exit as a warning.
 ### Add a singularity backend
 
 In `server.py` the `singularity_backend` stub is already in place. The
-harness wiring change is in `applications/swebench/app.py` where
+harness wiring change is in `agent_bench/benchmarks/swebench/app.py` where
 `prepare_environment` spawns the server:
 
 ```python

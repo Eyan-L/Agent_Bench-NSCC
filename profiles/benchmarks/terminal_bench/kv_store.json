@@ -1,0 +1,21 @@
+{
+  "_doc": "Terminal-Bench 2 task: kv-store-grpc. Loader: agent_bench/benchmarks/terminal_bench/loader.py materializes instance_data from agent_bench/benchmarks/terminal_bench/tasks/<task_id>/. Harness: TerminalBenchHarness (auto-selected by driver when instance_data['benchmark'] == 'terminal_bench'). repo_mapping is SWE-bench specific but RunConfig.compute_run_id requires it for deterministic hashing — placeholders fine, TB harness ignores them. container_image is unused for TB instances (TerminalBenchHarness reads docker image from per-task task.toml) but required by SweepConfig schema.",
+  "sweep_name": "tb_kv_store_grpc",
+  "plan_version": "v1.0",
+  "application": "terminal_bench",
+  "instances": [
+    "kv-store-grpc"
+  ],
+  "repo_mapping": {
+    "kv-store-grpc": {
+      "repo_id": "terminal-bench/kv-store-grpc",
+      "base_commit": "tb2"
+    }
+  },
+  "container_image": "alexgshaw/kv-store-grpc:20251031",
+  "wall_clock_budget_seconds": 900,
+  "output_dir": "tb_kv_store",
+  "seeds": [42],
+  "parallel_limit_gpu": 1,
+  "parallel_limit_cpu_cores": 8
+}

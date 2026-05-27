@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Emit shell assignments for a config/model/*.json file.
+"""Emit shell assignments for a profiles/models/*.json file.
 
 The emitted variables are intentionally runtime-facing: MODEL is the exact
 string passed to vLLM/SGLang and to OpenAI-compatible client requests.

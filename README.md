@@ -37,13 +37,13 @@ set -a && . .env && set +a
 
 Two modes — `docker` and `singularity`. In both, the agent runtime and the
 benchmark task each run in their **own** container (or .sif). The host runs
-only the serving backend.
+only the serving agent_bench.serving.
 
 **Local Docker** (default) — needs a running Docker daemon and the
 patched OpenClaw image:
 
 ```bash
-bash harnesses/openclaw/docker/build.sh   # one-time: agent-bench/openclaw:<v>
+bash agent_bench/harnesses/openclaw/docker/build.sh   # one-time: agent-bench/openclaw:<v>
 make serve &                              # vLLM on the host
 HARNESS_BACKEND=docker \
     make eval APP=swebench/phase1 HARNESS=openclaw_swebench MODEL_PROFILE=qwen36_27b SERVING=vllm/default
@@ -58,7 +58,7 @@ running `gateway`). Workspace is bind-mounted into both at `/testbed`.
 serving; the job spins it up on the compute node.
 
 ```bash
-qsub scripts/execution_pbs/run_benchmark.pbs
+qsub agent_bench/deployments/pbs/run_benchmark.pbs
 ```
 
 **Singularity** — analogous to docker but using `singularity instance`s for

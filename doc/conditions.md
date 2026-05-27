@@ -5,32 +5,32 @@ conditions:
 
 | Condition | Module | What it does |
 |---|---|---|
-| `ar_issue_only`     | `applications/swebench/conditions/ar_issue_only.py`     | One-shot LLM call from the issue text. No tools. SWE-bench specific. |
-| `ar_static_context` | `applications/swebench/conditions/ar_static_context.py` | One-shot + offline BM25 retrieval. SWE-bench specific. |
-| `openclaw_agent`    | base: `applications/conditions/openclaw_agent.py`<br>SWE: `applications/swebench/conditions/openclaw_agent.py`<br>TB:  `applications/terminal_bench/conditions/openclaw_agent.py` | Multi-turn agent loop driven by OpenClaw. Same `condition_type` for both benchmarks; the driver picks the subclass by `instance_data["benchmark"]`. |
-| `tb_react`          | `applications/terminal_bench/conditions/react.py`             | Multi-turn ReAct loop with `<bash>` blocks (terminal-bench tasks). No OpenClaw involvement. |
+| `ar_issue_only`     | `agent_bench/benchmarks/swebench/conditions/ar_issue_only.py`     | One-shot LLM call from the issue text. No tools. SWE-bench specific. |
+| `ar_static_context` | `agent_bench/benchmarks/swebench/conditions/ar_static_context.py` | One-shot + offline BM25 retrieval. SWE-bench specific. |
+| `openclaw_agent`    | base: `agent_bench/benchmarks/conditions/openclaw_agent.py`<br>SWE: `agent_bench/benchmarks/swebench/conditions/openclaw_agent.py`<br>TB:  `agent_bench/benchmarks/terminal_bench/conditions/openclaw_agent.py` | Multi-turn agent loop driven by OpenClaw. Same `condition_type` for both benchmarks; the driver picks the subclass by `instance_data["benchmark"]`. |
+| `tb_react`          | `agent_bench/benchmarks/terminal_bench/conditions/react.py`             | Multi-turn ReAct loop with `<bash>` blocks (terminal-bench tasks). No OpenClaw involvement. |
 
 ## Layout
 
-- `applications/conditions/` — base classes + utilities shared by all apps.
+- `agent_bench/benchmarks/conditions/` — base classes + utilities shared by all apps.
   Today:
   - `openclaw_agent.py` — `OpenClawAgentCondition` base (per-app subclasses
     plug in `agent_id`, `_build_message`, optional `_collect_artifacts`)
   - `_llm_client.py` — OpenAI-compat HTTP caller + unified-diff extractor
   - `util_sampler.py` — `UtilSampler` context manager (CPU/RSS/GPU sampling)
-- `applications/<app>/conditions/` — conditions specific to that benchmark, or
+- `agent_bench/benchmarks/<app>/conditions/` — conditions specific to that benchmark, or
   per-app subclasses of a shared base.
 
-`orchestration/` no longer carries any condition code — only driver / dispatcher
-/ runner / analysis / trace.
+Runtime dispatch, analysis, and trace code live in `agent_bench/runtime`,
+`agent_bench/results`, and `agent_bench/telemetry`.
 
-## Adding a benchmark-specific condition (`applications/<app>/conditions/<name>.py`)
+## Adding a benchmark-specific condition (`agent_bench/benchmarks/<app>/conditions/<name>.py`)
 
 ```python
 from pathlib import Path
 from typing import Dict, Optional
 
-from applications.conditions._llm_client import call_llm
+from agent_bench.benchmarks.conditions._llm_client import call_llm
 
 
 class YourCondition:
@@ -72,7 +72,7 @@ workflow. Override three things:
 from typing import Dict, Optional
 from pathlib import Path
 
-from applications.conditions.openclaw_agent import OpenClawAgentCondition
+from agent_bench.benchmarks.conditions.openclaw_agent import OpenClawAgentCondition
 
 
 class YourBenchOpenClawCondition(OpenClawAgentCondition):
@@ -95,32 +95,32 @@ class YourBenchOpenClawCondition(OpenClawAgentCondition):
         return None
 ```
 
-See `applications/swebench/conditions/openclaw_agent.py` for an example that
+See `agent_bench/benchmarks/swebench/conditions/openclaw_agent.py` for an example that
 collects a git diff.
 
 ## Patterns to lift
 
-- **LLM call.** `applications.conditions._llm_client.call_llm(...)` — handles
+- **LLM call.** `agent_bench.benchmarks.conditions._llm_client.call_llm(...)` — handles
   the OpenAI-compat request shape and returns `(text, prompt_tokens, completion_tokens, error)`.
 - **Step trace.** One row per LLM call or tool exec in `steps.jsonl` so
-  `orchestration/analysis/` can compute composition.
+  `agent_bench/results/analysis/` can compute composition.
 - **In-loop self-validation.** Surface a `verify` OpenClaw skill at
-  `applications/<app>/openclaw/skills/verify/SKILL.md` that tells the agent
+  `agent_bench/benchmarks/<app>/openclaw/skills/verify/SKILL.md` that tells the agent
   how to run the in-container test command (e.g. `python -m pytest` for
   SWE-bench, `bash /app/_oc_validate.sh` for TB). The skill runs in the same
   sandbox container as the agent's `exec` tool — no host IPC needed.
 - **Telemetry.** Wrap the loop with `UtilSampler` from
-  `applications.conditions.util_sampler` for CPU/RSS/GPU sampling. Both
+  `agent_bench.benchmarks.conditions.util_sampler` for CPU/RSS/GPU sampling. Both
   `tb_react` and `OpenClawAgentCondition` already do this.
 
 ## Wire the dispatcher
 
-`orchestration/runner/driver.py:execute_run` — add an `elif condition_type ==
+`agent_bench/runtime/driver.py:execute_run` — add an `elif condition_type ==
 "your_condition":` branch with a lazy import:
 
 ```python
 elif condition_type == "your_condition":
-    from applications.<app>.conditions.<your_condition> import YourCondition
+    from agent_bench.benchmarks.<app>.conditions.<your_condition> import YourCondition
     condition = YourCondition(
         model_config=run_config.condition.model,
         agent_config=run_config.condition.agent,
@@ -143,7 +143,7 @@ benchmark-keyed dispatch.
 
 ```bash
 # Smoke import
-PYTHONPATH=. python3 -c "from applications.<app>.conditions.<name> import YourCondition; print('OK')"
+PYTHONPATH=. python3 -c "from agent_bench.benchmarks.<app>.conditions.<name> import YourCondition; print('OK')"
 
 # Single-instance smoke run (using existing harness + app configs)
 make eval APP=<app>/<exp> HARNESS=<harness_with_your_condition> ...
@@ -158,10 +158,10 @@ Inspect `data/experiments/<stamp>/runs/<sweep>/<run_id>/`:
 
 ## Checklist
 
-- [ ] File at `applications/<app>/conditions/<name>.py` (or `applications/conditions/<name>.py` if cross-app)
+- [ ] File at `agent_bench/benchmarks/<app>/conditions/<name>.py` (or `agent_bench/benchmarks/conditions/<name>.py` if cross-app)
 - [ ] `__init__` accepts `(model_config, agent_config)` for parity with peers
 - [ ] `run()` returns dict with `step_trace_path`, `patch_path`, `total_prompt_tokens`, `total_completion_tokens`
 - [ ] Patch artifact written even on failure (empty file is fine — driver gates on size, not content; benchmarks without patches use `skip_patch_gate`)
-- [ ] Shared utilities imported via absolute paths (`from applications.conditions._llm_client import ...`)
-- [ ] Dispatch branch added in `orchestration/runner/driver.py` with a lazy import
+- [ ] Shared utilities imported via absolute paths (`from agent_bench.benchmarks.conditions._llm_client import ...`)
+- [ ] Dispatch branch added in `agent_bench/runtime/driver.py` with a lazy import
 - [ ] Sweep harness JSON using the new condition runs end-to-end

@@ -5,14 +5,14 @@ It intentionally uses the four independent config axes introduced by this
 branch:
 
 ```text
-APP             config/application/swebench/<phase>.json
-HARNESS_CONFIG  config/harness/<harness>_swebench.json
-MODEL_CONFIG    config/model/<model>.json
-SERVING_CONFIG  config/serving/<backend>/<profile>.json
+APP             profiles/benchmarks/swebench/<phase>.json
+HARNESS_CONFIG  profiles/harnesses/<harness>_swebench.json
+MODEL_CONFIG    profiles/models/<model>.json
+SERVING_CONFIG  profiles/serving/<backend>/<profile>.json
 ```
 
 Do not use the old mixed harness configs or retired backend-config paths. Model
-identity, context window, and output token cap live in `config/model/*`.
+identity, context window, and output token cap live in `profiles/models/*`.
 Serving profiles only describe endpoint/image/SIF/proxy deployment.
 
 ---
@@ -21,33 +21,33 @@ Serving profiles only describe endpoint/image/SIF/proxy deployment.
 
 | Axis | Example | Owns |
 |---|---|---|
-| APP | `config/application/swebench/phase1.json` | instance ids, app budget, output leaf |
-| HARNESS_CONFIG | `config/harness/openclaw_swebench.json` | OpenClaw/OpenHands/Hermes behavior and conditions |
-| MODEL_CONFIG | `config/model/qwen35_9b.json` | model id/path, provider, `context_window`, `max_tokens` |
-| SERVING_CONFIG | `config/serving/vllm/nscc.json` | serving backend endpoint, image, SIF, proxy settings |
+| APP | `profiles/benchmarks/swebench/phase1.json` | instance ids, app budget, output leaf |
+| HARNESS_CONFIG | `profiles/harnesses/openclaw_swebench.json` | OpenClaw/OpenHands/Hermes behavior and conditions |
+| MODEL_CONFIG | `profiles/models/qwen35_9b.json` | model id/path, provider, `context_window`, `max_tokens` |
+| SERVING_CONFIG | `profiles/serving/vllm/nscc.json` | serving backend endpoint, image, SIF, proxy settings |
 
 Common harness choices:
 
 ```text
-config/harness/openclaw_swebench.json
-config/harness/openhands_swebench.json
-config/harness/hermes_swebench.json
+profiles/harnesses/openclaw_swebench.json
+profiles/harnesses/openhands_swebench.json
+profiles/harnesses/hermes_swebench.json
 ```
 
 Common model choices:
 
 ```text
-config/model/qwen35_9b.json
-config/model/qwen36_27b.json
-config/model/minimax_m2_7.json
+profiles/models/qwen35_9b.json
+profiles/models/qwen36_27b.json
+profiles/models/minimax_m2_7.json
 ```
 
 Common serving choices:
 
 ```text
-config/serving/vllm/nscc.json
-config/serving/vllm/default.json
-config/serving/litellm/minimax_global.json
+profiles/serving/vllm/nscc.json
+profiles/serving/vllm/default.json
+profiles/serving/litellm/minimax_global.json
 ```
 
 Tensor parallelism is runtime state, not config-file state. Set `VLLM_TP`,
@@ -63,24 +63,24 @@ This requests one GPU and starts vLLM through Singularity.
 cd /home/users/ntu/boxi001/Agent_Bench
 
 export KIT_ROOT=$(pwd)
-export APP="$KIT_ROOT/config/application/swebench/phase1.json"
-export MODEL_CONFIG="$KIT_ROOT/config/model/qwen35_9b.json"
-export SERVING_CONFIG="$KIT_ROOT/config/serving/vllm/nscc.json"
+export APP="$KIT_ROOT/profiles/benchmarks/swebench/phase1.json"
+export MODEL_CONFIG="$KIT_ROOT/profiles/models/qwen35_9b.json"
+export SERVING_CONFIG="$KIT_ROOT/profiles/serving/vllm/nscc.json"
 
 for h in openclaw openhands hermes; do
   qsub -l select=1:ncpus=16:ngpus=1:mem=64gb \
     -l walltime=24:00:00 \
-    -v "KIT_ROOT=$KIT_ROOT,AB_RUN_STAMP=swebench_phase1_${h}_qwen35_9b,APP=$APP,HARNESS_CONFIG=$KIT_ROOT/config/harness/${h}_swebench.json,MODEL_CONFIG=$MODEL_CONFIG,SERVING_CONFIG=$SERVING_CONFIG,VLLM_TP=1,STAGE_SERVING=1" \
-    scripts/execution_pbs/run_benchmark.pbs
+    -v "KIT_ROOT=$KIT_ROOT,AB_RUN_STAMP=swebench_phase1_${h}_qwen35_9b,APP=$APP,HARNESS_CONFIG=$KIT_ROOT/profiles/harnesses/${h}_swebench.json,MODEL_CONFIG=$MODEL_CONFIG,SERVING_CONFIG=$SERVING_CONFIG,VLLM_TP=1,STAGE_SERVING=1" \
+    agent_bench/deployments/pbs/run_benchmark.pbs
 done
 ```
 
 Before first use on NSCC, ensure the harness runtime SIFs are available:
 
 ```bash
-bash scripts/execution_pbs/build_oc_sif.sh
-bash scripts/execution_pbs/build_oh_sif.sh
-bash scripts/execution_pbs/build_hm_sif.sh
+bash agent_bench/deployments/pbs/build_oc_sif.sh
+bash agent_bench/deployments/pbs/build_oh_sif.sh
+bash agent_bench/deployments/pbs/build_hm_sif.sh
 ```
 
 `run_benchmark.pbs` also prepares the selected runtime SIF when
@@ -100,16 +100,16 @@ This does not need a GPU request:
 cd /home/users/ntu/boxi001/Agent_Bench
 
 export KIT_ROOT=$(pwd)
-export APP="$KIT_ROOT/config/application/swebench/phase1.json"
-export MODEL_CONFIG="$KIT_ROOT/config/model/minimax_m2_7.json"
-export SERVING_CONFIG="$KIT_ROOT/config/serving/litellm/minimax_global.json"
+export APP="$KIT_ROOT/profiles/benchmarks/swebench/phase1.json"
+export MODEL_CONFIG="$KIT_ROOT/profiles/models/minimax_m2_7.json"
+export SERVING_CONFIG="$KIT_ROOT/profiles/serving/litellm/minimax_global.json"
 export MINIMAX_API_KEY="<your-minimax-key>"
 
 for h in openclaw openhands hermes; do
   qsub -l select=1:ncpus=16:mem=64gb \
     -l walltime=24:00:00 \
-    -v "KIT_ROOT=$KIT_ROOT,AB_RUN_STAMP=swebench_phase1_${h}_minimax_m2_7,APP=$APP,HARNESS_CONFIG=$KIT_ROOT/config/harness/${h}_swebench.json,MODEL_CONFIG=$MODEL_CONFIG,SERVING_CONFIG=$SERVING_CONFIG,MINIMAX_API_KEY=$MINIMAX_API_KEY,STAGE_SERVING=1" \
-    scripts/execution_pbs/run_benchmark.pbs
+    -v "KIT_ROOT=$KIT_ROOT,AB_RUN_STAMP=swebench_phase1_${h}_minimax_m2_7,APP=$APP,HARNESS_CONFIG=$KIT_ROOT/profiles/harnesses/${h}_swebench.json,MODEL_CONFIG=$MODEL_CONFIG,SERVING_CONFIG=$SERVING_CONFIG,MINIMAX_API_KEY=$MINIMAX_API_KEY,STAGE_SERVING=1" \
+    agent_bench/deployments/pbs/run_benchmark.pbs
 done
 ```
 
@@ -127,10 +127,10 @@ data/experiments/<AB_RUN_STAMP>/logs/litellm_config.yaml
 Use a smaller app config such as `phase0.json`:
 
 ```bash
-export APP="$KIT_ROOT/config/application/swebench/phase0.json"
+export APP="$KIT_ROOT/profiles/benchmarks/swebench/phase0.json"
 ```
 
-Or create a new application config under `config/application/swebench/` with
+Or create a new application config under `profiles/benchmarks/swebench/` with
 only the desired `instances`. The app config controls the task set; do not
 encode the task set in harness/model/serving configs.
 
@@ -147,7 +147,7 @@ Each stage can be disabled with `STAGE_*=0`.
 | `STAGE_SERVING` | start vLLM or LiteLLM sidecar |
 | `STAGE_OC_CHECK` | prepare the selected OpenClaw/OpenHands/Hermes runtime SIF |
 | `STAGE_OTEL` | start local OTel collector |
-| `STAGE_RUN` | invoke `orchestration.runner.driver` |
+| `STAGE_RUN` | invoke `agent_bench.runtime.driver` |
 | `STAGE_CLEANUP` | stop sidecars and collectors |
 
 Use `STAGE_SERVING` for the model-serving sidecar.

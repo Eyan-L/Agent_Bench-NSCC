@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static checks for the four-axis config layout."""
+"""Static checks for the profile layout."""
 from __future__ import annotations
 
 import argparse
@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from orchestration.runner.config import load_composed_config
+from agent_bench.core.config import load_composed_config
 
 
 def _json_files(root: Path) -> list[Path]:
@@ -24,7 +24,7 @@ def _load(path: Path) -> dict:
 
 def _check_all_json() -> list[str]:
     errors: list[str] = []
-    for path in _json_files(ROOT / "config"):
+    for path in _json_files(ROOT / "profiles"):
         try:
             _load(path)
         except Exception as exc:
@@ -34,7 +34,7 @@ def _check_all_json() -> list[str]:
 
 def _check_axis_boundaries() -> list[str]:
     errors: list[str] = []
-    for path in _json_files(ROOT / "config" / "application"):
+    for path in _json_files(ROOT / "profiles" / "benchmarks"):
         data = _load(path)
         output_dir = str(data.get("output_dir") or "")
         if not output_dir:
@@ -44,13 +44,13 @@ def _check_axis_boundaries() -> list[str]:
                 f"{path}: output_dir should be a run-set leaf, not a path "
                 f"(got {output_dir!r})"
             )
-    for path in _json_files(ROOT / "config" / "harness"):
+    for path in _json_files(ROOT / "profiles" / "harnesses"):
         data = _load(path)
         if "model" in data:
             errors.append(f"{path}: harness configs must not contain top-level `model`")
         if "harness" not in data:
             errors.append(f"{path}: missing top-level `harness`")
-    for path in _json_files(ROOT / "config" / "model"):
+    for path in _json_files(ROOT / "profiles" / "models"):
         model = _load(path).get("model")
         if not isinstance(model, dict):
             errors.append(f"{path}: missing `model` object")
@@ -62,7 +62,7 @@ def _check_axis_boundaries() -> list[str]:
             errors.append(f"{path}: model.context_window must be positive")
         if int(model.get("max_tokens", 0)) > int(model.get("context_window", 0)):
             errors.append(f"{path}: model.max_tokens exceeds model.context_window")
-    for path in _json_files(ROOT / "config" / "serving"):
+    for path in _json_files(ROOT / "profiles" / "serving"):
         serving = _load(path).get("serving")
         if not isinstance(serving, dict):
             errors.append(f"{path}: missing `serving` object")

@@ -1,12 +1,13 @@
 """Checks for provider-backed LiteLLM proxy serving profiles."""
 
 import json
+import os
 from pathlib import Path
 import subprocess
 
 import pytest
 
-from orchestration.runner.config import load_model_config, load_serving_config
+from agent_bench.core.config import load_model_config, load_serving_config
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,9 +64,9 @@ def test_direct_provider_serving_is_rejected(tmp_path, monkeypatch):
 def test_litellm_serving_hides_upstream_key_from_agents(monkeypatch):
     monkeypatch.setenv("MINIMAX_API_KEY", "sk-test-minimax")
 
-    serving = load_serving_config(ROOT / "config/serving/litellm/minimax_global.json")
+    serving = load_serving_config(ROOT / "profiles/serving/litellm/minimax_global.json")
     model = load_model_config(
-        ROOT / "config/model/minimax_m2_7.json",
+        ROOT / "profiles/models/minimax_m2_7.json",
         serving=serving,
     )
 
@@ -84,7 +85,7 @@ def test_litellm_serving_loader_exports_proxy_defaults(monkeypatch):
         [
             "python3",
             str(ROOT / "scripts/load_serving_env.py"),
-            str(ROOT / "config/serving/litellm/minimax_global.json"),
+            str(ROOT / "profiles/serving/litellm/minimax_global.json"),
         ],
         check=True,
         capture_output=True,
@@ -102,9 +103,63 @@ def test_litellm_serving_loader_exports_proxy_defaults(monkeypatch):
     assert "sk-test-minimax" not in proc.stdout
 
 
+def test_litellm_config_renderer_omits_optional_api_base_and_upstream_secret(tmp_path, monkeypatch):
+    out = tmp_path / "litellm.yaml"
+    monkeypatch.setenv("MODEL", "gemini/gemini-3.5-flash")
+    monkeypatch.setenv("LITELLM_UPSTREAM_MODEL", "gemini/gemini-3.5-flash")
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "sk-local-proxy")
+    monkeypatch.setenv("LITELLM_UPSTREAM_API_KEY", "sk-upstream-secret")
+    monkeypatch.delenv("LITELLM_UPSTREAM_BASE_URL", raising=False)
+
+    subprocess.run(
+        [
+            "python3",
+            "-m",
+            "agent_bench.serving.render_litellm_config",
+            "--output",
+            str(out),
+        ],
+        check=True,
+        cwd=ROOT,
+    )
+
+    rendered = out.read_text()
+    assert 'model_name: "gemini/gemini-3.5-flash"' in rendered
+    assert "api_base:" not in rendered
+    assert "os.environ/LITELLM_UPSTREAM_API_KEY" in rendered
+    assert "sk-upstream-secret" not in rendered
+    assert oct(os.stat(out).st_mode & 0o777) == "0o600"
+
+
+def test_litellm_config_renderer_includes_api_base_when_configured(tmp_path, monkeypatch):
+    out = tmp_path / "litellm.yaml"
+    monkeypatch.setenv("LITELLM_MODEL_ALIAS", "MiniMax-M2.7")
+    monkeypatch.setenv("LITELLM_UPSTREAM_MODEL", "openai/MiniMax-M2.7")
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "sk-local-proxy")
+    monkeypatch.setenv("LITELLM_UPSTREAM_BASE_URL", "https://api.minimax.io/v1")
+
+    subprocess.run(
+        [
+            "python3",
+            "-m",
+            "agent_bench.serving.render_litellm_config",
+            "--output",
+            str(out),
+        ],
+        check=True,
+        cwd=ROOT,
+    )
+
+    rendered = out.read_text()
+    assert 'model_name: "MiniMax-M2.7"' in rendered
+    assert 'model_name: "openai/MiniMax-M2.7"' in rendered
+    assert 'api_base: "os.environ/LITELLM_UPSTREAM_BASE_URL"' in rendered
+    assert "https://api.minimax.io/v1" not in rendered
+
+
 def test_pbs_uses_serving_stage_for_sidecars():
-    pbs = (ROOT / "scripts/execution_pbs/run_benchmark.pbs").read_text()
-    tb_pbs = (ROOT / "scripts/execution_pbs/run_benchmark_tb.pbs").read_text()
+    pbs = (ROOT / "agent_bench/deployments/pbs/run_benchmark.pbs").read_text()
+    tb_pbs = (ROOT / "agent_bench/deployments/pbs/run_benchmark_tb.pbs").read_text()
 
     assert "STAGE_VLLM" not in pbs
     assert "VLLM_PROFILE" not in pbs

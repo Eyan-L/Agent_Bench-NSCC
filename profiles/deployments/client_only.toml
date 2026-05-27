@@ -1,0 +1,5 @@
+[deployment]
+name = "client_only"
+kind = "client_only"
+requires_gpu = false
+description = "Do not start a local model server; use an existing endpoint or LiteLLM/API proxy."

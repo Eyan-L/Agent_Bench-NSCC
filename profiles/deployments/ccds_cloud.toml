@@ -1,0 +1,6 @@
+[deployment]
+name = "ccds_cloud"
+kind = "ccds_cloud"
+requires_gpu = false
+project = "agent-bench"
+description = "Render a CCDS cloud launch plan with provider secrets scoped to deployment."

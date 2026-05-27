@@ -1,10 +1,10 @@
 # bench-platform top-level orchestration.
 #
 # Composed-config run model. A run is the cartesian product of four JSON configs:
-#   APP      config/application/<app>/<exp>.json   what to run (instances, repos, budgets)
-#   HARNESS  config/harness/<name>.json             how to drive the agent framework
-#   MODEL    config/model/<name>.json               which model + model-level limits
-#   SERVING  config/serving/<engine>/<name>.json    serving endpoint / engine deployment
+#   APP      profiles/benchmarks/<app>/<exp>.json   what to run (instances, repos, budgets)
+#   HARNESS  profiles/harnesses/<name>.json             how to drive the agent framework
+#   MODEL    profiles/models/<name>.json               which model + model-level limits
+#   SERVING  profiles/serving/<engine>/<name>.json    serving endpoint / engine deployment
 # Override any of them on the command line, e.g.
 #   make run_phase0 SERVING=vllm/debug MODEL_PROFILE=qwen35_9b HARNESS=openclaw_swebench VLLM_TP=1
 # SERVING_BACKEND is derived from SERVING's first path segment by default.
@@ -52,7 +52,7 @@ export AB_EXPERIMENT_DIR
 # output_dir from the active app JSON is now a run-set leaf (e.g. phase0).
 # Fall back to _unknown when the JSON is missing (e.g. `make help` with a
 # half-edited config).
-APP_OUTPUT_DIR = $(shell $(PYTHON) -c 'import json; print(json.load(open("config/application/$(APP).json"))["output_dir"])' 2>/dev/null)
+APP_OUTPUT_DIR = $(shell $(PYTHON) -c 'import json; print(json.load(open("profiles/benchmarks/$(APP).json"))["output_dir"])' 2>/dev/null)
 APP_OUTPUT_LEAF = $(notdir $(APP_OUTPUT_DIR))
 SWEEP_DIR      = $(AB_EXPERIMENT_DIR)/runs/$(APP_OUTPUT_LEAF)
 EXPERIMENT_LOG_DIR = $(AB_EXPERIMENT_DIR)/logs
@@ -62,7 +62,7 @@ EXPERIMENT_LOG_DIR = $(AB_EXPERIMENT_DIR)/logs
 # SERVE_LOG, and waits up to SERVE_READY_TIMEOUT seconds for /v1/models to
 # come up. Set SERVE_AUTO=0 to skip (useful when you launch the backend
 # yourself or want to fail fast on missing serving).
-SERVE_PORT           = $(shell $(PYTHON) -c 'import json; print((json.load(open("config/serving/$(SERVING).json"))["serving"].get("endpoint") or {}).get("port", 8000))' 2>/dev/null || echo 8000)
+SERVE_PORT           = $(shell $(PYTHON) -c 'import json; print((json.load(open("profiles/serving/$(SERVING).json"))["serving"].get("endpoint") or {}).get("port", 8000))' 2>/dev/null || echo 8000)
 SERVE_URL            ?= http://localhost:$(SERVE_PORT)/v1/models
 SERVE_LOG            ?= $(EXPERIMENT_LOG_DIR)/$(SERVING_BACKEND).log
 SERVE_READY_TIMEOUT  ?= 600
@@ -72,7 +72,7 @@ SERVE_AUTO           ?= 1
 # the recipe's driver finishes (or on Ctrl-C). Skipped when SERVE_AUTO=0
 # (user manages backend lifecycle themselves). One sglang/vllm process per
 # experiment — never reused across runs.
-SERVE_CLEANUP_HOOK = if [ "$(SERVE_AUTO)" != "0" ]; then trap 'echo "[serve] stopping $(SERVING_BACKEND) after experiment"; PORT="$(SERVE_PORT)" bash backend/common/serve.sh stop 2>&1 | sed "s|^|[serve] |" || true' EXIT INT TERM; fi
+SERVE_CLEANUP_HOOK = if [ "$(SERVE_AUTO)" != "0" ]; then trap 'echo "[serve] stopping $(SERVING_BACKEND) after experiment"; PORT="$(SERVE_PORT)" bash agent_bench/serving/common/serve.sh stop 2>&1 | sed "s|^|[serve] |" || true' EXIT INT TERM; fi
 
 _check_eval_inputs:
 	@if [ -z "$(SWEBENCH_ROOT)" ] || [ -z "$(INSTANCE_DATA)" ]; then \
@@ -84,21 +84,26 @@ _ensure_serve:
 	@if [ "$(SERVE_AUTO)" = "0" ]; then \
 	    echo "[serve] SERVE_AUTO=0 — skipping auto-launch"; \
 	else \
-	    if curl -s -f -m 2 "$(SERVE_URL)" >/dev/null 2>&1; then \
+	    auth_args=(); \
+	    if [ "$(SERVING_BACKEND)" = "litellm" ]; then \
+	        key="$${LITELLM_PROXY_API_KEY:-$${MODEL_API_KEY:-sk-agent-bench-local}}"; \
+	        auth_args=(-H "Authorization: Bearer $$key"); \
+	    fi; \
+	    if curl -s -f -m 2 "$${auth_args[@]}" "$(SERVE_URL)" >/dev/null 2>&1; then \
 	        echo "[serve] $(SERVE_URL) already up — stopping for fresh per-experiment launch"; \
-	        PORT="$(SERVE_PORT)" bash backend/common/serve.sh stop 2>&1 | sed 's/^/[serve] /'; \
+	        PORT="$(SERVE_PORT)" bash agent_bench/serving/common/serve.sh stop 2>&1 | sed 's/^/[serve] /'; \
 	        for i in $$(seq 1 20); do \
 	            sleep 1; \
-	            curl -s -f -m 1 "$(SERVE_URL)" >/dev/null 2>&1 || break; \
+	            curl -s -f -m 1 "$${auth_args[@]}" "$(SERVE_URL)" >/dev/null 2>&1 || break; \
 	        done; \
 	    fi; \
 	    mkdir -p "$$(dirname "$(SERVE_LOG)")"; \
 	    echo "[serve] launching $(SERVING_BACKEND) → $(SERVE_LOG)"; \
-	    nohup bash backend/common/serve.sh >>"$(SERVE_LOG)" 2>&1 </dev/null & \
+	    nohup bash agent_bench/serving/common/serve.sh >>"$(SERVE_LOG)" 2>&1 </dev/null & \
 	    pid=$$!; \
 	    echo "[serve] PID $$pid — polling $(SERVE_URL) (timeout $(SERVE_READY_TIMEOUT)s)"; \
 	    deadline=$$(( $$(date +%s) + $(SERVE_READY_TIMEOUT) )); \
-	    while ! curl -s -f -m 2 "$(SERVE_URL)" >/dev/null 2>&1; do \
+	    while ! curl -s -f -m 2 "$${auth_args[@]}" "$(SERVE_URL)" >/dev/null 2>&1; do \
 	        if ! kill -0 $$pid 2>/dev/null; then \
 	            echo "[serve] PID $$pid died — see $(SERVE_LOG)" >&2; \
 	            tail -n 30 "$(SERVE_LOG)" >&2 2>/dev/null; exit 1; \
@@ -128,7 +133,7 @@ help:
 	@echo "Targets:"
 	@echo "  serve       Launch backend (SERVING_BACKEND=$(SERVING_BACKEND))"
 	@echo "  eval        Run driver with current APP/HARNESS/MODEL_PROFILE/SERVING"
-	@echo "  validate-configs  Static checks for config/application+harness+model+serving"
+	@echo "  validate-configs  Static checks for profiles/benchmarks+harnesses+models+serving"
 	@echo "  run_phase0  SWE-bench phase0 sanity (APP=swebench/phase0)"
 	@echo "  run_phase1  SWE-bench phase1 mini-verified (APP=swebench/phase1)"
 	@echo "  run_phase2  SWE-bench phase2 serving sweep (APP=swebench/phase2_serving)"
@@ -137,8 +142,8 @@ help:
 	@echo "  run_dr_smoke[_agent|_eval]   DeepResearch-Bench 3 tasks (same split)"
 	@echo "  run_dr_full[_agent|_eval]    DeepResearch-Bench full 100 tasks (same split)"
 	@echo "  stress      Run simulated stress workload (stress/loadgen-bin)"
-	@echo "  analyze     Aggregate results (orchestration/analysis/aggregate.py)"
-	@echo "  report      Build report (orchestration/report/generate.py)"
+	@echo "  analyze     Aggregate results (agent_bench/results/analysis/aggregate.py)"
+	@echo "  report      Build report (agent_bench/results/report/generate.py)"
 	@echo "  test        Trace pipeline self-tests"
 	@echo "  otel-up-host    Start native otelcol-contrib (no docker)"
 	@echo "  otel-down-host  Stop the native collector"
@@ -174,30 +179,31 @@ help:
 	@echo "  MIG_UUID=$(MIG_UUID) (defaults to data/last_mig_uuid)"
 
 serve:
-	bash backend/common/serve.sh
+	bash agent_bench/serving/common/serve.sh
 
 validate-configs:
 	$(PYTHON) scripts/validate_configs.py \
-	  --app config/application/$(APP).json \
-	  --harness config/harness/$(HARNESS).json \
-	  --model config/model/$(MODEL_PROFILE).json \
-	  --serving config/serving/$(SERVING).json
+	  --app profiles/benchmarks/$(APP).json \
+	  --harness profiles/harnesses/$(HARNESS).json \
+	  --model profiles/models/$(MODEL_PROFILE).json \
+	  --serving profiles/serving/$(SERVING).json
 
 eval: _check_eval_inputs _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
-	$(PYTHON) -m orchestration.runner.driver \
-	  --app     config/application/$(APP).json \
-	  --harness config/harness/$(HARNESS).json \
-	  --model   config/model/$(MODEL_PROFILE).json \
-	  --serving config/serving/$(SERVING).json \
+	$(PYTHON) -m agent_bench.runtime.driver \
+	  --app     profiles/benchmarks/$(APP).json \
+	  --harness profiles/harnesses/$(HARNESS).json \
+	  --model   profiles/models/$(MODEL_PROFILE).json \
+	  --serving profiles/serving/$(SERVING).json \
 	  --swebench-root $(SWEBENCH_ROOT) \
 	  --instance-data $(INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
-# Phase shortcuts — same as `eval`, but pin APP so the user can stay on
-# `make run_phase0` muscle memory. Override HARNESS / MODEL_PROFILE / SERVING as needed.
-run_phase0: APP := swebench/phase0
-run_phase0: eval
+# Phase shortcuts. Phase 0 uses the public experiment entrypoint; older
+# research shortcuts remain below for parameterized sweeps.
+run_phase0: _check_eval_inputs
+	INSTANCE_DATA="$(INSTANCE_DATA)" SWEBENCH_ROOT="$(SWEBENCH_ROOT)" \
+	$(PYTHON) run.py --config experiments/swebench_phase0.toml $(EXTRA_ARGS)
 
 run_phase1: APP := swebench/phase1
 run_phase1: eval
@@ -215,22 +221,22 @@ run_phase2: eval
 #   make run_tb HARNESS_BACKEND=singularity   # HPC fallback
 TB_INSTANCE_DATA ?= $(KIT_ROOT)/data/terminal_bench/tasks.json
 
-# Materialize the TB tasks.json from applications/terminal_bench/tasks/.
+# Materialize the TB tasks.json from agent_bench/benchmarks/terminal_bench/tasks/.
 # Re-runs are idempotent — the loader overwrites the file each time.
 tb-tasks:
 	@mkdir -p "$$(dirname "$(TB_INSTANCE_DATA)")"
-	$(PYTHON) -m applications.terminal_bench.loader "$(TB_INSTANCE_DATA)"
+	$(PYTHON) -m agent_bench.benchmarks.terminal_bench.loader "$(TB_INSTANCE_DATA)"
 	@echo "[tb] instance_data -> $(TB_INSTANCE_DATA)"
 
 run_tb: APP := terminal_bench/kv_store
 run_tb: HARNESS := tb_react_terminal_bench
 run_tb: tb-tasks _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
-	$(PYTHON) -m orchestration.runner.driver \
-	  --app     config/application/$(APP).json \
-	  --harness config/harness/$(HARNESS).json \
-	  --model   config/model/$(MODEL_PROFILE).json \
-	  --serving config/serving/$(SERVING).json \
+	$(PYTHON) -m agent_bench.runtime.driver \
+	  --app     profiles/benchmarks/$(APP).json \
+	  --harness profiles/harnesses/$(HARNESS).json \
+	  --model   profiles/models/$(MODEL_PROFILE).json \
+	  --serving profiles/serving/$(SERVING).json \
 	  --instance-data $(TB_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
@@ -250,7 +256,7 @@ run_tb: tb-tasks _ensure_serve
 # Requires four env vars at run time (auto-sourced from .env):
 #   BRAVE_API_KEY      OC native web_search (Brave Search API)
 #   JINA_READER_API    FACT citation scraping (aliased to JINA_API_KEY by
-#                      applications/deepresearch_bench/eval/judge_runner.py)
+#                      agent_bench/benchmarks/deepresearch_bench/eval/judge_runner.py)
 #   DEEPSEEK_API_KEY   RACE + FACT judge (DeepSeek-V4-Pro)
 #
 # Override HARNESS to swap the web_search provider, and MODEL_PROFILE to swap
@@ -266,7 +272,7 @@ DR_SERVING       ?= vllm/nscc
 # Materialize DR instances.json from eval/vendor/.../query.jsonl. Idempotent.
 dr-tasks:
 	@mkdir -p "$$(dirname "$(DR_INSTANCE_DATA)")"
-	python -m applications.deepresearch_bench.loader "$(DR_INSTANCE_DATA)"
+	python -m agent_bench.benchmarks.deepresearch_bench.loader "$(DR_INSTANCE_DATA)"
 	@echo "[dr] instance_data -> $(DR_INSTANCE_DATA)"
 
 # --- combined (agent + eval) -----------------------------------------
@@ -276,11 +282,11 @@ run_dr_smoke1: MODEL_PROFILE := $(DR_MODEL_PROFILE)
 run_dr_smoke1: SERVING := $(DR_SERVING)
 run_dr_smoke1: dr-tasks _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
-	$(DR_LOAD_ENV) python -m orchestration.runner.driver \
-	  --app     config/application/$(APP).json \
-	  --harness config/harness/$(HARNESS).json \
-	  --model   config/model/$(MODEL_PROFILE).json \
-	  --serving config/serving/$(SERVING).json \
+	$(DR_LOAD_ENV) python -m agent_bench.runtime.driver \
+	  --app     profiles/benchmarks/$(APP).json \
+	  --harness profiles/harnesses/$(HARNESS).json \
+	  --model   profiles/models/$(MODEL_PROFILE).json \
+	  --serving profiles/serving/$(SERVING).json \
 	  --instance-data $(DR_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
@@ -290,11 +296,11 @@ run_dr_smoke: MODEL_PROFILE := $(DR_MODEL_PROFILE)
 run_dr_smoke: SERVING := $(DR_SERVING)
 run_dr_smoke: dr-tasks _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
-	$(DR_LOAD_ENV) python -m orchestration.runner.driver \
-	  --app     config/application/$(APP).json \
-	  --harness config/harness/$(HARNESS).json \
-	  --model   config/model/$(MODEL_PROFILE).json \
-	  --serving config/serving/$(SERVING).json \
+	$(DR_LOAD_ENV) python -m agent_bench.runtime.driver \
+	  --app     profiles/benchmarks/$(APP).json \
+	  --harness profiles/harnesses/$(HARNESS).json \
+	  --model   profiles/models/$(MODEL_PROFILE).json \
+	  --serving profiles/serving/$(SERVING).json \
 	  --instance-data $(DR_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
@@ -304,11 +310,11 @@ run_dr_full: MODEL_PROFILE := $(DR_MODEL_PROFILE)
 run_dr_full: SERVING := $(DR_SERVING)
 run_dr_full: dr-tasks _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
-	$(DR_LOAD_ENV) python -m orchestration.runner.driver \
-	  --app     config/application/$(APP).json \
-	  --harness config/harness/$(HARNESS).json \
-	  --model   config/model/$(MODEL_PROFILE).json \
-	  --serving config/serving/$(SERVING).json \
+	$(DR_LOAD_ENV) python -m agent_bench.runtime.driver \
+	  --app     profiles/benchmarks/$(APP).json \
+	  --harness profiles/harnesses/$(HARNESS).json \
+	  --model   profiles/models/$(MODEL_PROFILE).json \
+	  --serving profiles/serving/$(SERVING).json \
 	  --instance-data $(DR_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
@@ -319,11 +325,11 @@ run_dr_smoke1_agent: MODEL_PROFILE := $(DR_MODEL_PROFILE)
 run_dr_smoke1_agent: SERVING := $(DR_SERVING)
 run_dr_smoke1_agent: dr-tasks _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
-	$(DR_LOAD_ENV) DR_SKIP_EVAL=1 python -m orchestration.runner.driver \
-	  --app     config/application/$(APP).json \
-	  --harness config/harness/$(HARNESS).json \
-	  --model   config/model/$(MODEL_PROFILE).json \
-	  --serving config/serving/$(SERVING).json \
+	$(DR_LOAD_ENV) DR_SKIP_EVAL=1 python -m agent_bench.runtime.driver \
+	  --app     profiles/benchmarks/$(APP).json \
+	  --harness profiles/harnesses/$(HARNESS).json \
+	  --model   profiles/models/$(MODEL_PROFILE).json \
+	  --serving profiles/serving/$(SERVING).json \
 	  --instance-data $(DR_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
@@ -333,11 +339,11 @@ run_dr_smoke_agent: MODEL_PROFILE := $(DR_MODEL_PROFILE)
 run_dr_smoke_agent: SERVING := $(DR_SERVING)
 run_dr_smoke_agent: dr-tasks _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
-	$(DR_LOAD_ENV) DR_SKIP_EVAL=1 python -m orchestration.runner.driver \
-	  --app     config/application/$(APP).json \
-	  --harness config/harness/$(HARNESS).json \
-	  --model   config/model/$(MODEL_PROFILE).json \
-	  --serving config/serving/$(SERVING).json \
+	$(DR_LOAD_ENV) DR_SKIP_EVAL=1 python -m agent_bench.runtime.driver \
+	  --app     profiles/benchmarks/$(APP).json \
+	  --harness profiles/harnesses/$(HARNESS).json \
+	  --model   profiles/models/$(MODEL_PROFILE).json \
+	  --serving profiles/serving/$(SERVING).json \
 	  --instance-data $(DR_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
@@ -347,11 +353,11 @@ run_dr_full_agent: MODEL_PROFILE := $(DR_MODEL_PROFILE)
 run_dr_full_agent: SERVING := $(DR_SERVING)
 run_dr_full_agent: dr-tasks _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
-	$(DR_LOAD_ENV) DR_SKIP_EVAL=1 python -m orchestration.runner.driver \
-	  --app     config/application/$(APP).json \
-	  --harness config/harness/$(HARNESS).json \
-	  --model   config/model/$(MODEL_PROFILE).json \
-	  --serving config/serving/$(SERVING).json \
+	$(DR_LOAD_ENV) DR_SKIP_EVAL=1 python -m agent_bench.runtime.driver \
+	  --app     profiles/benchmarks/$(APP).json \
+	  --harness profiles/harnesses/$(HARNESS).json \
+	  --model   profiles/models/$(MODEL_PROFILE).json \
+	  --serving profiles/serving/$(SERVING).json \
 	  --instance-data $(DR_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
@@ -362,7 +368,7 @@ run_dr_full_agent: dr-tasks _ensure_serve
 DR_EVAL_ROOT ?= $(KIT_ROOT)/data/experiments
 run_dr_smoke1_eval: APP := deepresearch_bench/smoke1
 run_dr_smoke1_eval: dr-tasks
-	$(DR_LOAD_ENV) python -m applications.deepresearch_bench.eval.runner \
+	$(DR_LOAD_ENV) python -m agent_bench.benchmarks.deepresearch_bench.eval.runner \
 	  --sweep         $(DR_EVAL_ROOT) \
 	  --app-leaf      $(APP_OUTPUT_LEAF) \
 	  --instance-data $(DR_INSTANCE_DATA) \
@@ -370,7 +376,7 @@ run_dr_smoke1_eval: dr-tasks
 
 run_dr_smoke_eval: APP := deepresearch_bench/smoke3
 run_dr_smoke_eval: dr-tasks
-	$(DR_LOAD_ENV) python -m applications.deepresearch_bench.eval.runner \
+	$(DR_LOAD_ENV) python -m agent_bench.benchmarks.deepresearch_bench.eval.runner \
 	  --sweep         $(DR_EVAL_ROOT) \
 	  --app-leaf      $(APP_OUTPUT_LEAF) \
 	  --instance-data $(DR_INSTANCE_DATA) \
@@ -378,7 +384,7 @@ run_dr_smoke_eval: dr-tasks
 
 run_dr_full_eval: APP := deepresearch_bench/full100
 run_dr_full_eval: dr-tasks
-	$(DR_LOAD_ENV) python -m applications.deepresearch_bench.eval.runner \
+	$(DR_LOAD_ENV) python -m agent_bench.benchmarks.deepresearch_bench.eval.runner \
 	  --sweep         $(DR_EVAL_ROOT) \
 	  --app-leaf      $(APP_OUTPUT_LEAF) \
 	  --instance-data $(DR_INSTANCE_DATA) \
@@ -386,16 +392,16 @@ run_dr_full_eval: dr-tasks
 
 # Native OTel collector (no docker). Downloads otelcol-contrib on first run.
 otel-up-host:
-	bash orchestration/otel/host_up.sh
+	bash agent_bench/telemetry/otel/host_up.sh
 
 otel-down-host:
-	bash orchestration/otel/host_down.sh
+	bash agent_bench/telemetry/otel/host_down.sh
 
 # Self-hosted SWE-bench scoring server (run on a docker host).
 # Clients set OC_SCORING_URL=http://<this-host>:8765 to use it.
 SCORING_PORT ?= 8765
 scoring-server: _check_eval_inputs
-	$(PYTHON) -m orchestration.scoring_server.main \
+	$(PYTHON) -m agent_bench.benchmarks.swebench.scoring_server.main \
 	  --swebench-root $(SWEBENCH_ROOT) \
 	  --host 0.0.0.0 --port $(SCORING_PORT)
 
@@ -403,10 +409,10 @@ stress:
 	./stress/loadgen-bin $(STRESS_ARGS)
 
 analyze:
-	$(PYTHON) -m orchestration.analysis.aggregate $(ANALYZE_ARGS)
+	$(PYTHON) -m agent_bench.results.analysis.aggregate $(ANALYZE_ARGS)
 
 report:
-	$(PYTHON) -m orchestration.report.generate $(REPORT_ARGS)
+	$(PYTHON) -m agent_bench.results.report.generate $(REPORT_ARGS)
 
 test:
 	$(PYTHON) -m tests.trace.test_trace_pipeline
@@ -417,12 +423,12 @@ clean:
 # ---- Containerized vLLM (MIG-aware) --------------------------------------
 # Sibling of `make serve`. `make serve` runs vLLM natively (JSON-config
 # driven); `make serve-docker` runs it as a docker container so it can bind
-# to a MIG slice via CDI. See backend/vllm/serve_docker.sh for the env
+# to a MIG slice via CDI. See agent_bench/serving/vllm/serve_docker.sh for the env
 # contract (VLLM_IMAGE / VLLM_MIG_UUID / VLLM_DETACH / ...).
 VLLM_CONTAINER_NAME ?= oc-vllm-serve
 
 serve-docker:
-	bash backend/vllm/serve_docker.sh $(VLLM_ARGS)
+	bash agent_bench/serving/vllm/serve_docker.sh $(VLLM_ARGS)
 
 serve-stop:
 	@if docker ps -a --format '{{.Names}}' | grep -qx "$(VLLM_CONTAINER_NAME)"; then \
@@ -446,7 +452,7 @@ OPENHANDS_SDK_VERSION ?= 1.21.0
 
 openhands-image:
 	OH_IMAGE_TAG=$(OPENHANDS_IMAGE) \
-	bash harnesses/openhands/docker/build.sh
+	bash agent_bench/harnesses/openhands/docker/build.sh
 
 # ---- MIG management ------------------------------------------------------
 # nvidia-smi MIG commands require root; the scripts enforce + remind.
@@ -470,7 +476,7 @@ _check_mig_uuid:
 	fi
 
 mig-smoke: _check_mig_uuid
-	@VLLM_MIG_UUID="$(MIG_UUID)" DRY_RUN=1 bash backend/vllm/serve_docker.sh --preset latency
+	@VLLM_MIG_UUID="$(MIG_UUID)" DRY_RUN=1 bash agent_bench/serving/vllm/serve_docker.sh --preset latency
 
 _ensure_mig_serve: _check_mig_uuid
 	@if curl -s -f -m 2 "$(SERVE_URL)" >/dev/null 2>&1; then \
@@ -479,7 +485,7 @@ _ensure_mig_serve: _check_mig_uuid
 	    mkdir -p "$$(dirname "$(MIG_SERVE_LOG)")"; \
 	    echo "[mig-serve] launching vLLM on $(MIG_UUID) → $(MIG_SERVE_LOG)"; \
 	    VLLM_MIG_UUID="$(MIG_UUID)" VLLM_TAIL_LOGS=0 VLLM_DETACH=1 \
-	      bash backend/vllm/serve_docker.sh >>"$(MIG_SERVE_LOG)" 2>&1; \
+	      bash agent_bench/serving/vllm/serve_docker.sh >>"$(MIG_SERVE_LOG)" 2>&1; \
 	    echo "[mig-serve] polling $(SERVE_URL) (timeout $(MIG_SERVE_READY_TIMEOUT)s)"; \
 	    deadline=$$(( $$(date +%s) + $(MIG_SERVE_READY_TIMEOUT) )); \
 	    while ! curl -s -f -m 2 "$(SERVE_URL)" >/dev/null 2>&1; do \
@@ -499,11 +505,11 @@ _ensure_mig_serve: _check_mig_uuid
 run_tb_mig: APP := terminal_bench/kv_store
 run_tb_mig: HARNESS := tb_react_terminal_bench
 run_tb_mig: tb-tasks _ensure_mig_serve
-	$(PYTHON) -m orchestration.runner.driver \
-	  --app     config/application/$(APP).json \
-	  --harness config/harness/$(HARNESS).json \
-	  --model   config/model/$(MODEL_PROFILE).json \
-	  --serving config/serving/$(SERVING).json \
+	$(PYTHON) -m agent_bench.runtime.driver \
+	  --app     profiles/benchmarks/$(APP).json \
+	  --harness profiles/harnesses/$(HARNESS).json \
+	  --model   profiles/models/$(MODEL_PROFILE).json \
+	  --serving profiles/serving/$(SERVING).json \
 	  --instance-data $(TB_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 

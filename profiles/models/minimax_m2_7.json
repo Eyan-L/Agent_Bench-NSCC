@@ -1,0 +1,12 @@
+{
+  "_doc": "MiniMax M2.7 profile. Prefer profiles/serving/litellm/minimax_global.json so agents talk to a local LiteLLM OpenAI-compatible proxy and never receive MINIMAX_API_KEY directly.",
+  "model": {
+    "config_id": "minimax_m2_7",
+    "name": "MiniMax-M2.7",
+    "provider": "minimax",
+    "temperature": 0.0,
+    "max_tokens": 8192,
+    "context_window": 262144,
+    "litellm_model": "openai/MiniMax-M2.7"
+  }
+}

@@ -1,0 +1,24 @@
+name = "nscc_vllm"
+description = "NSCC PBS SWE-bench smoke run with vLLM serving."
+output_dir = "runs/nscc_vllm"
+seeds = [42]
+
+[benchmark]
+name = "swebench"
+profile = "profiles/benchmarks/swebench/phase0.json"
+
+[harness]
+name = "openclaw"
+profile = "profiles/harnesses/openclaw_swebench.json"
+
+[model]
+profile = "profiles/models/qwen35_9b.json"
+
+[serving]
+profile = "profiles/serving/vllm/default.json"
+
+[deployment]
+profile = "profiles/deployments/nscc_pbs.toml"
+
+[limits]
+max_instances = 1

@@ -1,0 +1,24 @@
+name = "client_only"
+description = "SWE-bench smoke run through a LiteLLM/API endpoint without local GPU serving."
+output_dir = "runs/client_only"
+seeds = [42]
+
+[benchmark]
+name = "swebench"
+profile = "profiles/benchmarks/swebench/phase0.json"
+
+[harness]
+name = "openclaw"
+profile = "profiles/harnesses/openclaw_swebench.json"
+
+[model]
+profile = "profiles/models/gemini_3_5_flash.json"
+
+[serving]
+profile = "profiles/serving/litellm_gemini.toml"
+
+[deployment]
+profile = "profiles/deployments/client_only.toml"
+
+[limits]
+max_instances = 1

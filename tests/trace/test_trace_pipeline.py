@@ -1,4 +1,4 @@
-"""Sanity checks for the orchestration/trace/ instrumentation layer.
+"""Sanity checks for the agent_bench/telemetry/ instrumentation layer.
 
 Covers:
   1. Synthetic step durations roll up within tolerance (StepLogger + JSONL).
@@ -8,7 +8,7 @@ Covers:
   4. Forced crash (SIGTERM mid-trajectory) leaves a recoverable JSONL with
      a final manifest line carrying partial=true.
 
-Thresholds load from config/stress/trace_thresholds.yaml; override path via
+Thresholds load from profiles/stress/trace_thresholds.yaml; override path via
 TRACE_THRESHOLDS_FILE env var.
 
 Run: python -m tests.trace.test_trace_pipeline
@@ -27,12 +27,12 @@ from typing import Any, Dict, Iterable, List
 
 import yaml
 
-from orchestration.trace.schema import StepEvent, TelemetrySample
-from orchestration.trace.logger import StepLogger
-from orchestration.trace.writers import JSONLWriter
-from orchestration.trace.telemetry import ResourceCollector
-from orchestration.trace.llm_wrapper import LLMWrapper
-from orchestration.trace.align import align_telemetry_to_steps
+from agent_bench.telemetry.schema import StepEvent, TelemetrySample
+from agent_bench.telemetry.logger import StepLogger
+from agent_bench.telemetry.writers import JSONLWriter
+from agent_bench.telemetry.telemetry import ResourceCollector
+from agent_bench.telemetry.llm_wrapper import LLMWrapper
+from agent_bench.telemetry.align import align_telemetry_to_steps
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -229,7 +229,7 @@ def check_coverage(tmp: Path, cfg: dict) -> None:
 _CRASH_SCRIPT = """
 import os, sys, time, signal
 sys.path.insert(0, {repo_root!r})
-from orchestration.trace.logger import StepLogger
+from agent_bench.telemetry.logger import StepLogger
 
 logger = StepLogger(
     output_path={path!r},

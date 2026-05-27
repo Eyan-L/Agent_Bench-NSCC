@@ -20,3 +20,5 @@ frontend/openclaw/state/agents/*/sessions/
 frontend/openclaw/state/agents/*/memory/
 frontend/openclaw/state/agents/main/
 logs/*
+
+.agent/*

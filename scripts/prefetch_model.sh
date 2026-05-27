@@ -4,7 +4,7 @@
 # vllm serve will download on first run, but that makes the first 'make run_phase0'
 # take 10-20 minutes of silent 'waiting' before anything happens. Prefetch once.
 #
-# Resolves $MODEL from config/model/$MODEL_PROFILE.json (or AB_MODEL_CONFIG),
+# Resolves $MODEL from profiles/models/$MODEL_PROFILE.json (or AB_MODEL_CONFIG),
 # same as serve.sh. Pass MODEL=foo to override.
 
 set -euo pipefail
@@ -14,10 +14,10 @@ KIT_ROOT="${KIT_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 MODEL_CFG="${VLLM_MODEL_CONFIG:-${AB_MODEL_CONFIG:-}}"
 if [[ -z "$MODEL_CFG" && -n "${MODEL_PROFILE:-}" ]]; then
-    MODEL_CFG="$KIT_ROOT/config/model/${MODEL_PROFILE}.json"
+    MODEL_CFG="$KIT_ROOT/profiles/models/${MODEL_PROFILE}.json"
 fi
 if [[ -z "$MODEL_CFG" ]]; then
-    MODEL_CFG="$KIT_ROOT/config/model/qwen36_27b.json"
+    MODEL_CFG="$KIT_ROOT/profiles/models/qwen36_27b.json"
 fi
 if [[ -f "$MODEL_CFG" ]]; then
     eval "$(python3 "$KIT_ROOT/scripts/load_model_env.py" "$MODEL_CFG")"

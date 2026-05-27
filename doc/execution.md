@@ -2,7 +2,7 @@
 
 Two deployment modes — pick by environment. In **both**, the agent runtime
 and benchmark task each run in their **own** isolated container/sif. The host
-runs only vLLM/SGLang or another OpenAI-compatible serving backend.
+runs only vLLM/SGLang or another OpenAI-compatible serving agent_bench.serving.
 
 | Mode | When to use | Harness backend |
 |---|---|---|
@@ -54,7 +54,7 @@ Best for iterating on conditions or debugging a single instance.
 # Start a serving backend in the background
 make serve &
 # or directly:
-SERVING_BACKEND=vllm bash backend/common/serve.sh &
+SERVING_BACKEND=vllm bash agent_bench/serving/common/serve.sh &
 
 # Verify
 curl -s http://localhost:8000/v1/models | jq .
@@ -64,11 +64,11 @@ curl -s http://localhost:8000/v1/models | jq .
 
 ```bash
 HARNESS_BACKEND=docker \
-PYTHONPATH=. python3 -m orchestration.runner.driver \
-    --app config/application/swebench/phase1.json \
-    --harness config/harness/openclaw_swebench.json \
-    --model config/model/qwen36_27b.json \
-    --serving config/serving/vllm/default.json \
+PYTHONPATH=. python3 -m agent_bench.runtime.driver \
+    --app profiles/benchmarks/swebench/phase1.json \
+    --harness profiles/harnesses/openclaw_swebench.json \
+    --model profiles/models/qwen36_27b.json \
+    --serving profiles/serving/vllm/default.json \
     --swebench-root "$SWEBENCH_ROOT" \
     --instance-data "$INSTANCE_DATA"
 ```
@@ -79,7 +79,7 @@ Or via Makefile:
 make eval APP=swebench/phase1 HARNESS=openclaw_swebench MODEL_PROFILE=qwen36_27b SERVING=vllm/default
 ```
 
-The Docker harness (`applications/swebench/app.py:SWEBenchHarness`)
+The Docker harness (`agent_bench/benchmarks/swebench/app.py:SWEBenchHarness`)
 pulls the per-instance image lazily and `docker run`s it. First run on a new
 instance pulls 1-3 GiB; subsequent runs reuse the cached image.
 
@@ -88,11 +88,11 @@ instance pulls 1-3 GiB; subsequent runs reuse the cached image.
 ```bash
 INSTANCE=$(jq -r 'keys[0]' "$INSTANCE_DATA")
 HARNESS_BACKEND=docker PYTHONPATH=. \
-    python3 -m orchestration.runner.driver \
-      --app config/application/swebench/phase0.json \
-      --harness config/harness/openclaw_swebench.json \
-      --model config/model/qwen36_27b.json \
-      --serving config/serving/vllm/default.json \
+    python3 -m agent_bench.runtime.driver \
+      --app profiles/benchmarks/swebench/phase0.json \
+      --harness profiles/harnesses/openclaw_swebench.json \
+      --model profiles/models/qwen36_27b.json \
+      --serving profiles/serving/vllm/default.json \
       --swebench-root "$SWEBENCH_ROOT" \
       --instance-data "$INSTANCE_DATA"
 ```
@@ -110,25 +110,25 @@ the OTel collector, run the driver, tear everything down.
 ### Submit
 
 ```bash
-# Default bench profile (4× A100, 24h walltime)
-qsub scripts/execution_pbs/run_benchmark.pbs
+# Default bench profile (4x A100, 24h walltime)
+qsub agent_bench/deployments/pbs/run_benchmark.pbs
 
 # Override the app/harness/model/serving, skip stage 0 (assume pylib already populated)
-qsub -v STAGE_SWEBENCH=0,APP=$KIT_ROOT/config/application/swebench/phase0.json \
-    scripts/execution_pbs/run_benchmark.pbs
+qsub -v STAGE_SWEBENCH=0,APP=$KIT_ROOT/profiles/benchmarks/swebench/phase0.json \
+    agent_bench/deployments/pbs/run_benchmark.pbs
 
 # Small local-model smoke with the four-axis configs
 qsub -l select=1:ncpus=16:ngpus=1:mem=64gb \
-    -v KIT_ROOT=$KIT_ROOT,APP=$KIT_ROOT/config/application/swebench/phase0.json,HARNESS_CONFIG=$KIT_ROOT/config/harness/openclaw_swebench.json,MODEL_CONFIG=$KIT_ROOT/config/model/qwen35_9b.json,SERVING_CONFIG=$KIT_ROOT/config/serving/vllm/nscc.json,VLLM_TP=1 \
-    scripts/execution_pbs/run_benchmark.pbs
+    -v KIT_ROOT=$KIT_ROOT,APP=$KIT_ROOT/profiles/benchmarks/swebench/phase0.json,HARNESS_CONFIG=$KIT_ROOT/profiles/harnesses/openclaw_swebench.json,MODEL_CONFIG=$KIT_ROOT/profiles/models/qwen35_9b.json,SERVING_CONFIG=$KIT_ROOT/profiles/serving/vllm/nscc.json,VLLM_TP=1 \
+    agent_bench/deployments/pbs/run_benchmark.pbs
 
 # Provider-backed model API through a local LiteLLM proxy (no GPU request)
 qsub -l select=1:ncpus=16:mem=64gb \
-    -v KIT_ROOT=$KIT_ROOT,APP=$KIT_ROOT/config/application/swebench/phase0.json,HARNESS_CONFIG=$KIT_ROOT/config/harness/openclaw_swebench.json,MODEL_CONFIG=$KIT_ROOT/config/model/minimax_m2_7.json,SERVING_CONFIG=$KIT_ROOT/config/serving/litellm/minimax_global.json,MINIMAX_API_KEY=$MINIMAX_API_KEY \
-    scripts/execution_pbs/run_benchmark.pbs
+    -v KIT_ROOT=$KIT_ROOT,APP=$KIT_ROOT/profiles/benchmarks/swebench/phase0.json,HARNESS_CONFIG=$KIT_ROOT/profiles/harnesses/openclaw_swebench.json,MODEL_CONFIG=$KIT_ROOT/profiles/models/minimax_m2_7.json,SERVING_CONFIG=$KIT_ROOT/profiles/serving/litellm/minimax_global.json,MINIMAX_API_KEY=$MINIMAX_API_KEY \
+    agent_bench/deployments/pbs/run_benchmark.pbs
 
 # Terminal-Bench sweep
-qsub scripts/execution_pbs/run_benchmark_tb.pbs
+qsub agent_bench/deployments/pbs/run_benchmark_tb.pbs
 ```
 
 ### Stages (each toggleable via `STAGE_*=0`)
@@ -140,10 +140,10 @@ qsub scripts/execution_pbs/run_benchmark_tb.pbs
 | `STAGE_SERVING`  | start the local serving sidecar: vLLM for local models, or LiteLLM proxy for provider-backed models |
 | `STAGE_OC_CHECK` | prepare the selected harness runtime SIF: OpenClaw/OpenHands/Hermes all build locally on NSCC from a base/upstream SIF unless you explicitly set a pullable final `*_RUNTIME_DOCKER` |
 | `STAGE_OTEL`     | start the local OTel collector that writes otel-traces.jsonl |
-| `STAGE_RUN`      | invoke `orchestration/runner/driver` with the sweep |
+| `STAGE_RUN`      | invoke `agent_bench/runtime/driver` with the sweep |
 | `STAGE_CLEANUP`  | kill the serving sidecar + OTel, free ports |
 
-See the header comment in `scripts/execution_pbs/run_benchmark.pbs` for the
+See the header comment in `agent_bench/deployments/pbs/run_benchmark.pbs` for the
 full env-var menu.
 
 ### Outputs on the cluster
@@ -154,7 +154,7 @@ Logs go to `$KIT_ROOT/data/experiments/$AB_RUN_STAMP/logs/`:
 
 - `pbs.log` — top-level PBS job log
 - `vllm.log` — engine stdout (parsed by `engine_log_tailer`)
-- `litellm.log` — LiteLLM proxy stdout for `config/serving/litellm/*`
+- `litellm.log` — LiteLLM proxy stdout for `profiles/serving/litellm/*`
 - `litellm_config.yaml` — per-job LiteLLM proxy config; readable only by the job user
 - `engine_metrics.jsonl` — per-iteration scheduler state
 - `engine_log_tailer.log` — tailer's own diagnostic output
@@ -177,14 +177,14 @@ Docker-equipped scoring host as a fallback:
 
 ```bash
 # On a machine that can run Docker + SWE-bench:
-python -m orchestration.scoring_server.main \
+python -m agent_bench.benchmarks.swebench.scoring_server.main \
   --swebench-root /path/to/SWE-bench \
   --host 0.0.0.0 \
   --port 8765
 
 # In the NSCC qsub environment:
 qsub -v OC_SCORING_URL=http://<docker-host>:8765,... \
-  scripts/execution_pbs/run_benchmark.pbs
+  agent_bench/deployments/pbs/run_benchmark.pbs
 ```
 
 Scoring precedence is: `OC_SCORING_SIF_DIR` first, then `OC_SCORING_URL`, then
@@ -197,7 +197,7 @@ local `swebench.harness.run_evaluation` in Docker-capable environments.
 Removed. Agent harnesses are always containerized; running OpenClaw,
 OpenHands, or Hermes directly on the host is no longer supported. For quick
 local iteration, use `HARNESS_BACKEND=docker` with a small app config such as
-`config/application/swebench/phase0.json`.
+`profiles/benchmarks/swebench/phase0.json`.
 
 ---
 
@@ -211,14 +211,14 @@ jq . data/experiments/<stamp>/runs/<sweep>/<run_id>/verdict.json
 find data/experiments/<stamp>/runs/<sweep> -name verdict.json -exec jq -r .status {} \; | sort | uniq -c
 
 # Replay analysis without re-running anything
-PYTHONPATH=. python3 -m orchestration.analysis.aggregate --runs-dir data/experiments/<stamp>/runs/<sweep> --out-dir data/analysis/<stamp>/<sweep>
+PYTHONPATH=. python3 -m agent_bench.results.analysis.aggregate --runs-dir data/experiments/<stamp>/runs/<sweep> --out-dir data/analysis/<stamp>/<sweep>
 
 # Render figures
-PYTHONPATH=. python3 orchestration/analysis/plots/plot_all.py \
+PYTHONPATH=. python3 agent_bench/results/analysis/plots/plot_all.py \
     --runs-dir data/experiments/<stamp>/runs/<sweep_id> --out-dir data/figures/<stamp>/<sweep_id>
 
 # Mock figures (no real runs needed)
-PYTHONPATH=. python3 orchestration/analysis/plots/plot_all.py --mock
+PYTHONPATH=. python3 agent_bench/results/analysis/plots/plot_all.py --mock
 ```
 
 ---
@@ -240,7 +240,7 @@ Each validation invocation appends to `<run_dir>/validate_verdicts.jsonl`.
 
 ## Engine telemetry
 
-`backend/engine_log_tailer.py` polls vLLM/SGLang's Prometheus `/metrics`
+`agent_bench/serving/engine_log_tailer.py` polls vLLM/SGLang's Prometheus `/metrics`
 endpoint at iteration cadence (default 100ms) and writes per-iteration JSONL
 with running/waiting reqs, KV cache utilization, and token throughput.
 
@@ -248,7 +248,7 @@ Started automatically by the PBS script. For Docker / host mode, run it
 manually:
 
 ```bash
-python3 backend/engine_log_tailer.py \
+python3 agent_bench/serving/engine_log_tailer.py \
     --engine vllm \
     --base-url http://127.0.0.1:8000 \
     --interval 0.1 \
@@ -263,12 +263,12 @@ For serving-side characterization (no agent loop, just request replay):
 
 ```bash
 make -C stress/loadgen                        # build the loadgen binary
-./stress/loadgen/loadgen-bin agent --config config/stress/agent.json
-./stress/loadgen/loadgen-bin alibaba --config config/stress/alibaba.json
-./stress/loadgen/loadgen-bin azure   --config config/stress/azure.json
+./stress/loadgen/loadgen-bin agent --config profiles/stress/agent.json
+./stress/loadgen/loadgen-bin alibaba --config profiles/stress/alibaba.json
+./stress/loadgen/loadgen-bin azure   --config profiles/stress/azure.json
 
 # Cluster
-qsub -v EXP_CONFIG=config/stress/alibaba_nscc_2a_singularity.json \
+qsub -v EXP_CONFIG=profiles/stress/alibaba_nscc_2a_singularity.json \
     stress/scripts/pbs_experiment.pbs
 ```
 
@@ -280,10 +280,10 @@ Outputs land in `stress/loadgen/result/`.
 
 | Symptom | First check |
 |---|---|
-| `spans.jsonl` has only one record (heartbeat) | OC patches not applied — see `harnesses/openclaw/patch/MANIFEST.json` markers and the patched runtime SIF build |
+| `spans.jsonl` has only one record (heartbeat) | OC patches not applied — see `agent_bench/harnesses/openclaw/patch/MANIFEST.json` markers and the patched runtime SIF build |
 | `replayInvalid: true` in trajectory | Long-context formatting drift — slim the system prompt or raise per-call `max_tokens` |
-| `ENOTEMPTY` on plugin extract | Run `bash scripts/execution_pbs/oc_plugin_cache_clean.sh $OC_PLUGIN_CACHE` |
+| `ENOTEMPTY` on plugin extract | Run `bash agent_bench/deployments/pbs/oc_plugin_cache_clean.sh $OC_PLUGIN_CACHE` |
 | vLLM never reaches ready | `tail -50 $LOG_DIR/vllm.log` — usually plugin npm install on a cold cache (network needed) |
-| `spans.jsonl` missing entirely | OTel collector didn't start — check `bash scripts/execution_pbs/otel_collector.sh start` and `$OC_OTEL_DATA_DIR/otelcol.log` |
+| `spans.jsonl` missing entirely | OTel collector didn't start — check `bash agent_bench/deployments/pbs/otel_collector.sh start` and `$OC_OTEL_DATA_DIR/otelcol.log` |
 | Docker mode: instance image pull fails | Pre-fetch with `docker pull swebench/sweb.eval.<arch>.<instance>:latest` from a network-equipped host |
 | NSCC scoring tries Docker | Ensure Stage 1 pulled task SIFs and `OC_SCORING_SIF_DIR` points at that directory |

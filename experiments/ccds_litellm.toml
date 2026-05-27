@@ -1,0 +1,24 @@
+name = "ccds_litellm"
+description = "CCDS cloud Terminal-Bench smoke run through LiteLLM/provider serving."
+output_dir = "runs/ccds_litellm"
+seeds = [42]
+
+[benchmark]
+name = "terminal_bench"
+profile = "profiles/benchmarks/terminal_bench/kv_store.json"
+
+[harness]
+name = "react"
+profile = "profiles/harnesses/tb_react_terminal_bench.json"
+
+[model]
+profile = "profiles/models/gemini_3_5_flash.json"
+
+[serving]
+profile = "profiles/serving/litellm_gemini.toml"
+
+[deployment]
+profile = "profiles/deployments/ccds_cloud.toml"
+
+[limits]
+max_instances = 1

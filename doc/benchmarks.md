@@ -2,32 +2,32 @@
 
 A *benchmark* (or "application" in the three-layer abstraction) is a task
 suite the agent is scored against. The two existing applications are SWE-bench
-(`applications/swebench/`) and Terminal-Bench (`applications/terminal_bench/`).
-Adding a new one means writing the app code, a loader, per-(app × harness) glue,
-dropping the task data into `config/`, and wiring the dispatcher.
+(`agent_bench/benchmarks/swebench/`) and Terminal-Bench (`agent_bench/benchmarks/terminal_bench/`).
+Adding a new one means writing the app code, a loader, per-(app x harness) glue,
+adding task data under the benchmark package or `data/`, and wiring the dispatcher.
 
 ## What you'll add
 
 ```
-applications/<name>/
+agent_bench/benchmarks/<name>/
 ├── __init__.py
 ├── app.py             # lifecycle + scoring (historically called harness.py)
 ├── loader.py          # turn instance_id → instance_data dict
-└── openclaw/          # OpenClaw customization for THIS app (per-(app × harness))
+└── openclaw/          # OpenClaw customization for THIS app (per-(app x harness))
     ├── agents/        # AGENTS.md etc. — mounted into /root/.openclaw/agents/<id>/
     └── skills/verify/SKILL.md  # `verify` OpenClaw skill — tells the agent how to run the in-loop check
 
-applications/<name>/tasks/           # per-task assets vendored under the app
+agent_bench/benchmarks/<name>/tasks/           # per-task assets vendored under the app
 └── ... (instance JSONs / task definitions / per-instance assets)
 
-config/application/<name>/<sweep>.json  # at least one application sweep that targets it
+profiles/benchmarks/<name>/<sweep>.json  # at least one application sweep that targets it
 ```
 
 ## 1. The harness
 
 A harness owns the **per-run lifecycle**: stand up the environment, expose it
 to the condition, score the result, tear down. The driver
-(`orchestration/runner/driver.py`) calls these methods in order:
+(`agent_bench/runtime/driver.py`) calls these methods in order:
 
 ```python
 class YourBenchmarkHarness:
@@ -99,7 +99,7 @@ Implementation tips drawn from the existing harnesses:
 ## 2. The loader
 
 ```python
-# applications/<name>/loader.py
+# agent_bench/benchmarks/<name>/loader.py
 def load_instances(dataset_path: str) -> Dict[str, Dict]:
     """Return {instance_id: instance_data}. instance_data must include:
         instance_id      : str
@@ -113,12 +113,12 @@ right `instance_data` to `prepare_environment(...)` for each run.
 
 ## 3. Drop the task data
 
-Goes under the application itself — `applications/<name>/tasks/` (or wherever
+Goes under the application itself — `agent_bench/benchmarks/<name>/tasks/` (or wherever
 the loader points). There's no required shape; it's just where the loader
 reads from. Examples:
 
 - SWE-bench: external `verified.json` (path via `--instance-data`) — single JSON of all instances. No tasks/ dir because the upstream dataset is one big JSON.
-- Terminal-Bench: `applications/terminal_bench/tasks/<task>/{task.toml, environment/, tests/}` — one folder per task, vendored in-repo.
+- Terminal-Bench: `agent_bench/benchmarks/terminal_bench/tasks/<task>/{task.toml, environment/, tests/}` — one folder per task, vendored in-repo.
 
 Pick whichever matches the upstream benchmark's distribution format.
 
@@ -126,13 +126,13 @@ Pick whichever matches the upstream benchmark's distribution format.
 
 Two places:
 
-**`orchestration/runner/driver.py`** — the harness selection (currently in
+**`agent_bench/runtime/driver.py`** — the harness selection (currently in
 `execute_run` near top): branch on `instance_data["benchmark"]`. Existing pattern:
 
 ```python
 benchmark_kind = instance_data.get("benchmark", "swebench")
 if benchmark_kind == "your_benchmark":
-    from applications.your_benchmark.app import YourBenchmarkHarness
+    from agent_bench.benchmarks.your_benchmark.app import YourBenchmarkHarness
     harness = YourBenchmarkHarness(...)
 else:
     # existing branches
@@ -140,7 +140,7 @@ else:
 
 Lazy import keeps a pure SWE-bench install from needing your benchmark's deps.
 
-**`orchestration/runner/driver.py`** — the patch gate. Some benchmarks (TB) have no
+**`agent_bench/runtime/driver.py`** — the patch gate. Some benchmarks (TB) have no
 patch artifact and the empty-patch FAIL gate must be skipped. Add your
 benchmark to:
 
@@ -152,10 +152,10 @@ if applicable.
 
 ## 5. Add Application/Harness Configs
 
-Add `config/application/<name>/phase1.json` for instances/budgets/output, and
-`config/harness/<harness>_<name>.json` for framework behavior + conditions.
+Add `profiles/benchmarks/<name>/phase1.json` for instances/budgets/output, and
+`profiles/harnesses/<harness>_<name>.json` for framework behavior + conditions.
 Model identity and serving deployment are selected separately from
-`config/model/*.json` and `config/serving/*/*.json`.
+`profiles/models/*.json` and `profiles/serving/*/*.json`.
 
 ```json
 {
@@ -171,15 +171,15 @@ Model identity and serving deployment are selected separately from
 
 ```bash
 PYTHONPATH=. python3 -c "
-from applications.your_benchmark.app import YourBenchmarkHarness
-from applications.your_benchmark.loader import load_instances
+from agent_bench.benchmarks.your_benchmark.app import YourBenchmarkHarness
+from agent_bench.benchmarks.your_benchmark.loader import load_instances
 print('OK')
 "
-PYTHONPATH=. python3 -m orchestration.runner.driver \
-    --app config/application/your_benchmark/phase1.json \
-    --harness config/harness/openclaw_your_benchmark.json \
-    --model config/model/qwen36_27b.json \
-    --serving config/serving/vllm/default.json \
+PYTHONPATH=. python3 -m agent_bench.runtime.driver \
+    --app profiles/benchmarks/your_benchmark/phase1.json \
+    --harness profiles/harnesses/openclaw_your_benchmark.json \
+    --model profiles/models/qwen36_27b.json \
+    --serving profiles/serving/vllm/default.json \
     --instance-data data/your_benchmark/instances.json
 ```
 
@@ -189,12 +189,12 @@ Then inspect
 
 ## Checklist
 
-- [ ] `applications/<name>/{__init__.py, app.py, loader.py}`
-- [ ] `applications/<name>/openclaw/{agents,skills}` if running on OpenClaw (cross-app gateway helpers come from `applications/conditions/gateway_helpers.py`)
+- [ ] `agent_bench/benchmarks/<name>/{__init__.py, app.py, loader.py}`
+- [ ] `agent_bench/benchmarks/<name>/openclaw/{agents,skills}` if running on OpenClaw (cross-app gateway helpers come from `agent_bench/benchmarks/conditions/gateway_helpers.py`)
 - [ ] Harness exposes `prepare_environment` / `run_tests` / `cleanup` with the
       shapes above
-- [ ] `applications/<name>/tasks/` populated (or external dataset path documented)
+- [ ] `agent_bench/benchmarks/<name>/tasks/` populated (or external dataset path documented)
 - [ ] Driver dispatch branches on `instance_data["benchmark"]`
 - [ ] Patch-gate exemption added (only if your benchmark has no patch artifact)
-- [ ] At least one application JSON in `config/application/<name>/`
+- [ ] At least one application JSON in `profiles/benchmarks/<name>/`
 - [ ] Smoke test produces a verdict file

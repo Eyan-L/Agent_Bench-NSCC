@@ -4,16 +4,16 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from applications.swebench.conditions.hermes_agent import HermesAgentCondition
+from agent_bench.benchmarks.swebench.conditions.hermes_agent import HermesAgentCondition
 
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_hermes_patch_manifest_and_backend_contract():
-    manifest = ROOT / "harnesses/hermes/patch/MANIFEST.json"
-    patch = ROOT / "harnesses/hermes/patch/hermes-external-exec-bridge.patch"
-    telemetry_patch = ROOT / "harnesses/hermes/patch/hermes-agent-bench-telemetry.patch"
+    manifest = ROOT / "agent_bench/harnesses/hermes/patch/MANIFEST.json"
+    patch = ROOT / "agent_bench/harnesses/hermes/patch/hermes-external-exec-bridge.patch"
+    telemetry_patch = ROOT / "agent_bench/harnesses/hermes/patch/hermes-agent-bench-telemetry.patch"
     assert manifest.is_file()
     assert patch.is_file()
     assert telemetry_patch.is_file()
@@ -29,7 +29,7 @@ def test_hermes_patch_manifest_and_backend_contract():
 
 
 def test_hermes_docker_smoke_checks_patch_status():
-    smoke = (ROOT / "harnesses/hermes/docker/smoke.sh").read_text()
+    smoke = (ROOT / "agent_bench/harnesses/hermes/docker/smoke.sh").read_text()
     assert "HERMES_PATCH_MODE=baked" in smoke
     assert "/opt/hermes-tools/apply_patch.py status" in smoke
     assert "DockerEnvironment" in smoke
@@ -37,7 +37,7 @@ def test_hermes_docker_smoke_checks_patch_status():
 
 
 def test_hermes_app_uses_external_task_container_and_bridge():
-    app = (ROOT / "applications/swebench/hermes/app.py").read_text()
+    app = (ROOT / "agent_bench/benchmarks/swebench/hermes/app.py").read_text()
     assert "task_container_name = _oc_sandbox_name" in app
     assert "HermesDispatcher()" in app
     assert "target=task_container_name" in app
@@ -55,15 +55,15 @@ def test_hermes_app_uses_external_task_container_and_bridge():
 
 
 def test_hermes_driver_and_condition_are_registered():
-    driver = (ROOT / "orchestration/runner/driver.py").read_text()
+    driver = (ROOT / "agent_bench/runtime/driver.py").read_text()
     assert 'condition_type == "hermes_agent"' in driver
     assert 'harness_choice == "hermes"' in driver
     assert "SingularityContainer()" in driver
     assert "SWEBenchHermesHarness(swebench_root, container=container)" in driver
-    condition = (ROOT / "applications/swebench/conditions/hermes_agent.py").read_text()
+    condition = (ROOT / "agent_bench/benchmarks/swebench/conditions/hermes_agent.py").read_text()
     assert '_resolve_provider(self.model_config)' in condition
     assert '"--provider", provider' in condition
-    cfg = (ROOT / "config/harness/hermes_swebench.json").read_text()
+    cfg = (ROOT / "profiles/harnesses/hermes_swebench.json").read_text()
     assert '"harness": "hermes"' in cfg
     assert '"condition_type": "hermes_agent"' in cfg
 
@@ -194,7 +194,7 @@ def test_hermes_condition_reads_standard_events_filename(tmp_path):
 
 
 def test_hermes_config_template_selects_docker_backend():
-    template = (ROOT / "harnesses/hermes/state/config.yaml.template").read_text()
+    template = (ROOT / "agent_bench/harnesses/hermes/state/config.yaml.template").read_text()
     assert 'backend: "docker"' in template
     assert 'provider: "$PROVIDER"' in template
     assert 'cwd: "/testbed"' in template

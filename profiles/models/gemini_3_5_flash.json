@@ -1,0 +1,12 @@
+{
+  "_doc": "Gemini API profile. The provider model string is an explicit config value, not a latest-model alias.",
+  "model": {
+    "config_id": "gemini_3_5_flash",
+    "name": "gemini/gemini-3.5-flash",
+    "provider": "litellm",
+    "api_key": "EMPTY",
+    "temperature": 0.0,
+    "max_tokens": 8192,
+    "context_window": 1048576
+  }
+}

@@ -1,0 +1,10 @@
+[deployment]
+name = "nscc_pbs"
+kind = "nscc_pbs"
+requires_gpu = true
+container_runtime = "singularity"
+queue = "normal"
+walltime = "02:00:00"
+nodes = 1
+gpus = 1
+description = "Render a PBS job for NSCC-style batch execution."

@@ -1,0 +1,6 @@
+[deployment]
+name = "local_docker"
+kind = "local_docker"
+requires_gpu = true
+container_runtime = "docker"
+description = "Run benchmark and harness containers on the local Docker host."
