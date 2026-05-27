@@ -44,3 +44,13 @@ include = ["agent_bench*", "tests*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.yapf]
+based_on_style = "pep8"
+spaces_before_comment = 4
+ALLOW_SPLIT_BEFORE_DICT_VALUE = false
+
+[tool.yapfignore]
+ignore_patterns = [
+    "**/patch/**",
+]
