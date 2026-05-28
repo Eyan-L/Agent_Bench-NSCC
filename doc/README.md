@@ -1,36 +1,35 @@
-# Development docs
+# Documentation
 
-Detailed documentation for using and extending the framework. Pick the guide
-that matches what you're trying to do.
+Use these guides from top to bottom when getting oriented.
 
-## Using the framework
+## Users
 
-| Guide | What's in it |
+| Guide | Purpose |
 |---|---|
-| [execution.md](execution.md) | How to run a benchmark (Docker, PBS, host modes), inspect outputs, replay analysis, troubleshoot. |
-| [layout.md](layout.md)       | What each top-level folder is for and where to find what. |
-| [clean-break-refactor.md](clean-break-refactor.md) | New open-source-facing experiment/profile interface and migration map. |
+| [quickstart.md](quickstart.md) | Run OpenClaw-based examples through client-only, local Docker, NSCC PBS, and CCDS cloud deployments. |
+| [deployments.md](deployments.md) | Understand deployment adapters and how each environment launches serving and benchmark execution. |
+| [execution.md](execution.md) | Inspect outputs, telemetry, scoring behavior, and troubleshooting steps. |
+| [layout.md](layout.md) | Understand the repository layout after the refactor. |
 
-## Extending the framework
+## Developers
 
-| Guide | When to use |
+| Guide | Purpose |
 |---|---|
-| [benchmarks.md](benchmarks.md) | New application/dataset (the *what to test*) — e.g. SWE-bench Lite, HumanEval, a custom internal task set. Lives under `agent_bench/benchmarks/<name>/`. |
-| [conditions.md](conditions.md) | New way the agent attempts a task (the *how* the model is invoked) — e.g. a different retrieval strategy, an ablation, a tool-use variant. |
-| [harnesses.md](harnesses.md)   | New agent runtime / orchestrator (the *who runs the agent*) — e.g. add OpenHands alongside OpenClaw, or swap in claude-code. Lives under `agent_bench/harnesses/<name>/`. |
+| [benchmarks.md](benchmarks.md) | Add a new benchmark/task suite. |
+| [conditions.md](conditions.md) | Add a new task-attempt procedure. |
+| [harnesses.md](harnesses.md) | Add a new agent runtime or extend an existing one. |
+| [exec-bridge.md](exec-bridge.md) | Understand the OpenClaw execution bridge. |
+| [clean-break-refactor.md](clean-break-refactor.md) | Architecture overview for the hard-break package/profile layout. |
 
-## Quick orientation
+## Public Interface
 
-The repo's load-bearing abstraction is three layers:
+The user-facing commands are:
 
-- **agent_bench/benchmarks/** — *which app/dataset is being evaluated.* Owns instance
-  prep, scoring, and per-(app x harness) glue (e.g. `agent_bench/benchmarks/swebench/openclaw/`).
-- **agent_bench/harnesses/** — *which agent runtime drives the model.* Harness-wide shared
-  parts only.
-- **agent_bench/serving/** — *which inference engine serves the model.* vLLM or SGLang.
+```bash
+python3 validate.py --config experiments/<name>.toml
+python3 run.py --config experiments/<name>.toml
+python3 run.py --config experiments/<name>.toml --render-job
+python3 analyze.py --run runs/<run_id>
+```
 
-The three extension axes — application, condition, harness — are
-orthogonal: a new application is a new task set scored against any
-condition; a new condition runs against any application its conditions list
-supports; a new harness adds a new runtime with its own per-app glue.
-When in doubt about which axis a change lives on, see [layout.md](layout.md).
+Most users should edit only `experiments/` and `profiles/`.

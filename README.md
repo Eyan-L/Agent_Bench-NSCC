@@ -1,94 +1,69 @@
-# bench-platform
+# Agent Bench
 
-Measurement platform for **trajectory-centric agentic workflows** vs
-**request-centric autoregressive (AR) serving**. Provides the data and
-infrastructure to compare how agent workloads differ from traditional LLM
-serving across three axes — execution composition, resource bottlenecks,
-and the adequacy of token-level metrics.
+Agent Bench is a research platform for measuring trajectory-centric agent
+workloads on shared LLM serving infrastructure. It compares full task
+trajectories, tool execution, resource use, and task success rather than only
+request-level serving metrics such as TTFT and TPOT.
 
-## Motivation
-
-LLM serving today is studied through a request/turn lens — TTFT, TPOT,
-throughput per token. That lens was built around chatbot-shaped traces
-and assumes the workload is GPU-bound, request-organized, and adequately
-summarized by token-level metrics.
-
-Agentic workflows break all three assumptions:
-
-- They are **trajectory-organized**, not request-organized. One task spans
-  many LLM calls, tool invocations, retries, and stalls.
-- Their **resource shape is not purely GPU-centric**. Tool execution,
-  CPU work, dependency stalls, and retried attempts move bottlenecks off
-  the accelerator and inflate effective resource cost.
-- Their **success criterion is task-level**, not token-level. TTFT and
-  TPOT improvements do not necessarily translate to better task
-  completion.
-
-This platform exists to measure those gaps systematically, on a shared
-serving backend, across multiple workload classes (code agent, web
-search, document analysis).
-
-## Quick start
+The public run interface is experiment-based:
 
 ```bash
-cp .env.example .env && $EDITOR .env
+python3 validate.py --config experiments/client_only.toml
+python3 run.py --config experiments/local_vllm.toml
+python3 run.py --config experiments/nscc_vllm.toml --render-job
+python3 analyze.py --run runs/<run_id>
+```
+
+Experiments compose reusable profiles from `profiles/`:
+
+- benchmark: SWE-bench, Terminal-Bench, DeepResearch-Bench, or LongBench
+- harness: OpenClaw, OpenHands, Hermes, ReAct, or AR
+- model: model alias, context window, and token limits
+- serving: vLLM, SGLang, LiteLLM, or an existing OpenAI-compatible endpoint
+- deployment: client-only, local Docker, NSCC PBS, or CCDS cloud
+
+## Quick Start
+
+```bash
+cp .env.example .env
+$EDITOR .env
 set -a && . .env && set +a
 ```
 
-Two modes — `docker` and `singularity`. In both, the agent runtime and the
-benchmark task each run in their **own** container (or .sif). The host runs
-only the serving agent_bench.serving.
-
-**Local Docker** (default) — needs a running Docker daemon and the
-patched OpenClaw image:
+OpenClaw + SWE-bench smoke examples:
 
 ```bash
-bash agent_bench/harnesses/openclaw/docker/build.sh   # one-time: agent-bench/openclaw:<v>
-make serve &                              # vLLM on the host
-HARNESS_BACKEND=docker \
-    make eval APP=swebench/phase1 HARNESS=openclaw_swebench MODEL_PROFILE=qwen36_27b SERVING=vllm/default
-```
+# API fallback through LiteLLM
+python3 run.py --config experiments/client_only.toml
 
-Per-run docker layout: a private docker network, a `task-<run_id>` container
-(SWE-bench instance image), an `oc-<run_id>` container (`agent-bench/openclaw`
-running `gateway`). Workspace is bind-mounted into both at `/testbed`.
+# Local Docker containers + vLLM
+python3 run.py --config experiments/local_vllm.toml
 
-**HPC cluster (PBS)** — render a short PBS wrapper from an experiment TOML.
-The generated job provisions serving, runtime SIFs, OTel, the benchmark, and
-cleanup through the Python PBS runner. Don't pre-start serving; the job spins
-it up on the compute node.
-
-```bash
+# NSCC PBS + vLLM
 python3 run.py --config experiments/nscc_vllm.toml --render-job > nscc_vllm.pbs
 qsub nscc_vllm.pbs
+
+# CCDS cloud + vLLM
+python3 run.py --config experiments/ccds_vllm.toml --render-job > ccds_vllm.sh
+bash ccds_vllm.sh
 ```
 
-**Singularity** — analogous to docker but using `singularity instance`s for
-the agent runtime and task .sif on the same private mount tree.
+See [doc/quickstart.md](doc/quickstart.md) for prerequisites, provider/API
+fallback, and output locations.
 
-Then aggregate + render:
+## Documentation
 
-```bash
-make analyze
-make report
-```
-
-Outputs land in `data/experiments/<stamp>/runs/<sweep_id>/<run_id>/`
-(per-run verdicts, trajectories, spans, telemetry). Engine/PBS logs live in
-`data/experiments/<stamp>/logs/`.
+- [doc/quickstart.md](doc/quickstart.md): shortest path to run OpenClaw-based examples.
+- [doc/deployments.md](doc/deployments.md): deployment adapter behavior and examples.
+- [doc/layout.md](doc/layout.md): repository layout and public surfaces.
+- [doc/execution.md](doc/execution.md): runtime operations, outputs, telemetry, and troubleshooting.
+- [doc/benchmarks.md](doc/benchmarks.md): adding a benchmark.
+- [doc/conditions.md](doc/conditions.md): adding a condition.
+- [doc/harnesses.md](doc/harnesses.md): adding an agent runtime.
 
 ## Tests
 
 ```bash
-make test     # trace pipeline self-checks
+conda run -n ab python3 -m pytest -q
+conda run -n ab python3 -m compileall agent_bench run.py validate.py analyze.py
 ```
-
-## Documentation
-
-Detailed guides live under [`doc/`](doc/):
-
-- [doc/execution.md](doc/execution.md) — running benchmarks (Docker, PBS, host modes), inputs/outputs, common operations, troubleshooting.
-- [doc/layout.md](doc/layout.md) — what each top-level folder is for.
-- [doc/benchmarks.md](doc/benchmarks.md) — adding a new benchmark.
-- [doc/conditions.md](doc/conditions.md) — adding a new condition.
-- [doc/frontends.md](doc/frontends.md) — adding a new agent runtime / frontend.

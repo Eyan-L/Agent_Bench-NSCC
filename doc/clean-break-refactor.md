@@ -1,6 +1,8 @@
-# Agent Bench Clean-Break Surface
+# Agent Bench Architecture Surface
 
-This document describes the open-source-facing shape of Agent Bench after the hard-break refactor. The old public roots were moved into `agent_bench/`, and `experiments/` plus `profiles/` are now the run/config surface.
+This document describes the open-source-facing shape of Agent Bench after the
+hard-break refactor. It is an architecture overview; use
+[quickstart.md](quickstart.md) for current run commands.
 
 ## Five Public Nouns
 
@@ -44,7 +46,7 @@ Use `--dry-run` to print the resolved execution plan without launching work.
 python3 run.py --config experiments/client_only.toml
 python3 run.py --config experiments/local_vllm.toml
 python3 run.py --config experiments/nscc_vllm.toml --render-job
-python3 run.py --config experiments/ccds_litellm.toml --render-job
+python3 run.py --config experiments/ccds_vllm.toml --render-job
 ```
 
 ## Experiment Files

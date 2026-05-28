@@ -1,10 +1,9 @@
 # Adding a new harness
 
 A *harness* is the agent runtime — the runtime image plus the orchestrator that
-actually drives the LLM through tool calls. The only harness currently
-implemented is OpenClaw (`agent_bench/harnesses/openclaw/`). This guide covers swapping in
-or adding alongside another (e.g. OpenHands, SWE-Agent, claude-code, a custom
-CLI).
+actually drives the LLM through tool calls. Agent Bench currently represents
+OpenClaw, OpenHands, Hermes, ReAct, and AR. OpenClaw is the base implementation
+used by the quick-start examples.
 
 In the three-layer abstraction:
 
@@ -143,14 +142,14 @@ via `agent_bench/benchmarks/terminal_bench/conditions/react.py:_emit_span`).
 ## 6. Smoke test
 
 ```bash
-# Manual: bring up the harness, hit it once, tear down
-RUN_DIR=$(mktemp -d)
-bash agent_bench/harnesses/your_harness/gateway_up.sh "" 18900 "smoke-token" smoke-run
-# ... your_harness agent invocation ...
-bash agent_bench/harnesses/your_harness/gateway_down.sh ""
+# Preferred: run through an experiment TOML
+python3 validate.py --config experiments/your_harness_smoke.toml
+python3 run.py --config experiments/your_harness_smoke.toml --dry-run
+python3 run.py --config experiments/your_harness_smoke.toml
 ```
 
-Then run a 1-instance sweep that uses your harness condition.
+For low-level debugging, harness-specific gateway helpers can still be invoked
+directly when the harness provides them.
 
 ## Checklist
 
@@ -161,4 +160,4 @@ Then run a 1-instance sweep that uses your harness condition.
 - [ ] `OTEL_RESOURCE_ATTRIBUTES=oc.run_id=$RUN_ID` set when launching the agent so spans demux per-run
 - [ ] `gateway_down.sh` SIGTERMs first, gives ≥1s for OTel flush, then SIGKILLs
 - [ ] Spans emitted in the canonical schema (or the condition writes them directly to `spans.jsonl`)
-- [ ] One full run produces `verdict.json` + `step_trace.jsonl` + `spans.jsonl`
+- [ ] One full run produces `verdict.json`, `steps.jsonl`, and `spans.jsonl` when telemetry is available

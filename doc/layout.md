@@ -9,10 +9,8 @@ Agent_Bench/
 ├── profiles/          reusable benchmark, harness, model, serving, deployment profiles
 ├── data/              generated datasets, run artifacts, figures, and local caches
 ├── scripts/           small host utilities that are still invoked directly
-├── stress/            serving-side load generation stack
 ├── doc/               development and user documentation
-├── tests/             repository tests
-└── analysis_tools/    ad-hoc plotting helpers outside the packaged results code
+└── tests/             repository tests
 ```
 
 ## Public Surface
@@ -38,7 +36,7 @@ agent_bench/
 ├── runtime/       main driver, dispatch contract, exec bridge socket protocol
 ├── deployments/  local/client/PBS/cloud adapters and container helpers
 ├── benchmarks/   SWE-bench, Terminal-Bench, DeepResearch, LongBench
-├── agent_bench/harnesses/  OpenClaw, OpenHands, Hermes, ReAct, AR runtime assets
+├── harnesses/     OpenClaw, OpenHands, Hermes, ReAct, AR runtime assets
 ├── serving/      vLLM, SGLang, LiteLLM, endpoint helpers, engine telemetry
 ├── telemetry/    OTel helpers, trace processing, resource sampler
 └── results/      analysis, aggregation, plots, reports
@@ -55,7 +53,7 @@ Profiles are reusable fragments referenced by experiment TOMLs.
 ```
 profiles/
 ├── benchmarks/   task suites and sweep definitions
-├── profiles/harnesses/     agent runtime behavior and condition lists
+├── harnesses/    agent runtime behavior and condition lists
 ├── models/       model aliases, context windows, generation limits
 ├── serving/      vLLM, SGLang, LiteLLM, existing endpoint definitions
 ├── deployments/  client-only, local Docker, NSCC PBS, CCDS cloud

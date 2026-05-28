@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
         ("nscc_vllm", "nscc_pbs", "vllm", "nscc_pbs.toml"),
         ("nscc_terminal_bench", "nscc_pbs", "vllm", "nscc_pbs.toml"),
         ("nscc_litellm", "nscc_pbs", "litellm", "nscc_pbs_cpu.toml"),
-        ("ccds_litellm", "ccds_cloud", "litellm", "ccds_cloud.toml"),
+        ("ccds_vllm", "ccds_cloud", "vllm", "ccds_cloud.toml"),
     ],
 )
 def test_example_experiments_resolve(
@@ -95,7 +95,7 @@ def test_deployment_plans_render_static_scripts() -> None:
     assert "python3 -m agent_bench.deployments.pbs.run_job --config experiments/nscc_vllm.toml" in nscc_plan.job_script
     assert "--dry-run" not in nscc_plan.job_script
 
-    ccds = load_resolved_experiment(ROOT / "experiments" / "ccds_litellm.toml", root=ROOT)
+    ccds = load_resolved_experiment(ROOT / "experiments" / "ccds_vllm.toml", root=ROOT)
     ccds_plan = plan_deployment(ccds)
 
     assert ccds_plan.deployment == "ccds_cloud"

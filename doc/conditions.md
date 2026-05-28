@@ -145,8 +145,10 @@ benchmark-keyed dispatch.
 # Smoke import
 PYTHONPATH=. python3 -c "from agent_bench.benchmarks.<app>.conditions.<name> import YourCondition; print('OK')"
 
-# Single-instance smoke run (using existing harness + app configs)
-make eval APP=<app>/<exp> HARNESS=<harness_with_your_condition> ...
+# Single-instance smoke run using an experiment TOML that selects your condition
+python3 validate.py --config experiments/<your_condition_smoke>.toml
+python3 run.py --config experiments/<your_condition_smoke>.toml --dry-run
+python3 run.py --config experiments/<your_condition_smoke>.toml
 ```
 
 Inspect `data/experiments/<stamp>/runs/<sweep>/<run_id>/`:
@@ -164,4 +166,5 @@ Inspect `data/experiments/<stamp>/runs/<sweep>/<run_id>/`:
 - [ ] Patch artifact written even on failure (empty file is fine — driver gates on size, not content; benchmarks without patches use `skip_patch_gate`)
 - [ ] Shared utilities imported via absolute paths (`from agent_bench.benchmarks.conditions._llm_client import ...`)
 - [ ] Dispatch branch added in `agent_bench/runtime/driver.py` with a lazy import
-- [ ] Sweep harness JSON using the new condition runs end-to-end
+- [ ] Harness YAML using the new condition is referenced by an experiment TOML
+- [ ] Smoke experiment runs end-to-end

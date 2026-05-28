@@ -175,12 +175,9 @@ from agent_bench.benchmarks.your_benchmark.app import YourBenchmarkHarness
 from agent_bench.benchmarks.your_benchmark.loader import load_instances
 print('OK')
 "
-PYTHONPATH=. python3 -m agent_bench.runtime.driver \
-    --app profiles/benchmarks/your_benchmark/phase1.json \
-    --harness profiles/harnesses/openclaw_your_benchmark.yaml \
-    --model profiles/models/qwen36_27b.json \
-    --serving profiles/serving/vllm/default.yaml \
-    --instance-data data/your_benchmark/instances.json
+python3 validate.py --config experiments/your_benchmark_local.toml
+python3 run.py --config experiments/your_benchmark_local.toml --dry-run
+python3 run.py --config experiments/your_benchmark_local.toml
 ```
 
 Then inspect
@@ -197,4 +194,5 @@ Then inspect
 - [ ] Driver dispatch branches on `instance_data["benchmark"]`
 - [ ] Patch-gate exemption added (only if your benchmark has no patch artifact)
 - [ ] At least one application JSON in `profiles/benchmarks/<name>/`
+- [ ] At least one experiment TOML in `experiments/`
 - [ ] Smoke test produces a verdict file

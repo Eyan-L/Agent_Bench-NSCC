@@ -1,0 +1,24 @@
+name = "ccds_vllm"
+description = "CCDS cloud SWE-bench smoke run with OpenClaw and vLLM serving."
+output_dir = "runs/ccds_vllm"
+seeds = [42]
+
+[benchmark]
+name = "swebench"
+profile = "profiles/benchmarks/swebench/phase0.json"
+
+[harness]
+name = "openclaw"
+profile = "profiles/harnesses/openclaw_swebench.yaml"
+
+[model]
+profile = "profiles/models/qwen35_9b.json"
+
+[serving]
+profile = "profiles/serving/vllm/default.yaml"
+
+[deployment]
+profile = "profiles/deployments/ccds_cloud.toml"
+
+[limits]
+max_instances = 1

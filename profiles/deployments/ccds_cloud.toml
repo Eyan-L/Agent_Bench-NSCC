@@ -1,6 +1,6 @@
 [deployment]
 name = "ccds_cloud"
 kind = "ccds_cloud"
-requires_gpu = false
+requires_gpu = true
 project = "agent-bench"
-description = "Render a CCDS cloud launch plan with provider secrets scoped to deployment."
+description = "Render a CCDS cloud launch plan for GPU-backed vLLM serving."
