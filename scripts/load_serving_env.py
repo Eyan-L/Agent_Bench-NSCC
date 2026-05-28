@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """Emit shell assignments for a profiles/serving/<backend> profile file."""
 
-import json
 import os
 import sys
 from pathlib import Path
 
-try:  # pragma: no cover - only used on Python < 3.11
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover
-    import tomli as tomllib  # type: ignore[no-redef]
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from agent_bench.core.profile_io import load_profile
 
 
 def _shell_quote(v):
@@ -80,16 +79,13 @@ def _endpoint(serving):
 
 def main(argv):
     if len(argv) != 2:
-        print(f"usage: {argv[0]} <serving-profile.json|toml>", file=sys.stderr)
+        print(f"usage: {argv[0]} <serving-profile>", file=sys.stderr)
         return 2
     path = Path(argv[1])
     if not path.is_file():
         print(f"serving config not found: {path}", file=sys.stderr)
         return 1
-    if path.suffix == ".toml":
-        data = tomllib.loads(path.read_text()) or {}
-    else:
-        data = json.loads(path.read_text()) or {}
+    data = load_profile(path)
     serving = data.get("serving") or {}
     if not isinstance(serving, dict):
         print(f"serving config {path} is missing a `serving` object", file=sys.stderr)

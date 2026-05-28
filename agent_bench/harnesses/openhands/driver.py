@@ -12,7 +12,7 @@ the SWE-bench harness uses.
 
 Wire to the world:
 
-    --config   <path>        TOML rendered from profiles/harnesses/openhands_*.json
+    --config   <path>        TOML rendered from profiles/harnesses/openhands_*.yaml
     --task     <message>     initial user message
     --events   <jsonl>       NDJSON event log written here
     --workspace <dir>        agent's workspace (in-container path)

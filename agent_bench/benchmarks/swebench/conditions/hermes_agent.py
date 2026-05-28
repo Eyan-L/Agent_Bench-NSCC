@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from agent_bench.core.profile_io import load_profile
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,8 +47,7 @@ def _resolve_provider(model_config: Any = None) -> str:
     model_path = os.environ.get("AB_MODEL_CONFIG")
     if model_path:
         try:
-            with open(model_path) as fh:
-                cfg = json.load(fh) or {}
+            cfg = load_profile(model_path)
             provider = ((cfg.get("model") or {}).get("provider") or "").strip()
             if provider:
                 return provider

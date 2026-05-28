@@ -48,6 +48,7 @@ from agent_bench.deployments.containers import (
 )
 from agent_bench.harnesses.hermes.dispatcher import HermesDispatcher
 from agent_bench.core.config import endpoint_for_container, load_active_model_and_serving
+from agent_bench.core.profile_io import load_profile
 
 logger = logging.getLogger(__name__)
 
@@ -274,15 +275,14 @@ class SWEBenchHermesHarness:
         kit_root = os.environ.get("KIT_ROOT", os.getcwd())
         harness_path = os.environ.get(
             "AB_HARNESS_CONFIG",
-            os.path.join(kit_root, "profiles/harnesses/hermes_swebench.json"),
+            os.path.join(kit_root, "profiles/harnesses/hermes_swebench.yaml"),
         )
         if not os.path.isfile(harness_path):
             raise FileNotFoundError(
                 f"hermes harness config not found at {harness_path} "
                 "(set AB_HARNESS_CONFIG)."
             )
-        with open(harness_path) as fh:
-            return json.load(fh) or {}
+        return load_profile(harness_path)
 
     def _build_state_dir(self, *, run_id: str, sandbox_image: str) -> Path:
         state_dir = self.state_base / run_id

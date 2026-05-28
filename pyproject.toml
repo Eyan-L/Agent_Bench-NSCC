@@ -4,13 +4,14 @@ version = "0.1.0"
 description = "Unified agent benchmark platform (eval + stress) on shared vLLM/sglang backend"
 requires-python = ">=3.10"
 dependencies = [
+    "pyyaml>=6.0",
     "tomli>=2.0.0; python_version<'3.11'",
 ]
 
 [project.optional-dependencies]
 local = ["psutil>=5.9.0", "pynvml>=11.5.0", "requests>=2.31.0"]
-nscc = ["pyyaml>=6.0", "requests>=2.31.0"]
-ccds = ["pyyaml>=6.0", "requests>=2.31.0"]
+nscc = ["requests>=2.31.0"]
+ccds = ["requests>=2.31.0"]
 openclaw = ["requests>=2.31.0"]
 openhands = ["requests>=2.31.0"]
 hermes = ["requests>=2.31.0"]
@@ -22,7 +23,6 @@ legacy = [
     "psutil>=5.9.0",
     "pyarrow>=14.0.0",
     "pynvml>=11.5.0",
-    "pyyaml>=6.0",
     "requests>=2.31.0",
     "scipy>=1.11.0",
 ]
@@ -34,7 +34,6 @@ dev = [
     "pyarrow>=14.0.0",
     "pynvml>=11.5.0",
     "pytest>=7.0",
-    "pyyaml>=6.0",
     "requests>=2.31.0",
     "scipy>=1.11.0",
 ]

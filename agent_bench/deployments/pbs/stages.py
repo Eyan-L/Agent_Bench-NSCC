@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 from typing import Any, Mapping
 
+from agent_bench.core.profile_io import load_profile
 from agent_bench.core.spec import ConfigError, ResolvedExperiment
 from agent_bench.deployments.pbs.job_spec import PbsJobSpec
 
@@ -460,7 +461,7 @@ def _write_openclaw_state_template(
     harness_path = resolved.profile_paths.get("harness")
     if not harness_path:
         raise ConfigError("OpenClaw plugin warm requires a harness profile path")
-    harness = json.loads(Path(harness_path).read_text(encoding="utf-8")) or {}
+    harness = load_profile(harness_path)
     oc_cfg = dict(harness.get("openclaw") or {})
     if not oc_cfg:
         raise ConfigError(f"harness config {harness_path} has no openclaw block")

@@ -2,7 +2,7 @@
 
 Overrides:
   - ``agent_id = "deep_researcher"`` — must match
-    ``profiles/harnesses/openclaw_deepresearch_bench_brave.json`` ``openclaw.agents.list[0].id``
+    ``profiles/harnesses/openclaw_deepresearch_bench_brave.yaml`` ``openclaw.agents.list[0].id``
     AND the dirname under state_dir/agents/ where prompts are dropped (see
     ``agent_bench/benchmarks/deepresearch_bench/app.py:_build_state_dir``).
   - ``_build_message`` — research framing ("PROMPT.md on disk, write

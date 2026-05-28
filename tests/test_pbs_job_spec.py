@@ -116,7 +116,7 @@ def test_litellm_pbs_spec_does_not_emit_upstream_secret(tmp_path: Path, monkeypa
                 f'profile = "{ROOT / "profiles/benchmarks/terminal_bench/kv_store.json"}"',
                 "[harness]",
                 'name = "react"',
-                f'profile = "{ROOT / "profiles/harnesses/tb_react_terminal_bench.json"}"',
+                f'profile = "{ROOT / "profiles/harnesses/tb_react_terminal_bench.yaml"}"',
                 "[model]",
                 f'profile = "{ROOT / "profiles/models/gemini_3_5_flash.json"}"',
                 "[serving]",

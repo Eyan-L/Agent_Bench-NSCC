@@ -37,6 +37,7 @@ from agent_bench.benchmarks.deepresearch_bench.app import DeepResearchHarness
 from agent_bench.benchmarks.swebench.app import DEFAULT_OC_IMAGE, _force_rmtree
 from agent_bench.harnesses.openclaw.dispatcher import OpenClawRemoteDispatcher
 from agent_bench.core.config import endpoint_for_container, load_active_model_and_serving
+from agent_bench.core.profile_io import load_profile
 
 logger = logging.getLogger(__name__)
 
@@ -388,12 +389,11 @@ class LongBenchHarness(DeepResearchHarness):
 
         harness_path = os.environ.get(
             "AB_HARNESS_CONFIG",
-            os.path.join(kit_root, "profiles/harnesses/openclaw_longbench_clawrag.json"),
+            os.path.join(kit_root, "profiles/harnesses/openclaw_longbench_clawrag.yaml"),
         )
         if not os.path.isfile(harness_path):
             raise FileNotFoundError(f"harness config not found at {harness_path}")
-        with open(harness_path) as fh:
-            harness_cfg = json.load(fh) or {}
+        harness_cfg = load_profile(harness_path)
         oc_cfg = dict(harness_cfg.get("openclaw") or {})
         if not oc_cfg:
             raise ValueError(f"harness config {harness_path} has no `openclaw` block")

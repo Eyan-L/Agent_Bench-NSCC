@@ -1,6 +1,6 @@
 # OpenHands SDK 1.21 driver config — read by /opt/openhands_driver.py.
 # Rendered per-run by agent_bench.benchmarks.swebench.openhands.compose from a
-# profiles/harnesses/openhands_swebench.json + profiles/models/*.json files. Brace-form placeholders are
+# profiles/harnesses/openhands_swebench.yaml + profiles/models/*.json files. Brace-form placeholders are
 # substituted before write; everything else is verbatim.
 #
 # Deployment model in agent-bench: the agent runs inside the OpenHands harness

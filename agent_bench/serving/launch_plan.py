@@ -11,6 +11,7 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from agent_bench.core.config import ModelConfig, ServingConfig, load_model_config, load_serving_config
+from agent_bench.core.profile_io import resolve_profile_ref
 
 
 class LaunchPlanError(ValueError):
@@ -533,7 +534,7 @@ def _resolve_model_path(env: Mapping[str, str], root: Path, backend: str | None)
         if value:
             return _resolve_path(value, root)
     profile = env.get("MODEL_PROFILE", "qwen36_27b")
-    return _resolve_profile_ref(profile, root / "profiles" / "models", [".json"])
+    return resolve_profile_ref(profile, root / "profiles" / "models", [".json", ".yaml", ".yml"])
 
 
 def _resolve_serving_path(env: Mapping[str, str], root: Path, backend: str | None) -> Path:
@@ -550,7 +551,7 @@ def _resolve_serving_path(env: Mapping[str, str], root: Path, backend: str | Non
         serving = f"{backend}/default"
     if not serving:
         serving = "vllm/default"
-    return _resolve_profile_ref(serving, root / "profiles" / "serving", [".json", ".toml"])
+    return resolve_profile_ref(serving, root / "profiles" / "serving", [".yaml", ".yml", ".json", ".toml"])
 
 
 def _resolve_path(value: str, root: Path) -> Path:
@@ -561,29 +562,6 @@ def _resolve_path(value: str, root: Path) -> Path:
     if direct.exists():
         return direct
     return (root / path).resolve()
-
-
-def _resolve_profile_ref(value: str, base_dir: Path, suffixes: Sequence[str]) -> Path:
-    path = Path(value).expanduser()
-    candidates: list[Path] = []
-    if path.is_absolute():
-        candidates.append(path)
-    else:
-        candidates.append((Path.cwd() / path).resolve())
-        candidates.append((base_dir / path).resolve())
-    if path.suffix:
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
-        return candidates[-1]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-        for suffix in suffixes:
-            with_suffix = Path(str(candidate) + suffix)
-            if with_suffix.exists():
-                return with_suffix
-    return Path(str(candidates[-1]) + suffixes[0])
 
 
 def _backend_env_name(backend: str, suffix: str) -> str:

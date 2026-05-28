@@ -62,7 +62,7 @@ profile = "profiles/benchmarks/swebench/phase0.json"
 
 [harness]
 name = "openclaw"
-profile = "profiles/harnesses/openclaw_swebench.json"
+profile = "profiles/harnesses/openclaw_swebench.yaml"
 
 [model]
 profile = "profiles/models/gemini_3_5_flash.json"

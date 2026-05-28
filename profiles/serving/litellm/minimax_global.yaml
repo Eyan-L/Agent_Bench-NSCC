@@ -1,0 +1,33 @@
+# MiniMax international API via a local LiteLLM proxy sidecar. Set
+# MINIMAX_API_KEY in the PBS job environment. Agents only receive the local
+# proxy key, never the upstream MiniMax key.
+serving:
+  config_id: litellm-minimax-global
+  backend: litellm
+  preset: minimax-global
+  endpoint:
+    scheme: http
+    bind_host: 0.0.0.0
+    client_host: 127.0.0.1
+    port: 8000
+    path: /v1
+  proxy:
+    api_key: sk-agent-bench-local
+    num_workers: 4
+    agent_provider: custom
+  provider:
+    active: minimax
+    providers:
+      minimax:
+        name: minimax
+        api: openai-compatible
+        base_url: https://api.minimax.io/v1
+        api_key_env: MINIMAX_API_KEY
+        model: openai/MiniMax-M2.7
+  runtime: {}
+  scheduler:
+    max_num_seqs: 128
+    enable_prefix_caching: false
+  sif: /scratch/users/ntu/$USER/sif_images/litellm_main_stable.sif
+  image: docker://docker.litellm.ai/berriai/litellm:main-stable
+  additional_flags: {}

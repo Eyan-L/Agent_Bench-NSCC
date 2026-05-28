@@ -6,9 +6,9 @@ branch:
 
 ```text
 APP             profiles/benchmarks/swebench/<phase>.json
-HARNESS_CONFIG  profiles/harnesses/<harness>_swebench.json
+HARNESS_CONFIG  profiles/harnesses/<harness>_swebench.yaml
 MODEL_CONFIG    profiles/models/<model>.json
-SERVING_CONFIG  profiles/serving/<backend>/<profile>.json
+SERVING_CONFIG  profiles/serving/<backend>/<profile>.yaml
 ```
 
 Do not use the old mixed harness configs or retired backend-config paths. Model
@@ -22,16 +22,16 @@ Serving profiles only describe endpoint/image/SIF/proxy deployment.
 | Axis | Example | Owns |
 |---|---|---|
 | APP | `profiles/benchmarks/swebench/phase1.json` | instance ids, app budget, output leaf |
-| HARNESS_CONFIG | `profiles/harnesses/openclaw_swebench.json` | OpenClaw/OpenHands/Hermes behavior and conditions |
+| HARNESS_CONFIG | `profiles/harnesses/openclaw_swebench.yaml` | OpenClaw/OpenHands/Hermes behavior and conditions |
 | MODEL_CONFIG | `profiles/models/qwen35_9b.json` | model id/path, provider, `context_window`, `max_tokens` |
-| SERVING_CONFIG | `profiles/serving/vllm/nscc.json` | serving backend endpoint, image, SIF, proxy settings |
+| SERVING_CONFIG | `profiles/serving/vllm/nscc.yaml` | serving backend endpoint, image, SIF, proxy settings |
 
 Common harness choices:
 
 ```text
-profiles/harnesses/openclaw_swebench.json
-profiles/harnesses/openhands_swebench.json
-profiles/harnesses/hermes_swebench.json
+profiles/harnesses/openclaw_swebench.yaml
+profiles/harnesses/openhands_swebench.yaml
+profiles/harnesses/hermes_swebench.yaml
 ```
 
 Common model choices:
@@ -45,9 +45,9 @@ profiles/models/minimax_m2_7.json
 Common serving choices:
 
 ```text
-profiles/serving/vllm/nscc.json
-profiles/serving/vllm/default.json
-profiles/serving/litellm/minimax_global.json
+profiles/serving/vllm/nscc.yaml
+profiles/serving/vllm/default.yaml
+profiles/serving/litellm/minimax_global.yaml
 ```
 
 Tensor parallelism is runtime state, not config-file state. Set `VLLM_TP`,
@@ -65,7 +65,7 @@ cd /home/users/ntu/boxi001/Agent_Bench
 export KIT_ROOT=$(pwd)
 export APP="$KIT_ROOT/profiles/benchmarks/swebench/phase1.json"
 export MODEL_CONFIG="$KIT_ROOT/profiles/models/qwen35_9b.json"
-export SERVING_CONFIG="$KIT_ROOT/profiles/serving/vllm/nscc.json"
+export SERVING_CONFIG="$KIT_ROOT/profiles/serving/vllm/nscc.yaml"
 
 python3 run.py --config experiments/nscc_vllm.toml --render-job > nscc_vllm.pbs
 qsub -v KIT_ROOT=$KIT_ROOT,VLLM_TP=1 nscc_vllm.pbs
@@ -98,7 +98,7 @@ cd /home/users/ntu/boxi001/Agent_Bench
 export KIT_ROOT=$(pwd)
 export APP="$KIT_ROOT/profiles/benchmarks/swebench/phase1.json"
 export MODEL_CONFIG="$KIT_ROOT/profiles/models/minimax_m2_7.json"
-export SERVING_CONFIG="$KIT_ROOT/profiles/serving/litellm/minimax_global.json"
+export SERVING_CONFIG="$KIT_ROOT/profiles/serving/litellm/minimax_global.yaml"
 export MINIMAX_API_KEY="<your-minimax-key>"
 
 python3 run.py --config experiments/nscc_litellm.toml --render-job > nscc_litellm.pbs

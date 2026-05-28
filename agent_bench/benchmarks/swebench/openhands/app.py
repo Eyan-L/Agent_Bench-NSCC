@@ -64,6 +64,7 @@ from agent_bench.deployments.containers import (
 )
 from agent_bench.harnesses.openhands.dispatcher import OpenHandsDispatcher
 from agent_bench.core.config import endpoint_for_container, load_active_model_and_serving
+from agent_bench.core.profile_io import load_profile
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +320,7 @@ class SWEBenchOpenHandsHarness:
     def _build_state_dir(self, *, run_id: str) -> Path:
         """Materialize <state_base>/<run_id>/ with the rendered config.toml.
 
-        The harness config (`profiles/harnesses/openhands_swebench.json`, picked by the
+        The harness config (`profiles/harnesses/openhands_swebench.yaml`, picked by the
         driver) carries an `openhands` block with model + agent + run
         knobs. We substitute those into agent_bench/harnesses/openhands/state/config.toml.template
         and drop the result at <state_dir>/config.toml. The OH driver reads
@@ -334,15 +335,14 @@ class SWEBenchOpenHandsHarness:
         # Driver sets AB_HARNESS_CONFIG to the resolved harness config path.
         harness_path = os.environ.get(
             "AB_HARNESS_CONFIG",
-            os.path.join(kit_root, "profiles/harnesses/openhands_swebench.json"),
+            os.path.join(kit_root, "profiles/harnesses/openhands_swebench.yaml"),
         )
         if not os.path.isfile(harness_path):
             raise FileNotFoundError(
                 f"openhands harness config not found at {harness_path} "
                 "(set AB_HARNESS_CONFIG)."
             )
-        with open(harness_path) as fh:
-            harness_cfg = json.load(fh) or {}
+        harness_cfg = load_profile(harness_path)
 
         oh_cfg = harness_cfg.get("openhands") or {}
         model_cfg, _serving_cfg = load_active_model_and_serving(kit_root=kit_root)

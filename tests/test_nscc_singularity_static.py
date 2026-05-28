@@ -202,9 +202,9 @@ def test_runner_maps_app_output_under_experiment_dir(monkeypatch):
     monkeypatch.setenv("AB_EXPERIMENT_DIR", "/tmp/agent-bench-exp")
     cfg = load_composed_config(
         ROOT / "profiles/benchmarks/swebench/phase0.json",
-        ROOT / "profiles/harnesses/openclaw_swebench.json",
+        ROOT / "profiles/harnesses/openclaw_swebench.yaml",
         ROOT / "profiles/models/qwen36_27b.json",
-        ROOT / "profiles/serving/vllm/default.json",
+        ROOT / "profiles/serving/vllm/default.yaml",
     )
 
     assert cfg.output_dir == Path("/tmp/agent-bench-exp/runs/phase0")

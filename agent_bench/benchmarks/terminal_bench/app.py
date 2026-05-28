@@ -68,6 +68,7 @@ from agent_bench.benchmarks.swebench.app import (
 )
 from agent_bench.harnesses.openclaw.dispatcher import OpenClawRemoteDispatcher
 from agent_bench.core.config import endpoint_for_container, load_active_model_and_serving
+from agent_bench.core.profile_io import load_profile
 
 logger = logging.getLogger(__name__)
 
@@ -171,8 +172,7 @@ class TerminalBenchDockerHarness:
         if not harness_cfg_path or not os.path.isfile(harness_cfg_path):
             return False
         try:
-            with open(harness_cfg_path) as fh:
-                return bool((json.load(fh) or {}).get("openclaw"))
+            return bool(load_profile(harness_cfg_path).get("openclaw"))
         except Exception:
             return False
 
@@ -185,8 +185,7 @@ class TerminalBenchDockerHarness:
         if not p or not os.path.isfile(p):
             return None
         try:
-            with open(p) as fh:
-                cfg = json.load(fh) or {}
+            cfg = load_profile(p)
         except Exception:
             return None
         agents = ((cfg.get("openclaw") or {}).get("agents") or {}).get("list") or []
@@ -509,15 +508,14 @@ class TerminalBenchDockerHarness:
         else:
             harness_path = os.environ.get(
                 "AB_HARNESS_CONFIG",
-                os.path.join(kit_root, "profiles/harnesses/openclaw_terminal_bench.json"),
+                os.path.join(kit_root, "profiles/harnesses/openclaw_terminal_bench.yaml"),
             )
             if not os.path.isfile(harness_path):
                 raise FileNotFoundError(
                     f"harness config not found at {harness_path} "
                     "(set AB_HARNESS_CONFIG or OC_HOST_STATE_TEMPLATE)."
                 )
-            with open(harness_path) as fh:
-                harness_cfg = json.load(fh) or {}
+            harness_cfg = load_profile(harness_path)
             oc_cfg = dict(harness_cfg.get("openclaw") or {})
             if not oc_cfg:
                 raise ValueError(

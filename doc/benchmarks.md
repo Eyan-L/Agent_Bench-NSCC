@@ -153,9 +153,9 @@ if applicable.
 ## 5. Add Application/Harness Configs
 
 Add `profiles/benchmarks/<name>/phase1.json` for instances/budgets/output, and
-`profiles/harnesses/<harness>_<name>.json` for framework behavior + conditions.
+`profiles/harnesses/<harness>_<name>.yaml` for framework behavior + conditions.
 Model identity and serving deployment are selected separately from
-`profiles/models/*.json` and `profiles/serving/*/*.json`.
+`profiles/models/*.json` and `profiles/serving/*/*.yaml`.
 
 ```json
 {
@@ -177,9 +177,9 @@ print('OK')
 "
 PYTHONPATH=. python3 -m agent_bench.runtime.driver \
     --app profiles/benchmarks/your_benchmark/phase1.json \
-    --harness profiles/harnesses/openclaw_your_benchmark.json \
+    --harness profiles/harnesses/openclaw_your_benchmark.yaml \
     --model profiles/models/qwen36_27b.json \
-    --serving profiles/serving/vllm/default.json \
+    --serving profiles/serving/vllm/default.yaml \
     --instance-data data/your_benchmark/instances.json
 ```
 

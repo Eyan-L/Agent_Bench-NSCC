@@ -9,13 +9,13 @@ profile = "profiles/benchmarks/terminal_bench/kv_store.json"
 
 [harness]
 name = "react"
-profile = "profiles/harnesses/tb_react_terminal_bench.json"
+profile = "profiles/harnesses/tb_react_terminal_bench.yaml"
 
 [model]
 profile = "profiles/models/qwen35_9b.json"
 
 [serving]
-profile = "profiles/serving/vllm/nscc.json"
+profile = "profiles/serving/vllm/nscc.yaml"
 
 [deployment]
 profile = "profiles/deployments/nscc_pbs.toml"

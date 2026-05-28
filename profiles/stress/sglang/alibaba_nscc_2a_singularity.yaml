@@ -1,0 +1,42 @@
+name: alibaba-nscc2a-singularity
+output_dir: experiment/{timestamp}_{trace_type}_nscc2a
+sglang:
+  launcher: singularity
+  port: 30000
+  host: 0.0.0.0
+  cuda_visible_devices: 0,1,2,3
+  model_path: Qwen/Qwen3-30B-A3B-Instruct-2507
+  mem_fraction_static: 0.85
+  page_size: 64
+  hicache_size: 30
+  tool_call_parser: qwen
+  extra_args: ''
+  startup_timeout_sec: 900
+  singularity:
+    sif_image: /scratch/users/ntu/USERNAME/sglang.sif
+    mounts:
+    - /scratch/users/ntu/USERNAME/models:/scratch/users/ntu/USERNAME/models
+    modules:
+    - singularity
+    apply_patch: true
+loadgen:
+  trace_type: alibaba
+  model: default
+  timeout_sec: 3000
+  speedup: 1.0
+  start_offset: 0
+  duration: 900
+  max_requests: 0
+  max_inflight: 1024
+  log_every: 500
+  record_body: true
+  alibaba:
+    trace: alibaba/qwen-bailian-usagetraces-anon/qwen_traceA_tokens.jsonl
+    type_filter: ''
+    session_sample_rate: 1.0
+    session_sample_seed: 42
+plots:
+  enabled: true
+  sm_trace: false
+  env_prelude: module load miniforge3
+  python_bin: python3

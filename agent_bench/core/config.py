@@ -8,10 +8,7 @@ from pathlib import Path
 import os
 from urllib.parse import urlunparse
 
-try:  # pragma: no cover - only used on Python < 3.11
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover
-    import tomli as tomllib  # type: ignore[no-redef]
+from agent_bench.core.profile_io import load_profile, resolve_profile_ref
 
 
 @dataclass
@@ -230,13 +227,13 @@ def load_composed_config(
     model_path: Path,
     serving_path: Path,
 ) -> SweepConfig:
-    """Compose a SweepConfig from four independent JSON configs.
+    """Compose a SweepConfig from independent profile files.
 
     Folder convention:
         profiles/benchmarks/<app>/<exp>.json   instances/repo_mapping/container/budget/output
-        profiles/harnesses/<name>.json             harness/runtime behavior + conditions[]
-        profiles/models/<name>.json               model identity and model-level limits
-        profiles/serving/<engine>/<name>.json    serving endpoint / engine deployment
+        profiles/harnesses/<name>.yaml        harness/runtime behavior + conditions[]
+        profiles/models/<name>.json           model identity and model-level limits
+        profiles/serving/<engine>/<name>.yaml serving endpoint / engine deployment
 
     Each call writes under:
 
@@ -245,15 +242,15 @@ def load_composed_config(
     Override `AB_RUN_STAMP` for stable / human-named runs, or
     `AB_EXPERIMENT_DIR` to move the experiment root.
 
-    `_doc` keys at the top level of any file are ignored — they're a
-    JSON-friendly stand-in for the comments YAML would otherwise allow.
+    `_doc` keys at the top level of any file are ignored for older JSON
+    profiles; YAML profiles should prefer native comments.
     """
     from datetime import datetime
     from zoneinfo import ZoneInfo
     import os as _os
 
-    app = _read_json(app_path)
-    harness = _read_json(harness_path)
+    app = _read_profile(app_path)
+    harness = _read_profile(harness_path)
     serving = load_serving_config(serving_path)
     model = load_model_config(model_path, serving=serving)
 
@@ -321,15 +318,11 @@ def load_composed_config(
 
 
 def _read_json(path: Path) -> dict:
-    with open(path) as f:
-        return json.load(f) or {}
+    return load_profile(path)
 
 
 def _read_profile(path: Path) -> dict:
-    if path.suffix == ".toml":
-        with open(path, "rb") as f:
-            return tomllib.load(f) or {}
-    return _read_json(path)
+    return load_profile(path)
 
 
 def _endpoint_value(value: Any) -> Optional[str]:
@@ -435,7 +428,7 @@ def load_serving_config(serving_path: Path) -> ServingConfig:
 
 
 def load_model_config(model_path: Path, *, serving: Optional[ServingConfig] = None) -> ModelConfig:
-    data = _read_json(model_path)
+    data = _read_profile(model_path)
     model_data = data.get("model")
     if not isinstance(model_data, dict):
         raise ValueError(f"model config {model_path} is missing `model`")
@@ -497,10 +490,22 @@ def load_active_model_and_serving(
     serving_path = os.environ.get("AB_SERVING_CONFIG")
     if not model_path:
         model_profile = os.environ.get("MODEL_PROFILE", "qwen36_27b")
-        model_path = str(root / "profiles" / "models" / f"{model_profile}.json")
+        model_path = str(
+            resolve_profile_ref(
+                model_profile,
+                root / "profiles" / "models",
+                [".json", ".yaml", ".yml"],
+            )
+        )
     if not serving_path:
         serving_profile = os.environ.get("SERVING", "vllm/default")
-        serving_path = str(root / "profiles" / "serving" / f"{serving_profile}.json")
+        serving_path = str(
+            resolve_profile_ref(
+                serving_profile,
+                root / "profiles" / "serving",
+                [".yaml", ".yml", ".json", ".toml"],
+            )
+        )
 
     model_path_p = _resolve(model_path)
     serving_path_p = _resolve(serving_path)

@@ -66,7 +66,7 @@ def test_direct_provider_serving_is_rejected(tmp_path, monkeypatch):
 def test_litellm_serving_hides_upstream_key_from_agents(monkeypatch):
     monkeypatch.setenv("MINIMAX_API_KEY", "sk-test-minimax")
 
-    serving = load_serving_config(ROOT / "profiles/serving/litellm/minimax_global.json")
+    serving = load_serving_config(ROOT / "profiles/serving/litellm/minimax_global.yaml")
     model = load_model_config(
         ROOT / "profiles/models/minimax_m2_7.json",
         serving=serving,
@@ -87,7 +87,7 @@ def test_litellm_serving_loader_exports_proxy_defaults(monkeypatch):
         [
             "python3",
             str(ROOT / "scripts/load_serving_env.py"),
-            str(ROOT / "profiles/serving/litellm/minimax_global.json"),
+            str(ROOT / "profiles/serving/litellm/minimax_global.yaml"),
         ],
         check=True,
         capture_output=True,

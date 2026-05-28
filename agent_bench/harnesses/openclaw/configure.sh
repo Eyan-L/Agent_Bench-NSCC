@@ -11,7 +11,7 @@
 # Env:
 #   OC_BIN              openclaw CLI to use (default: from PATH)
 #   MODEL_PROFILE       profiles/models/$MODEL_PROFILE.json (default: qwen36_27b)
-#   SERVING             profiles/serving/$SERVING.json (default: vllm/tp1_128k)
+#   SERVING             profiles/serving/$SERVING.yaml (default: vllm/tp1_128k)
 #   VLLM_BASE           vLLM OpenAI-compat URL (overrides config model.endpoint)
 #   VLLM_MODEL          model id (overrides profiles/models)
 #   OC_AGENT_ID         agent id to register (default: swebench)
@@ -21,6 +21,24 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KIT_ROOT="${KIT_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
+
+resolve_profile_ref() {
+    local base="$1"
+    local ref="$2"
+    shift 2
+    if [[ "$ref" == */*.* || "$ref" == /* ]]; then
+        echo "$ref"
+        return 0
+    fi
+    local ext
+    for ext in "$@"; do
+        if [[ -f "$base/$ref.$ext" ]]; then
+            echo "$base/$ref.$ext"
+            return 0
+        fi
+    done
+    echo "$base/$ref.$1"
+}
 
 # Source MODEL/endpoint from the active model/serving configs.
 MODEL_CFG="${VLLM_MODEL_CONFIG:-${AB_MODEL_CONFIG:-}}"
@@ -34,7 +52,7 @@ else
 fi
 SERVING_CFG="${VLLM_SERVING_CONFIG:-${AB_SERVING_CONFIG:-}}"
 if [[ -z "$SERVING_CFG" ]]; then
-    SERVING_CFG="$KIT_ROOT/profiles/serving/${SERVING:-vllm/tp1_128k}.json"
+    SERVING_CFG="$(resolve_profile_ref "$KIT_ROOT/profiles/serving" "${SERVING:-vllm/tp1_128k}" yaml yml json toml)"
 fi
 if [[ -f "$SERVING_CFG" ]]; then
     eval "$(python3 "$KIT_ROOT/scripts/load_serving_env.py" "$SERVING_CFG")"

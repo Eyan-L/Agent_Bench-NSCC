@@ -71,7 +71,7 @@ RUN su node -c '/usr/local/bin/openclaw plugins list >/tmp/oc_warmup.log 2>&1' \
  && rm /tmp/oc_warmup.log
 
 # The warmup config must mirror the harness's real plugin set (see
-# profiles/harnesses/openclaw_27b.json -> openclaw.plugins). The harness ENABLES
+# profiles/harnesses/openclaw_27b.yaml -> openclaw.plugins). The harness ENABLES
 # diagnostics-otel (≈11 @opentelemetry/* pkgs) + memory-core (chokidar/typebox),
 # and acpx is always-on — these are exactly the plugins whose npm install fails
 # with -122 against npmmirror at run time (the agent CLI's ensureCliPluginRegistry

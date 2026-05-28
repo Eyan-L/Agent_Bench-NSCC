@@ -6,10 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-try:  # pragma: no cover - exercised only on Python < 3.11
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover
-    import tomli as tomllib  # type: ignore[no-redef]
+from agent_bench.core.profile_io import ProfileLoadError, load_profile
 
 
 BENCHMARKS = {"swebench", "terminal_bench", "deepresearch_bench", "longbench"}
@@ -204,31 +201,22 @@ def _named_section(
 
 
 def _load_profile(path: Path) -> dict[str, Any]:
-    if path.suffix == ".json":
-        return _load_json(path)
-    if path.suffix == ".toml":
-        return _load_toml(path)
-    raise ConfigError(f"unsupported profile file extension: {path}")
+    try:
+        return load_profile(path)
+    except ProfileLoadError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def _load_toml(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        raise ConfigError(f"missing TOML file: {path}")
-    with path.open("rb") as fh:
-        data = tomllib.load(fh)
-    if not isinstance(data, dict):
-        raise ConfigError(f"TOML file did not produce a table: {path}")
-    return data
+    if path.suffix.lower() != ".toml":
+        raise ConfigError(f"experiment config must be a TOML file: {path}")
+    return _load_profile(path)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        raise ConfigError(f"missing JSON file: {path}")
-    with path.open("r", encoding="utf-8") as fh:
-        data = json.load(fh)
-    if not isinstance(data, dict):
-        raise ConfigError(f"JSON file did not produce an object: {path}")
-    return data
+    if path.suffix.lower() != ".json":
+        raise ConfigError(f"expected JSON profile file: {path}")
+    return _load_profile(path)
 
 
 def _unwrap(raw: dict[str, Any], key: str) -> dict[str, Any]:

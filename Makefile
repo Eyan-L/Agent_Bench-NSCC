@@ -1,10 +1,10 @@
 # bench-platform top-level orchestration.
 #
-# Composed-config run model. A run is the cartesian product of four JSON configs:
+# Composed-config run model. A run is the cartesian product of four profiles:
 #   APP      profiles/benchmarks/<app>/<exp>.json   what to run (instances, repos, budgets)
-#   HARNESS  profiles/harnesses/<name>.json             how to drive the agent framework
+#   HARNESS  profiles/harnesses/<name>.yaml        how to drive the agent framework
 #   MODEL    profiles/models/<name>.json               which model + model-level limits
-#   SERVING  profiles/serving/<engine>/<name>.json    serving endpoint / engine deployment
+#   SERVING  profiles/serving/<engine>/<name>.yaml serving endpoint / engine deployment
 # Override any of them on the command line, e.g.
 #   make run_phase0 SERVING=vllm/debug MODEL_PROFILE=qwen35_9b HARNESS=openclaw_swebench VLLM_TP=1
 # SERVING_BACKEND is derived from SERVING's first path segment by default.
@@ -32,6 +32,11 @@ INSTANCE_DATA  ?=
 KIT_ROOT       ?= $(CURDIR)
 export KIT_ROOT
 
+APP_PROFILE_PATH = profiles/benchmarks/$(APP).json
+HARNESS_PROFILE_PATH = $(shell $(PYTHON) -c 'from agent_bench.core.profile_io import resolve_profile_ref; print(resolve_profile_ref("$(HARNESS)", "profiles/harnesses", [".yaml", ".yml", ".json"]))' 2>/dev/null || echo profiles/harnesses/$(HARNESS).yaml)
+MODEL_PROFILE_PATH = $(shell $(PYTHON) -c 'from agent_bench.core.profile_io import resolve_profile_ref; print(resolve_profile_ref("$(MODEL_PROFILE)", "profiles/models", [".json", ".yaml", ".yml"]))' 2>/dev/null || echo profiles/models/$(MODEL_PROFILE).json)
+SERVING_PROFILE_PATH = $(shell $(PYTHON) -c 'from agent_bench.core.profile_io import resolve_profile_ref; print(resolve_profile_ref("$(SERVING)", "profiles/serving", [".yaml", ".yml", ".json", ".toml"]))' 2>/dev/null || echo profiles/serving/$(SERVING).yaml)
+
 # Per-sweep timestamp (Singapore time) + experiment dir. Both Make and the
 # driver use AB_RUN_STAMP so engine logs and per-run dirs end up under one
 # experiment root. Override AB_RUN_STAMP to pin/resume an existing run.
@@ -52,7 +57,7 @@ export AB_EXPERIMENT_DIR
 # output_dir from the active app JSON is now a run-set leaf (e.g. phase0).
 # Fall back to _unknown when the JSON is missing (e.g. `make help` with a
 # half-edited config).
-APP_OUTPUT_DIR = $(shell $(PYTHON) -c 'import json; print(json.load(open("profiles/benchmarks/$(APP).json"))["output_dir"])' 2>/dev/null)
+APP_OUTPUT_DIR = $(shell $(PYTHON) -c 'import json; print(json.load(open("$(APP_PROFILE_PATH)"))["output_dir"])' 2>/dev/null)
 APP_OUTPUT_LEAF = $(notdir $(APP_OUTPUT_DIR))
 SWEEP_DIR      = $(AB_EXPERIMENT_DIR)/runs/$(APP_OUTPUT_LEAF)
 EXPERIMENT_LOG_DIR = $(AB_EXPERIMENT_DIR)/logs
@@ -62,7 +67,7 @@ EXPERIMENT_LOG_DIR = $(AB_EXPERIMENT_DIR)/logs
 # SERVE_LOG, and waits up to SERVE_READY_TIMEOUT seconds for /v1/models to
 # come up. Set SERVE_AUTO=0 to skip (useful when you launch the backend
 # yourself or want to fail fast on missing serving).
-SERVE_PORT           = $(shell $(PYTHON) -c 'import json; print((json.load(open("profiles/serving/$(SERVING).json"))["serving"].get("endpoint") or {}).get("port", 8000))' 2>/dev/null || echo 8000)
+SERVE_PORT           = $(shell $(PYTHON) -c 'from agent_bench.core.profile_io import load_profile; print((load_profile("$(SERVING_PROFILE_PATH)")["serving"].get("endpoint") or {}).get("port", 8000))' 2>/dev/null || echo 8000)
 SERVE_URL            ?= http://localhost:$(SERVE_PORT)/v1/models
 SERVE_LOG            ?= $(EXPERIMENT_LOG_DIR)/$(SERVING_BACKEND).log
 SERVE_READY_TIMEOUT  ?= 600
@@ -183,18 +188,18 @@ serve:
 
 validate-configs:
 	$(PYTHON) scripts/validate_configs.py \
-	  --app profiles/benchmarks/$(APP).json \
-	  --harness profiles/harnesses/$(HARNESS).json \
-	  --model profiles/models/$(MODEL_PROFILE).json \
-	  --serving profiles/serving/$(SERVING).json
+	  --app $(APP_PROFILE_PATH) \
+	  --harness $(HARNESS_PROFILE_PATH) \
+	  --model $(MODEL_PROFILE_PATH) \
+	  --serving $(SERVING_PROFILE_PATH)
 
 eval: _check_eval_inputs _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
 	$(PYTHON) -m agent_bench.runtime.driver \
-	  --app     profiles/benchmarks/$(APP).json \
-	  --harness profiles/harnesses/$(HARNESS).json \
-	  --model   profiles/models/$(MODEL_PROFILE).json \
-	  --serving profiles/serving/$(SERVING).json \
+	  --app     $(APP_PROFILE_PATH) \
+	  --harness $(HARNESS_PROFILE_PATH) \
+	  --model   $(MODEL_PROFILE_PATH) \
+	  --serving $(SERVING_PROFILE_PATH) \
 	  --swebench-root $(SWEBENCH_ROOT) \
 	  --instance-data $(INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
@@ -234,9 +239,9 @@ run_tb: tb-tasks _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
 	$(PYTHON) -m agent_bench.runtime.driver \
 	  --app     profiles/benchmarks/$(APP).json \
-	  --harness profiles/harnesses/$(HARNESS).json \
-	  --model   profiles/models/$(MODEL_PROFILE).json \
-	  --serving profiles/serving/$(SERVING).json \
+	  --harness $(HARNESS_PROFILE_PATH) \
+	  --model   $(MODEL_PROFILE_PATH) \
+	  --serving $(SERVING_PROFILE_PATH) \
 	  --instance-data $(TB_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
@@ -284,9 +289,9 @@ run_dr_smoke1: dr-tasks _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
 	$(DR_LOAD_ENV) python -m agent_bench.runtime.driver \
 	  --app     profiles/benchmarks/$(APP).json \
-	  --harness profiles/harnesses/$(HARNESS).json \
-	  --model   profiles/models/$(MODEL_PROFILE).json \
-	  --serving profiles/serving/$(SERVING).json \
+	  --harness $(HARNESS_PROFILE_PATH) \
+	  --model   $(MODEL_PROFILE_PATH) \
+	  --serving $(SERVING_PROFILE_PATH) \
 	  --instance-data $(DR_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
@@ -298,9 +303,9 @@ run_dr_smoke: dr-tasks _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
 	$(DR_LOAD_ENV) python -m agent_bench.runtime.driver \
 	  --app     profiles/benchmarks/$(APP).json \
-	  --harness profiles/harnesses/$(HARNESS).json \
-	  --model   profiles/models/$(MODEL_PROFILE).json \
-	  --serving profiles/serving/$(SERVING).json \
+	  --harness $(HARNESS_PROFILE_PATH) \
+	  --model   $(MODEL_PROFILE_PATH) \
+	  --serving $(SERVING_PROFILE_PATH) \
 	  --instance-data $(DR_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
@@ -312,9 +317,9 @@ run_dr_full: dr-tasks _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
 	$(DR_LOAD_ENV) python -m agent_bench.runtime.driver \
 	  --app     profiles/benchmarks/$(APP).json \
-	  --harness profiles/harnesses/$(HARNESS).json \
-	  --model   profiles/models/$(MODEL_PROFILE).json \
-	  --serving profiles/serving/$(SERVING).json \
+	  --harness $(HARNESS_PROFILE_PATH) \
+	  --model   $(MODEL_PROFILE_PATH) \
+	  --serving $(SERVING_PROFILE_PATH) \
 	  --instance-data $(DR_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
@@ -327,9 +332,9 @@ run_dr_smoke1_agent: dr-tasks _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
 	$(DR_LOAD_ENV) DR_SKIP_EVAL=1 python -m agent_bench.runtime.driver \
 	  --app     profiles/benchmarks/$(APP).json \
-	  --harness profiles/harnesses/$(HARNESS).json \
-	  --model   profiles/models/$(MODEL_PROFILE).json \
-	  --serving profiles/serving/$(SERVING).json \
+	  --harness $(HARNESS_PROFILE_PATH) \
+	  --model   $(MODEL_PROFILE_PATH) \
+	  --serving $(SERVING_PROFILE_PATH) \
 	  --instance-data $(DR_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
@@ -341,9 +346,9 @@ run_dr_smoke_agent: dr-tasks _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
 	$(DR_LOAD_ENV) DR_SKIP_EVAL=1 python -m agent_bench.runtime.driver \
 	  --app     profiles/benchmarks/$(APP).json \
-	  --harness profiles/harnesses/$(HARNESS).json \
-	  --model   profiles/models/$(MODEL_PROFILE).json \
-	  --serving profiles/serving/$(SERVING).json \
+	  --harness $(HARNESS_PROFILE_PATH) \
+	  --model   $(MODEL_PROFILE_PATH) \
+	  --serving $(SERVING_PROFILE_PATH) \
 	  --instance-data $(DR_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
@@ -355,9 +360,9 @@ run_dr_full_agent: dr-tasks _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
 	$(DR_LOAD_ENV) DR_SKIP_EVAL=1 python -m agent_bench.runtime.driver \
 	  --app     profiles/benchmarks/$(APP).json \
-	  --harness profiles/harnesses/$(HARNESS).json \
-	  --model   profiles/models/$(MODEL_PROFILE).json \
-	  --serving profiles/serving/$(SERVING).json \
+	  --harness $(HARNESS_PROFILE_PATH) \
+	  --model   $(MODEL_PROFILE_PATH) \
+	  --serving $(SERVING_PROFILE_PATH) \
 	  --instance-data $(DR_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
@@ -507,9 +512,9 @@ run_tb_mig: HARNESS := tb_react_terminal_bench
 run_tb_mig: tb-tasks _ensure_mig_serve
 	$(PYTHON) -m agent_bench.runtime.driver \
 	  --app     profiles/benchmarks/$(APP).json \
-	  --harness profiles/harnesses/$(HARNESS).json \
-	  --model   profiles/models/$(MODEL_PROFILE).json \
-	  --serving profiles/serving/$(SERVING).json \
+	  --harness $(HARNESS_PROFILE_PATH) \
+	  --model   $(MODEL_PROFILE_PATH) \
+	  --serving $(SERVING_PROFILE_PATH) \
 	  --instance-data $(TB_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 

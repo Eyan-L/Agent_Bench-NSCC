@@ -28,7 +28,7 @@ def _plan(model: str, serving: str, **kwargs):
 def test_vllm_native_launch_plan_uses_profile_and_env_overrides() -> None:
     plan = _plan(
         "profiles/models/qwen35_9b.json",
-        "profiles/serving/vllm/default.json",
+        "profiles/serving/vllm/default.yaml",
         backend="vllm",
         env={"PORT": "8123", "TP": "2", "CUDA_VISIBLE_DEVICES": "0,1"},
     )
@@ -47,7 +47,7 @@ def test_vllm_native_launch_plan_uses_profile_and_env_overrides() -> None:
 def test_vllm_docker_launch_plan_does_not_inline_forwarded_token() -> None:
     plan = _plan(
         "profiles/models/qwen35_9b.json",
-        "profiles/serving/vllm/default.json",
+        "profiles/serving/vllm/default.yaml",
         backend="vllm",
         mode="docker",
         env={"HUGGING_FACE_HUB_TOKEN": "hf-secret", "VLLM_DETACH": "0"},
@@ -63,7 +63,7 @@ def test_vllm_docker_launch_plan_does_not_inline_forwarded_token() -> None:
 def test_sglang_native_and_singularity_launch_plans() -> None:
     native = _plan(
         "profiles/models/qwen35_9b.json",
-        "profiles/serving/sglang/default.json",
+        "profiles/serving/sglang/default.yaml",
         backend="sglang",
         env={"SGLANG_CUDA_VISIBLE_DEVICES": "0,1"},
     )
@@ -75,7 +75,7 @@ def test_sglang_native_and_singularity_launch_plans() -> None:
 
     singularity = _plan(
         "profiles/models/qwen35_9b.json",
-        "profiles/serving/sglang/default.json",
+        "profiles/serving/sglang/default.yaml",
         backend="sglang",
         mode="singularity",
         env={"SERVING_SIF": "/tmp/sglang.sif"},
@@ -103,7 +103,7 @@ def test_litellm_launch_plan_uses_proxy_auth_without_upstream_secret() -> None:
 def test_litellm_launch_environment_and_config_do_not_emit_upstream_secret(tmp_path: Path) -> None:
     plan = _plan(
         "profiles/models/minimax_m2_7.json",
-        "profiles/serving/litellm/minimax_global.json",
+        "profiles/serving/litellm/minimax_global.yaml",
         backend="litellm",
         env={"LITELLM_CONFIG_PATH": str(tmp_path / "litellm.yaml")},
     )

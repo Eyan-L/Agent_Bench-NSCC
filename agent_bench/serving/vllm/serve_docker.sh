@@ -35,6 +35,24 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KIT_ROOT="${KIT_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 
+resolve_profile_ref() {
+    local base="$1"
+    local ref="$2"
+    shift 2
+    if [[ "$ref" == */*.* || "$ref" == /* ]]; then
+        echo "$ref"
+        return 0
+    fi
+    local ext
+    for ext in "$@"; do
+        if [[ -f "$base/$ref.$ext" ]]; then
+            echo "$base/$ref.$ext"
+            return 0
+        fi
+    done
+    echo "$base/$ref.$1"
+}
+
 MODEL_CFG="${VLLM_MODEL_CONFIG:-${AB_MODEL_CONFIG:-}}"
 if [[ -z "$MODEL_CFG" && -n "${MODEL_PROFILE:-}" ]]; then
     MODEL_CFG="$KIT_ROOT/profiles/models/${MODEL_PROFILE}.json"
@@ -44,7 +62,7 @@ if [[ -n "$MODEL_CFG" && -f "$MODEL_CFG" ]]; then
 fi
 SERVING_CFG="${VLLM_SERVING_CONFIG:-${AB_SERVING_CONFIG:-}}"
 if [[ -z "$SERVING_CFG" && -n "${SERVING:-}" ]]; then
-    SERVING_CFG="$KIT_ROOT/profiles/serving/${SERVING}.json"
+    SERVING_CFG="$(resolve_profile_ref "$KIT_ROOT/profiles/serving" "$SERVING" yaml yml json toml)"
 fi
 if [[ -n "$SERVING_CFG" && -f "$SERVING_CFG" ]]; then
     eval "$(python3 "$KIT_ROOT/scripts/load_serving_env.py" "$SERVING_CFG")"

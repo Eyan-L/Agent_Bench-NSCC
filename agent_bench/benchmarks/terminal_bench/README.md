@@ -80,9 +80,9 @@ qsub -v VLLM_TP=1 nscc_terminal_bench.pbs
 # Local (non-PBS) smoke run, assuming vLLM is already up at :8000:
 python -m agent_bench.runtime.driver \
   --app profiles/benchmarks/terminal_bench/kv_store.json \
-  --harness profiles/harnesses/tb_react_terminal_bench.json \
+  --harness profiles/harnesses/tb_react_terminal_bench.yaml \
   --model profiles/models/qwen36_27b.json \
-  --serving profiles/serving/vllm/default.json \
+  --serving profiles/serving/vllm/default.yaml \
   --swebench-root /tmp/dummy \
   --instance-data data/terminal_bench/tasks.json
 ```

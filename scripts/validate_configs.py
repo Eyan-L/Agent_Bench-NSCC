@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -11,30 +10,31 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from agent_bench.core.config import load_composed_config
+from agent_bench.core.profile_io import load_profile
 
 
-def _json_files(root: Path) -> list[Path]:
-    return sorted(root.glob("**/*.json"))
+def _profile_files(root: Path) -> list[Path]:
+    suffixes = {".json", ".toml", ".yaml", ".yml"}
+    return sorted(path for path in root.glob("**/*") if path.suffix in suffixes)
 
 
 def _load(path: Path) -> dict:
-    with open(path) as fh:
-        return json.load(fh) or {}
+    return load_profile(path)
 
 
-def _check_all_json() -> list[str]:
+def _check_all_profiles() -> list[str]:
     errors: list[str] = []
-    for path in _json_files(ROOT / "profiles"):
+    for path in _profile_files(ROOT / "profiles"):
         try:
             _load(path)
         except Exception as exc:
-            errors.append(f"{path}: invalid JSON: {exc}")
+            errors.append(f"{path}: invalid profile: {exc}")
     return errors
 
 
 def _check_axis_boundaries() -> list[str]:
     errors: list[str] = []
-    for path in _json_files(ROOT / "profiles" / "benchmarks"):
+    for path in _profile_files(ROOT / "profiles" / "benchmarks"):
         data = _load(path)
         output_dir = str(data.get("output_dir") or "")
         if not output_dir:
@@ -44,13 +44,13 @@ def _check_axis_boundaries() -> list[str]:
                 f"{path}: output_dir should be a run-set leaf, not a path "
                 f"(got {output_dir!r})"
             )
-    for path in _json_files(ROOT / "profiles" / "harnesses"):
+    for path in _profile_files(ROOT / "profiles" / "harnesses"):
         data = _load(path)
         if "model" in data:
             errors.append(f"{path}: harness configs must not contain top-level `model`")
         if "harness" not in data:
             errors.append(f"{path}: missing top-level `harness`")
-    for path in _json_files(ROOT / "profiles" / "models"):
+    for path in _profile_files(ROOT / "profiles" / "models"):
         model = _load(path).get("model")
         if not isinstance(model, dict):
             errors.append(f"{path}: missing `model` object")
@@ -62,7 +62,7 @@ def _check_axis_boundaries() -> list[str]:
             errors.append(f"{path}: model.context_window must be positive")
         if int(model.get("max_tokens", 0)) > int(model.get("context_window", 0)):
             errors.append(f"{path}: model.max_tokens exceeds model.context_window")
-    for path in _json_files(ROOT / "profiles" / "serving"):
+    for path in _profile_files(ROOT / "profiles" / "serving"):
         serving = _load(path).get("serving")
         if not isinstance(serving, dict):
             errors.append(f"{path}: missing `serving` object")
@@ -108,7 +108,7 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     errors = []
-    errors.extend(_check_all_json())
+    errors.extend(_check_all_profiles())
     errors.extend(_check_axis_boundaries())
     errors.extend(_check_combo(args))
 

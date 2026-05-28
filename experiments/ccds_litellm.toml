@@ -9,7 +9,7 @@ profile = "profiles/benchmarks/terminal_bench/kv_store.json"
 
 [harness]
 name = "react"
-profile = "profiles/harnesses/tb_react_terminal_bench.json"
+profile = "profiles/harnesses/tb_react_terminal_bench.yaml"
 
 [model]
 profile = "profiles/models/gemini_3_5_flash.json"

@@ -2,7 +2,7 @@
 # Start/stop a local OTel collector for the OC gateway.
 #
 # The OC gateway emits OTLP/HTTP spans + metrics + logs to
-# http://localhost:$PORT (configured in profiles/harnesses/&lt;name&gt;.json (openclaw block) →
+# http://localhost:$PORT (configured in profiles/harnesses/&lt;name&gt;.yaml (openclaw block) →
 # diagnostics.otel.endpoint). Without a collector listening, every span is
 # dropped on the floor and the run's `spans.jsonl` is never produced. Agent
 # conditions snapshot the collector's on-disk trace file into each run.
@@ -21,7 +21,7 @@
 #   OC_OTEL_DATA_DIR  Directory for config + trace + pid + log files.
 #                     Default: $SCRATCH/oc-agent_bench/telemetry/otel.
 #   OC_OTEL_PORT      OTLP/HTTP listen port. Default: 4318. Must match
-#                     profiles/harnesses/&lt;name&gt;.json (openclaw block): diagnostics.otel.endpoint.
+#                     profiles/harnesses/&lt;name&gt;.yaml (openclaw block): diagnostics.otel.endpoint.
 #   OC_OTEL_SIF       Path to the otelcol-contrib .sif. Default:
 #                     $SCRATCH/sif_images/otelcol-contrib.sif.
 #                     Pull on a network-equipped node before submitting:

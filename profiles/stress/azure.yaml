@@ -1,0 +1,24 @@
+name: azure-code-sample0
+output_dir: experiment/{timestamp}_{trace_type}
+sglang:
+  launcher: single
+  port: 30000
+  cuda_visible_devices: '0'
+  model_path: Qwen/Qwen3-30B-A3B-Instruct-2507
+  mem_fraction_static: 0.85
+loadgen:
+  trace_type: azure
+  speedup: 1.0
+  max_requests: 0
+  max_inflight: 1024
+  record_body: true
+  azure:
+    trace: azure-trace/sample_0_code_all_input1_output1_ALL.json
+    sampling_rate: 1.0
+    prompt_name: None
+    recur_step: 10
+    seed: 42
+    max_drift_ms: 0
+plots:
+  enabled: true
+  sm_trace: false

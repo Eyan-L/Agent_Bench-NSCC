@@ -13,6 +13,7 @@ from typing import List, Optional
 
 from agent_bench.core.config import load_composed_config, RunConfig
 from agent_bench.core.manifest import RunManifest, get_manifest_path, load_or_create_manifest
+from agent_bench.core.profile_io import load_profile
 from agent_bench.benchmarks.swebench.app import validate_fairness_constraints
 from agent_bench.benchmarks.swebench.openclaw.app import SWEBenchHarness
 from agent_bench.deployments.containers import DockerContainer, SingularityContainer
@@ -373,8 +374,7 @@ def run_sweep(app_path: Path, harness_path: Path, model_path: Path, serving_path
     # Layer-1 class even though they share the SWE-bench application.
     harness_choice = "openclaw"
     try:
-        with open(harness_path) as _fh:
-            _hc = json.load(_fh) or {}
+        _hc = load_profile(harness_path)
         harness_choice = (_hc.get("harness") or "openclaw").lower()
     except Exception as e:  # noqa: BLE001 — non-fatal, fall back to default
         logger.warning("could not read 'harness' from %s: %s", harness_path, e)
@@ -549,11 +549,11 @@ def main():
     parser.add_argument("--app", type=Path, required=True,
                        help="Application config (profiles/benchmarks/<app>/<exp>.json)")
     parser.add_argument("--harness", type=Path, required=True,
-                       help="Harness config (profiles/harnesses/<name>.json)")
+                       help="Harness config (profiles/harnesses/<name>.yaml)")
     parser.add_argument("--model", type=Path, required=True,
                        help="Model config (profiles/models/<name>.json)")
     parser.add_argument("--serving", type=Path, required=True,
-                       help="Serving config (profiles/serving/<engine>/<name>.json)")
+                       help="Serving config (profiles/serving/<engine>/<name>.yaml)")
     # swebench-root is only required when the sweep contains SWE-bench
     # instances — pure terminal_bench sweeps don't use it.
     parser.add_argument("--swebench-root", type=Path, required=False,

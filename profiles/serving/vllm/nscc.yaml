@@ -1,0 +1,21 @@
+# NSCC vLLM endpoint profile. Model context length comes from
+# profiles/models/*.json; tensor parallelism is selected at qsub time via
+# VLLM_TP or TP.
+serving:
+  config_id: vllm-nscc
+  backend: vllm
+  preset: default
+  endpoint:
+    scheme: http
+    bind_host: 0.0.0.0
+    client_host: 127.0.0.1
+    port: 8000
+    path: /v1
+  runtime:
+    gpu_mem_util: 0.93
+  scheduler:
+    max_num_seqs: 128
+    enable_prefix_caching: true
+  sif: /scratch/users/ntu/$USER/sif_images/nscc_vllm_openai_cu128.sif
+  image: docker://chengzhilu/vllm:0.20.0-torch2.11-cu128-a100-h100
+  additional_flags: {}

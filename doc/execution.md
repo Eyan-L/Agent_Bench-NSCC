@@ -66,9 +66,9 @@ curl -s http://localhost:8000/v1/models | jq .
 HARNESS_BACKEND=docker \
 PYTHONPATH=. python3 -m agent_bench.runtime.driver \
     --app profiles/benchmarks/swebench/phase1.json \
-    --harness profiles/harnesses/openclaw_swebench.json \
+    --harness profiles/harnesses/openclaw_swebench.yaml \
     --model profiles/models/qwen36_27b.json \
-    --serving profiles/serving/vllm/default.json \
+    --serving profiles/serving/vllm/default.yaml \
     --swebench-root "$SWEBENCH_ROOT" \
     --instance-data "$INSTANCE_DATA"
 ```
@@ -90,9 +90,9 @@ INSTANCE=$(jq -r 'keys[0]' "$INSTANCE_DATA")
 HARNESS_BACKEND=docker PYTHONPATH=. \
     python3 -m agent_bench.runtime.driver \
       --app profiles/benchmarks/swebench/phase0.json \
-      --harness profiles/harnesses/openclaw_swebench.json \
+      --harness profiles/harnesses/openclaw_swebench.yaml \
       --model profiles/models/qwen36_27b.json \
-      --serving profiles/serving/vllm/default.json \
+      --serving profiles/serving/vllm/default.yaml \
       --swebench-root "$SWEBENCH_ROOT" \
       --instance-data "$INSTANCE_DATA"
 ```
@@ -252,12 +252,12 @@ For serving-side characterization (no agent loop, just request replay):
 
 ```bash
 make -C stress/loadgen                        # build the loadgen binary
-./stress/loadgen/loadgen-bin agent --config profiles/stress/agent.json
-./stress/loadgen/loadgen-bin alibaba --config profiles/stress/alibaba.json
-./stress/loadgen/loadgen-bin azure   --config profiles/stress/azure.json
+./stress/loadgen/loadgen-bin agent --config profiles/stress/agent.yaml
+./stress/loadgen/loadgen-bin alibaba --config profiles/stress/alibaba.yaml
+./stress/loadgen/loadgen-bin azure   --config profiles/stress/azure.yaml
 
 # Cluster
-qsub -v EXP_CONFIG=profiles/stress/alibaba_nscc_2a_singularity.json \
+qsub -v EXP_CONFIG=profiles/stress/alibaba_nscc_2a_singularity.yaml \
     stress/scripts/pbs_experiment.pbs
 ```
 

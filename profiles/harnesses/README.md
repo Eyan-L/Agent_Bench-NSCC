@@ -1,12 +1,12 @@
 # Composed Config Layout
 
-Agent_Bench now composes four independent JSON axes:
+Agent_Bench now composes four independent profile axes:
 
 ```text
 profiles/benchmarks/<app>/<sweep>.json  # tasks, instances, budgets, output dirs
-profiles/harnesses/<harness>_<app>.json    # agent framework behavior + conditions
+profiles/harnesses/<harness>_<app>.yaml    # agent framework behavior + conditions
 profiles/models/<model>.json              # model id/path, context window, output cap
-profiles/serving/<backend>/<profile>.json # serving endpoint / engine or proxy deployment
+profiles/serving/<backend>/<profile>.yaml # serving endpoint / engine or proxy deployment
 ```
 
 Examples:

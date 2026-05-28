@@ -9,7 +9,7 @@ SWE-bench tasks. Mirrors `agent_bench.benchmarks.swebench.openclaw`:
     rides the shared exec-bridge into the SWE-bench sandbox container.
 
   - `compose.py` — host-side helpers that render a per-run config.toml
-    from profiles/harnesses/openhands_swebench.json plus profiles/models/*.json and compute the docker
+    from profiles/harnesses/openhands_swebench.yaml plus profiles/models/*.json and compute the docker
     mounts the harness needs.
 
 The dispatcher that brokers tool calls between the OH harness container and

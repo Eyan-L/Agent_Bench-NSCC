@@ -69,11 +69,11 @@ def test_client_only_rejects_local_serving(tmp_path: Path) -> None:
                 f'profile = "{ROOT / "profiles/benchmarks/swebench/phase0.json"}"',
                 "[harness]",
                 'name = "openclaw"',
-                f'profile = "{ROOT / "profiles/harnesses/openclaw_swebench.json"}"',
+                f'profile = "{ROOT / "profiles/harnesses/openclaw_swebench.yaml"}"',
                 "[model]",
                 f'profile = "{ROOT / "profiles/models/qwen35_9b.json"}"',
                 "[serving]",
-                f'profile = "{ROOT / "profiles/serving/vllm/default.json"}"',
+                f'profile = "{ROOT / "profiles/serving/vllm/default.yaml"}"',
                 "[deployment]",
                 f'profile = "{ROOT / "profiles/deployments/client_only.toml"}"',
             ]

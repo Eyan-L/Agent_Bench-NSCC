@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent_bench.benchmarks.swebench.conditions.hermes_agent import HermesAgentCondition
+from agent_bench.core.profile_io import load_profile
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -63,9 +64,9 @@ def test_hermes_driver_and_condition_are_registered():
     condition = (ROOT / "agent_bench/benchmarks/swebench/conditions/hermes_agent.py").read_text()
     assert '_resolve_provider(self.model_config)' in condition
     assert '"--provider", provider' in condition
-    cfg = (ROOT / "profiles/harnesses/hermes_swebench.json").read_text()
-    assert '"harness": "hermes"' in cfg
-    assert '"condition_type": "hermes_agent"' in cfg
+    cfg = load_profile(ROOT / "profiles/harnesses/hermes_swebench.yaml")
+    assert cfg["harness"] == "hermes"
+    assert cfg["conditions"][0]["condition_type"] == "hermes_agent"
 
 
 def test_hermes_condition_writes_agent_namespace_spans(tmp_path):

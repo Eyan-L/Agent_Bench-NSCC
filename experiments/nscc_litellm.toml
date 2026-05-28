@@ -9,13 +9,13 @@ profile = "profiles/benchmarks/swebench/phase0.json"
 
 [harness]
 name = "openclaw"
-profile = "profiles/harnesses/openclaw_swebench.json"
+profile = "profiles/harnesses/openclaw_swebench.yaml"
 
 [model]
 profile = "profiles/models/minimax_m2_7.json"
 
 [serving]
-profile = "profiles/serving/litellm/minimax_global.json"
+profile = "profiles/serving/litellm/minimax_global.yaml"
 
 [deployment]
 profile = "profiles/deployments/nscc_pbs_cpu.toml"

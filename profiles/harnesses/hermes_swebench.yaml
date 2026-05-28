@@ -1,0 +1,16 @@
+# Hermes Agent SWE-bench harness. The Hermes image keeps the upstream docker
+# terminal backend, patched so docker exec routes through Agent_Bench's exec
+# bridge into the SWE-bench task container.
+harness: hermes
+hermes:
+  run:
+    max_turns: 90
+    terminal_timeout: 180
+conditions:
+- condition_id: hermes_agent
+  condition_type: hermes_agent
+  description: 'Hermes Agent CLI: full agent loop, tool execs routed through Agent_Bench bridge into the SWE-bench sandbox.'
+  agent:
+    max_steps: 500
+    max_time_seconds: 1800
+    retry_limit: 10
