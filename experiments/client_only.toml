@@ -4,18 +4,18 @@ output_dir = "runs/client_only"
 seeds = [42]
 
 [benchmark]
-name = "swebench"
-profile = "profiles/benchmarks/swebench/phase0.json"
+name = "terminal_bench"
+profile = "profiles/benchmarks/terminal_bench/kv_store.json"
 
 [harness]
 name = "openclaw"
-profile = "profiles/harnesses/openclaw_swebench.yaml"
+profile = "profiles/harnesses/openclaw_terminal_bench.yaml"
 
 [model]
-profile = "profiles/models/gemini_3_5_flash.json"
+profile = "profiles/models/qwen36_35b_a3b.json"
 
 [serving]
-profile = "profiles/serving/litellm_gemini.toml"
+profile = "profiles/serving/litellm/qwen36_35b_a3b.yaml"
 
 [deployment]
 profile = "profiles/deployments/client_only.toml"

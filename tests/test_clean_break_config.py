@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
+import json
 from pathlib import Path
+import types
 import subprocess
 import sys
 
 import pytest
 
+import agent_bench.core.execution as execution
+
+from agent_bench.core.execution import STAGE_ORDER, _instance_data_path, build_execution_plan
 from agent_bench.core.spec import ConfigError, load_resolved_experiment
 from agent_bench.deployments import plan_deployment
 
@@ -56,6 +62,394 @@ def test_run_id_is_stable() -> None:
     assert len(first.run_id) == 12
 
 
+def test_execution_plan_uses_ab_run_stamp_for_run_dir() -> None:
+    resolved = load_resolved_experiment(ROOT / "experiments" / "client_only.toml", root=ROOT)
+    stamp = "2026-05-28_14-52-37"
+
+    plan = build_execution_plan(resolved, env={"KIT_ROOT": str(ROOT), "AB_RUN_STAMP": stamp})
+
+    assert resolved.run_id != stamp
+    assert plan.run_id == stamp
+    assert plan.run_dir == ROOT / "runs" / "client_only" / stamp
+    assert plan.log_dir == plan.run_dir / "logs"
+
+
+def test_execution_plan_ab_experiment_dir_overrides_stamp(tmp_path: Path) -> None:
+    resolved = load_resolved_experiment(ROOT / "experiments" / "client_only.toml", root=ROOT)
+    experiment_dir = tmp_path / "custom-exp"
+
+    plan = build_execution_plan(
+        resolved,
+        env={
+            "KIT_ROOT": str(ROOT),
+            "AB_EXPERIMENT_DIR": str(experiment_dir),
+            "AB_RUN_STAMP": "ignored-stamp",
+        },
+    )
+
+    assert plan.run_id == "custom-exp"
+    assert plan.run_dir == experiment_dir
+    assert plan.log_dir == experiment_dir / "logs"
+
+
+def test_execution_plan_agent_bench_run_dir_is_strongest_override(tmp_path: Path) -> None:
+    resolved = load_resolved_experiment(ROOT / "experiments" / "client_only.toml", root=ROOT)
+    run_dir = tmp_path / "explicit-run"
+
+    plan = build_execution_plan(
+        resolved,
+        env={
+            "KIT_ROOT": str(ROOT),
+            "AGENT_BENCH_RUN_DIR": str(run_dir),
+            "AB_EXPERIMENT_DIR": str(tmp_path / "custom-exp"),
+            "AB_RUN_STAMP": "ignored-stamp",
+        },
+    )
+
+    assert plan.run_id == "explicit-run"
+    assert plan.run_dir == run_dir
+    assert plan.log_dir == run_dir / "logs"
+
+
+@pytest.mark.parametrize(
+    ("experiment", "deployment", "start_serving", "prepare_images", "start_otel"),
+    [
+        ("client_only", "client_only", True, False, True),
+        ("local_vllm", "local_docker", True, False, True),
+        ("nscc_vllm", "nscc_pbs", True, True, True),
+        ("nscc_terminal_bench", "nscc_pbs", True, True, True),
+    ],
+)
+def test_execution_plan_uses_canonical_stage_order(
+    experiment: str,
+    deployment: str,
+    start_serving: bool,
+    prepare_images: bool,
+    start_otel: bool,
+) -> None:
+    resolved = load_resolved_experiment(ROOT / "experiments" / f"{experiment}.toml", root=ROOT)
+
+    plan = build_execution_plan(resolved, env={"KIT_ROOT": str(ROOT), "USER": "alice"})
+
+    assert tuple(stage.name for stage in plan.stages) == STAGE_ORDER
+    assert plan.deployment == deployment
+    assert plan.stage_enabled("start_serving") is start_serving
+    assert plan.stage_enabled("prepare_images") is prepare_images
+    assert plan.stage_enabled("start_otel") is start_otel
+
+
+def test_prepare_environment_installs_missing_swebench_deps_in_active_env(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SWEBENCH_ROOT", "")
+    monkeypatch.setenv("AB_SWEBENCH_ROOT", "")
+    resolved = load_resolved_experiment(ROOT / "experiments" / "local_vllm.toml", root=ROOT)
+    env = {
+        "AGENT_BENCH_RUN_DIR": str(tmp_path / "run"),
+        "AGENT_BENCH_LOG_DIR": str(tmp_path / "run/logs"),
+        "CONDA_DEFAULT_ENV": "agent-bench",
+        "CONDA_PREFIX": str(tmp_path / "conda/envs/agent-bench"),
+    }
+    plan = execution.build_execution_plan(resolved, env=env)
+    ctx = execution.ExecutionContext(
+        resolved=resolved,
+        plan=plan,
+        retry_errors=True,
+        max_workers=1,
+        env=env,
+    )
+    installed: list[str] = []
+    targets: list[Path | None] = []
+
+    monkeypatch.setattr(execution, "_has_python_module", lambda module: bool(installed))
+    monkeypatch.setattr(execution, "_has_executable", lambda name, env: bool(installed))
+
+    def fake_install(packages, *, log_path, env, install_target):
+        installed.extend(packages)
+        targets.append(install_target)
+
+    monkeypatch.setattr(execution, "_run_python_dependency_install", fake_install)
+
+    execution._prepare_environment(ctx)
+
+    assert installed == ["datasets", "swebench"]
+    assert targets == [None]
+    assert Path(env["AGENT_BENCH_LOG_DIR"]).is_dir()
+    assert env["OC_OTEL_DATA_DIR"] == str(tmp_path / "run/logs/otel")
+    assert env["OC_OTEL_TRACE_FILE"] == str(tmp_path / "run/logs/otel/otel-traces.jsonl")
+    assert Path(env["OC_OTEL_TRACE_FILE"]).is_file()
+    assert env["SWEBENCH_ROOT"] == str((tmp_path / "run" / "swebench_root").resolve())
+    assert Path(env["SWEBENCH_ROOT"]).is_dir()
+
+
+def test_local_otel_stage_runs_docker_scripts(tmp_path: Path, monkeypatch) -> None:
+    resolved = load_resolved_experiment(ROOT / "experiments" / "client_only.toml", root=ROOT)
+    env = {
+        "KIT_ROOT": str(ROOT),
+        "AGENT_BENCH_RUN_DIR": str(tmp_path / "run"),
+        "AGENT_BENCH_LOG_DIR": str(tmp_path / "run/logs"),
+    }
+    plan = execution.build_execution_plan(resolved, env=env)
+    plan.log_dir.mkdir(parents=True, exist_ok=True)
+    ctx = execution.ExecutionContext(
+        resolved=resolved,
+        plan=plan,
+        retry_errors=True,
+        max_workers=1,
+        env=env,
+    )
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((list(argv), dict(kwargs["env"])))
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(execution.subprocess, "run", fake_run)
+
+    with ExitStack() as stack:
+        execution._start_otel(ctx, stack)
+
+    assert len(calls) == 2
+    assert calls[0][0][-1].endswith("otel_collector_up.sh")
+    assert calls[1][0][-1].endswith("otel_collector_down.sh")
+    assert calls[0][1]["OC_OTEL_DATA_DIR"] == str(tmp_path / "run/logs/otel")
+    assert calls[0][1]["OC_OTEL_TRACE_FILE"] == str(tmp_path / "run/logs/otel/otel-traces.jsonl")
+    assert calls[0][1]["OC_OTEL_NAME"].startswith("agent-bench-otel-")
+
+
+def test_prepare_environment_preserves_explicit_swebench_root(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SWEBENCH_ROOT", "")
+    monkeypatch.setenv("AB_SWEBENCH_ROOT", "")
+    resolved = load_resolved_experiment(ROOT / "experiments" / "local_vllm.toml", root=ROOT)
+    explicit_root = tmp_path / "custom-swebench-root"
+    env = {
+        "AGENT_BENCH_RUN_DIR": str(tmp_path / "run"),
+        "AGENT_BENCH_LOG_DIR": str(tmp_path / "run/logs"),
+        "SWEBENCH_ROOT": str(explicit_root),
+    }
+    plan = execution.build_execution_plan(resolved, env=env)
+    ctx = execution.ExecutionContext(
+        resolved=resolved,
+        plan=plan,
+        retry_errors=True,
+        max_workers=1,
+        env=env,
+    )
+    monkeypatch.setattr(execution, "_has_python_module", lambda module: True)
+
+    execution._prepare_environment(ctx)
+
+    assert env["SWEBENCH_ROOT"] == str(explicit_root.resolve())
+    assert env["AB_SWEBENCH_ROOT"] == str(explicit_root.resolve())
+    assert explicit_root.is_dir()
+
+
+def test_prepare_environment_installs_missing_swebench_deps_in_pbs_target(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SWEBENCH_ROOT", "")
+    monkeypatch.setenv("AB_SWEBENCH_ROOT", "")
+    resolved = load_resolved_experiment(ROOT / "experiments" / "nscc_vllm.toml", root=ROOT)
+    env = {
+        "KIT_ROOT": str(ROOT),
+        "SCRATCH": str(tmp_path / "scratch"),
+        "USER": "alice",
+        "AGENT_BENCH_RUN_DIR": str(tmp_path / "run"),
+        "AGENT_BENCH_LOG_DIR": str(tmp_path / "run/logs"),
+    }
+    plan = execution.build_execution_plan(resolved, env=env)
+    ctx = execution.ExecutionContext(
+        resolved=resolved,
+        plan=plan,
+        retry_errors=True,
+        max_workers=1,
+        env=env,
+    )
+    installed: list[str] = []
+    targets: list[Path | None] = []
+
+    monkeypatch.setattr(execution, "_has_python_module", lambda module: bool(installed))
+    monkeypatch.setattr(execution, "_has_executable", lambda name, env: bool(installed))
+
+    def fake_install(packages, *, log_path, env, install_target):
+        installed.extend(packages)
+        targets.append(install_target)
+
+    monkeypatch.setattr(execution, "_run_python_dependency_install", fake_install)
+
+    execution._prepare_environment(ctx)
+
+    assert installed == ["datasets", "swebench"]
+    assert targets == [Path(env["OC_PYLIB"])]
+    assert Path(env["OC_PIP_CACHE"]).is_dir()
+    assert env["PYTHONPATH"].split(":")[0] == str(Path(env["OC_PYLIB"]).resolve())
+
+
+def test_prepare_environment_installs_litellm_for_native_litellm_mode(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SWEBENCH_ROOT", "")
+    monkeypatch.setenv("AB_SWEBENCH_ROOT", "")
+    resolved = load_resolved_experiment(ROOT / "experiments" / "client_only.toml", root=ROOT)
+    env = {
+        "AGENT_BENCH_RUN_DIR": str(tmp_path / "run"),
+        "AGENT_BENCH_LOG_DIR": str(tmp_path / "run/logs"),
+        "CONDA_DEFAULT_ENV": "agent-bench",
+        "CONDA_PREFIX": str(tmp_path / "conda/envs/agent-bench"),
+        "SERVING_MODE": "native",
+    }
+    plan = execution.build_execution_plan(resolved, env=env)
+    ctx = execution.ExecutionContext(
+        resolved=resolved,
+        plan=plan,
+        retry_errors=True,
+        max_workers=1,
+        env=env,
+    )
+    installed: list[str] = []
+
+    monkeypatch.setattr(execution, "_has_python_module", lambda module: bool(installed))
+    monkeypatch.setattr(execution, "_has_executable", lambda name, env: bool(installed))
+    monkeypatch.setattr(
+        execution,
+        "_run_python_dependency_install",
+        lambda packages, **kwargs: installed.extend(packages),
+    )
+
+    execution._prepare_environment(ctx)
+
+    assert plan.serving_plan is not None
+    assert plan.serving_plan.mode == "native"
+    assert installed == ["litellm"]
+
+
+def test_litellm_execution_plan_modes_follow_deployment_defaults() -> None:
+    local = load_resolved_experiment(ROOT / "experiments" / "client_only.toml", root=ROOT)
+    local_plan = build_execution_plan(local, env={"KIT_ROOT": str(ROOT)})
+
+    assert local_plan.serving_plan is not None
+    assert local_plan.serving_plan.backend == "litellm"
+    assert local_plan.serving_plan.mode == "docker"
+    assert local_plan.serving_plan.argv[:2] == ("docker", "run")
+
+    pbs = load_resolved_experiment(ROOT / "experiments" / "nscc_litellm.toml", root=ROOT)
+    pbs_plan = build_execution_plan(pbs, env={"KIT_ROOT": str(ROOT), "USER": "alice"})
+
+    assert pbs_plan.serving_plan is not None
+    assert pbs_plan.serving_plan.backend == "litellm"
+    assert pbs_plan.serving_plan.mode == "singularity"
+
+
+def test_litellm_docker_start_registers_container_cleanup(tmp_path: Path, monkeypatch) -> None:
+    resolved = load_resolved_experiment(ROOT / "experiments" / "client_only.toml", root=ROOT)
+    env = {
+        "KIT_ROOT": str(ROOT),
+        "AGENT_BENCH_RUN_DIR": str(tmp_path / "run"),
+        "AGENT_BENCH_LOG_DIR": str(tmp_path / "run/logs"),
+        "QWEN_API_KEY": "sk-upstream",
+    }
+    plan = build_execution_plan(resolved, env=env)
+    assert plan.serving_plan is not None
+    assert plan.serving_plan.mode == "docker"
+    ctx = execution.ExecutionContext(
+        resolved=resolved,
+        plan=plan,
+        retry_errors=True,
+        max_workers=1,
+        env=env,
+    )
+    calls: list[tuple[str, object]] = []
+
+    class FakeProc:
+        pass
+
+    fake_proc = FakeProc()
+    monkeypatch.setattr(execution, "http_ready", lambda *args, **kwargs: False)
+    monkeypatch.setattr(execution, "prepare_launch_artifacts", lambda *args, **kwargs: None)
+    monkeypatch.setattr(execution.subprocess, "Popen", lambda *args, **kwargs: fake_proc)
+    monkeypatch.setattr(execution, "wait_for_http_ready", lambda *args, **kwargs: None)
+    monkeypatch.setattr(execution, "terminate_process_group", lambda proc: calls.append(("terminate", proc)))
+    monkeypatch.setattr(execution, "_remove_docker_container", lambda name: calls.append(("rm", name)))
+
+    stack = ExitStack()
+    execution._start_serving(ctx, stack)
+    stack.close()
+
+    assert calls == [
+        ("terminate", fake_proc),
+        ("rm", plan.serving_plan.metadata["container_name"]),
+    ]
+
+
+def test_swebench_instance_data_materializes_from_benchmark_profile(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("INSTANCE_DATA", raising=False)
+
+    def fake_load_dataset(dataset: str, *, split: str):
+        assert dataset == "princeton-nlp/SWE-bench_Verified"
+        assert split == "test"
+        return [
+            {
+                "instance_id": "astropy__astropy-12907",
+                "repo": "astropy/astropy",
+                "problem_statement": "Fix astropy",
+            },
+            {"instance_id": "other__repo-1", "repo": "other/repo"},
+        ]
+
+    monkeypatch.setitem(sys.modules, "datasets", types.SimpleNamespace(load_dataset=fake_load_dataset))
+    resolved = load_resolved_experiment(ROOT / "experiments" / "local_vllm.toml", root=ROOT)
+
+    path = _instance_data_path(resolved)
+
+    assert path == (tmp_path / "data/swebench/phase0_sanity_instances.json").resolve()
+    assert json.loads(path.read_text()) == [
+        {
+            "instance_id": "astropy__astropy-12907",
+            "repo": "astropy/astropy",
+            "problem_statement": "Fix astropy",
+        }
+    ]
+
+
+def test_swebench_instance_data_top_level_override_wins(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("INSTANCE_DATA", raising=False)
+    instance_data = tmp_path / "instances.json"
+    instance_data.write_text("[]", encoding="utf-8")
+    config = tmp_path / "override.toml"
+    config.write_text(
+        "\n".join(
+            [
+                'name = "override"',
+                'output_dir = "runs/override"',
+                f'instance_data = "{instance_data.name}"',
+                "seeds = [42]",
+                "[benchmark]",
+                'name = "swebench"',
+                f'profile = "{ROOT / "profiles/benchmarks/swebench/phase0.json"}"',
+                "[harness]",
+                'name = "openclaw"',
+                f'profile = "{ROOT / "profiles/harnesses/openclaw_swebench.yaml"}"',
+                "[model]",
+                f'profile = "{ROOT / "profiles/models/gemini_3_5_flash.json"}"',
+                "[serving]",
+                f'profile = "{ROOT / "profiles/serving/litellm_gemini.toml"}"',
+                "[deployment]",
+                f'profile = "{ROOT / "profiles/deployments/client_only.toml"}"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    resolved = load_resolved_experiment(config, root=ROOT)
+
+    assert _instance_data_path(resolved) == instance_data.resolve()
+
+
+def test_swebench_instance_data_env_override_wins(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    instance_data = tmp_path / "env_instances.json"
+    instance_data.write_text("[]", encoding="utf-8")
+    monkeypatch.setenv("INSTANCE_DATA", str(instance_data))
+    resolved = load_resolved_experiment(ROOT / "experiments" / "client_only.toml", root=ROOT)
+
+    assert _instance_data_path(resolved) == instance_data.resolve()
+
+
 def test_client_only_rejects_local_serving(tmp_path: Path) -> None:
     config = tmp_path / "bad.toml"
     config.write_text(
@@ -92,7 +486,7 @@ def test_deployment_plans_render_static_scripts() -> None:
     assert nscc_plan.deployment == "nscc_pbs"
     assert nscc_plan.job_script is not None
     assert "#PBS -N agent-bench-nscc_vllm" in nscc_plan.job_script
-    assert "python3 -m agent_bench.deployments.pbs.run_job --config experiments/nscc_vllm.toml" in nscc_plan.job_script
+    assert "python3 run.py --config experiments/nscc_vllm.toml" in nscc_plan.job_script
     assert "--dry-run" not in nscc_plan.job_script
 
     ccds = load_resolved_experiment(ROOT / "experiments" / "ccds_vllm.toml", root=ROOT)
@@ -123,3 +517,5 @@ def test_validate_and_run_entrypoints() -> None:
     )
     assert dry_run.returncode == 0, dry_run.stderr
     assert "deployment: client_only" in dry_run.stdout
+    assert "stages:" in dry_run.stdout
+    assert "prepare_environment: enabled" in dry_run.stdout

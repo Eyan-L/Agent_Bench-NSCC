@@ -176,6 +176,21 @@ class OpenClawRemoteDispatcher(Dispatcher):
         }
         return mounts, env
 
+    def agent_container_args(self) -> List[str]:
+        """Legacy docker-run bridge wiring.
+
+        Prefer ``agent_mounts_and_env()`` in new harness code. This shim keeps
+        older raw ``docker run`` harnesses from silently starting OpenClaw
+        without the exec bridge.
+        """
+        mounts, env = self.agent_mounts_and_env()
+        args: List[str] = []
+        for mount in mounts:
+            args += ["-v", f"{mount.host}:{mount.container}:{mount.mode}"]
+        for key, value in env.items():
+            args += ["-e", f"{key}={value}"]
+        return args
+
     def env_info(self) -> Dict[str, Any]:
         if self.pid is None or self.socket_path is None:
             raise RuntimeError(

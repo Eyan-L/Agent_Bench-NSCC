@@ -3,6 +3,8 @@
   "sweep_name": "phase2_serving_sweep",
   "plan_version": "v1.0",
   "application": "swebench",
+  "dataset": "princeton-nlp/SWE-bench_Verified",
+  "split": "test",
   "seeds": [42],
   "instances": [],
   "repo_mapping": {},

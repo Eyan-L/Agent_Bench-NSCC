@@ -400,6 +400,16 @@ class TerminalBenchDockerHarness:
         gateway_token = secrets.token_hex(24)
         assert dispatcher is not None and state_dir is not None  # for type-checkers
 
+        # Wire the bridge explicitly, matching the SWE-bench harness pattern.
+        # Without these env vars, OpenClaw falls back to its built-in Docker
+        # tools and bridge-side tool-call logging never runs.
+        bridge_mounts, bridge_env = dispatcher.agent_mounts_and_env()
+        bridge_args: List[str] = []
+        for mount in bridge_mounts:
+            bridge_args += ["-v", f"{mount.host}:{mount.container}:{mount.mode}"]
+        for key, value in bridge_env.items():
+            bridge_args += ["-e", f"{key}={value}"]
+
         cmd = [
             "docker", "run", "-d",
             "--name", oc_name,
@@ -419,7 +429,7 @@ class TerminalBenchDockerHarness:
             "-e", f"OPENCLAW_RUN_ID={run_id}",
             "-e", f"OTEL_RESOURCE_ATTRIBUTES=oc.run_id={run_id}",
             "-e", "DOCKER_API_VERSION=1.44",
-            *dispatcher.agent_container_args(),
+            *bridge_args,
             "--entrypoint", "/usr/local/bin/openclaw",
             self.oc_image,
             "gateway", "--allow-unconfigured",

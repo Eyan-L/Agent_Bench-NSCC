@@ -85,19 +85,66 @@ def test_sglang_native_and_singularity_launch_plans() -> None:
     assert "/tmp/sglang.sif" in singularity.argv
 
 
-def test_litellm_launch_plan_uses_proxy_auth_without_upstream_secret() -> None:
+def test_litellm_native_launch_plan_uses_proxy_auth_without_upstream_secret() -> None:
     plan = _plan(
         "profiles/models/gemini_3_5_flash.json",
         "profiles/serving/litellm_gemini.toml",
         backend="litellm",
+        mode="native",
     )
 
     assert plan.argv[0] == "litellm"
+    assert plan.mode == "native"
     assert plan.env["MODEL_API_KEY"] == "sk-agent-bench-local"
     assert plan.readiness_headers == {"Authorization": "Bearer sk-agent-bench-local"}
     assert plan.upstream_api_key_env == "GEMINI_API_KEY"
     assert "GEMINI_API_KEY" in plan.secret_env_names
     assert "LITELLM_UPSTREAM_API_KEY" not in plan.env
+
+
+def test_litellm_docker_launch_plan_uses_host_network_and_env_secrets(tmp_path: Path) -> None:
+    config_path = tmp_path / "litellm.yaml"
+    plan = _plan(
+        "profiles/models/minimax_m2_7.json",
+        "profiles/serving/litellm/minimax_global.yaml",
+        backend="litellm",
+        mode="docker",
+        env={
+            "LITELLM_CONFIG_PATH": str(config_path),
+            "LITELLM_CONTAINER_NAME": "litellm-test",
+            "LITELLM_EXTRA_DOCKER_ARGS": "--pull never",
+        },
+    )
+
+    assert plan.argv[:2] == ("docker", "run")
+    assert plan.mode == "docker"
+    assert "--rm" in plan.argv
+    assert plan.argv[plan.argv.index("--name") + 1] == "litellm-test"
+    assert plan.argv[plan.argv.index("--network") + 1] == "host"
+    assert plan.argv[plan.argv.index("-v") + 1] == f"{config_path}:{config_path}:ro"
+    image_index = plan.argv.index("docker.litellm.ai/berriai/litellm:main-stable")
+    assert plan.argv[image_index + 1] == "--config"
+    assert "docker://docker.litellm.ai/berriai/litellm:main-stable" not in plan.argv
+    assert "LITELLM_UPSTREAM_API_KEY" in plan.argv
+    assert "--pull" in plan.argv
+    assert "never" in plan.argv
+    assert plan.metadata["container_name"] == "litellm-test"
+    assert "LITELLM_UPSTREAM_API_KEY" not in plan.env
+    assert "sk-upstream-secret" not in " ".join(plan.argv)
+
+
+def test_litellm_singularity_launch_plan_still_uses_sif() -> None:
+    plan = _plan(
+        "profiles/models/minimax_m2_7.json",
+        "profiles/serving/litellm/minimax_global.yaml",
+        backend="litellm",
+        mode="singularity",
+        env={"SERVING_SIF": "/tmp/litellm.sif"},
+    )
+
+    assert plan.argv[:4] == ("singularity", "exec", "--containall", "--bind")
+    assert "/tmp/litellm.sif" in plan.argv
+    assert plan.mode == "singularity"
 
 
 def test_litellm_launch_environment_and_config_do_not_emit_upstream_secret(tmp_path: Path) -> None:

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 from typing import Any, Mapping
+from zoneinfo import ZoneInfo
 
 from agent_bench.core.spec import ConfigError, ResolvedExperiment
 from agent_bench.serving.launch_plan import LaunchPlanError, ServingLaunchPlan, build_launch_plan
@@ -81,16 +84,27 @@ class PbsJobSpec:
             lines.append(f"#PBS -q {self.resources.queue}")
         if self.resources.join_output:
             lines.append("#PBS -j oe")
+        experiment_base = self.run_dir.parent
         lines.extend(
             [
                 "",
                 "set -euo pipefail",
                 'cd "${PBS_O_WORKDIR:-$PWD}"',
                 f"export AGENT_BENCH_PBS_SITE={shlex.quote(self.site)}",
-                f"export AGENT_BENCH_RUN_DIR={shlex.quote(str(self.run_dir))}",
-                f"export AGENT_BENCH_LOG_DIR={shlex.quote(str(self.log_dir))}",
+                'if [[ -z "${AB_RUN_STAMP:-}" ]]; then',
+                '    AB_RUN_STAMP="$(TZ=Asia/Singapore date +%Y-%m-%d_%H-%M-%S)"',
+                '    if [[ -n "${PBS_JOBID:-}" ]]; then',
+                '        AB_JOB_SUFFIX="${PBS_JOBID//[^A-Za-z0-9._-]/_}"',
+                '        AB_RUN_STAMP="${AB_RUN_STAMP}_${AB_JOB_SUFFIX}"',
+                "    fi",
+                "fi",
+                "export AB_RUN_STAMP",
+                f"export AB_EXPERIMENT_BASE={shlex.quote(str(experiment_base))}",
+                'export AB_EXPERIMENT_DIR="${AB_EXPERIMENT_DIR:-$AB_EXPERIMENT_BASE/$AB_RUN_STAMP}"',
+                'export AGENT_BENCH_RUN_DIR="${AGENT_BENCH_RUN_DIR:-$AB_EXPERIMENT_DIR}"',
+                'export AGENT_BENCH_LOG_DIR="${AGENT_BENCH_LOG_DIR:-$AGENT_BENCH_RUN_DIR/logs}"',
                 f"export AGENT_BENCH_STAGES={shlex.quote(self.stage_summary())}",
-                f"python3 -m agent_bench.deployments.pbs.run_job --config {config_arg}",
+                f"python3 run.py --config {config_arg}",
                 "",
             ]
         )
@@ -137,7 +151,7 @@ def build_pbs_job_spec(
     deployment = resolved.deployment
     backend = resolved.serving.get("backend")
     scratch = _env_str(source_env, "SCRATCH", default=str(Path.home() / "scratch"))
-    run_dir = _path_from_env_or_default(source_env, "AGENT_BENCH_RUN_DIR", resolved.spec.output_dir / resolved.run_id)
+    run_stamp, run_dir = _resolve_job_run_dir(resolved, source_env)
     log_dir = _path_from_env_or_default(source_env, "AGENT_BENCH_LOG_DIR", run_dir / "logs")
 
     resources = PbsResources(
@@ -185,6 +199,8 @@ def build_pbs_job_spec(
             "harness": resolved.spec.harness_name,
             "serving_backend": str(backend),
             "run_id": resolved.run_id,
+            "run_stamp": run_stamp,
+            "stable_run_id": resolved.run_id,
         },
     )
 
@@ -227,6 +243,39 @@ def _path_from_env_or_default(env: Mapping[str, str], key: str, default: str | P
     if value:
         return Path(value).expanduser()
     return Path(default).expanduser()
+
+
+def _resolve_job_run_dir(
+    resolved: ResolvedExperiment,
+    env: Mapping[str, str],
+) -> tuple[str, Path]:
+    explicit = env.get("AGENT_BENCH_RUN_DIR")
+    if explicit:
+        run_dir = Path(explicit).expanduser()
+        return run_dir.name, run_dir
+
+    experiment_dir = env.get("AB_EXPERIMENT_DIR")
+    if experiment_dir:
+        run_dir = Path(experiment_dir).expanduser()
+        return run_dir.name, run_dir
+
+    stamp = _run_stamp(env)
+    return stamp, resolved.spec.output_dir / stamp
+
+
+def _run_stamp(env: Mapping[str, str]) -> str:
+    explicit = env.get("AB_RUN_STAMP")
+    if explicit:
+        return explicit
+    stamp = datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y-%m-%d_%H-%M-%S")
+    job_id = env.get("PBS_JOBID")
+    if job_id:
+        stamp = f"{stamp}_{_sanitize_run_stamp_suffix(job_id)}"
+    return stamp
+
+
+def _sanitize_run_stamp_suffix(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]", "_", value)
 
 
 def _shell_path(path: Path) -> str:

@@ -63,7 +63,7 @@ Profiles:
 - `profiles/deployments/nscc_pbs_cpu.toml` for provider/API fallback
 
 Use NSCC PBS for HPC execution. `run.py --render-job` emits a short wrapper with
-PBS directives and delegates runtime work to `agent_bench.deployments.pbs.run_job`.
+PBS directives and calls `python3 run.py --config ...` inside the allocation, so the same core stage coordinator drives local and PBS execution.
 
 Canonical vLLM example:
 

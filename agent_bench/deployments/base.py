@@ -95,12 +95,12 @@ class PbsDeployment:
         job_spec = build_pbs_job_spec(resolved, site=self.site)
         return DeploymentPlan(
             deployment="nscc_pbs",
-            summary=f"Render a short {self.site} PBS job that delegates runtime behavior to Python adapters.",
+            summary=f"Render a short {self.site} PBS wrapper that calls the shared run.py stage coordinator.",
             steps=(
                 "render PBS resource header from deployment profile",
-                "resolve PBS job spec from experiment and deployment profile",
-                "start serving adapter through the shared serving launch plan",
-                "run benchmark and harness adapters inside the job",
+                "export PBS run/log directories and stage summary",
+                "call run.py --config inside the allocation",
+                "let the core stage coordinator prepare serving, telemetry, images, and benchmark execution",
             ),
             job_script=job_spec.render_script(),
             warnings=job_spec.warnings,

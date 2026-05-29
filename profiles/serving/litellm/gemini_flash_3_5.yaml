@@ -1,0 +1,33 @@
+# Gemini Flash 3.5 international API via a local LiteLLM proxy sidecar. Set
+# GEMINI_API_KEY in the PBS job environment. Agents only receive the local
+# proxy key, never the upstream Gemini key.
+serving:
+  config_id: litellm-gemini-flash-3-5
+  backend: litellm
+  preset: gemini-flash-3-5
+  endpoint:
+    scheme: http
+    bind_host: 0.0.0.0
+    client_host: 127.0.0.1
+    port: 8000
+    path: /v1
+  proxy:
+    api_key: sk-agent-bench-local
+    num_workers: 4
+    agent_provider: custom
+  provider:
+    active: gemini
+    providers:
+      gemini:
+        name: gemini
+        api: google
+        base_url: https://generativelanguage.googleapis.com/v1
+        api_key_env: GEMINI_API_KEY
+        model: gemini/gemini-flash-3.5
+  runtime: {}
+  scheduler:
+    max_num_seqs: 128
+    enable_prefix_caching: false
+  sif: /scratch/users/ntu/$USER/sif_images/litellm_main_stable.sif
+  image: docker://docker.litellm.ai/berriai/litellm:main-stable
+  additional_flags: {}

@@ -22,3 +22,7 @@ frontend/openclaw/state/agents/main/
 logs/*
 
 .agent/*
+
+build/
+bench_platform.egg-info/
+runs

@@ -3,6 +3,8 @@
   "sweep_name": "phase0_sanity",
   "plan_version": "v1.0",
   "application": "swebench",
+  "dataset": "princeton-nlp/SWE-bench_Verified",
+  "split": "test",
   "instances": [
     "astropy__astropy-12907"
   ],

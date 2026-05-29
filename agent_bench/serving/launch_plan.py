@@ -391,7 +391,7 @@ def _build_litellm_plan(
     env: Mapping[str, str],
     log_path: str | None,
 ) -> ServingLaunchPlan:
-    if mode not in {"native", "singularity"}:
+    if mode not in {"native", "docker", "singularity"}:
         raise LaunchPlanError(f"unsupported LiteLLM launch mode: {mode}")
     port = _env_int(env, "LITELLM_PORT", "PORT", default=serving.port)
     bind_host = _env_str(env, "LITELLM_HOST", "BIND_HOST", default=serving.bind_host)
@@ -430,6 +430,7 @@ def _build_litellm_plan(
     if upstream_base_url:
         launch_env["LITELLM_UPSTREAM_BASE_URL"] = upstream_base_url
 
+    metadata = {"upstream_model": upstream_model, "mode": mode}
     if mode == "native":
         argv = (
             "litellm",
@@ -442,6 +443,50 @@ def _build_litellm_plan(
             "--num_workers",
             str(num_workers),
         )
+    elif mode == "docker":
+        image = _docker_image_ref(
+            _env_str(
+                env,
+                "LITELLM_IMAGE",
+                "SERVING_IMAGE",
+                default=serving.image or "docker.litellm.ai/berriai/litellm:main-stable",
+            )
+        )
+        container_name = _env_str(env, "LITELLM_CONTAINER_NAME", default=f"agent-bench-litellm-{port}")
+        docker_args = [
+            "run",
+            "--rm",
+            "--name",
+            container_name,
+            "--network",
+            "host",
+            "-v",
+            f"{config_path}:{config_path}:ro",
+            "-e",
+            "LITELLM_UPSTREAM_API_KEY",
+            "-e",
+            "LITELLM_MASTER_KEY",
+            "-e",
+            "NO_TELEMETRY",
+        ]
+        if upstream_base_url:
+            docker_args.extend(["-e", "LITELLM_UPSTREAM_BASE_URL"])
+        docker_args.extend(shlex.split(env.get("LITELLM_EXTRA_DOCKER_ARGS", "")))
+        argv = (
+            "docker",
+            *docker_args,
+            image,
+            "--config",
+            config_path,
+            "--host",
+            bind_host,
+            "--port",
+            str(port),
+            "--num_workers",
+            str(num_workers),
+        )
+        metadata["container_name"] = container_name
+        metadata["image"] = image
     else:
         sif = _env_str(env, "LITELLM_SIF", "SERVING_SIF", default=serving.sif or "")
         if not sif:
@@ -481,8 +526,15 @@ def _build_litellm_plan(
         model_name=model_alias,
         secret_env_names=secret_names,
         upstream_api_key_env=upstream_api_key_env,
-        metadata={"upstream_model": upstream_model, "mode": mode},
+        metadata=metadata,
     )
+
+
+def _docker_image_ref(value: str) -> str:
+    image = value.removeprefix("docker://")
+    if not image:
+        raise LaunchPlanError("Docker image reference must be non-empty")
+    return image
 
 
 def _vllm_preset_flags(

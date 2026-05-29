@@ -1,7 +1,7 @@
 """OpenClaw agent condition — base class for any benchmark.
 
 Drives one run of the OpenClaw CLI against the per-app sandbox container.
-Subclasses (in `agent_bench/benchmarks/<app>/conditions/openclaw_agent.py`) plug in:
+Subclasses (in `applications/<app>/conditions/openclaw_agent.py`) plug in:
 
   - ``agent_id``        — the id registered in openclaw.json `agents.list[]`
                           and passed as ``openclaw agent --agent <id>``.
@@ -859,6 +859,7 @@ class OpenClawAgentCondition:
 
         sessions_subpath = f"agents/{self.agent_id}/sessions"
         cache_subpath = "logs/cache-trace.jsonl"
+        exec_bridge_subpath = "logs/openclaw_exec_bridge.jsonl"
         # Raw per-LLM-call response stream (pi-ai patch writes here when
         # OPENCLAW_RAW_RESPONSE_LOG points at it). Each line = one HTTP request.
         raw_resp_subpath = "logs/llm-raw-responses.jsonl"
@@ -882,6 +883,12 @@ class OpenClawAgentCondition:
                         shutil.copy2(src, dst)
                 except Exception as e:
                     logger.debug("host session archive skipped %s: %s", src, e)
+            exec_bridge_src = state / exec_bridge_subpath
+            if exec_bridge_src.exists():
+                try:
+                    shutil.copy2(exec_bridge_src, run_dir / "openclaw_exec_bridge.jsonl")
+                except Exception as e:
+                    logger.debug("host exec-bridge log skipped %s: %s", exec_bridge_src, e)
             return
 
         handle = self._handle(container_id)
@@ -905,6 +912,23 @@ class OpenClawAgentCondition:
                         )
             except Exception as e:
                 logger.debug("session archive skipped %s: %s", src, e)
+        exec_bridge_src = f"/root/.openclaw/{exec_bridge_subpath}"
+        exec_bridge_dst = run_dir / "openclaw_exec_bridge.jsonl"
+        try:
+            if self.container is not None and handle is not None:
+                self.container.copy_out(handle, exec_bridge_src, exec_bridge_dst)
+            else:
+                r = subprocess.run(
+                    ["docker", "cp", f"{container_id}:{exec_bridge_src}", str(exec_bridge_dst)],
+                    capture_output=True, text=True,
+                )
+                if r.returncode != 0:
+                    logger.debug(
+                        "exec-bridge log skipped %s: %s",
+                        exec_bridge_src, r.stderr.strip(),
+                    )
+        except Exception as e:
+            logger.debug("exec-bridge log skipped %s: %s", exec_bridge_src, e)
 
     # ------------------------------------------------------------------
     # In-container exec helper — routes through self.container when present.

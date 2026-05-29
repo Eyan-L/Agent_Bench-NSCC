@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
+import types
 
+from agent_bench.core.execution import materialize_benchmark_data
 from agent_bench.core.spec import load_resolved_experiment
 from agent_bench.deployments.pbs.job_spec import RUNTIME_STAGES, build_pbs_job_spec, dump_spec_json
 from agent_bench.deployments.pbs.stages import (
@@ -33,6 +36,22 @@ def test_nscc_pbs_job_spec_embeds_serving_launch_plan() -> None:
     assert spec.serving_plan.readiness_url == "http://127.0.0.1:8000/v1/models"
 
 
+def test_pbs_job_spec_uses_ab_run_stamp_for_run_dir() -> None:
+    resolved = load_resolved_experiment(ROOT / "experiments/nscc_vllm.toml", root=ROOT)
+    stamp = "2026-05-28_14-52-37_123.server"
+
+    spec = build_pbs_job_spec(
+        resolved,
+        env={"KIT_ROOT": str(ROOT), "USER": "alice", "AB_RUN_STAMP": stamp},
+    )
+
+    assert spec.run_dir == ROOT / "runs" / "nscc_vllm" / stamp
+    assert spec.log_dir == spec.run_dir / "logs"
+    assert spec.metadata["run_stamp"] == stamp
+    assert spec.metadata["run_id"] == resolved.run_id
+    assert spec.metadata["stable_run_id"] == resolved.run_id
+
+
 def test_pbs_render_job_uses_short_python_worker() -> None:
     resolved = load_resolved_experiment(ROOT / "experiments/nscc_vllm.toml", root=ROOT)
     script = build_pbs_job_spec(resolved, env={"KIT_ROOT": str(ROOT)}).render_script()
@@ -40,7 +59,12 @@ def test_pbs_render_job_uses_short_python_worker() -> None:
     assert "#PBS -N agent-bench-nscc_vllm" in script
     assert "#PBS -l select=1:ngpus=1" in script
     assert 'cd "${PBS_O_WORKDIR:-$PWD}"' in script
-    assert "python3 -m agent_bench.deployments.pbs.run_job --config experiments/nscc_vllm.toml" in script
+    assert 'AB_RUN_STAMP="$(TZ=Asia/Singapore date +%Y-%m-%d_%H-%M-%S)"' in script
+    assert 'AB_JOB_SUFFIX="${PBS_JOBID//[^A-Za-z0-9._-]/_}"' in script
+    assert 'export AB_EXPERIMENT_DIR="${AB_EXPERIMENT_DIR:-$AB_EXPERIMENT_BASE/$AB_RUN_STAMP}"' in script
+    assert 'export AGENT_BENCH_RUN_DIR="${AGENT_BENCH_RUN_DIR:-$AB_EXPERIMENT_DIR}"' in script
+    assert 'export AGENT_BENCH_LOG_DIR="${AGENT_BENCH_LOG_DIR:-$AGENT_BENCH_RUN_DIR/logs}"' in script
+    assert "python3 run.py --config experiments/nscc_vllm.toml" in script
     assert "run_benchmark.pbs" not in script
     assert "STAGE_SWEBENCH" not in script
 
@@ -61,7 +85,7 @@ def test_terminal_bench_pbs_render_job_uses_same_python_worker() -> None:
     script = spec.render_script()
 
     assert "#PBS -N agent-bench-nscc_terminal_bench" in script
-    assert "python3 -m agent_bench.deployments.pbs.run_job --config experiments/nscc_terminal_bench.toml" in script
+    assert "python3 run.py --config experiments/nscc_terminal_bench.toml" in script
     assert "run_benchmark_tb.pbs" not in script
     assert spec.metadata["benchmark"] == "terminal_bench"
     assert spec.serving_plan is not None
@@ -165,8 +189,42 @@ def test_pbs_run_job_dry_run_entrypoint() -> None:
     )
 
     assert proc.returncode == 0, proc.stderr
-    assert "pbs_job: agent-bench-nscc_vllm" in proc.stdout
+    assert "deployment: nscc_pbs" in proc.stdout
+    assert "stages:" in proc.stdout
     assert "serving: vllm/singularity" in proc.stdout
+
+
+def test_pbs_materializes_swebench_instance_data_from_profile(tmp_path: Path, monkeypatch) -> None:
+    def fake_load_dataset(dataset: str, *, split: str):
+        assert dataset == "princeton-nlp/SWE-bench_Verified"
+        assert split == "test"
+        return [
+            {"instance_id": "astropy__astropy-12907", "repo": "astropy/astropy"},
+            {"instance_id": "unselected__repo-1", "repo": "unselected/repo"},
+        ]
+
+    monkeypatch.setitem(sys.modules, "datasets", types.SimpleNamespace(load_dataset=fake_load_dataset))
+    monkeypatch.delenv("INSTANCE_DATA", raising=False)
+    monkeypatch.delenv("AB_INSTANCE_DATA", raising=False)
+    resolved = load_resolved_experiment(ROOT / "experiments/nscc_vllm.toml", root=ROOT)
+    spec = build_pbs_job_spec(
+        resolved,
+        env={
+            "KIT_ROOT": str(ROOT),
+            "SCRATCH": str(tmp_path / "scratch"),
+            "USER": "alice",
+            "AGENT_BENCH_RUN_DIR": str(tmp_path / "run"),
+        },
+    )
+
+    materialize_benchmark_data(resolved, pbs_spec=spec, env=os.environ)
+
+    out = spec.run_dir / "swebench_instances.json"
+    assert json.loads(out.read_text()) == [
+        {"instance_id": "astropy__astropy-12907", "repo": "astropy/astropy"}
+    ]
+    assert Path(os.environ["INSTANCE_DATA"]) == out
+    assert Path(os.environ["AB_INSTANCE_DATA"]) == out
 
 
 def test_pbs_stage3_image_commands_are_planned_without_shell_fragments(tmp_path: Path) -> None:

@@ -69,6 +69,27 @@ def _read_stdin_bytes() -> bytes:
         return b""
 
 
+def _resolve_log_path() -> str:
+    explicit = os.environ.get("OPENCLAW_EXEC_BRIDGE_LOG_PATH")
+    if explicit:
+        return explicit
+    log_dir = os.environ.get("OPENCLAW_EXEC_BRIDGE_LOG_DIR")
+    if log_dir:
+        return os.path.join(log_dir, "openclaw_exec_bridge.jsonl")
+    return "/root/.openclaw/logs/openclaw_exec_bridge.jsonl"
+
+
+def _append_log_entry(log_path: str, entry: dict) -> None:
+    if not log_path:
+        return
+    try:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--workdir", required=True)
@@ -115,6 +136,7 @@ def main() -> int:
         command = ["/bin/sh", "-lc", args.command]
 
     stdin_bytes = _read_stdin_bytes()
+    log_path = _resolve_log_path()
 
     request = {
         "command": command,
@@ -138,17 +160,65 @@ def main() -> int:
     }
 
     sock_timeout = (args.timeout_ms / 1000.0 + 30) if args.timeout_ms else 3600.0
+    send_start = time.monotonic()
     try:
         response = _send_and_recv(socket_path, frame, sock_timeout)
+        elapsed_ms = int((time.monotonic() - send_start) * 1000)
     except Exception as e:
+        elapsed_ms = int((time.monotonic() - send_start) * 1000)
+        _append_log_entry(log_path, {
+            "ts": int(time.time() * 1000),
+            "elapsedMs": elapsed_ms,
+            "commandName": command[0] if command else None,
+            "command": command,
+            "cwd": args.workdir,
+            "stdout": "",
+            "stderr": "",
+            "stdoutSize": 0,
+            "stderrSize": 0,
+            "ok": False,
+            "error": {"message": str(e)},
+            "agentId": request.get("agentId"),
+            "sessionKey": request.get("sessionKey"),
+        })
         sys.stderr.write(f"oc-exec-bridge: socket call failed: {e}\n")
         return 125
 
     if response.get("type") != "exec-res":
+        _append_log_entry(log_path, {
+            "ts": int(time.time() * 1000),
+            "elapsedMs": elapsed_ms,
+            "commandName": command[0] if command else None,
+            "command": command,
+            "cwd": args.workdir,
+            "stdout": "",
+            "stderr": "",
+            "stdoutSize": 0,
+            "stderrSize": 0,
+            "ok": False,
+            "error": {"message": f"bad response type: {response.get('type')!r}"},
+            "agentId": request.get("agentId"),
+            "sessionKey": request.get("sessionKey"),
+        })
         sys.stderr.write(f"oc-exec-bridge: bad response type: {response.get('type')!r}\n")
         return 125
     if not response.get("ok"):
         err = response.get("error", {})
+        _append_log_entry(log_path, {
+            "ts": int(time.time() * 1000),
+            "elapsedMs": elapsed_ms,
+            "commandName": command[0] if command else None,
+            "command": command,
+            "cwd": args.workdir,
+            "stdout": "",
+            "stderr": "",
+            "stdoutSize": 0,
+            "stderrSize": 0,
+            "ok": False,
+            "error": {"code": err.get("code"), "message": err.get("message")},
+            "agentId": request.get("agentId"),
+            "sessionKey": request.get("sessionKey"),
+        })
         sys.stderr.write(
             f"oc-exec-bridge: server error "
             f"[{err.get('code', '?')}] {err.get('message', '?')}\n"
@@ -160,15 +230,38 @@ def main() -> int:
     stdout_b64 = payload.get("stdoutB64")
     stderr_b64 = payload.get("stderrB64")
     if stdout_b64 is not None:
-        sys.stdout.buffer.write(base64.b64decode(stdout_b64))
+        stdout_bytes = base64.b64decode(stdout_b64)
+        stdout_text = stdout_bytes.decode("utf-8", errors="replace")
+        sys.stdout.buffer.write(stdout_bytes)
     else:
-        sys.stdout.write(payload.get("stdout", ""))
+        stdout_text = payload.get("stdout", "")
+        stdout_bytes = stdout_text.encode("utf-8")
+        sys.stdout.write(stdout_text)
     sys.stdout.flush()
     if stderr_b64 is not None:
-        sys.stderr.buffer.write(base64.b64decode(stderr_b64))
+        stderr_bytes = base64.b64decode(stderr_b64)
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+        sys.stderr.buffer.write(stderr_bytes)
     else:
-        sys.stderr.write(payload.get("stderr", ""))
+        stderr_text = payload.get("stderr", "")
+        stderr_bytes = stderr_text.encode("utf-8")
+        sys.stderr.write(stderr_text)
     sys.stderr.flush()
+    _append_log_entry(log_path, {
+        "ts": int(time.time() * 1000),
+        "elapsedMs": elapsed_ms,
+        "commandName": command[0] if command else None,
+        "command": command,
+        "cwd": args.workdir,
+        "exitCode": payload.get("exitCode"),
+        "stdout": stdout_text,
+        "stderr": stderr_text,
+        "stdoutSize": len(stdout_bytes),
+        "stderrSize": len(stderr_bytes),
+        "ok": True,
+        "agentId": request.get("agentId"),
+        "sessionKey": request.get("sessionKey"),
+    })
     return int(payload.get("exitCode", 0))
 
 

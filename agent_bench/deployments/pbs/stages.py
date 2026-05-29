@@ -32,6 +32,7 @@ def prepare_environment(resolved: ResolvedExperiment, spec: PbsJobSpec, env: dic
     Path(env["SIF_DIR"]).mkdir(parents=True, exist_ok=True)
     Path(env["SINGULARITY_CACHEDIR"]).mkdir(parents=True, exist_ok=True)
     Path(env["OC_PYLIB"]).mkdir(parents=True, exist_ok=True)
+    Path(env["OC_PIP_CACHE"]).mkdir(parents=True, exist_ok=True)
     Path(env["OC_HOST_WORKSPACE_BASE"]).mkdir(parents=True, exist_ok=True)
     Path(env["OC_TB_SIF_DIR"]).mkdir(parents=True, exist_ok=True)
     Path(env["OC_OTEL_DATA_DIR"]).mkdir(parents=True, exist_ok=True)
@@ -75,6 +76,7 @@ def runtime_environment(
         "AGENT_BENCH_LOG_DIR": env.get("AGENT_BENCH_LOG_DIR") or str(spec.log_dir),
         "OC_LOG_DIR": env.get("OC_LOG_DIR") or str(spec.log_dir),
         "OC_PYLIB": env.get("OC_PYLIB") or f"{scratch}/pylib",
+        "OC_PIP_CACHE": env.get("OC_PIP_CACHE") or f"{scratch}/.pip-cache",
         "OC_SCORING_SIF_DIR": sif_dir,
         "SWEBENCH_ROOT": env.get("SWEBENCH_ROOT") or f"{scratch}/pylib",
         "HARNESS_BACKEND": env.get("HARNESS_BACKEND")

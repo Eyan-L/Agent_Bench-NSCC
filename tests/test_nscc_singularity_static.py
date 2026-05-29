@@ -92,6 +92,18 @@ def test_openclaw_uses_runtime_serving_endpoint():
     assert "endpoint_for_container(" in app
 
 
+def test_openclaw_docker_harnesses_use_bridge_mounts_and_env():
+    for rel in (
+        "agent_bench/benchmarks/terminal_bench/app.py",
+        "agent_bench/benchmarks/deepresearch_bench/app.py",
+        "agent_bench/benchmarks/longbench/app.py",
+    ):
+        app = (ROOT / rel).read_text()
+        assert "dispatcher.agent_mounts_and_env()" in app
+        assert "*bridge_args" in app
+        assert "*dispatcher.agent_container_args()" not in app
+
+
 def test_openclaw_forces_chat_completions_transport():
     stages = (ROOT / "agent_bench/deployments/pbs/stages.py").read_text()
     configure = (ROOT / "agent_bench/harnesses/openclaw/configure.sh").read_text()

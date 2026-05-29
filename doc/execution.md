@@ -134,4 +134,4 @@ python3 agent_bench/results/analysis/plots/plot_all.py \
 | `spans.jsonl` missing | Check OTel collector logs and OpenClaw runtime patch markers. |
 | NSCC job requests a GPU for provider fallback | Use the CPU deployment profile, as in `experiments/nscc_litellm.toml`. |
 | SWE-bench scoring tries Docker on NSCC | Confirm task SIFs were prepared and `OC_SCORING_SIF_DIR` is set in the job environment. |
-| Generated PBS script looks too short | That is expected; it delegates execution to `agent_bench.deployments.pbs.run_job`. |
+| Generated PBS script looks too short | That is expected; it delegates execution back to `run.py`, which runs the shared stage coordinator. |

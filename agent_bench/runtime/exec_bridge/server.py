@@ -296,7 +296,11 @@ def serve(socket_path: str, token: str, backend: Backend) -> None:
     server = _ThreadingUnixServer(str(sock_path), _make_handler(token, backend))
     # Bridge runs as root inside OC container; socket must be readable from there.
     os.chmod(sock_path, 0o666)
-    logger.info("listening on %s (backend=%s)", sock_path, agent_bench.serving.__name__)
+    logger.info(
+        "listening on %s (backend=%s)",
+        sock_path,
+        getattr(backend, "__name__", type(backend).__name__),
+    )
 
     def _sigterm(signum, _frame):
         # `server.shutdown()` from a same-thread signal handler deadlocks
