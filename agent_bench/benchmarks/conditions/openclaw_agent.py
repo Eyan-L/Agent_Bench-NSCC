@@ -237,6 +237,8 @@ class OpenClawAgentCondition:
         # <id>.jsonl + <id>.trajectory.jsonl under
         # /root/.openclaw/agents/<agent_id>/sessions/. cache-trace.jsonl
         # (enabled via diagnostics.cacheTrace) lands under .openclaw/logs/.
+        # The raw response log is also archived here; it is the only artifact
+        # that records one row per OpenAI-compatible LLM HTTP request.
         self._archive_session_artifacts(container_id, run_dir, run_dir.name)
 
         # 3d. Prefer per-request model usage spans from the raw response log.
@@ -695,10 +697,14 @@ class OpenClawAgentCondition:
     ) -> int:
         """Backfill one ``openclaw.model.usage`` span per LLM HTTP request.
 
-        ``agentMeta.usage`` is an aggregate over the full agent run. The raw
-        pi-ai response log records one row per OpenAI-compatible request, with
-        request start time, latency, token usage, and streaming metrics. Prefer
-        those rows so ``spans.jsonl`` represents each model call separately.
+        The OpenClaw agent result only exposes ``agentMeta.usage`` after the
+        whole agent run completes. That aggregate is useful as a fallback, but
+        it necessarily creates one long span whose duration is the full agent
+        wall time. The patched pi-ai OpenAI provider writes
+        ``conversation/llm-raw-responses.jsonl`` with one line per streaming
+        chat-completions request, including request start time, response
+        latency, and API usage. This method turns those rows into per-request
+        spans so ``spans.jsonl`` can represent every LLM call.
         """
         raw_path = run_dir / "conversation" / "llm-raw-responses.jsonl"
         if not raw_path.is_file():
@@ -719,6 +725,9 @@ class OpenClawAgentCondition:
 
         def _parse_start_ns(value) -> int:
             if isinstance(value, (int, float)):
+                # Raw logger currently writes ISO strings, but accept epoch
+                # seconds/milliseconds/nanoseconds for compatibility with
+                # ad-hoc logs.
                 f = float(value)
                 if f > 1e15:
                     return int(f)

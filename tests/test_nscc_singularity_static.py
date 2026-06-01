@@ -222,3 +222,68 @@ def test_runner_maps_app_output_under_experiment_dir(monkeypatch):
     )
 
     assert cfg.output_dir == Path("/tmp/agent-bench-exp/runs/phase0")
+
+
+def test_openclaw_raw_response_log_synthesizes_per_request_model_usage(tmp_path):
+    import json
+
+    from applications.conditions.openclaw_agent import OpenClawAgentCondition
+
+    run_dir = tmp_path / "run-1"
+    raw_dir = run_dir / "conversation"
+    raw_dir.mkdir(parents=True)
+    spans_path = run_dir / "spans.jsonl"
+    spans_path.write_text("")
+    rows = [
+        {
+            "ts": "2026-06-01T00:00:00.000Z",
+            "agentId": "agent",
+            "sessionId": "sess-1",
+            "runId": "run-1",
+            "model": "model-a",
+            "provider": "provider-a",
+            "api": "openai-completions",
+            "httpStatus": 200,
+            "response": {
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15,
+                }
+            },
+            "metrics": {"total_ms": 1200, "ttft_ms": 100, "tbt_avg_ms": 20},
+        },
+        {
+            "ts": "2026-06-01T00:00:02.000Z",
+            "agentId": "agent",
+            "sessionId": "sess-1",
+            "runId": "run-1",
+            "model": "model-a",
+            "provider": "provider-a",
+            "api": "openai-completions",
+            "httpStatus": 200,
+            "response": {
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 7,
+                    "total_tokens": 27,
+                }
+            },
+            "metrics": {"total_ms": 900, "ttft_ms": 80, "tbt_avg_ms": 15},
+        },
+    ]
+    raw_path = raw_dir / "llm-raw-responses.jsonl"
+    raw_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    count = OpenClawAgentCondition._maybe_synthesize_model_usage_spans_from_raw_log(
+        spans_path, run_dir, "run-1"
+    )
+
+    spans = [json.loads(line) for line in spans_path.read_text().splitlines()]
+    assert count == 2
+    assert len(spans) == 2
+    assert [span["attrs"]["openclaw.llm.request_index"] for span in spans] == [1, 2]
+    assert [span["duration_ms"] for span in spans] == [1200.0, 900.0]
+    assert [span["attrs"]["openclaw.tokens.input"] for span in spans] == [10, 20]
+    assert [span["attrs"]["openclaw.tokens.output"] for span in spans] == [5, 7]
+    assert all(span["attrs"]["openclaw.channel"] == "synth.raw_response" for span in spans)
