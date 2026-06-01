@@ -32,9 +32,10 @@ directly on the host as production harnesses.
 - Client-only changes serving behavior only; it does not mean the harness runs
   without isolation.
 
-## PBS Stages
+## Execution Stages
 
-NSCC jobs are rendered as short wrappers around the Python PBS stage runner.
+Every run uses the shared Python stage coordinator. NSCC jobs are rendered as
+short wrappers that call back into the same coordinator.
 
 | Stage | Purpose |
 |---|---|
@@ -46,13 +47,29 @@ NSCC jobs are rendered as short wrappers around the Python PBS stage runner.
 | `run_benchmark` | invoke the runtime driver |
 | `cleanup` | terminate sidecars and collectors |
 
-Disable a stage at submission time with `AB_STAGE_<NAME>=0`, for example:
+Stages can be controlled per experiment with a top-level `[stages]` table:
+
+```toml
+[stages]
+start_otel = true
+start_serving = true
+prepare_images = false
+```
+
+Stage values must be booleans and stage names must match the table above.
+Precedence is: built-in defaults, deployment profile `[deployment.stages]`,
+experiment TOML `[stages]`, `AB_STAGE_<NAME>` environment variables, then
+legacy compatibility variables such as `STAGE_OTEL`.
+
+Override a stage at submission time with `AB_STAGE_<NAME>=0`, for example:
 
 ```bash
 qsub -v AB_STAGE_PREPARE_IMAGES=0 nscc_vllm.pbs
 ```
 
-Legacy stage names are accepted only as compatibility overrides.
+`OC_OTEL_MODE` controls how the OTel collector runs (`docker`, `host`, or
+`off`). Use `[stages].start_otel` or `AB_STAGE_START_OTEL` as the canonical
+on/off switch for the stage itself.
 
 ## Outputs
 
@@ -98,13 +115,10 @@ OC_SCORING_SIF_DIR -> OC_SCORING_URL -> local Docker SWE-bench evaluation
 ## Telemetry
 
 OpenClaw emits OTel spans for model usage and tool calls when the patched
-runtime and diagnostics plugin are active. The PBS stage runner starts the OTel
-collector automatically. Local runs can start it through the same helper used by
-PBS if needed:
-
-```bash
-bash agent_bench/deployments/pbs/otel_collector.sh start
-```
+runtime and diagnostics plugin are active. The shared `start_otel` stage starts
+the collector when enabled, for both local and PBS runs. Set
+`[stages].start_otel = true` in an experiment TOML to force it on, or use
+`AB_STAGE_START_OTEL=0` for a one-off disable.
 
 Engine telemetry is collected from serving metrics where available and written
 as JSONL. LiteLLM provider fallback still records agent-side steps, but it does

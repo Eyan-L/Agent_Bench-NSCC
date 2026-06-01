@@ -13,7 +13,7 @@ import sys
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
-from agent_bench.core.spec import ConfigError, ResolvedExperiment
+from agent_bench.core.spec import ConfigError, ResolvedExperiment, STAGE_NAMES
 from agent_bench.deployments.processes import (
     ProcessError,
     http_ready,
@@ -29,15 +29,7 @@ from agent_bench.serving.launch_plan import (
 )
 
 
-STAGE_ORDER = (
-    "prepare_environment",
-    "materialize_benchmark",
-    "prepare_images",
-    "start_serving",
-    "start_otel",
-    "run_benchmark",
-    "cleanup",
-)
+STAGE_ORDER = STAGE_NAMES
 
 _LEGACY_STAGE_ENV = {
     "materialize_benchmark": ("STAGE_SWEBENCH", "STAGE_TB_DATA"),
@@ -683,7 +675,7 @@ def _start_local_otel(ctx: ExecutionContext, stack: ExitStack) -> None:
         _note("start_otel", "skipped by OC_OTEL_MODE")
         return
     if mode not in {"docker", "host"}:
-        raise ConfigError(f"unsupported OC_OTEL_MODE={mode!r}; expected docker or host")
+        raise ConfigError(f"unsupported OC_OTEL_MODE={mode!r}; expected docker, host, or off")
 
     start_script = _local_otel_script("host_up.sh" if mode == "host" else "otel_collector_up.sh", ctx)
     stop_script = _local_otel_script("host_down.sh" if mode == "host" else "otel_collector_down.sh", ctx)
@@ -829,9 +821,12 @@ def _apply_stage_overrides(
     deployment_stages = resolved.deployment.get("stages") or {}
     if not isinstance(deployment_stages, dict):
         raise ConfigError("deployment.stages must be a table/object when present")
+    experiment_stages = resolved.spec.stages
     for stage in STAGE_ORDER:
         if stage in deployment_stages:
             stages[stage] = bool(deployment_stages[stage])
+        if stage in experiment_stages:
+            stages[stage] = experiment_stages[stage]
         new_key = f"AB_STAGE_{stage.upper()}"
         if new_key in env:
             stages[stage] = _parse_bool(env[new_key])

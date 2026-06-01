@@ -21,6 +21,36 @@ from agent_bench.deployments.pbs.stages import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _write_nscc_vllm_experiment(tmp_path: Path, *, stage_lines: list[str]) -> Path:
+    config = tmp_path / "nscc_vllm_stages.toml"
+    config.write_text(
+        "\n".join(
+            [
+                'name = "nscc_vllm_stages"',
+                'output_dir = "runs/nscc_vllm_stages"',
+                "seeds = [42]",
+                *stage_lines,
+                "[benchmark]",
+                'name = "swebench"',
+                f'profile = "{ROOT / "profiles/benchmarks/swebench/phase0.json"}"',
+                "[harness]",
+                'name = "openclaw"',
+                f'profile = "{ROOT / "profiles/harnesses/openclaw_swebench.yaml"}"',
+                "[model]",
+                f'profile = "{ROOT / "profiles/models/qwen35_9b.json"}"',
+                "[serving]",
+                f'profile = "{ROOT / "profiles/serving/vllm/nscc.yaml"}"',
+                "[deployment]",
+                f'profile = "{ROOT / "profiles/deployments/nscc_pbs.toml"}"',
+                "[limits]",
+                "max_instances = 1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return config
+
+
 def test_nscc_pbs_job_spec_embeds_serving_launch_plan() -> None:
     resolved = load_resolved_experiment(ROOT / "experiments/nscc_vllm.toml", root=ROOT)
     spec = build_pbs_job_spec(resolved, env={"KIT_ROOT": str(ROOT), "USER": "alice"})
@@ -111,6 +141,40 @@ def test_pbs_stage_env_overrides_are_resolved_once() -> None:
     assert spec.resources.select_value() == "select=1:ncpus=8:ngpus=1:mem=64gb"
 
 
+def test_pbs_stage_summary_reflects_experiment_stage_overrides(tmp_path: Path) -> None:
+    config = _write_nscc_vllm_experiment(
+        tmp_path,
+        stage_lines=["[stages]", "start_otel = false", "prepare_images = false"],
+    )
+    resolved = load_resolved_experiment(config, root=ROOT)
+
+    spec = build_pbs_job_spec(resolved, env={"KIT_ROOT": str(ROOT), "USER": "alice"})
+    script = spec.render_script()
+
+    assert spec.stages["start_otel"] is False
+    assert spec.stages["prepare_images"] is False
+    assert "start_otel=0" in spec.stage_summary()
+    assert "prepare_images=0" in spec.stage_summary()
+    assert "start_otel=0" in script
+    assert "prepare_images=0" in script
+
+
+def test_pbs_env_stage_override_wins_over_experiment_stage_override(tmp_path: Path) -> None:
+    config = _write_nscc_vllm_experiment(
+        tmp_path,
+        stage_lines=["[stages]", "start_otel = false"],
+    )
+    resolved = load_resolved_experiment(config, root=ROOT)
+
+    spec = build_pbs_job_spec(
+        resolved,
+        env={"KIT_ROOT": str(ROOT), "USER": "alice", "AB_STAGE_START_OTEL": "1"},
+    )
+
+    assert spec.stages["start_otel"] is True
+    assert "start_otel=1" in spec.stage_summary()
+
+
 def test_litellm_pbs_spec_does_not_emit_upstream_secret(tmp_path: Path, monkeypatch) -> None:
     deployment = tmp_path / "pbs_cpu.toml"
     deployment.write_text(
@@ -144,7 +208,7 @@ def test_litellm_pbs_spec_does_not_emit_upstream_secret(tmp_path: Path, monkeypa
                 "[model]",
                 f'profile = "{ROOT / "profiles/models/gemini_3_5_flash.json"}"',
                 "[serving]",
-                f'profile = "{ROOT / "profiles/serving/litellm_gemini.toml"}"',
+                f'profile = "{ROOT / "profiles/serving/litellm/gemini_flash_3_5.yaml"}"',
                 "[deployment]",
                 f'profile = "{deployment}"',
             ]

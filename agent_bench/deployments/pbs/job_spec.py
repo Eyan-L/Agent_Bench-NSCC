@@ -10,19 +10,11 @@ import shlex
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
-from agent_bench.core.spec import ConfigError, ResolvedExperiment
+from agent_bench.core.spec import ConfigError, ResolvedExperiment, STAGE_NAMES
 from agent_bench.serving.launch_plan import LaunchPlanError, ServingLaunchPlan, build_launch_plan
 
 
-RUNTIME_STAGES = (
-    "prepare_environment",
-    "materialize_benchmark",
-    "prepare_images",
-    "start_serving",
-    "start_otel",
-    "run_benchmark",
-    "cleanup",
-)
+RUNTIME_STAGES = STAGE_NAMES
 
 _LEGACY_STAGE_ENV = {
     "materialize_benchmark": ("STAGE_SWEBENCH", "STAGE_TB_DATA"),
@@ -209,12 +201,15 @@ def _resolve_stages(resolved: ResolvedExperiment, env: Mapping[str, str]) -> dic
     deployment_stages = resolved.deployment.get("stages") or {}
     if not isinstance(deployment_stages, dict):
         raise ConfigError("deployment.stages must be a table/object when present")
+    experiment_stages = resolved.spec.stages
     stages = {stage: True for stage in RUNTIME_STAGES}
     if resolved.serving.get("backend") not in {"vllm", "sglang", "litellm"}:
         stages["start_serving"] = False
     for stage in RUNTIME_STAGES:
         if stage in deployment_stages:
             stages[stage] = bool(deployment_stages[stage])
+        if stage in experiment_stages:
+            stages[stage] = experiment_stages[stage]
         new_key = f"AB_STAGE_{stage.upper()}"
         if new_key in env:
             stages[stage] = _parse_bool(env[new_key])

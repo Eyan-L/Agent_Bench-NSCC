@@ -13,6 +13,15 @@ BENCHMARKS = {"swebench", "terminal_bench", "deepresearch_bench", "longbench"}
 HARNESSES = {"openclaw", "openhands", "hermes", "react", "ar"}
 SERVING_BACKENDS = {"vllm", "sglang", "litellm", "existing_endpoint", "openai_compatible"}
 DEPLOYMENTS = {"client_only", "local_docker", "nscc_pbs", "ccds_cloud"}
+STAGE_NAMES = (
+    "prepare_environment",
+    "materialize_benchmark",
+    "prepare_images",
+    "start_serving",
+    "start_otel",
+    "run_benchmark",
+    "cleanup",
+)
 
 
 class ConfigError(ValueError):
@@ -32,6 +41,7 @@ class ExperimentSpec:
     deployment_profile: Path
     output_dir: Path
     seeds: tuple[int, ...]
+    stages: dict[str, bool]
     limits: dict[str, Any]
     raw: dict[str, Any]
 
@@ -59,6 +69,7 @@ class ResolvedExperiment:
             "deployment": self.deployment,
             "output_dir": str(self.spec.output_dir),
             "seeds": list(self.spec.seeds),
+            "stages": dict(self.spec.stages),
             "limits": self.spec.limits,
             "profiles": {key: str(value) for key, value in self.profile_paths.items()},
         }
@@ -160,6 +171,7 @@ def _parse_experiment_spec(raw: dict[str, Any], *, config_path: Path, repo_root:
     limits = raw.get("limits", {})
     if not isinstance(limits, dict):
         raise ConfigError("limits must be a table when present")
+    stages = _parse_stages(raw.get("stages", {}))
 
     return ExperimentSpec(
         name=name,
@@ -173,6 +185,7 @@ def _parse_experiment_spec(raw: dict[str, Any], *, config_path: Path, repo_root:
         deployment_profile=_required_profile(config_path, repo_root, deployment, "deployment.profile"),
         output_dir=output_dir,
         seeds=seeds,
+        stages=stages,
         limits=limits,
         raw=raw,
     )
@@ -237,6 +250,8 @@ def _stable_run_id(resolved: ResolvedExperiment) -> str:
         "seeds": list(resolved.spec.seeds),
         "limits": resolved.spec.limits,
     }
+    if resolved.spec.stages:
+        payload["stages"] = resolved.spec.stages
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:12]
 
@@ -264,6 +279,25 @@ def _parse_seeds(value: Any) -> tuple[int, ...]:
             raise ConfigError("seeds must be a non-empty list of integers")
         seeds.append(item)
     return tuple(seeds)
+
+
+def _parse_stages(value: Any) -> dict[str, bool]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError("stages must be a table when present")
+    unknown = sorted(set(value) - set(STAGE_NAMES))
+    if unknown:
+        raise ConfigError(
+            f"stages contains unknown stage(s): {', '.join(unknown)}; "
+            f"expected one of {', '.join(STAGE_NAMES)}"
+        )
+    stages: dict[str, bool] = {}
+    for key, item in value.items():
+        if not isinstance(item, bool):
+            raise ConfigError(f"stages.{key} must be a boolean")
+        stages[key] = item
+    return stages
 
 
 def _required_profile(config_path: Path, repo_root: Path, section: dict[str, Any], label: str) -> Path:

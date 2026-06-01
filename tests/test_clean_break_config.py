@@ -19,6 +19,36 @@ from agent_bench.deployments import plan_deployment
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _write_client_only_experiment(tmp_path: Path, *, stage_lines: list[str]) -> Path:
+    config = tmp_path / "client_only_stages.toml"
+    config.write_text(
+        "\n".join(
+            [
+                'name = "client_only_stages"',
+                'output_dir = "runs/client_only_stages"',
+                "seeds = [42]",
+                *stage_lines,
+                "[benchmark]",
+                'name = "terminal_bench"',
+                f'profile = "{ROOT / "profiles/benchmarks/terminal_bench/kv_store.json"}"',
+                "[harness]",
+                'name = "openclaw"',
+                f'profile = "{ROOT / "profiles/harnesses/openclaw_terminal_bench.yaml"}"',
+                "[model]",
+                f'profile = "{ROOT / "profiles/models/qwen36_35b_a3b.json"}"',
+                "[serving]",
+                f'profile = "{ROOT / "profiles/serving/litellm/qwen36_35b_a3b.yaml"}"',
+                "[deployment]",
+                f'profile = "{ROOT / "profiles/deployments/client_only.toml"}"',
+                "[limits]",
+                "max_instances = 1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return config
+
+
 @pytest.mark.parametrize(
     ("experiment", "deployment", "backend", "deployment_profile"),
     [
@@ -136,6 +166,67 @@ def test_execution_plan_uses_canonical_stage_order(
     assert plan.stage_enabled("start_serving") is start_serving
     assert plan.stage_enabled("prepare_images") is prepare_images
     assert plan.stage_enabled("start_otel") is start_otel
+
+
+def test_otel_mode_off_does_not_disable_stage_in_plan() -> None:
+    resolved = load_resolved_experiment(ROOT / "experiments" / "client_only.toml", root=ROOT)
+
+    plan = build_execution_plan(
+        resolved,
+        env={"KIT_ROOT": str(ROOT), "OC_OTEL_MODE": "off"},
+    )
+
+    assert plan.stage_enabled("start_otel") is True
+
+
+def test_experiment_stage_override_disables_local_otel(tmp_path: Path) -> None:
+    config = _write_client_only_experiment(tmp_path, stage_lines=["[stages]", "start_otel = false"])
+
+    resolved = load_resolved_experiment(config, root=ROOT)
+    plan = build_execution_plan(resolved, env={"KIT_ROOT": str(ROOT)})
+
+    assert resolved.spec.stages == {"start_otel": False}
+    assert plan.stage_enabled("start_otel") is False
+
+
+def test_experiment_stage_override_enables_prepare_images(tmp_path: Path) -> None:
+    config = _write_client_only_experiment(tmp_path, stage_lines=["[stages]", "prepare_images = true"])
+
+    resolved = load_resolved_experiment(config, root=ROOT)
+    plan = build_execution_plan(resolved, env={"KIT_ROOT": str(ROOT)})
+
+    assert plan.stage_enabled("prepare_images") is True
+
+
+def test_env_stage_override_wins_over_experiment_stage_override(tmp_path: Path) -> None:
+    config = _write_client_only_experiment(tmp_path, stage_lines=["[stages]", "start_otel = false"])
+
+    resolved = load_resolved_experiment(config, root=ROOT)
+    plan = build_execution_plan(
+        resolved,
+        env={"KIT_ROOT": str(ROOT), "AB_STAGE_START_OTEL": "1"},
+    )
+
+    assert plan.stage_enabled("start_otel") is True
+
+
+@pytest.mark.parametrize(
+    ("stage_lines", "message"),
+    [
+        (["stages = []"], "stages must be a table"),
+        (["[stages]", "strat_otel = false"], "unknown stage"),
+        (["[stages]", 'start_otel = "false"'], "stages.start_otel must be a boolean"),
+    ],
+)
+def test_experiment_stages_reject_invalid_values(
+    tmp_path: Path,
+    stage_lines: list[str],
+    message: str,
+) -> None:
+    config = _write_client_only_experiment(tmp_path, stage_lines=stage_lines)
+
+    with pytest.raises(ConfigError, match=message):
+        load_resolved_experiment(config, root=ROOT)
 
 
 def test_prepare_environment_installs_missing_swebench_deps_in_active_env(tmp_path: Path, monkeypatch) -> None:
@@ -428,7 +519,7 @@ def test_swebench_instance_data_top_level_override_wins(tmp_path: Path, monkeypa
                 "[model]",
                 f'profile = "{ROOT / "profiles/models/gemini_3_5_flash.json"}"',
                 "[serving]",
-                f'profile = "{ROOT / "profiles/serving/litellm_gemini.toml"}"',
+                f'profile = "{ROOT / "profiles/serving/litellm/gemini_flash_3_5.yaml"}"',
                 "[deployment]",
                 f'profile = "{ROOT / "profiles/deployments/client_only.toml"}"',
             ]
