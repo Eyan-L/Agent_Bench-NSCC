@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from agent_bench.benchmarks.conditions.agent_otel import optional_int, write_spans_and_otlp
+from agent_bench.benchmarks.conditions.util_sampler import UtilSampler
 from agent_bench.core.profile_io import load_profile
 
 logger = logging.getLogger(__name__)
@@ -79,7 +81,7 @@ class HermesAgentCondition:
         if not container_id:
             return self._failure(run_dir, instance_id, "Hermes condition requires container_id")
 
-        message = _build_message(instance_data["problem_statement"])
+        message = self._build_message(instance_data)
         model_name = getattr(self.model_config, "name", None) or "Qwen/Qwen3.6-27B"
         provider = _resolve_provider(self.model_config)
         timeout = getattr(self.agent_config, "max_time_seconds", 1800)
@@ -94,33 +96,38 @@ class HermesAgentCondition:
         ]
         harness = env_info.get("_harness")
 
+        sampler_cm = UtilSampler(run_dir, gateway_pid=optional_int(env_info.get("bridge_pid")))
+        sampler_cm.__enter__()
         start_ns = time.time_ns()
         try:
-            if harness is not None and hasattr(harness, "exec_in_container"):
-                proc = harness.exec_in_container(
-                    container_id,
-                    argv,
-                    timeout=timeout + 120,
-                    env=env_info.get("agent_env"),
-                    workdir=workspace_root,
-                    check=False,
-                )
-            else:
-                proc = subprocess.run(
-                    ["docker", "exec", container_id, *argv],
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout + 120,
-                )
-            rc = proc.returncode
-            stdout = proc.stdout or ""
-            stderr = proc.stderr or ""
-        except subprocess.TimeoutExpired as e:
-            rc = -1
-            stdout = (e.stdout or b"").decode("utf-8", errors="replace") if e.stdout else ""
-            stderr = (e.stderr or b"").decode("utf-8", errors="replace") if e.stderr else ""
-            stderr += "\nHermes agent wall-clock timeout"
-        end_ns = time.time_ns()
+            try:
+                if harness is not None and hasattr(harness, "exec_in_container"):
+                    proc = harness.exec_in_container(
+                        container_id,
+                        argv,
+                        timeout=timeout + 120,
+                        env=env_info.get("agent_env"),
+                        workdir=workspace_root,
+                        check=False,
+                    )
+                else:
+                    proc = subprocess.run(
+                        ["docker", "exec", container_id, *argv],
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout + 120,
+                    )
+                rc = proc.returncode
+                stdout = proc.stdout or ""
+                stderr = proc.stderr or ""
+            except subprocess.TimeoutExpired as e:
+                rc = -1
+                stdout = (e.stdout or b"").decode("utf-8", errors="replace") if e.stdout else ""
+                stderr = (e.stderr or b"").decode("utf-8", errors="replace") if e.stderr else ""
+                stderr += "\nHermes agent wall-clock timeout"
+        finally:
+            end_ns = time.time_ns()
+            sampler_cm.__exit__(None, None, None)
 
         if stdout:
             (run_dir / "hermes_stdout.log").write_text(stdout[-20000:])
@@ -176,12 +183,7 @@ class HermesAgentCondition:
         step_path = run_dir / "steps.jsonl"
         step_path.write_text(json.dumps(step) + "\n")
 
-        patch_text = ""
-        if harness is not None:
-            try:
-                patch_text = harness.collect_patch(container_id, workspace_root)
-            except Exception as e:
-                logger.warning("collect_patch failed: %s", e)
+        patch_text = self._collect_artifacts(env_info, container_id, workspace_root)
         patch_path = run_dir / "candidate.patch"
         patch_path.write_text(patch_text)
 
@@ -193,6 +195,24 @@ class HermesAgentCondition:
             "telemetry_path": str(spans_path),
             "exit_code": rc,
         }
+
+    def _build_message(self, instance_data: Dict) -> str:
+        return _build_message(instance_data["problem_statement"])
+
+    def _collect_artifacts(
+        self,
+        env_info: Dict,
+        container_id: str,
+        workspace_root: str,
+    ) -> str:
+        harness = env_info.get("_harness")
+        if harness is None:
+            return ""
+        try:
+            return harness.collect_patch(container_id, workspace_root)
+        except Exception as e:
+            logger.warning("collect_patch failed: %s", e)
+            return ""
 
     def _failure(self, run_dir: Path, instance_id: str, msg: str) -> Dict:
         patch_path = run_dir / "candidate.patch"
@@ -239,73 +259,152 @@ class HermesAgentCondition:
             "agent.run_id": run_id,
             "service.name": "agent-bench-hermes",
         }
-        model_start_ns = int(usage.get("start_ns") or start_ns)
-        model_end_ns = int(usage.get("end_ns") or end_ns)
-        model_duration_ms = (
-            float(usage.get("duration_ms"))
-            if usage.get("duration_ms") is not None
-            else (model_end_ns - model_start_ns) / 1e6
+        usage_events = [e for e in events if e.get("type") == "model.usage"]
+        if usage_events:
+            spans: List[Dict[str, Any]] = [
+                self._model_usage_event_to_span(
+                    evt,
+                    run_id=run_id,
+                    session_id=session_id,
+                    fallback_start_ns=start_ns,
+                    fallback_end_ns=end_ns,
+                    model_name=model_name,
+                    provider=provider,
+                    resource=resource,
+                    request_index=idx,
+                )
+                for idx, evt in enumerate(usage_events, start=1)
+            ]
+        else:
+            model_start_ns = int(usage.get("start_ns") or start_ns)
+            model_end_ns = int(usage.get("end_ns") or end_ns)
+            model_duration_ms = (
+                float(usage.get("duration_ms"))
+                if usage.get("duration_ms") is not None
+                else (model_end_ns - model_start_ns) / 1e6
+            )
+            spans = [{
+                "name": "agent.model.usage",
+                "canonical_name": "agent.model.usage",
+                "start_unix_nano": model_start_ns,
+                "end_unix_nano": model_end_ns,
+                "start_iso": _ns_to_iso(model_start_ns),
+                "end_iso": _ns_to_iso(model_end_ns),
+                "duration_ms": model_duration_ms,
+                "attrs": {
+                    "agent.channel": "synth.agent_call",
+                    "agent.provider": usage.get("provider") or provider,
+                    "agent.model": usage.get("model") or model_name,
+                    "agent.run_id": run_id,
+                    "agent.session_id": session_id,
+                    "agent.llm.request_index": 1,
+                    "agent.tokens.input": usage["input_tokens"],
+                    "agent.tokens.output": usage["output_tokens"],
+                    "agent.tokens.cache_read": usage["cache_read_tokens"],
+                    "agent.tokens.cache_write": usage["cache_write_tokens"],
+                    "agent.tokens.total": usage["total_tokens"],
+                    "agent.api_calls": usage["api_calls"],
+                },
+                "resource": resource,
+                "synthesized": True,
+            }]
+        tool_events = [e for e in events if e.get("type") == "tool.call"]
+        if tool_events:
+            for evt in tool_events:
+                spans.append(self._tool_event_to_span(evt, run_id, session_id, resource))
+        else:
+            call_id = f"{session_id}:hermes-agent"
+            is_error = exit_code != 0
+            spans.append({
+                "name": "agent.tool.call",
+                "canonical_name": "agent.tool.call",
+                "start_unix_nano": start_ns,
+                "end_unix_nano": end_ns,
+                "start_iso": _ns_to_iso(start_ns),
+                "end_iso": _ns_to_iso(end_ns),
+                "duration_ms": duration_ms,
+                "attrs": {
+                    "agent.channel": "hermes.oneshot",
+                    "agent.tool.name": "hermes.agent",
+                    "agent.tool.call_id": call_id,
+                    "agent.tool.callId": call_id,
+                    "agent.tool.is_error": is_error,
+                    "agent.tool.isError": is_error,
+                    "agent.run_id": run_id,
+                    "agent.runId": run_id,
+                    "agent.session_id": session_id,
+                    "agent.sessionId": session_id,
+                    "agent.exit_code": exit_code,
+                    "agent.tool.synthetic_run": True,
+                },
+                "resource": resource,
+                "synthesized": True,
+            })
+        write_spans_and_otlp(
+            path,
+            spans,
+            scope_name="agent-bench-hermes",
+            resource_defaults=resource,
         )
-        model_span = {
+
+    def _model_usage_event_to_span(
+        self,
+        evt: Dict[str, Any],
+        *,
+        run_id: str,
+        session_id: str,
+        fallback_start_ns: int,
+        fallback_end_ns: int,
+        model_name: str,
+        provider: str,
+        resource: Dict[str, Any],
+        request_index: int,
+    ) -> Dict[str, Any]:
+        start_ns = self._as_int(evt.get("start_ns")) or fallback_start_ns
+        end_ns = self._as_int(evt.get("end_ns")) or fallback_end_ns
+        try:
+            duration_ms = float(evt.get("duration_ms"))
+        except (TypeError, ValueError):
+            duration_ms = max((end_ns - start_ns) / 1e6, 0.0)
+        input_tokens = self._as_int(evt.get("input_tokens") or evt.get("prompt_tokens"))
+        output_tokens = self._as_int(evt.get("output_tokens") or evt.get("completion_tokens"))
+        cache_read = self._as_int(evt.get("cache_read_tokens") or evt.get("cached_tokens"))
+        cache_write = self._as_int(evt.get("cache_write_tokens") or evt.get("cache_creation_tokens"))
+        total_tokens = self._as_int(evt.get("total_tokens")) or (input_tokens + output_tokens)
+        attrs = {
+            "agent.channel": evt.get("channel") or "hermes.events",
+            "agent.provider": evt.get("provider") or provider,
+            "agent.model": evt.get("model") or model_name,
+            "agent.api": evt.get("api"),
+            "agent.run_id": evt.get("run_id") or run_id,
+            "agent.runId": evt.get("runId") or evt.get("run_id") or run_id,
+            "agent.session_id": evt.get("session_id") or session_id,
+            "agent.sessionId": evt.get("sessionId") or evt.get("session_id") or session_id,
+            "agent.llm.request_index": request_index,
+            "agent.http.status_code": evt.get("http_status") or evt.get("httpStatus"),
+            "agent.tokens.input": input_tokens,
+            "agent.tokens.output": output_tokens,
+            "agent.tokens.cache_read": cache_read,
+            "agent.tokens.cache_write": cache_write,
+            "agent.tokens.total": total_tokens,
+            "agent.ttft_ms": evt.get("ttft_ms"),
+            "agent.tpot_ms": evt.get("tpot_ms") or evt.get("tbt_avg_ms"),
+            "agent.headers_ms": evt.get("headers_ms"),
+            "agent.chunks.count": evt.get("chunks_count"),
+            "agent.api_calls": self._as_int(evt.get("api_calls")),
+        }
+        return {
             "name": "agent.model.usage",
             "canonical_name": "agent.model.usage",
-            "start_unix_nano": model_start_ns,
-            "end_unix_nano": model_end_ns,
-            "start_iso": _ns_to_iso(model_start_ns),
-            "end_iso": _ns_to_iso(model_end_ns),
-            "duration_ms": model_duration_ms,
-            "attrs": {
-                "agent.channel": "hermes.oneshot",
-                "agent.provider": usage.get("provider") or provider,
-                "agent.model": usage.get("model") or model_name,
-                "agent.run_id": run_id,
-                "agent.session_id": session_id,
-                "agent.tokens.input": usage["input_tokens"],
-                "agent.tokens.output": usage["output_tokens"],
-                "agent.tokens.cache_read": usage["cache_read_tokens"],
-                "agent.tokens.cache_write": usage["cache_write_tokens"],
-                "agent.tokens.total": usage["total_tokens"],
-                "agent.api_calls": usage["api_calls"],
-            },
+            "start_unix_nano": start_ns,
+            "end_unix_nano": end_ns,
+            "start_iso": _ns_to_iso(start_ns),
+            "end_iso": _ns_to_iso(end_ns),
+            "duration_ms": duration_ms,
+            "attrs": attrs,
             "resource": resource,
-            "synthesized": not usage.get("from_events"),
+            "synthesized": False,
         }
-        with path.open("w") as fh:
-            fh.write(json.dumps(model_span) + "\n")
-            tool_events = [e for e in events if e.get("type") == "tool.call"]
-            if tool_events:
-                for evt in tool_events:
-                    span = self._tool_event_to_span(evt, run_id, session_id, resource)
-                    fh.write(json.dumps(span) + "\n")
-            else:
-                call_id = f"{session_id}:hermes-agent"
-                is_error = exit_code != 0
-                tool_span = {
-                    "name": "agent.tool.call",
-                    "canonical_name": "agent.tool.call",
-                    "start_unix_nano": start_ns,
-                    "end_unix_nano": end_ns,
-                    "start_iso": _ns_to_iso(start_ns),
-                    "end_iso": _ns_to_iso(end_ns),
-                    "duration_ms": duration_ms,
-                    "attrs": {
-                        "agent.channel": "hermes.oneshot",
-                        "agent.tool.name": "hermes.agent",
-                        "agent.tool.call_id": call_id,
-                        "agent.tool.callId": call_id,
-                        "agent.tool.is_error": is_error,
-                        "agent.tool.isError": is_error,
-                        "agent.run_id": run_id,
-                        "agent.runId": run_id,
-                        "agent.session_id": session_id,
-                        "agent.sessionId": session_id,
-                        "agent.exit_code": exit_code,
-                        "agent.tool.synthetic_run": True,
-                    },
-                    "resource": resource,
-                    "synthesized": True,
-                }
-                fh.write(json.dumps(tool_span) + "\n")
 
     @staticmethod
     def _as_int(value: Any) -> int:
@@ -457,3 +556,25 @@ class HermesAgentCondition:
                 shutil.copytree(src, dst)
             except OSError:
                 pass
+
+
+class TerminalBenchHermesCondition(HermesAgentCondition):
+    """Hermes agent driving a Terminal-Bench task container."""
+
+    def _build_message(self, instance_data: Dict) -> str:
+        return (
+            "Carry out this terminal task in the current container. Install "
+            "any required packages, write the required files, and start any "
+            "required services so the verifier passes. Before declaring DONE, "
+            "run `bash /tests/test.sh && cat /logs/verifier/reward.txt`; only "
+            "finish once the reward is 1.\n\n"
+            f"Task:\n{instance_data['instruction']}"
+        )
+
+    def _collect_artifacts(
+        self,
+        env_info: Dict,
+        container_id: str,
+        workspace_root: str,
+    ) -> str:
+        return "# terminal_bench: no patch - agent state in container\n"

@@ -188,20 +188,6 @@ class OpenClawAgentCondition:
         prompt_tokens, completion_tokens = self._parse_usage(payload)
         response_text = self._parse_text(payload)
 
-        # The OpenClaw OCSB patch is *supposed* to emit `openclaw.model.usage`
-        # spans via the gateway's diagnostic-events bus, but on this build the
-        # patch is silent for direct CLI→gateway agent calls. Synthesize an
-        # equivalent span from agentMeta.usage so downstream analysis sees a
-        # uniform shape regardless of which OpenClaw version produced the
-        # trajectory.
-        if spans_path is not None:
-            self._maybe_synthesize_model_usage_span(
-                spans_path, payload,
-                run_id=run_dir.name,
-                start_ns=step_start_ns,
-                end_ns=step_end_ns,
-            )
-
         # 3. Log the run as a single LLM_INFER step. We note the subtype so
         #    downstream analysis can flag that this step aggregates OpenClaw's
         #    internal multi-step trajectory into one row rather than exposing
@@ -253,7 +239,22 @@ class OpenClawAgentCondition:
         # (enabled via diagnostics.cacheTrace) lands under .openclaw/logs/.
         self._archive_session_artifacts(container_id, run_dir, run_dir.name)
 
-        # 3d. If the OC tool-call patches didn't fire (most builds), backfill
+        # 3d. Prefer per-request model usage spans from the raw response log.
+        # The older agentMeta.usage fallback is run-level aggregate data, so it
+        # is intentionally used only when the per-request log is unavailable.
+        if spans_path is not None:
+            raw_usage_spans = self._maybe_synthesize_model_usage_spans_from_raw_log(
+                spans_path, run_dir, run_dir.name,
+            )
+            if raw_usage_spans == 0:
+                self._maybe_synthesize_model_usage_span(
+                    spans_path, payload,
+                    run_id=run_dir.name,
+                    start_ns=step_start_ns,
+                    end_ns=step_end_ns,
+                )
+
+        # 3e. If the OC tool-call patches didn't fire (most builds), backfill
         # `openclaw.tool.call` spans from the archived session trajectory so
         # downstream analysis sees per-tool spans regardless.
         if spans_path is not None:
@@ -685,6 +686,151 @@ class OpenClawAgentCondition:
             fh.write(json.dumps(span, ensure_ascii=False) + "\n")
         logger.info("  synthesized model.usage span (input=%d output=%d)",
                     attrs["openclaw.tokens.input"], attrs["openclaw.tokens.output"])
+
+    @staticmethod
+    def _maybe_synthesize_model_usage_spans_from_raw_log(
+        spans_path: Path,
+        run_dir: Path,
+        run_id: str,
+    ) -> int:
+        """Backfill one ``openclaw.model.usage`` span per LLM HTTP request.
+
+        ``agentMeta.usage`` is an aggregate over the full agent run. The raw
+        pi-ai response log records one row per OpenAI-compatible request, with
+        request start time, latency, token usage, and streaming metrics. Prefer
+        those rows so ``spans.jsonl`` represents each model call separately.
+        """
+        raw_path = run_dir / "conversation" / "llm-raw-responses.jsonl"
+        if not raw_path.is_file():
+            return 0
+
+        try:
+            existing = [json.loads(l) for l in open(spans_path) if l.strip()]
+        except (OSError, json.JSONDecodeError):
+            existing = []
+        if any(
+            s.get("name") == "openclaw.model.usage"
+            and (s.get("attrs") or {}).get("openclaw.channel") == "synth.raw_response"
+            for s in existing
+        ):
+            return 0
+
+        from datetime import datetime, timezone
+
+        def _parse_start_ns(value) -> int:
+            if isinstance(value, (int, float)):
+                f = float(value)
+                if f > 1e15:
+                    return int(f)
+                return int(f * (1e6 if f > 1e12 else 1e9))
+            if isinstance(value, str):
+                try:
+                    return int(datetime.fromisoformat(
+                        value.replace("Z", "+00:00")
+                    ).timestamp() * 1e9)
+                except ValueError:
+                    return 0
+            return 0
+
+        def _as_int(value) -> int:
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        spans_out: List[Dict] = []
+        try:
+            lines = raw_path.read_text(errors="replace").splitlines()
+        except OSError as e:
+            logger.warning("raw model usage read failed: %s", e)
+            return 0
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            metrics = row.get("metrics") or {}
+            response = row.get("response") or {}
+            usage = response.get("usage") or {}
+            start_ns = _parse_start_ns(row.get("ts"))
+            try:
+                duration_ms = float(metrics.get("total_ms") or 0)
+            except (TypeError, ValueError):
+                duration_ms = 0.0
+            end_ns = start_ns + int(duration_ms * 1e6) if start_ns else 0
+            start_iso = (
+                datetime.fromtimestamp(start_ns / 1e9, tz=timezone.utc).isoformat()
+                if start_ns else None
+            )
+            end_iso = (
+                datetime.fromtimestamp(end_ns / 1e9, tz=timezone.utc).isoformat()
+                if end_ns else None
+            )
+
+            prompt_tokens = _as_int(metrics.get("prompt_tokens") or usage.get("prompt_tokens"))
+            completion_tokens = _as_int(
+                metrics.get("completion_tokens") or usage.get("completion_tokens")
+            )
+            cached_tokens = _as_int(metrics.get("cached_tokens"))
+            if not cached_tokens:
+                details = usage.get("prompt_tokens_details") or {}
+                cached_tokens = _as_int(details.get("cached_tokens"))
+            total_tokens = _as_int(metrics.get("total_tokens") or usage.get("total_tokens"))
+            if total_tokens == 0:
+                total_tokens = prompt_tokens + completion_tokens
+
+            attrs = {
+                "openclaw.channel": "synth.raw_response",
+                "openclaw.provider": row.get("provider") or "unknown",
+                "openclaw.model": row.get("model") or response.get("model") or "unknown",
+                "openclaw.api": row.get("api") or "unknown",
+                "openclaw.sessionId": row.get("sessionId") or "",
+                "openclaw.runId": row.get("runId") or run_id,
+                "openclaw.llm.request_index": len(spans_out) + 1,
+                "openclaw.http.status_code": row.get("httpStatus"),
+                "openclaw.tokens.input": prompt_tokens,
+                "openclaw.tokens.output": completion_tokens,
+                "openclaw.tokens.cache_read": cached_tokens,
+                "openclaw.tokens.cache_write": 0,
+                "openclaw.tokens.total": total_tokens,
+                "openclaw.ttft_ms": metrics.get("ttft_ms"),
+                "openclaw.tpot_ms": metrics.get("tbt_avg_ms"),
+                "openclaw.headers_ms": metrics.get("headers_ms"),
+                "openclaw.chunks.count": metrics.get("chunks_count"),
+            }
+            spans_out.append({
+                "name": "openclaw.model.usage",
+                "start_unix_nano": start_ns,
+                "end_unix_nano": end_ns,
+                "start_iso": start_iso,
+                "end_iso": end_iso,
+                "duration_ms": duration_ms,
+                "attrs": attrs,
+                "resource": {
+                    "oc.run_id": run_id,
+                    "service.name": "agent-bench-openclaw",
+                },
+                "synthesized": True,
+            })
+
+        if not spans_out:
+            return 0
+
+        try:
+            with open(spans_path, "a") as fh:
+                for s in spans_out:
+                    fh.write(json.dumps(s, ensure_ascii=False) + "\n")
+        except OSError as e:
+            logger.warning("raw model usage span write failed: %s", e)
+            return 0
+
+        logger.info("  synthesized %d per-request model.usage span(s)", len(spans_out))
+        return len(spans_out)
 
     # ------------------------------------------------------------------
     # Synthetic openclaw.tool.call spans (replay session trajectory)

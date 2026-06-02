@@ -1,0 +1,17 @@
+# OpenHands Terminal-Bench harness. Agent workspace is /app; tool calls are
+# routed through Agent_Bench's exec bridge into the Terminal-Bench task container.
+harness: openhands
+openhands:
+  agent:
+    name: CodeActAgent
+  run:
+    runtime: process
+    max_iterations: 100
+conditions:
+- condition_id: openhands_agent
+  condition_type: openhands_agent
+  description: OpenHands SDK agent driving a Terminal-Bench task container
+  agent:
+    max_steps: 200
+    max_time_seconds: 1500
+    retry_limit: 5

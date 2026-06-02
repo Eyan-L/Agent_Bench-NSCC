@@ -52,6 +52,9 @@ def test_hermes_app_uses_external_task_container_and_bridge():
     assert "AB_AGENT_RUNTIME_EVENTS_FILE" in app
     assert 'f"{_STATE_DIR_IN_HERMES}/events.jsonl"' in app
     assert "MINIMAX_API_KEY" in app
+    assert "otel_env(" in app
+    assert 'service_name="agent-bench-hermes"' in app
+    assert 'extra_attrs={"hm.run_id": run_id}' in app
     assert "/var/run/docker.sock" not in app
 
 
@@ -88,6 +91,8 @@ def test_hermes_condition_writes_agent_namespace_spans(tmp_path):
     )
 
     spans = [json.loads(line) for line in spans_path.read_text().splitlines()]
+    raw = json.loads((tmp_path / "spans_raw.jsonl").read_text())
+    assert raw["resourceSpans"]
     assert [span["canonical_name"] for span in spans] == [
         "agent.model.usage",
         "agent.tool.call",
@@ -97,6 +102,8 @@ def test_hermes_condition_writes_agent_namespace_spans(tmp_path):
     assert model_attrs["agent.provider"] == "minimax"
     assert model_attrs["agent.model"] == "MiniMax-M2.7"
     assert model_attrs["agent.tokens.total"] == 0
+    assert model_attrs["agent.channel"] == "synth.agent_call"
+    assert model_attrs["agent.llm.request_index"] == 1
 
     tool_attrs = spans[1]["attrs"]
     assert tool_attrs["agent.tool.name"] == "hermes.agent"
@@ -155,6 +162,8 @@ def test_hermes_condition_turns_agent_events_into_usage_and_tool_spans(tmp_path)
     )
 
     spans = [json.loads(line) for line in spans_path.read_text().splitlines()]
+    raw = json.loads((tmp_path / "spans_raw.jsonl").read_text())
+    assert raw["resourceSpans"]
     assert [span["canonical_name"] for span in spans] == [
         "agent.model.usage",
         "agent.tool.call",
@@ -166,6 +175,8 @@ def test_hermes_condition_turns_agent_events_into_usage_and_tool_spans(tmp_path)
     assert spans[0]["attrs"]["agent.tokens.cache_read"] == 3
     assert spans[0]["attrs"]["agent.tokens.cache_write"] == 2
     assert spans[0]["attrs"]["agent.tokens.total"] == 23
+    assert spans[0]["attrs"]["agent.channel"] == "hermes.events"
+    assert spans[0]["attrs"]["agent.llm.request_index"] == 1
     assert spans[1]["attrs"]["agent.tool.name"] == "terminal"
     assert spans[1]["attrs"]["agent.tool.call_id"] == "call-1"
     assert spans[1]["attrs"]["agent.tool.result_chars"] == 42
@@ -198,7 +209,7 @@ def test_hermes_config_template_selects_docker_backend():
     template = (ROOT / "agent_bench/harnesses/hermes/state/config.yaml.template").read_text()
     assert 'backend: "docker"' in template
     assert 'provider: "$PROVIDER"' in template
-    assert 'cwd: "/testbed"' in template
+    assert 'cwd: "$TERMINAL_CWD"' in template
     assert "docker_image" in template
     assert "terminal" in template
     assert "platform_toolsets" in template

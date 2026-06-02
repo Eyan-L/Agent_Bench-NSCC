@@ -10,7 +10,7 @@ model:
 
 terminal:
   backend: "docker"
-  cwd: "/testbed"
+  cwd: "$TERMINAL_CWD"
   timeout: $TERMINAL_TIMEOUT
   docker_image: "$SANDBOX_IMAGE"
 

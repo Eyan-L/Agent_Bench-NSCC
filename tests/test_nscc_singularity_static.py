@@ -173,7 +173,9 @@ def test_hermes_singularity_exec_runs_from_workspace():
     app = (ROOT / "agent_bench/benchmarks/swebench/hermes/app.py").read_text()
     condition = (ROOT / "agent_bench/benchmarks/swebench/conditions/hermes_agent.py").read_text()
 
-    assert '"OTEL_RESOURCE_ATTRIBUTES": f"agent.run_id={run_id}"' in app
+    assert "otel_env(" in app
+    assert 'service_name="agent-bench-hermes"' in app
+    assert 'extra_attrs={"hm.run_id": run_id}' in app
     assert "workdir: Optional[str] = None" in app
     assert "workdir=workspace_root" in condition
 

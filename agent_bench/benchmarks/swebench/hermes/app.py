@@ -46,6 +46,7 @@ from agent_bench.deployments.containers import (
     DockerContainer,
     Mount,
 )
+from agent_bench.benchmarks.conditions.agent_otel import otel_env, otel_endpoint_for_container
 from agent_bench.harnesses.hermes.dispatcher import HermesDispatcher
 from agent_bench.core.config import endpoint_for_container, load_active_model_and_serving
 from agent_bench.core.profile_io import load_profile
@@ -224,7 +225,12 @@ class SWEBenchHermesHarness:
             "TERMINAL_ENV": "docker",
             "TERMINAL_CWD": _TASK_WORKSPACE,
             "TERMINAL_DOCKER_IMAGE": container_image,
-            "OTEL_RESOURCE_ATTRIBUTES": f"agent.run_id={run_id}",
+            **otel_env(
+                service_name="agent-bench-hermes",
+                run_id=run_id,
+                endpoint=otel_endpoint_for_container(self.container.host_address),
+                extra_attrs={"hm.run_id": run_id},
+            ),
             **b_env,
         }
         hm_spec = ContainerSpec(
@@ -295,7 +301,7 @@ class SWEBenchHermesHarness:
         model_cfg, _serving_cfg = load_active_model_and_serving(repo_root=repo_root)
 
         template_path = (
-            Path(repo_root) / "harnesses" / "hermes" / "state" / "config.yaml.template"
+            Path(repo_root) / "agent_bench" / "harnesses" / "hermes" / "state" / "config.yaml.template"
         )
         if not template_path.is_file():
             raise FileNotFoundError(f"hermes config.yaml.template missing at {template_path}")
@@ -310,6 +316,7 @@ class SWEBenchHermesHarness:
             "CONTEXT_LENGTH": str(model_cfg.context_window),
             "MAX_TURNS": str((hm_cfg.get("run") or {}).get("max_turns") or 90),
             "TERMINAL_TIMEOUT": str((hm_cfg.get("run") or {}).get("terminal_timeout") or 180),
+            "TERMINAL_CWD": _TASK_WORKSPACE,
             "SANDBOX_IMAGE": sandbox_image,
         }
         rendered = string.Template(template_path.read_text()).safe_substitute(values)

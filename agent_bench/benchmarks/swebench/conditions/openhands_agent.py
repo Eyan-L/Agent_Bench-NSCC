@@ -33,6 +33,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent_bench.benchmarks.conditions.agent_otel import optional_int, write_spans_and_otlp
+from agent_bench.benchmarks.conditions.util_sampler import UtilSampler
 from agent_bench.deployments.containers.base import Container, ContainerHandle
 
 logger = logging.getLogger(__name__)
@@ -51,7 +53,10 @@ def _iso_to_unix_ns(t: Any) -> int:
     if t is None:
         return 0
     if isinstance(t, (int, float)):
-        return int(float(t) * 1e6) if float(t) > 1e12 else int(float(t) * 1e9)
+        f = float(t)
+        if f > 1e15:
+            return int(f)
+        return int(f * (1e6 if f > 1e12 else 1e9))
     if isinstance(t, str):
         try:
             iso = t.replace("Z", "+00:00")
@@ -59,6 +64,13 @@ def _iso_to_unix_ns(t: Any) -> int:
         except ValueError:
             return 0
     return 0
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _ns_to_iso(ns: int) -> Optional[str]:
@@ -99,7 +111,7 @@ class OpenHandsAgentCondition:
             return self._failure(run_dir, instance_id,
                                  "env_info missing runtime config and events paths")
 
-        message = _build_message(instance_data["problem_statement"])
+        message = self._build_message(instance_data)
         inner = (
             f"python /opt/openhands_driver.py "
             f"--config {shlex.quote(config_path_in)} "
@@ -108,40 +120,48 @@ class OpenHandsAgentCondition:
             f"--workspace {shlex.quote(workspace_root)}"
         )
         timeout = getattr(self.agent_config, "max_time_seconds", 1800)
+        sampler_cm = UtilSampler(run_dir, gateway_pid=optional_int(env_info.get("bridge_pid")))
+        sampler_cm.__enter__()
         step_start_ns = time.time_ns()
         try:
-            if self.container is not None:
-                handle = ContainerHandle(
-                    id=container_id, name=container_id,
-                    backend=self.container.backend_id,
-                )
-                proc = self.container.exec(
-                    handle, ["bash", "-lc", inner],
-                    check=False, timeout=timeout + 120,
-                )
-            else:
-                # Legacy fallback when no container injected.
-                argv = ["docker", "exec", container_id, "bash", "-lc", inner]
-                proc = subprocess.run(
-                    argv, capture_output=True, text=True, timeout=timeout + 120,
-                )
-            rc = proc.returncode
-            stdout_tail = (proc.stdout or "")[-2000:]
-            stderr_tail = (proc.stderr or "")[-2000:]
-        except subprocess.TimeoutExpired as e:
-            rc = -1
-            stdout_tail = (e.stdout or b"").decode("utf-8", errors="replace")[-2000:] if e.stdout else ""
-            stderr_tail = (e.stderr or b"").decode("utf-8", errors="replace")[-2000:] if e.stderr else ""
-        step_end_ns = time.time_ns()
+            try:
+                if self.container is not None:
+                    handle = ContainerHandle(
+                        id=container_id, name=container_id,
+                        backend=self.container.backend_id,
+                    )
+                    proc = self.container.exec(
+                        handle, ["bash", "-lc", inner],
+                        check=False, timeout=timeout + 120,
+                    )
+                else:
+                    # Legacy fallback when no container injected.
+                    argv = ["docker", "exec", container_id, "bash", "-lc", inner]
+                    proc = subprocess.run(
+                        argv, capture_output=True, text=True, timeout=timeout + 120,
+                    )
+                rc = proc.returncode
+                stdout_tail = (proc.stdout or "")[-2000:]
+                stderr_tail = (proc.stderr or "")[-2000:]
+            except subprocess.TimeoutExpired as e:
+                rc = -1
+                stdout_tail = (e.stdout or b"").decode("utf-8", errors="replace")[-2000:] if e.stdout else ""
+                stderr_tail = (e.stderr or b"").decode("utf-8", errors="replace")[-2000:] if e.stderr else ""
+        finally:
+            step_end_ns = time.time_ns()
+            sampler_cm.__exit__(None, None, None)
 
         # 2. Parse events.jsonl + build spans.
         events = self._load_events(Path(events_path_host))
         run_id = run_dir.name
         spans = self._build_spans(events, run_id, step_start_ns, step_end_ns)
         spans_path = run_dir / "spans.jsonl"
-        with spans_path.open("w") as fh:
-            for s in spans:
-                fh.write(json.dumps(s, ensure_ascii=False) + "\n")
+        write_spans_and_otlp(
+            spans_path,
+            spans,
+            scope_name="agent-bench-openhands",
+            resource_defaults=self._resource_attrs(run_id, instance_id),
+        )
         logger.info("  wrote %d span(s) -> %s", len(spans), spans_path.name)
 
         prompt_tokens, completion_tokens = self._aggregate_tokens(events)
@@ -188,14 +208,9 @@ class OpenHandsAgentCondition:
             except OSError:
                 pass
 
-        # 4. Patch — harness collects it via git diff in the workspace.
-        harness = env_info.get("_harness")
-        patch_text = ""
-        if harness is not None:
-            try:
-                patch_text = harness.collect_patch(container_id, workspace_root)
-            except Exception as e:
-                logger.warning("collect_patch failed: %s", e)
+        # 4. Benchmark-specific artifact: SWE-bench writes a git patch;
+        # Terminal-Bench records a marker because work lives in the task container.
+        patch_text = self._collect_artifacts(env_info, container_id, workspace_root)
         patch_path = run_dir / "candidate.patch"
         patch_path.write_text(patch_text)
 
@@ -206,6 +221,36 @@ class OpenHandsAgentCondition:
             "total_completion_tokens": completion_tokens,
             "telemetry_path": str(spans_path),
         }
+
+    def _build_message(self, instance_data: Dict) -> str:
+        return _build_message(instance_data["problem_statement"])
+
+    def _collect_artifacts(
+        self,
+        env_info: Dict,
+        container_id: str,
+        workspace_root: str,
+    ) -> str:
+        harness = env_info.get("_harness")
+        if harness is None:
+            return ""
+        try:
+            return harness.collect_patch(container_id, workspace_root)
+        except Exception as e:
+            logger.warning("collect_patch failed: %s", e)
+            return ""
+
+    @staticmethod
+    def _resource_attrs(run_id: str, instance_id: str | None = None) -> Dict[str, Any]:
+        resource: Dict[str, Any] = {
+            "oc.run_id": run_id,
+            "oh.run_id": run_id,
+            "agent.run_id": run_id,
+            "service.name": "agent-bench-openhands",
+        }
+        if instance_id:
+            resource["instance_id"] = instance_id
+        return resource
 
     # ------------------------------------------------------------------
     # Event parsing + span synthesis
@@ -251,37 +296,44 @@ class OpenHandsAgentCondition:
         self, events: List[Dict], run_id: str,
         fallback_start_ns: int, fallback_end_ns: int,
     ) -> List[Dict]:
-        m = self._extract_summary_metrics(events)
-        prompt = int(m.get("prompt_tokens") or 0)
-        completion = int(m.get("completion_tokens") or 0)
-        cache_read = int(m.get("cache_read_tokens") or 0)
-        cache_write = int(m.get("cache_creation_tokens") or 0)
-        total = int(m.get("total_tokens") or 0) or (prompt + completion)
-
-        spans: List[Dict] = [{
-            "name": "agent.model.usage",
-            "canonical_name": "agent.model.usage",
-            "start_unix_nano": fallback_start_ns,
-            "end_unix_nano": fallback_end_ns,
-            "start_iso": _ns_to_iso(fallback_start_ns),
-            "end_iso": _ns_to_iso(fallback_end_ns),
-            "duration_ms": (fallback_end_ns - fallback_start_ns) / 1e6,
-            "attrs": {
-                "agent.channel": "openhands.driver",
-                "agent.provider": "openhands",
-                "agent.model": self.model_config.name,
-                "agent.tokens.input": prompt,
-                "agent.tokens.output": completion,
-                "agent.tokens.cache_read": cache_read,
-                "agent.tokens.cache_write": cache_write,
-                "agent.tokens.total": total,
-            },
-            "resource": {
-                "oc.run_id": run_id,
-                "service.name": "agent-bench-openhands",
-            },
-            "synthesized": True,
-        }]
+        usage_events = self._model_usage_events(events)
+        if usage_events:
+            spans: List[Dict] = [
+                self._model_usage_event_to_span(
+                    evt, run_id, fallback_start_ns, fallback_end_ns, idx,
+                )
+                for idx, evt in enumerate(usage_events, start=1)
+            ]
+        else:
+            m = self._extract_summary_metrics(events)
+            prompt = _as_int(m.get("prompt_tokens"))
+            completion = _as_int(m.get("completion_tokens"))
+            cache_read = _as_int(m.get("cache_read_tokens"))
+            cache_write = _as_int(m.get("cache_creation_tokens"))
+            total = _as_int(m.get("total_tokens")) or (prompt + completion)
+            spans = [{
+                "name": "agent.model.usage",
+                "canonical_name": "agent.model.usage",
+                "start_unix_nano": fallback_start_ns,
+                "end_unix_nano": fallback_end_ns,
+                "start_iso": _ns_to_iso(fallback_start_ns),
+                "end_iso": _ns_to_iso(fallback_end_ns),
+                "duration_ms": (fallback_end_ns - fallback_start_ns) / 1e6,
+                "attrs": {
+                    "agent.channel": "synth.agent_call",
+                    "agent.provider": "openhands",
+                    "agent.model": self.model_config.name,
+                    "agent.run_id": run_id,
+                    "agent.llm.request_index": 1,
+                    "agent.tokens.input": prompt,
+                    "agent.tokens.output": completion,
+                    "agent.tokens.cache_read": cache_read,
+                    "agent.tokens.cache_write": cache_write,
+                    "agent.tokens.total": total,
+                },
+                "resource": self._resource_attrs(run_id),
+                "synthesized": True,
+            }]
 
         # Tool-call pairs by tool_call_id.
         pending: Dict[str, Dict] = {}
@@ -320,13 +372,81 @@ class OpenHandsAgentCondition:
                         "agent.tool.is_error": is_error,
                         "agent.run_id": run_id,
                     },
-                    "resource": {
-                        "oc.run_id": run_id,
-                        "service.name": "agent-bench-openhands",
-                    },
+                    "resource": self._resource_attrs(run_id),
                     "synthesized": True,
                 })
         return spans
+
+    @staticmethod
+    def _model_usage_events(events: List[Dict]) -> List[Dict]:
+        out: List[Dict] = []
+        for evt in events:
+            if not isinstance(evt, dict):
+                continue
+            if evt.get("type") == "model.usage" or evt.get("driver_event") == "model_usage":
+                out.append(evt)
+        return out
+
+    def _model_usage_event_to_span(
+        self,
+        evt: Dict,
+        run_id: str,
+        fallback_start_ns: int,
+        fallback_end_ns: int,
+        request_index: int,
+    ) -> Dict:
+        start_ns = (
+            _as_int(evt.get("start_ns"))
+            or _iso_to_unix_ns(evt.get("start_ts"))
+            or _iso_to_unix_ns(evt.get("timestamp"))
+            or _iso_to_unix_ns(evt.get("ts"))
+            or fallback_start_ns
+        )
+        end_ns = (
+            _as_int(evt.get("end_ns"))
+            or _iso_to_unix_ns(evt.get("end_ts"))
+            or fallback_end_ns
+        )
+        try:
+            duration_ms = float(evt.get("duration_ms"))
+        except (TypeError, ValueError):
+            duration_ms = max((end_ns - start_ns) / 1e6, 0.0)
+        prompt = _as_int(evt.get("input_tokens") or evt.get("prompt_tokens"))
+        completion = _as_int(evt.get("output_tokens") or evt.get("completion_tokens"))
+        cache_read = _as_int(evt.get("cache_read_tokens") or evt.get("cached_tokens"))
+        cache_write = _as_int(evt.get("cache_write_tokens") or evt.get("cache_creation_tokens"))
+        total = _as_int(evt.get("total_tokens")) or (prompt + completion)
+        attrs = {
+            "agent.channel": evt.get("channel") or "openhands.events",
+            "agent.provider": evt.get("provider") or "openhands",
+            "agent.model": evt.get("model") or self.model_config.name,
+            "agent.api": evt.get("api"),
+            "agent.session_id": evt.get("session_id") or evt.get("sessionId") or run_id,
+            "agent.run_id": evt.get("run_id") or evt.get("runId") or run_id,
+            "agent.llm.request_index": request_index,
+            "agent.http.status_code": evt.get("http_status") or evt.get("httpStatus"),
+            "agent.tokens.input": prompt,
+            "agent.tokens.output": completion,
+            "agent.tokens.cache_read": cache_read,
+            "agent.tokens.cache_write": cache_write,
+            "agent.tokens.total": total,
+            "agent.ttft_ms": evt.get("ttft_ms"),
+            "agent.tpot_ms": evt.get("tpot_ms") or evt.get("tbt_avg_ms"),
+            "agent.headers_ms": evt.get("headers_ms"),
+            "agent.chunks.count": evt.get("chunks_count"),
+        }
+        return {
+            "name": "agent.model.usage",
+            "canonical_name": "agent.model.usage",
+            "start_unix_nano": start_ns,
+            "end_unix_nano": end_ns,
+            "start_iso": _ns_to_iso(start_ns),
+            "end_iso": _ns_to_iso(end_ns),
+            "duration_ms": duration_ms,
+            "attrs": attrs,
+            "resource": self._resource_attrs(run_id),
+            "synthesized": False,
+        }
 
     # ------------------------------------------------------------------
 
@@ -353,3 +473,25 @@ class OpenHandsAgentCondition:
             "total_completion_tokens": 0,
             "telemetry_path": None,
         }
+
+
+class TerminalBenchOpenHandsCondition(OpenHandsAgentCondition):
+    """OpenHands agent driving a Terminal-Bench task container."""
+
+    def _build_message(self, instance_data: Dict) -> str:
+        return (
+            "Carry out this terminal task in the current container. Install "
+            "any required packages, write the required files, and start any "
+            "required services so the verifier passes. Before stopping, run "
+            "`bash /tests/test.sh && cat /logs/verifier/reward.txt`; only stop "
+            "once the reward is 1.\n\n"
+            f"Task:\n{instance_data['instruction']}"
+        )
+
+    def _collect_artifacts(
+        self,
+        env_info: Dict,
+        container_id: str,
+        workspace_root: str,
+    ) -> str:
+        return "# terminal_bench: no patch - agent state in container\n"

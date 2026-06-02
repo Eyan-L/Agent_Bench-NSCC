@@ -62,6 +62,7 @@ from agent_bench.deployments.containers import (
     DockerContainer,
     Mount,
 )
+from agent_bench.benchmarks.conditions.agent_otel import otel_env, otel_endpoint_for_container
 from agent_bench.harnesses.openhands.dispatcher import OpenHandsDispatcher
 from agent_bench.core.config import endpoint_for_container, load_active_model_and_serving
 from agent_bench.core.profile_io import load_profile
@@ -242,7 +243,12 @@ class SWEBenchOpenHandsHarness:
         oh_mounts.extend(b_mounts)
         oh_env = {
             "OPENHANDS_RUN_ID": run_id,
-            "OTEL_RESOURCE_ATTRIBUTES": f"oh.run_id={run_id}",
+            **otel_env(
+                service_name="agent-bench-openhands",
+                run_id=run_id,
+                endpoint=otel_endpoint_for_container(self.container.host_address),
+                extra_attrs={"oh.run_id": run_id},
+            ),
             **b_env,
         }
         oh_spec = ContainerSpec(
@@ -347,7 +353,7 @@ class SWEBenchOpenHandsHarness:
         model_cfg, _serving_cfg = load_active_model_and_serving(repo_root=repo_root)
 
         template_path = (
-            Path(repo_root) / "harnesses" / "openhands" / "state" / "config.toml.template"
+            Path(repo_root) / "agent_bench" / "harnesses" / "openhands" / "state" / "config.toml.template"
         )
         if not template_path.is_file():
             raise FileNotFoundError(

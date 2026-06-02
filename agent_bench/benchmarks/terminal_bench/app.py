@@ -427,6 +427,7 @@ class TerminalBenchDockerHarness:
             "-e", f"OPENCLAW_GATEWAY_TOKEN={gateway_token}",
             "-e", f"OPENCLAW_GATEWAY_OTEL_ENDPOINT={os.environ.get('AB_TELEMETRY_ENDPOINT', 'http://vllm-host:4318')}",
             "-e", f"OPENCLAW_RUN_ID={run_id}",
+            "-e", "OPENCLAW_RAW_RESPONSE_LOG=/root/.openclaw/logs/llm-raw-responses.jsonl",
             "-e", f"OTEL_RESOURCE_ATTRIBUTES=oc.run_id={run_id}",
             "-e", "DOCKER_API_VERSION=1.44",
             *bridge_args,

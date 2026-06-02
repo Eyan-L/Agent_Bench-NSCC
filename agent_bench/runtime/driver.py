@@ -180,12 +180,16 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             )
 
         elif condition_type == "openhands_agent":
-            # OpenHands is SWE-bench-only in this branch (no TB port yet); the
-            # condition file lives next to the openclaw one under the app dir.
-            from agent_bench.benchmarks.swebench.conditions.openhands_agent import (
-                OpenHandsAgentCondition,
-            )
-            condition = OpenHandsAgentCondition(
+            benchmark = instance_data.get("benchmark", "swebench")
+            if benchmark == "terminal_bench":
+                from agent_bench.benchmarks.swebench.conditions.openhands_agent import (
+                    TerminalBenchOpenHandsCondition as _Cls,
+                )
+            else:
+                from agent_bench.benchmarks.swebench.conditions.openhands_agent import (
+                    OpenHandsAgentCondition as _Cls,
+                )
+            condition = _Cls(
                 model_config=run_config.condition.model,
                 agent_config=run_config.condition.agent,
                 container=getattr(harness, "container", None),
@@ -198,10 +202,16 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             )
 
         elif condition_type == "hermes_agent":
-            from agent_bench.benchmarks.swebench.conditions.hermes_agent import (
-                HermesAgentCondition,
-            )
-            condition = HermesAgentCondition(
+            benchmark = instance_data.get("benchmark", "swebench")
+            if benchmark == "terminal_bench":
+                from agent_bench.benchmarks.swebench.conditions.hermes_agent import (
+                    TerminalBenchHermesCondition as _Cls,
+                )
+            else:
+                from agent_bench.benchmarks.swebench.conditions.hermes_agent import (
+                    HermesAgentCondition as _Cls,
+                )
+            condition = _Cls(
                 model_config=run_config.condition.model,
                 agent_config=run_config.condition.agent,
             )
@@ -463,35 +473,56 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
         lb_harness = LongBenchHarness(benchmark_data_root)
 
     # Lazy-build the TB harness only if any instance in this sweep is TB.
-    # Same AB_DEPLOYMENT_CONTAINER_BACKEND env var as SWE-bench:
-    #   docker      (default) — TerminalBenchDockerHarness
-    #                            (OC container + task container + bridge)
-    #   singularity            — TerminalBenchSingularityHarness (HPC fallback)
+    # Harness choice now applies to Terminal-Bench too:
+    #   openclaw  -> TerminalBenchDockerHarness / TerminalBenchSingularityHarness
+    #   openhands -> TerminalBenchOpenHandsHarness (docker)
+    #   hermes    -> TerminalBenchHermesHarness (docker)
     tb_harness = None
     if needs_tb:
-        from agent_bench.benchmarks.terminal_bench.app import (
-            TerminalBenchDockerHarness,
-            TerminalBenchSingularityHarness,
-        )
         tb_backend = os.environ.get("AB_DEPLOYMENT_CONTAINER_BACKEND", "docker").lower()
-        if tb_backend == "docker":
-            tb_cls = TerminalBenchDockerHarness
-        elif tb_backend == "singularity":
-            tb_cls = TerminalBenchSingularityHarness
-        else:
-            raise ValueError(
-                f"Unknown AB_DEPLOYMENT_CONTAINER_BACKEND={tb_backend!r} for terminal_bench; "
-                "expected docker|singularity."
+        if harness_choice == "openhands":
+            if tb_backend != "docker":
+                raise ValueError(
+                    "terminal_bench + openhands currently requires "
+                    "AB_DEPLOYMENT_CONTAINER_BACKEND=docker"
+                )
+            from agent_bench.benchmarks.terminal_bench.openhands.app import (
+                TerminalBenchOpenHandsHarness as tb_cls,
             )
+            tb_harness = tb_cls(benchmark_data_root, container=DockerContainer())
+        elif harness_choice == "hermes":
+            if tb_backend != "docker":
+                raise ValueError(
+                    "terminal_bench + hermes currently requires "
+                    "AB_DEPLOYMENT_CONTAINER_BACKEND=docker"
+                )
+            from agent_bench.benchmarks.terminal_bench.hermes.app import (
+                TerminalBenchHermesHarness as tb_cls,
+            )
+            tb_harness = tb_cls(benchmark_data_root, container=DockerContainer())
+        else:
+            from agent_bench.benchmarks.terminal_bench.app import (
+                TerminalBenchDockerHarness,
+                TerminalBenchSingularityHarness,
+            )
+            if tb_backend == "docker":
+                tb_cls = TerminalBenchDockerHarness
+            elif tb_backend == "singularity":
+                tb_cls = TerminalBenchSingularityHarness
+            else:
+                raise ValueError(
+                    f"Unknown AB_DEPLOYMENT_CONTAINER_BACKEND={tb_backend!r} for terminal_bench; "
+                    "expected docker|singularity."
+                )
+            tb_harness = tb_cls(benchmark_data_root)
         if harness is not None:
             logger.info(
                 "Sweep contains terminal-bench instances; constructing "
                 "%s alongside %s.",
-                tb_cls.__name__, type(harness).__name__,
+                type(tb_harness).__name__, type(harness).__name__,
             )
         else:
-            logger.info("Constructing %s.", tb_cls.__name__)
-        tb_harness = tb_cls(benchmark_data_root)
+            logger.info("Constructing %s.", type(tb_harness).__name__)
 
     completed = 0
     failed = 0
