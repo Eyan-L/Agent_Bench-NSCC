@@ -99,7 +99,7 @@ def _oc_sandbox_name(prefix: str, scope_key: str) -> str:
 # Image tag for the patched OpenClaw runtime built by
 # agent_bench/harnesses/openclaw/docker/build.sh. Override via env.
 # ----------------------------------------------------------------------
-DEFAULT_OC_IMAGE = os.environ.get("OC_IMAGE_TAG", "agent-bench/openclaw:2026.4.22")
+DEFAULT_OPENCLAW_RUNTIME_IMAGE = os.environ.get("AB_AGENT_RUNTIME_IMAGE", "agent-bench/openclaw:2026.4.22")
 
 
 # ----------------------------------------------------------------------

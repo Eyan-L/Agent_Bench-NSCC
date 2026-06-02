@@ -18,8 +18,8 @@ def test_openhands_uses_container_backend_for_nscc():
     assert "ContainerSpec" in app
     assert "self.container.start" in app
     assert "self.container.exec" in app
-    assert "OH_RUNTIME_SIF" in app
-    assert "OC_SCORING_SIF_DIR" in app
+    assert "AB_AGENT_RUNTIME_SIF" in app
+    assert "AB_SCORING_IMAGE_DIR" in app
     assert "ContainerHandle" in condition
     assert "self.container.exec" in condition
     assert '["docker", "exec", container_id, "bash", "-lc", inner]' in condition
@@ -35,8 +35,8 @@ def test_hermes_uses_container_backend_for_nscc():
     assert "ContainerSpec" in app
     assert "self.container.start" in app
     assert "self.container.exec" in app
-    assert "HM_RUNTIME_SIF" in app
-    assert "OC_SCORING_SIF_DIR" in app
+    assert "AB_AGENT_RUNTIME_SIF" in app
+    assert "AB_SCORING_IMAGE_DIR" in app
     assert "exec_in_container" in condition
     assert '["docker", "exec", container_id, *argv]' in condition
     assert "agent_mounts_and_env" in dispatcher
@@ -62,7 +62,7 @@ def test_swebench_harnesses_can_use_remote_scoring_server():
         app = (ROOT / rel).read_text()
         assert "score_via_scoring_server" in app
     helper = (ROOT / "agent_bench/benchmarks/swebench/scoring.py").read_text()
-    assert "OC_SCORING_URL" in helper
+    assert "AB_SCORING_SERVICE_URL" in helper
     assert "/v1/submit" in helper
     assert "/v1/submission/" in helper
 
@@ -70,7 +70,7 @@ def test_swebench_harnesses_can_use_remote_scoring_server():
 def test_swebench_harnesses_can_score_with_singularity_sifs():
     helper = (ROOT / "agent_bench/benchmarks/swebench/scoring.py").read_text()
     assert "def score_via_singularity" in helper
-    assert "OC_SCORING_SIF_DIR" in helper
+    assert "AB_SCORING_IMAGE_DIR" in helper
     assert '["singularity", "exec"' in helper
     assert "get_eval_report" in helper
 
@@ -88,7 +88,7 @@ def test_openclaw_uses_runtime_serving_endpoint():
     app = (ROOT / "agent_bench/benchmarks/swebench/openclaw/app.py").read_text()
 
     assert 'os.environ.get("OPENAI_BASE_URL")' in app
-    assert 'os.environ.get("MODEL_ENDPOINT")' in app
+    assert 'os.environ.get("AB_SERVING_BASE_URL")' in app
     assert "endpoint_for_container(" in app
 
 
@@ -126,16 +126,16 @@ def test_openclaw_forces_chat_completions_transport():
 def test_pbs_prepares_runtime_sif_by_harness_choice():
     stages = (ROOT / "agent_bench/deployments/pbs/stages.py").read_text()
 
-    assert "OH_RUNTIME_SIF" in stages
-    assert "HM_RUNTIME_SIF" in stages
-    assert "OH_RUNTIME_BASE_DOCKER" in stages
-    assert "HM_RUNTIME_BASE_DOCKER" in stages
+    assert "AB_AGENT_RUNTIME_SIF" in stages
+    assert "AB_AGENT_RUNTIME_SIF" in stages
+    assert "AB_AGENT_RUNTIME_BASE_DOCKER" in stages
+    assert "AB_AGENT_RUNTIME_BASE_DOCKER" in stages
     assert "build_oh_sif.sh" in stages
     assert "build_hm_sif.sh" in stages
     assert 'harness == "openhands"' in stages
     assert 'harness == "hermes"' in stages
-    assert 'out["OH_IMAGE"] = env.get("OH_IMAGE") or out["OH_RUNTIME_SIF"]' in stages
-    assert 'out["HM_IMAGE"] = env.get("HM_IMAGE") or out["HM_RUNTIME_SIF"]' in stages
+    assert 'out["AB_AGENT_RUNTIME_IMAGE"] = env.get("AB_AGENT_RUNTIME_IMAGE") or out["AB_AGENT_RUNTIME_SIF"]' in stages
+    assert 'out["AB_AGENT_RUNTIME_IMAGE"] = env.get("AB_AGENT_RUNTIME_IMAGE") or out["AB_AGENT_RUNTIME_SIF"]' in stages
     assert "pull OpenHands" in stages
     assert "pull Hermes" in stages
 
@@ -193,19 +193,19 @@ def test_singularity_subprocess_env_drops_home_override(monkeypatch):
 def test_pbs_groups_logs_under_experiment_dir(tmp_path: Path):
     resolved = load_resolved_experiment(ROOT / "experiments/nscc_vllm.toml", root=ROOT)
     env = {
-        "KIT_ROOT": str(ROOT),
+        "AB_REPO_ROOT": str(ROOT),
         "USER": "alice",
         "SCRATCH": str(tmp_path / "scratch"),
-        "AGENT_BENCH_RUN_DIR": str(tmp_path / "run"),
-        "AGENT_BENCH_LOG_DIR": str(tmp_path / "run/logs"),
+        "AB_RUN_DIR": str(tmp_path / "run"),
+        "AB_LOG_DIR": str(tmp_path / "run/logs"),
     }
     spec = build_pbs_job_spec(resolved, env=env)
 
     prepare_environment(resolved, spec, env)
 
     assert env["AB_EXPERIMENT_DIR"] == str(tmp_path / "run")
-    assert env["OC_LOG_DIR"] == str(tmp_path / "run/logs")
-    assert env["AGENT_BENCH_LOG_DIR"] == str(tmp_path / "run/logs")
+    assert env["AB_LOG_DIR"] == str(tmp_path / "run/logs")
+    assert env["AB_LOG_DIR"] == str(tmp_path / "run/logs")
 
 
 def test_runner_maps_app_output_under_experiment_dir(monkeypatch):

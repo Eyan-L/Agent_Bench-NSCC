@@ -48,7 +48,7 @@ OUT_SIF="$SCRATCH/sif_images/openclaw_2026.4.22_patched.sif"
 INSIDE_PKG="/app"
 SANDBOX_DIR=""
 KEEP_SANDBOX=0
-KIT_ROOT="${KIT_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+AB_REPO_ROOT="${AB_REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -56,7 +56,7 @@ while [[ $# -gt 0 ]]; do
         --out)          OUT_SIF="$2"; shift 2 ;;
         --inside-pkg)   INSIDE_PKG="$2"; shift 2 ;;
         --sandbox-dir)  SANDBOX_DIR="$2"; shift 2 ;;
-        --kit-root)     KIT_ROOT="$2"; shift 2 ;;
+        --repo-root)     AB_REPO_ROOT="$2"; shift 2 ;;
         --keep-sandbox) KEEP_SANDBOX=1; shift ;;
         -h|--help)      sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "unknown arg: $1" >&2; exit 1 ;;
@@ -64,7 +64,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -f "$BASE_SIF" ]] || { echo "ERROR: --base sif not found: $BASE_SIF" >&2; exit 1; }
-[[ -d "$KIT_ROOT/agent_bench/harnesses/openclaw/patch" ]] || { echo "ERROR: patch dir not under $KIT_ROOT" >&2; exit 1; }
+[[ -d "$AB_REPO_ROOT/agent_bench/harnesses/openclaw/patch" ]] || { echo "ERROR: patch dir not under $AB_REPO_ROOT" >&2; exit 1; }
 
 # Always work in a unique sandbox dir to dodge stale state. Use a temp dir
 # under SCRATCH (sandbox rebuild needs ~3 GB of space; /tmp is small).
@@ -80,7 +80,7 @@ echo "[build-oc-sif] base       = $BASE_SIF"
 echo "[build-oc-sif] out        = $OUT_SIF"
 echo "[build-oc-sif] inside-pkg = $INSIDE_PKG"
 echo "[build-oc-sif] sandbox    = $SANDBOX_DIR"
-echo "[build-oc-sif] kit-root   = $KIT_ROOT"
+echo "[build-oc-sif] repo-root   = $AB_REPO_ROOT"
 echo "[build-oc-sif] started    = $(date -u +%FT%TZ)"
 
 # 1. Extract sif → writable sandbox
@@ -89,13 +89,13 @@ singularity build --sandbox "$SANDBOX_DIR" "$BASE_SIF"
 
 # 2. Stage the harness tree where apply_patch.py expects (relative to itself).
 #    Sandbox is writable, so just cp instead of bind.
-cp -r "$KIT_ROOT/agent_bench/harnesses/openclaw" "$SANDBOX_DIR/oc-harness"
+cp -r "$AB_REPO_ROOT/agent_bench/harnesses/openclaw" "$SANDBOX_DIR/oc-harness"
 
 # 3. Apply all patches. idempotent by design — markers skip already-baked ones.
 singularity exec --writable "$SANDBOX_DIR" bash -c "
     set -e
-    export OC_HOST_OPENCLAW='$INSIDE_PKG'
-    export OC_PATCH_MODE=runtime
+    export AB_HARNESS_OPENCLAW_SOURCE_ROOT='$INSIDE_PKG'
+    export AB_HARNESS_OPENCLAW_PATCH_MODE=runtime
     python3 /oc-harness/apply_patch.py apply
     python3 /oc-harness/apply_patch.py status
 "
@@ -123,8 +123,8 @@ mv "$OUT_NEW" "$OUT_SIF"
 echo "[build-oc-sif] finished   = $(date -u +%FT%TZ)"
 ls -lh "$OUT_SIF"
 echo "[build-oc-sif] applied patches (status from new sif):"
-singularity exec --bind "$KIT_ROOT/agent_bench/harnesses/openclaw:/oc-harness:ro" "$OUT_SIF" \
-    bash -c "OC_HOST_OPENCLAW='$INSIDE_PKG' python3 /oc-harness/apply_patch.py status" \
+singularity exec --bind "$AB_REPO_ROOT/agent_bench/harnesses/openclaw:/oc-harness:ro" "$OUT_SIF" \
+    bash -c "AB_HARNESS_OPENCLAW_SOURCE_ROOT='$INSIDE_PKG' python3 /oc-harness/apply_patch.py status" \
     2>&1 | sed 's/^/    /' || true
 
 echo "[build-oc-sif] done; backup at ${OUT_SIF}.bak (if pre-existing)"

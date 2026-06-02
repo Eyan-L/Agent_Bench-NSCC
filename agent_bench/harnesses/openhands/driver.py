@@ -254,7 +254,7 @@ def _action_to_shell(tool_name: str, action: Any) -> Optional[str]:
             return f"cat -n {q(path)}"
         if op == "create":
             text = getattr(action, "file_text", "") or ""
-            return f"cat > {q(path)} <<'__OH_EOF__'\n{text}\n__OH_EOF__"
+            return f"cat > {q(path)} <<'__OPENHANDS_EOF__'\n{text}\n__OPENHANDS_EOF__"
         # str_replace / insert / undo_edit are best handled inline by SDK
         # to avoid byte-perfect newline issues; fall through to in-process.
 

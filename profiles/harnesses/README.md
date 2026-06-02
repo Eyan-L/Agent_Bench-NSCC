@@ -3,8 +3,8 @@
 Agent_Bench now composes four independent profile axes:
 
 ```text
-profiles/benchmarks/<app>/<sweep>.json  # tasks, instances, budgets, output dirs
-profiles/harnesses/<harness>_<app>.yaml    # agent framework behavior + conditions
+profiles/benchmarks/<benchmark>/<sweep>.json  # tasks, instances, budgets, output dirs
+profiles/harnesses/<harness>_<benchmark>.yaml    # agent framework behavior + conditions
 profiles/models/<model>.json              # model id/path, context window, output cap
 profiles/serving/<backend>/<profile>.yaml # serving endpoint / engine or proxy deployment
 ```
@@ -13,19 +13,19 @@ Examples:
 
 ```bash
 make run_phase0 \
-  HARNESS=openclaw_swebench \
-  MODEL_PROFILE=qwen25_05b \
-  SERVING=vllm/debug
+  AB_HARNESS_CONFIG=openclaw_swebench \
+  AB_MODEL_CONFIG=qwen25_05b \
+  AB_SERVING_CONFIG=vllm/debug
 
 make run_phase1 \
-  HARNESS=hermes_swebench \
-  MODEL_PROFILE=qwen36_27b \
-  SERVING=vllm/default
+  AB_HARNESS_CONFIG=hermes_swebench \
+  AB_MODEL_CONFIG=qwen36_27b \
+  AB_SERVING_CONFIG=vllm/default
 ```
 
 Important boundaries:
 
-- Application configs own tasks/budgets and a run-set leaf like `phase0`;
+- Benchmark configs own tasks/budgets and a run-set leaf like `phase0`;
   the experiment root is `data/experiments/<AB_RUN_STAMP>/`.
 - Harness configs must not contain `model`. They only describe the framework
   and conditions.
@@ -39,7 +39,7 @@ Important boundaries:
   upstream key only to that proxy container via `serving.provider.*.api_key_env`,
   and exposes only a local proxy key to OpenClaw/OpenHands/Hermes. Direct
   `backend: "provider"` / `backend: "api"` profiles are not supported.
-- Tensor parallelism is launch state: set `VLLM_TP`, `SGLANG_TP`, or `TP`
+- Tensor parallelism is launch state: set `AB_SERVING_TENSOR_PARALLEL_SIZE` or backend-specific `VLLM_TP`/`SGLANG_TP`
   when submitting/running the job.
 - A valid run must satisfy:
 

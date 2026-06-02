@@ -10,7 +10,7 @@ Usage:
     scripts/otel_query.py                 # default path, all signals
     scripts/otel_query.py --kind spans
     scripts/otel_query.py --name openclaw.model.usage
-    OC_OTEL_DATA_DIR=data/otel scripts/otel_query.py --kind spans --json
+    AB_TELEMETRY_DATA_DIR=data/otel scripts/otel_query.py --kind spans --json
 """
 from __future__ import annotations
 
@@ -94,7 +94,7 @@ def _logs(record: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
 
 def main() -> None:
     default_path = Path(
-        os.environ.get("OC_OTEL_DATA_DIR", "/tmp/otel")
+        os.environ.get("AB_TELEMETRY_DATA_DIR", "/tmp/otel")
     ) / "otel-traces.jsonl"
     p = argparse.ArgumentParser()
     p.add_argument("--path", default=str(default_path), help="JSONL trace file")

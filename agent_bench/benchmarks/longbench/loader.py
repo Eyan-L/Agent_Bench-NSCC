@@ -1,14 +1,14 @@
 """LongBench v1 loader — materializes per-subtask ``instance_data`` for the driver.
 
 Reads LongBench's raw per-subtask JSONL (from ``data.zip``, unpacked to
-``LONGBENCH_DATA_DIR``). We deliberately bypass ``datasets.load_dataset`` because
+``AB_BENCHMARK_DATA_ROOT``). We deliberately bypass ``datasets.load_dataset`` because
 LongBench v1 is a *script-based* dataset that ``datasets>=4`` can no longer load.
 Each JSONL row::
 
     {input, context, answers, length, dataset, language, all_classes, _id}
 
 One ``instance`` == one LongBench subtask (``instance_id`` == subtask name). The
-harness loops over ``instance_data["examples"]`` (capped via LONGBENCH_EXAMPLE_CAP),
+harness loops over ``instance_data["examples"]`` (capped via AB_BENCHMARK_EXAMPLE_CAP),
 and per example: ingests ``context`` into ClawRAG as markdown, has the agent
 retrieve + answer, then scores with the subtask's LongBench metric. RAG-only — the
 ``context`` is NOT placed in the prompt.
@@ -49,11 +49,11 @@ DATASET2METRIC: Dict[str, str] = {
 
 
 def _data_dir() -> Path:
-    return Path(os.environ.get("LONGBENCH_DATA_DIR", "/mnt/vdb/hongrui/longbench/data"))
+    return Path(os.environ.get("AB_BENCHMARK_DATA_ROOT", "/mnt/vdb/hongrui/longbench/data"))
 
 
 def _example_cap() -> int:
-    return int(os.environ.get("LONGBENCH_EXAMPLE_CAP", "20"))
+    return int(os.environ.get("AB_BENCHMARK_EXAMPLE_CAP", "20"))
 
 
 def _load_maxlen() -> Dict[str, int]:
@@ -89,7 +89,7 @@ def load_task(task_id: str, cap: Optional[int] = None) -> Dict:
     src = _data_dir() / f"{task_id}.jsonl"
     if not src.exists():
         raise FileNotFoundError(
-            f"LongBench data not found: {src} — unzip data.zip into LONGBENCH_DATA_DIR "
+            f"LongBench data not found: {src} — unzip data.zip into AB_BENCHMARK_DATA_ROOT "
             f"(see agent_bench/benchmarks/longbench/loader.py docstring)."
         )
     rows = _read_jsonl(src)
@@ -120,10 +120,10 @@ def load_task(task_id: str, cap: Optional[int] = None) -> Dict:
         "examples": examples,
         # OC sandbox image for the agent; overridden by harness/config if set.
         "docker_image": os.environ.get(
-            "LONGBENCH_SANDBOX_IMAGE", "longbench/clawrag-sandbox.UNUSED:latest"
+            "AB_BENCHMARK_SANDBOX_IMAGE", "longbench/clawrag-sandbox.UNUSED:latest"
         ),
         "workspace": "/workspace",
-        "agent_timeout_sec": int(os.environ.get("LONGBENCH_AGENT_TIMEOUT_SEC", "600")),
+        "agent_timeout_sec": int(os.environ.get("AB_BENCHMARK_AGENT_TIMEOUT_SEC", "600")),
         # SWE-bench-shaped echoes so generic readers (manifest emitter, etc.) don't NPE.
         "repo": "longbench",
         "base_commit": "longbench-v1",

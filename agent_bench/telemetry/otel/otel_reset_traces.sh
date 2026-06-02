@@ -8,8 +8,8 @@
 
 set -euo pipefail
 
-NAME="${OC_OTEL_NAME:-oc-otel}"
-DATA_DIR="${OC_OTEL_DATA_DIR:-/tmp/otel}"
+NAME="${AB_TELEMETRY_NAME:-oc-otel}"
+DATA_DIR="${AB_TELEMETRY_DATA_DIR:-/tmp/otel}"
 TRACE_FILE="$DATA_DIR/otel-traces.jsonl"
 
 if docker ps --format '{{.Names}}' | grep -qx "$NAME"; then

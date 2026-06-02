@@ -94,20 +94,20 @@ def test_litellm_serving_loader_exports_proxy_defaults(monkeypatch):
         text=True,
     )
 
-    assert "SERVING_BACKEND='litellm'" in proc.stdout
-    assert "MODEL_ENDPOINT='http://127.0.0.1:8000/v1'" in proc.stdout
-    assert "SERVING_PROVIDER_BASE_URL='https://api.minimax.io/v1'" in proc.stdout
-    assert "SERVING_PROVIDER_API_KEY_ENV='MINIMAX_API_KEY'" in proc.stdout
-    assert "MODEL_API_KEY='sk-agent-bench-local'" in proc.stdout
+    assert "AB_SERVING_BACKEND='litellm'" in proc.stdout
+    assert "AB_SERVING_BASE_URL='http://127.0.0.1:8000/v1'" in proc.stdout
+    assert "AB_SERVING_PROVIDER_BASE_URL='https://api.minimax.io/v1'" in proc.stdout
+    assert "AB_SERVING_PROVIDER_API_KEY_ENV='MINIMAX_API_KEY'" in proc.stdout
+    assert "AB_SERVING_API_KEY='sk-agent-bench-local'" in proc.stdout
     assert "OPENAI_API_KEY='sk-agent-bench-local'" in proc.stdout
-    assert "OC_VLLM_API_KEY='sk-agent-bench-local'" in proc.stdout
+    assert "AB_SERVING_API_KEY='sk-agent-bench-local'" in proc.stdout
     assert "HERMES_INFERENCE_PROVIDER='custom'" in proc.stdout
     assert "sk-test-minimax" not in proc.stdout
 
 
 def test_litellm_config_renderer_omits_optional_api_base_and_upstream_secret(tmp_path, monkeypatch):
     out = tmp_path / "litellm.yaml"
-    monkeypatch.setenv("MODEL", "gemini/gemini-3.5-flash")
+    monkeypatch.setenv("AB_MODEL_NAME", "gemini/gemini-3.5-flash")
     monkeypatch.setenv("LITELLM_UPSTREAM_MODEL", "gemini/gemini-3.5-flash")
     monkeypatch.setenv("LITELLM_MASTER_KEY", "sk-local-proxy")
     monkeypatch.setenv("LITELLM_UPSTREAM_API_KEY", "sk-upstream-secret")
@@ -163,8 +163,8 @@ def test_pbs_uses_shared_serving_plan_for_sidecars():
     swe = load_resolved_experiment(ROOT / "experiments/nscc_vllm.toml", root=ROOT)
     tb = load_resolved_experiment(ROOT / "experiments/nscc_terminal_bench.toml", root=ROOT)
 
-    swe_spec = build_pbs_job_spec(swe, env={"KIT_ROOT": str(ROOT), "USER": "alice"})
-    tb_spec = build_pbs_job_spec(tb, env={"KIT_ROOT": str(ROOT), "USER": "alice"})
+    swe_spec = build_pbs_job_spec(swe, env={"AB_REPO_ROOT": str(ROOT), "USER": "alice"})
+    tb_spec = build_pbs_job_spec(tb, env={"AB_REPO_ROOT": str(ROOT), "USER": "alice"})
 
     assert swe_spec.stages["start_serving"]
     assert tb_spec.stages["start_serving"]

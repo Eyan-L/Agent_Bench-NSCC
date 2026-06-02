@@ -53,7 +53,7 @@ def _write_nscc_vllm_experiment(tmp_path: Path, *, stage_lines: list[str]) -> Pa
 
 def test_nscc_pbs_job_spec_embeds_serving_launch_plan() -> None:
     resolved = load_resolved_experiment(ROOT / "experiments/nscc_vllm.toml", root=ROOT)
-    spec = build_pbs_job_spec(resolved, env={"KIT_ROOT": str(ROOT), "USER": "alice"})
+    spec = build_pbs_job_spec(resolved, env={"AB_REPO_ROOT": str(ROOT), "USER": "alice"})
 
     assert tuple(spec.stages) == RUNTIME_STAGES
     assert all(spec.stages.values())
@@ -72,7 +72,7 @@ def test_pbs_job_spec_uses_ab_run_stamp_for_run_dir() -> None:
 
     spec = build_pbs_job_spec(
         resolved,
-        env={"KIT_ROOT": str(ROOT), "USER": "alice", "AB_RUN_STAMP": stamp},
+        env={"AB_REPO_ROOT": str(ROOT), "USER": "alice", "AB_RUN_STAMP": stamp},
     )
 
     assert spec.run_dir == ROOT / "runs" / "nscc_vllm" / stamp
@@ -84,7 +84,7 @@ def test_pbs_job_spec_uses_ab_run_stamp_for_run_dir() -> None:
 
 def test_pbs_render_job_uses_short_python_worker() -> None:
     resolved = load_resolved_experiment(ROOT / "experiments/nscc_vllm.toml", root=ROOT)
-    script = build_pbs_job_spec(resolved, env={"KIT_ROOT": str(ROOT)}).render_script()
+    script = build_pbs_job_spec(resolved, env={"AB_REPO_ROOT": str(ROOT)}).render_script()
 
     assert "#PBS -N agent-bench-nscc_vllm" in script
     assert "#PBS -l select=1:ngpus=1" in script
@@ -92,8 +92,8 @@ def test_pbs_render_job_uses_short_python_worker() -> None:
     assert 'AB_RUN_STAMP="$(TZ=Asia/Singapore date +%Y-%m-%d_%H-%M-%S)"' in script
     assert 'AB_JOB_SUFFIX="${PBS_JOBID//[^A-Za-z0-9._-]/_}"' in script
     assert 'export AB_EXPERIMENT_DIR="${AB_EXPERIMENT_DIR:-$AB_EXPERIMENT_BASE/$AB_RUN_STAMP}"' in script
-    assert 'export AGENT_BENCH_RUN_DIR="${AGENT_BENCH_RUN_DIR:-$AB_EXPERIMENT_DIR}"' in script
-    assert 'export AGENT_BENCH_LOG_DIR="${AGENT_BENCH_LOG_DIR:-$AGENT_BENCH_RUN_DIR/logs}"' in script
+    assert 'export AB_RUN_DIR="${AB_RUN_DIR:-$AB_EXPERIMENT_DIR}"' in script
+    assert 'export AB_LOG_DIR="${AB_LOG_DIR:-$AB_RUN_DIR/logs}"' in script
     assert "python3 run.py --config experiments/nscc_vllm.toml" in script
     assert "run_benchmark.pbs" not in script
     assert "STAGE_SWEBENCH" not in script
@@ -111,7 +111,7 @@ def test_legacy_monolithic_pbs_entrypoints_are_removed() -> None:
 
 def test_terminal_bench_pbs_render_job_uses_same_python_worker() -> None:
     resolved = load_resolved_experiment(ROOT / "experiments/nscc_terminal_bench.toml", root=ROOT)
-    spec = build_pbs_job_spec(resolved, env={"KIT_ROOT": str(ROOT), "USER": "alice"})
+    spec = build_pbs_job_spec(resolved, env={"AB_REPO_ROOT": str(ROOT), "USER": "alice"})
     script = spec.render_script()
 
     assert "#PBS -N agent-bench-nscc_terminal_bench" in script
@@ -126,8 +126,8 @@ def test_pbs_stage_env_overrides_are_resolved_once() -> None:
     spec = build_pbs_job_spec(
         resolved,
         env={
-            "KIT_ROOT": str(ROOT),
-            "STAGE_SERVING": "0",
+            "AB_REPO_ROOT": str(ROOT),
+            "AB_STAGE_START_SERVING": "0",
             "AB_STAGE_START_OTEL": "false",
             "PBS_WALLTIME": "01:00:00",
             "PBS_CPUS": "8",
@@ -148,7 +148,7 @@ def test_pbs_stage_summary_reflects_experiment_stage_overrides(tmp_path: Path) -
     )
     resolved = load_resolved_experiment(config, root=ROOT)
 
-    spec = build_pbs_job_spec(resolved, env={"KIT_ROOT": str(ROOT), "USER": "alice"})
+    spec = build_pbs_job_spec(resolved, env={"AB_REPO_ROOT": str(ROOT), "USER": "alice"})
     script = spec.render_script()
 
     assert spec.stages["start_otel"] is False
@@ -168,7 +168,7 @@ def test_pbs_env_stage_override_wins_over_experiment_stage_override(tmp_path: Pa
 
     spec = build_pbs_job_spec(
         resolved,
-        env={"KIT_ROOT": str(ROOT), "USER": "alice", "AB_STAGE_START_OTEL": "1"},
+        env={"AB_REPO_ROOT": str(ROOT), "USER": "alice", "AB_STAGE_START_OTEL": "1"},
     )
 
     assert spec.stages["start_otel"] is True
@@ -221,9 +221,9 @@ def test_litellm_pbs_spec_does_not_emit_upstream_secret(tmp_path: Path, monkeypa
     spec = build_pbs_job_spec(
         resolved,
         env={
-            "KIT_ROOT": str(ROOT),
+            "AB_REPO_ROOT": str(ROOT),
             "GEMINI_API_KEY": "sk-gemini-secret",
-            "SERVING_MODE": "native",
+            "AB_SERVING_MODE": "native",
         },
     )
     rendered = spec.render_script()
@@ -268,16 +268,15 @@ def test_pbs_materializes_swebench_instance_data_from_profile(tmp_path: Path, mo
         ]
 
     monkeypatch.setitem(sys.modules, "datasets", types.SimpleNamespace(load_dataset=fake_load_dataset))
-    monkeypatch.delenv("INSTANCE_DATA", raising=False)
-    monkeypatch.delenv("AB_INSTANCE_DATA", raising=False)
+    monkeypatch.delenv("AB_BENCHMARK_INSTANCE_DATA", raising=False)
     resolved = load_resolved_experiment(ROOT / "experiments/nscc_vllm.toml", root=ROOT)
     spec = build_pbs_job_spec(
         resolved,
         env={
-            "KIT_ROOT": str(ROOT),
+            "AB_REPO_ROOT": str(ROOT),
             "SCRATCH": str(tmp_path / "scratch"),
             "USER": "alice",
-            "AGENT_BENCH_RUN_DIR": str(tmp_path / "run"),
+            "AB_RUN_DIR": str(tmp_path / "run"),
         },
     )
 
@@ -287,14 +286,13 @@ def test_pbs_materializes_swebench_instance_data_from_profile(tmp_path: Path, mo
     assert json.loads(out.read_text()) == [
         {"instance_id": "astropy__astropy-12907", "repo": "astropy/astropy"}
     ]
-    assert Path(os.environ["INSTANCE_DATA"]) == out
-    assert Path(os.environ["AB_INSTANCE_DATA"]) == out
+    assert Path(os.environ["AB_BENCHMARK_INSTANCE_DATA"]) == out
 
 
 def test_pbs_stage3_image_commands_are_planned_without_shell_fragments(tmp_path: Path) -> None:
     resolved = load_resolved_experiment(ROOT / "experiments/nscc_vllm.toml", root=ROOT)
     env = {
-        "KIT_ROOT": str(ROOT),
+        "AB_REPO_ROOT": str(ROOT),
         "SCRATCH": str(tmp_path / "scratch"),
         "USER": "alice",
         "VLLM_SIF": str(tmp_path / "scratch/sif_images/vllm.sif"),
@@ -315,7 +313,7 @@ def test_pbs_stage3_image_commands_are_planned_without_shell_fragments(tmp_path:
 def test_terminal_bench_stage4_image_commands_are_python_owned(tmp_path: Path) -> None:
     resolved = load_resolved_experiment(ROOT / "experiments/nscc_terminal_bench.toml", root=ROOT)
     env = {
-        "KIT_ROOT": str(ROOT),
+        "AB_REPO_ROOT": str(ROOT),
         "SCRATCH": str(tmp_path / "scratch"),
         "USER": "alice",
         "VLLM_SIF": str(tmp_path / "scratch/sif_images/vllm.sif"),
@@ -333,36 +331,36 @@ def test_terminal_bench_stage4_image_commands_are_python_owned(tmp_path: Path) -
 def test_pbs_prepare_environment_exports_runtime_paths(tmp_path: Path, monkeypatch) -> None:
     resolved = load_resolved_experiment(ROOT / "experiments/nscc_vllm.toml", root=ROOT)
     env = {
-        "KIT_ROOT": str(ROOT),
+        "AB_REPO_ROOT": str(ROOT),
         "SCRATCH": str(tmp_path / "scratch"),
         "USER": "alice",
-        "AGENT_BENCH_RUN_DIR": str(tmp_path / "run"),
-        "AGENT_BENCH_LOG_DIR": str(tmp_path / "run/logs"),
+        "AB_RUN_DIR": str(tmp_path / "run"),
+        "AB_LOG_DIR": str(tmp_path / "run/logs"),
     }
     spec = build_pbs_job_spec(resolved, env=env)
-    monkeypatch.delenv("OC_OTEL_TRACE_FILE", raising=False)
+    monkeypatch.delenv("AB_TELEMETRY_TRACE_FILE", raising=False)
 
     prepare_environment(resolved, spec, env)
 
-    assert Path(env["SIF_DIR"]).is_dir()
-    assert Path(env["OC_OTEL_DATA_DIR"]).is_dir()
-    assert env["OC_OTEL_TRACE_FILE"].endswith("otel-traces.jsonl")
-    assert env["OC_OC_SIF"] == env["OC_RUNTIME_SIF"]
-    assert env["HARNESS_BACKEND"] == "singularity"
-    assert env["SWEBENCH_ROOT"] == env["OC_PYLIB"]
+    assert Path(env["AB_SCORING_IMAGE_DIR"]).is_dir()
+    assert Path(env["AB_TELEMETRY_DATA_DIR"]).is_dir()
+    assert env["AB_TELEMETRY_TRACE_FILE"].endswith("otel-traces.jsonl")
+    assert env["AB_AGENT_RUNTIME_IMAGE"] == env["AB_AGENT_RUNTIME_SIF"]
+    assert env["AB_DEPLOYMENT_CONTAINER_BACKEND"] == "singularity"
+    assert env["AB_BENCHMARK_DATA_ROOT"] == env["AB_RUNTIME_PYLIB"]
 
 
 def test_pbs_openclaw_plugin_cache_warm_command_writes_state_template(tmp_path: Path) -> None:
     resolved = load_resolved_experiment(ROOT / "experiments/nscc_vllm.toml", root=ROOT)
     env = {
-        "KIT_ROOT": str(ROOT),
+        "AB_REPO_ROOT": str(ROOT),
         "SCRATCH": str(tmp_path / "scratch"),
         "USER": "alice",
-        "AGENT_BENCH_RUN_DIR": str(tmp_path / "run"),
-        "AGENT_BENCH_LOG_DIR": str(tmp_path / "run/logs"),
-        "MODEL_ENDPOINT": "http://127.0.0.1:8000/v1",
-        "MODEL_API_KEY": "sk-local",
-        "MODEL": "Qwen/Qwen3.5-9B",
+        "AB_RUN_DIR": str(tmp_path / "run"),
+        "AB_LOG_DIR": str(tmp_path / "run/logs"),
+        "AB_SERVING_BASE_URL": "http://127.0.0.1:8000/v1",
+        "AB_SERVING_API_KEY": "sk-local",
+        "AB_MODEL_NAME": "Qwen/Qwen3.5-9B",
     }
     spec = build_pbs_job_spec(resolved, env=env)
 
@@ -381,7 +379,7 @@ def test_pbs_openclaw_plugin_cache_warm_command_writes_state_template(tmp_path: 
 def test_pbs_otel_stage_command_is_best_effort(tmp_path: Path) -> None:
     resolved = load_resolved_experiment(ROOT / "experiments/nscc_vllm.toml", root=ROOT)
     env = {
-        "KIT_ROOT": str(ROOT),
+        "AB_REPO_ROOT": str(ROOT),
         "SCRATCH": str(tmp_path / "scratch"),
         "USER": "alice",
     }

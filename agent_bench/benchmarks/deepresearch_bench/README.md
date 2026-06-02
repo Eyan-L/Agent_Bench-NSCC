@@ -67,10 +67,10 @@ make run_dr_full            # all 100 tasks
 Override model/serving separately from the harness:
 
 ```
-make run_dr_smoke HARNESS=openclaw_deepresearch_bench_brave MODEL_PROFILE=qwen36_35b_a3b_local_research SERVING=vllm/nscc
+make run_dr_smoke AB_HARNESS_CONFIG=openclaw_deepresearch_bench_brave AB_MODEL_CONFIG=qwen36_35b_a3b_local_research AB_SERVING_CONFIG=vllm/nscc
 ```
 
-Override `HARNESS_BACKEND` is **not** supported — DR-Bench is docker-only
+Override `AB_DEPLOYMENT_CONTAINER_BACKEND` is **not** supported — DR-Bench is docker-only
 (no singularity backend; not implemented).
 
 ## Outputs
@@ -89,7 +89,7 @@ Per task, the harness writes to
     fact/                  vendored FACT intermediate outputs
 ```
 
-`status = PASS` when RACE overall score >= `DR_PASS_THRESHOLD` (default
+`status = PASS` when RACE overall score >= `AB_BENCHMARK_PASS_THRESHOLD` (default
 0.5; tune via env). FACT scores are reported but don't gate the verdict.
 
 ## Evaluation details

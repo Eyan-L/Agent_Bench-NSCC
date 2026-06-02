@@ -16,11 +16,11 @@ workspace_base = "${WORKSPACE}"
 max_iterations = ${MAX_ITERATIONS}
 
 [llm]
-model = "${MODEL}"
+model = "${AB_MODEL_NAME}"
 base_url = "${BASE_URL}"
 api_key = "${API_KEY}"
 temperature = ${TEMPERATURE}
-max_output_tokens = ${MAX_TOKENS}
+max_output_tokens = ${AB_MODEL_MAX_OUTPUT_TOKENS}
 max_input_tokens = ${CONTEXT_WINDOW}
 
 [agent]

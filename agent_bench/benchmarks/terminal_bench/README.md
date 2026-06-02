@@ -38,11 +38,11 @@ compute nodes without internet. Add a new task by dropping its `instruction.md`
    task ids. Harness/model/serving are selected separately.
 2. PBS pipeline (`python3 run.py --config experiments/nscc_terminal_bench.toml --render-job`):
    - **Stage 0**: `singularity pull` each task's `docker_image` (from
-     `task.toml`) into `$OC_TB_SIF_DIR`. One-time, cached across jobs.
+     `task.toml`) into `$AB_DEPLOYMENT_TASK_IMAGE_DIR`. One-time, cached across jobs.
    - **Stage 1**: materialize `data/terminal_bench/tasks.json` from the
      vendored task tree using `loader.materialize_dataset`.
    - **Stage 2**: start the serving sidecar from the serving profile.
-   - **Stage 3**: run `python -m agent_bench.runtime.driver --app ... --harness ... --model ... --serving ... --instance-data ...`.
+   - **Stage 3**: run `python -m agent_bench.runtime.driver --benchmark-config ... --harness-config ... --model-config ... --serving-config ... --benchmark-instance-data ...`.
 3. Driver auto-detects `instance_data["benchmark"] == "terminal_bench"` and
    routes to `TerminalBenchHarness` for that instance (the SWE-bench harness
    is unaffected).
@@ -73,18 +73,18 @@ No other SWE-bench code paths are touched.
 ## Running
 
 ```bash
-# Submit the TB job. Set VLLM_TP/SGLANG_TP/TP at launch to match ngpus.
+# Submit the TB job. Set AB_SERVING_TENSOR_PARALLEL_SIZE or backend-specific VLLM_TP/SGLANG_TP at launch to match ngpus.
 python3 run.py --config experiments/nscc_terminal_bench.toml --render-job > nscc_terminal_bench.pbs
 qsub -v VLLM_TP=1 nscc_terminal_bench.pbs
 
 # Local (non-PBS) smoke run, assuming vLLM is already up at :8000:
 python -m agent_bench.runtime.driver \
-  --app profiles/benchmarks/terminal_bench/kv_store.json \
-  --harness profiles/harnesses/tb_react_terminal_bench.yaml \
-  --model profiles/models/qwen36_27b.json \
-  --serving profiles/serving/vllm/default.yaml \
-  --swebench-root /tmp/dummy \
-  --instance-data data/terminal_bench/tasks.json
+  --benchmark-config profiles/benchmarks/terminal_bench/kv_store.json \
+  --harness-config profiles/harnesses/tb_react_terminal_bench.yaml \
+  --model-config profiles/models/qwen36_27b.json \
+  --serving-config profiles/serving/vllm/default.yaml \
+  --benchmark-data-root /tmp/dummy \
+  --benchmark-instance-data data/terminal_bench/tasks.json
 ```
 
 Pre-flight on a node with internet (one-time):

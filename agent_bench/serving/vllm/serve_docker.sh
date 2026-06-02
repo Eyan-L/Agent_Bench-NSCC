@@ -8,10 +8,9 @@
 # only that slice — useful for shared-node experiments and the RQ3++
 # slice-size sweep.
 #
-# Keeps the same argv surface as the old host launcher (preset / model /
-# port / max-model-len) so existing make targets, sweep yaml, and PBS jobs
-# don't need to know about the docker switch. The host fallback lives at
-# `agent_bench/serving/vllm/serve_host.sh`.
+# Uses the Agent Bench serving argv surface (preset / model-name /
+# serving-port / serving-max-model-len) while keeping vLLM-native env names
+# for backend-specific docker controls.
 #
 # Defaults to detached: the container survives shell exit, `make serve-stop`
 # kills it, `make serve-logs` follows its stdout.
@@ -19,7 +18,7 @@
 # Env:
 #   VLLM_IMAGE              container image (default: vllm/vllm-openai:v0.11.0)
 #   VLLM_MIG_UUID           bind one MIG slice (CDI format `MIG-<uuid>`).
-#                           When set: TP is forced to 1 and `--gpus` becomes
+#                           When set: AB_SERVING_TENSOR_PARALLEL_SIZE is forced to 1 and `--gpus` becomes
 #                           `--device nvidia.com/gpu=MIG-<uuid>`.
 #   VLLM_CONTAINER_NAME     docker container name (default: oc-vllm-serve)
 #   VLLM_DETACH             1 = detach + tail logs (default), 0 = foreground
@@ -28,12 +27,12 @@
 #   VLLM_EXTRA_DOCKER_ARGS  pass-through to docker run (e.g. "--memory 64g")
 #   HUGGING_FACE_HUB_TOKEN  forwarded into the container if set
 #
-# Args: same as serve_host.sh (--preset, --model, --port, --max-model-len).
+# Args: --preset, --model-name, --serving-port, --serving-max-model-len.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-KIT_ROOT="${KIT_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
+AB_REPO_ROOT="${AB_REPO_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 
 resolve_profile_ref() {
     local base="$1"
@@ -53,28 +52,25 @@ resolve_profile_ref() {
     echo "$base/$ref.$1"
 }
 
-MODEL_CFG="${VLLM_MODEL_CONFIG:-${AB_MODEL_CONFIG:-}}"
-if [[ -z "$MODEL_CFG" && -n "${MODEL_PROFILE:-}" ]]; then
-    MODEL_CFG="$KIT_ROOT/profiles/models/${MODEL_PROFILE}.json"
-fi
-if [[ -n "$MODEL_CFG" && -f "$MODEL_CFG" ]]; then
-    eval "$(python3 "$KIT_ROOT/scripts/load_model_env.py" "$MODEL_CFG")"
-fi
-SERVING_CFG="${VLLM_SERVING_CONFIG:-${AB_SERVING_CONFIG:-}}"
-if [[ -z "$SERVING_CFG" && -n "${SERVING:-}" ]]; then
-    SERVING_CFG="$(resolve_profile_ref "$KIT_ROOT/profiles/serving" "$SERVING" yaml yml json toml)"
-fi
-if [[ -n "$SERVING_CFG" && -f "$SERVING_CFG" ]]; then
-    eval "$(python3 "$KIT_ROOT/scripts/load_serving_env.py" "$SERVING_CFG")"
+MODEL_CFG="${AB_MODEL_CONFIG:-qwen36_27b}"
+MODEL_CFG="$(resolve_profile_ref "$AB_REPO_ROOT/profiles/models" "$MODEL_CFG" json yaml yml)"
+if [[ -f "$MODEL_CFG" ]]; then
+    eval "$(python3 "$AB_REPO_ROOT/scripts/load_model_env.py" "$MODEL_CFG")"
 fi
 
-PRESET="${SERVING_PRESET:-default}"
-MODEL="${MODEL:-Qwen/Qwen3.6-35B-A3B}"
-TP="${TP:-2}"
-PORT="${PORT:-8000}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-${MODEL_CONTEXT_WINDOW:-131072}}"
-GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"
-BIND_HOST="${BIND_HOST:-0.0.0.0}"
+SERVING_CFG="${AB_SERVING_CONFIG:-vllm/default}"
+SERVING_CFG="$(resolve_profile_ref "$AB_REPO_ROOT/profiles/serving" "$SERVING_CFG" yaml yml json toml)"
+if [[ -f "$SERVING_CFG" ]]; then
+    eval "$(python3 "$AB_REPO_ROOT/scripts/load_serving_env.py" "$SERVING_CFG")"
+fi
+
+AB_SERVING_PRESET="${AB_SERVING_PRESET:-default}"
+AB_MODEL_NAME="${AB_MODEL_NAME:-Qwen/Qwen3.6-35B-A3B}"
+AB_SERVING_TENSOR_PARALLEL_SIZE="${AB_SERVING_TENSOR_PARALLEL_SIZE:-2}"
+AB_SERVING_PORT="${AB_SERVING_PORT:-8000}"
+AB_SERVING_MAX_MODEL_LEN="${AB_SERVING_MAX_MODEL_LEN:-${AB_MODEL_CONTEXT_WINDOW:-131072}}"
+AB_SERVING_GPU_MEMORY_UTILIZATION="${AB_SERVING_GPU_MEMORY_UTILIZATION:-0.90}"
+AB_SERVING_BIND_HOST="${AB_SERVING_BIND_HOST:-0.0.0.0}"
 
 VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.11.0}"
 VLLM_CONTAINER_NAME="${VLLM_CONTAINER_NAME:-oc-vllm-serve}"
@@ -86,10 +82,10 @@ VLLM_EXTRA_DOCKER_ARGS="${VLLM_EXTRA_DOCKER_ARGS:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --preset)         PRESET="$2"; shift 2 ;;
-        --model)          MODEL="$2"; shift 2 ;;
-        --port)           PORT="$2"; shift 2 ;;
-        --max-model-len)  MAX_MODEL_LEN="$2"; shift 2 ;;
+        --preset)         AB_SERVING_PRESET="$2"; shift 2 ;;
+        --model-name)     AB_MODEL_NAME="$2"; shift 2 ;;
+        --serving-port)   AB_SERVING_PORT="$2"; shift 2 ;;
+        --serving-max-model-len) AB_SERVING_MAX_MODEL_LEN="$2"; shift 2 ;;
         --foreground)     VLLM_DETACH=0; shift ;;
         --dry-run)        DRY_RUN=1; shift ;;
         -h|--help)
@@ -143,10 +139,10 @@ if [[ -n "$VLLM_MIG_UUID" ]]; then
         ' | tr -d ' ' || true)"
     fi
 
-    # MIG slices are isolated — TP > 1 across them is impossible.
-    if [[ "$TP" -ne 1 ]]; then
-        echo "[serve_vllm] MIG mode: forcing TP=1 (slice $MIG_FULL)" >&2
-        TP=1
+    # MIG slices are isolated — AB_SERVING_TENSOR_PARALLEL_SIZE > 1 across them is impossible.
+    if [[ "$AB_SERVING_TENSOR_PARALLEL_SIZE" -ne 1 ]]; then
+        echo "[serve_vllm] MIG mode: forcing AB_SERVING_TENSOR_PARALLEL_SIZE=1 (slice $MIG_FULL)" >&2
+        AB_SERVING_TENSOR_PARALLEL_SIZE=1
     fi
 
     GPU_ARGS=(--device "nvidia.com/gpu=${MIG_FULL}")
@@ -155,53 +151,53 @@ else
     # All visible GPUs. CDI-style 'all' selector works with both legacy nvidia
     # runtime and modern CDI; docker resolves either path.
     GPU_ARGS=(--gpus all)
-    GPU_DESC="all visible GPUs (TP=$TP)"
+    GPU_DESC="all visible GPUs (AB_SERVING_TENSOR_PARALLEL_SIZE=$AB_SERVING_TENSOR_PARALLEL_SIZE)"
 fi
 
 # ---- Port collision check -----------------------------------------------
 
-if command -v ss >/dev/null 2>&1 && ss -tlnH "sport = :$PORT" 2>/dev/null | grep -q ':'; then
-    echo "ERROR: port $PORT already in use. Stop the other server or set PORT=." >&2
-    ss -tlnpH "sport = :$PORT" 2>/dev/null | head -3 >&2 || true
+if command -v ss >/dev/null 2>&1 && ss -tlnH "sport = :$AB_SERVING_PORT" 2>/dev/null | grep -q ':'; then
+    echo "ERROR: port $AB_SERVING_PORT already in use. Stop the other server or set AB_SERVING_PORT=." >&2
+    ss -tlnpH "sport = :$AB_SERVING_PORT" 2>/dev/null | head -3 >&2 || true
     exit 4
 fi
 
 # ---- Container name collision -------------------------------------------
 
 if docker ps -a --format '{{.Names}}' | grep -qx "$VLLM_CONTAINER_NAME"; then
-    if [[ "${OC_FORCE_RM:-0}" = "1" ]]; then
-        echo "[serve_vllm] removing existing container $VLLM_CONTAINER_NAME (OC_FORCE_RM=1)" >&2
+    if [[ "${AB_SERVING_FORCE_RM:-0}" = "1" ]]; then
+        echo "[serve_vllm] removing existing container $VLLM_CONTAINER_NAME (AB_SERVING_FORCE_RM=1)" >&2
         docker rm -f "$VLLM_CONTAINER_NAME" >/dev/null
     else
         echo "ERROR: container '$VLLM_CONTAINER_NAME' already exists." >&2
-        echo "       Stop it ('make serve-stop') or rerun with OC_FORCE_RM=1." >&2
+        echo "       Stop it ('make serve-stop') or rerun with AB_SERVING_FORCE_RM=1." >&2
         exit 5
     fi
 fi
 
 # ---- vLLM arg construction (mirrors serve_host.sh presets) --------------
 
-# TOOL_CALL_PARSER selects which family of <tool_call> markers vLLM extracts
+# AB_MODEL_TOOL_CALL_PARSER selects which family of <tool_call> markers vLLM extracts
 # from the model output into the OpenAI-compat `tool_calls` field.
 #   qwen3_coder   Qwen3-Coder / Qwen3.6 (default; the agent-bench reference model)
 #   hermes        Qwen2.5-Instruct, Hermes models — `<tool_call>{...}</tool_call>`
 #   ""            no parser; tools markers stay in `content` (OC plugin parses them)
-TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen3_coder}"
-REASONING_PARSER="${REASONING_PARSER-}"
+AB_MODEL_TOOL_CALL_PARSER="${AB_MODEL_TOOL_CALL_PARSER:-qwen3_coder}"
+AB_MODEL_REASONING_PARSER="${AB_MODEL_REASONING_PARSER-}"
 
 BASE_FLAGS=(
-    --host "$BIND_HOST"
-    --port "$PORT"
-    --tensor-parallel-size "$TP"
-    --max-model-len "$MAX_MODEL_LEN"
-    --gpu-memory-utilization "$GPU_MEM_UTIL"
+    --host "$AB_SERVING_BIND_HOST"
+    --port "$AB_SERVING_PORT"
+    --tensor-parallel-size "$AB_SERVING_TENSOR_PARALLEL_SIZE"
+    --max-model-len "$AB_SERVING_MAX_MODEL_LEN"
+    --gpu-memory-utilization "$AB_SERVING_GPU_MEMORY_UTILIZATION"
     --trust-remote-code
 )
-if [[ -n "$TOOL_CALL_PARSER" ]]; then
-    BASE_FLAGS+=(--enable-auto-tool-choice --tool-call-parser "$TOOL_CALL_PARSER")
+if [[ -n "$AB_MODEL_TOOL_CALL_PARSER" ]]; then
+    BASE_FLAGS+=(--enable-auto-tool-choice --tool-call-parser "$AB_MODEL_TOOL_CALL_PARSER")
 fi
-if [[ -n "$REASONING_PARSER" ]]; then
-    BASE_FLAGS+=(--reasoning-parser "$REASONING_PARSER")
+if [[ -n "$AB_MODEL_REASONING_PARSER" ]]; then
+    BASE_FLAGS+=(--reasoning-parser "$AB_MODEL_REASONING_PARSER")
 fi
 # Qwen3 thinking-mode routes the model's chain-of-thought to a separate
 # `reasoning` field. Most agent harnesses read `content` only, so they see
@@ -220,11 +216,11 @@ fi
 
 declare -a PRESET_FLAGS
 CONFIG_ID=""
-case "$PRESET" in
+case "$AB_SERVING_PRESET" in
     default)
-        CONFIG_ID="${SERVING_CONFIG_ID:-vllm-default}"
-        PRESET_FLAGS=(--max-num-seqs "${MAX_NUM_SEQS:-128}")
-        [[ "${ENABLE_PREFIX_CACHING:-1}" == "1" ]] && PRESET_FLAGS+=(--enable-prefix-caching) ;;
+        CONFIG_ID="${AB_SERVING_CONFIG_ID:-vllm-default}"
+        PRESET_FLAGS=(--max-num-seqs "${AB_SERVING_MAX_NUM_SEQS:-128}")
+        [[ "${AB_SERVING_ENABLE_PREFIX_CACHING:-1}" == "1" ]] && PRESET_FLAGS+=(--enable-prefix-caching) ;;
     latency)
         CONFIG_ID="vllm-latency"
         PRESET_FLAGS=(--max-num-seqs 8 --enable-prefix-caching --scheduling-policy priority) ;;
@@ -235,7 +231,7 @@ case "$PRESET" in
         CONFIG_ID="vllm-context"
         PRESET_FLAGS=(--max-num-seqs 32 --enable-prefix-caching --kv-cache-dtype fp8) ;;
     *)
-        echo "Unknown preset: $PRESET (default|latency|throughput|context)" >&2
+        echo "Unknown preset: $AB_SERVING_PRESET (default|latency|throughput|context)" >&2
         exit 2 ;;
 esac
 
@@ -265,7 +261,7 @@ DOCKER_ARGS=(
 [[ -n "$VLLM_EXTRA_DOCKER_ARGS" ]] && DOCKER_ARGS+=($VLLM_EXTRA_DOCKER_ARGS)
 DOCKER_ARGS+=(
     "$VLLM_IMAGE"
-    --model "$MODEL"
+    --model "$AB_MODEL_NAME"
     "${BASE_FLAGS[@]}"
     "${PRESET_FLAGS[@]}"
 )
@@ -275,23 +271,23 @@ DOCKER_ARGS+=(
 echo "[serve_vllm] image:        $VLLM_IMAGE"
 echo "[serve_vllm] container:    $VLLM_CONTAINER_NAME"
 echo "[serve_vllm] gpu binding:  $GPU_DESC"
-echo "[serve_vllm] preset:       $PRESET (config_id=$CONFIG_ID)"
-echo "[serve_vllm] endpoint:     http://localhost:$PORT/v1"
+echo "[serve_vllm] preset:       $AB_SERVING_PRESET (config_id=$CONFIG_ID)"
+echo "[serve_vllm] endpoint:     http://localhost:$AB_SERVING_PORT/v1"
 echo "[serve_vllm] HF cache:     $VLLM_HOST_HF_HOME"
 echo "[serve_vllm] command:"
 printf "  docker"; printf " %q" "${DOCKER_ARGS[@]}"; printf "\n\n"
 
 # Persist config_id for the experiment driver.
-mkdir -p "${KIT_ROOT:-$(pwd)}/data"
-echo "$CONFIG_ID" > "${KIT_ROOT:-$(pwd)}/data/serving_config_id"
+mkdir -p "${AB_REPO_ROOT:-$(pwd)}/data"
+echo "$CONFIG_ID" > "${AB_REPO_ROOT:-$(pwd)}/data/serving_config_id"
 # Mirror MIG provenance so manifests / aggregate.py can pick it up.
 {
     echo "config_id=$CONFIG_ID"
     echo "vllm_image=$VLLM_IMAGE"
     echo "mig_uuid=${MIG_FULL:-}"
     echo "mig_profile=${MIG_PROFILE:-}"
-    echo "tensor_parallel_size=$TP"
-} > "${KIT_ROOT:-$(pwd)}/data/serving_metadata.env"
+    echo "tensor_parallel_size=$AB_SERVING_TENSOR_PARALLEL_SIZE"
+} > "${AB_REPO_ROOT:-$(pwd)}/data/serving_metadata.env"
 
 if [[ "${DRY_RUN:-0}" = "1" ]]; then
     echo "[serve_vllm] DRY-RUN — exiting before docker run."

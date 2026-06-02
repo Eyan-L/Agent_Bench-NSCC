@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Emit shell assignments for a model profile file.
 
-The emitted variables are intentionally runtime-facing: MODEL is the exact
-string passed to vLLM/SGLang and to OpenAI-compatible client requests.
-Existing env values win so one-off CLI overrides still work.
+The emitted variables are runtime-facing AB_* names. AB_MODEL_NAME is the exact
+string passed to serving engines and OpenAI-compatible client requests. Existing
+env values win so one-off CLI overrides still work.
 """
 
 import os
@@ -18,16 +18,16 @@ from agent_bench.core.profile_io import load_profile
 
 _KEYS = [
     ("AB_MODEL_ID", "config_id"),
-    ("MODEL", "name"),
-    ("MODEL_TEMPERATURE", "temperature"),
-    ("MAX_TOKENS", "max_tokens"),
-    ("MODEL_CONTEXT_WINDOW", "context_window"),
-    ("MAX_MODEL_LEN", "context_window"),
-    ("MODEL_PROVIDER", "provider"),
-    ("MODEL_API_KEY", "api_key"),
+    ("AB_MODEL_NAME", "name"),
+    ("AB_MODEL_TEMPERATURE", "temperature"),
+    ("AB_MODEL_MAX_OUTPUT_TOKENS", "max_tokens"),
+    ("AB_MODEL_CONTEXT_WINDOW", "context_window"),
+    ("AB_SERVING_MAX_MODEL_LEN", "context_window"),
+    ("AB_MODEL_PROVIDER", "provider"),
+    ("AB_SERVING_API_KEY", "api_key"),
     ("LITELLM_MODEL", "litellm_model"),
-    ("TOOL_CALL_PARSER", "tool_call_parser"),
-    ("REASONING_PARSER", "reasoning_parser"),
+    ("AB_MODEL_TOOL_CALL_PARSER", "tool_call_parser"),
+    ("AB_MODEL_REASONING_PARSER", "reasoning_parser"),
 ]
 
 

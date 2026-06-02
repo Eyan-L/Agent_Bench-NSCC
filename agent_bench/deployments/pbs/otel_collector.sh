@@ -9,7 +9,7 @@
 #
 # This script runs `otel/opentelemetry-collector-contrib` via singularity
 # with a config that has just one OTLP/HTTP receiver and a `file` exporter
-# pointing at $OC_OTEL_DATA_DIR/otel-traces.jsonl. Best-effort — failures
+# pointing at $AB_TELEMETRY_DATA_DIR/otel-traces.jsonl. Best-effort — failures
 # log a warning and exit non-zero so the caller can decide whether to abort
 # the whole run or proceed without telemetry.
 #
@@ -18,16 +18,16 @@
 #   pbs/otel_collector.sh stop    # SIGTERM the pid, falls back to SIGKILL
 #
 # Env (all optional):
-#   OC_OTEL_DATA_DIR  Directory for config + trace + pid + log files.
+#   AB_TELEMETRY_DATA_DIR  Directory for config + trace + pid + log files.
 #                     Default: $SCRATCH/oc-agent_bench/telemetry/otel.
-#   OC_OTEL_PORT      OTLP/HTTP listen port. Default: 4318. Must match
+#   AB_TELEMETRY_PORT      OTLP/HTTP listen port. Default: 4318. Must match
 #                     profiles/harnesses/&lt;name&gt;.yaml (openclaw block): diagnostics.otel.endpoint.
-#   OC_OTEL_SIF       Path to the otelcol-contrib .sif. Default:
+#   AB_TELEMETRY_SIF       Path to the otelcol-contrib .sif. Default:
 #                     $SCRATCH/sif_images/otelcol-contrib.sif.
 #                     Pull on a network-equipped node before submitting:
-#                       singularity pull $OC_OTEL_SIF \
+#                       singularity pull $AB_TELEMETRY_SIF \
 #                           docker://otel/opentelemetry-collector-contrib:latest
-#   OC_OTEL_DOCKER    Source image. Default:
+#   AB_TELEMETRY_DOCKER    Source image. Default:
 #                     docker://otel/opentelemetry-collector-contrib:latest.
 
 set -uo pipefail
@@ -35,10 +35,10 @@ set -uo pipefail
 USER_NAME="${USER:-$(whoami)}"
 SCRATCH="${SCRATCH:-/scratch/users/ntu/$USER_NAME}"
 
-DATA_DIR="${OC_OTEL_DATA_DIR:-$SCRATCH/oc-agent_bench/telemetry/otel}"
-PORT="${OC_OTEL_PORT:-4318}"
-SIF="${OC_OTEL_SIF:-$SCRATCH/sif_images/otelcol-contrib.sif}"
-DOCKER="${OC_OTEL_DOCKER:-docker://otel/opentelemetry-collector-contrib:latest}"
+DATA_DIR="${AB_TELEMETRY_DATA_DIR:-$SCRATCH/oc-agent_bench/telemetry/otel}"
+PORT="${AB_TELEMETRY_PORT:-4318}"
+SIF="${AB_TELEMETRY_SIF:-$SCRATCH/sif_images/otelcol-contrib.sif}"
+DOCKER="${AB_TELEMETRY_DOCKER:-docker://otel/opentelemetry-collector-contrib:latest}"
 
 PID_FILE="$DATA_DIR/otelcol.pid"
 LOG_FILE="$DATA_DIR/otelcol.log"
@@ -56,7 +56,7 @@ ensure_sif() {
     if ! singularity pull --name "$(basename "$SIF")" \
             --dir "$(dirname "$SIF")" "$DOCKER" >&2; then
         LOG "ERROR: singularity pull failed; pre-pull on a login node and"
-        LOG "       set OC_OTEL_SIF to its path."
+        LOG "       set AB_TELEMETRY_SIF to its path."
         return 1
     fi
 }

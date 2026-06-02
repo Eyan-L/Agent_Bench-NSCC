@@ -53,13 +53,13 @@ def _otlp_attrs(items) -> Dict:
 
 
 _OTEL_TRACE_FILE_DEFAULT = os.environ.get(
-    "OC_OTEL_TRACE_FILE",
-    os.path.join(os.environ.get("OC_OTEL_DATA_DIR", "/tmp/otel"), "otel-traces.jsonl"),
+    "AB_TELEMETRY_TRACE_FILE",
+    os.path.join(os.environ.get("AB_TELEMETRY_DATA_DIR", "/tmp/otel"), "otel-traces.jsonl"),
 )
 # Time to wait after the agent run before reading the trace file, so the
 # diagnostics-otel plugin's batch processor has a chance to flush. The plugin
 # is configured with flushIntervalMs=20 in openclaw.json; 1.5s is generous.
-_OTEL_FLUSH_WAIT_SECONDS = float(os.environ.get("OC_OTEL_FLUSH_WAIT_SECONDS", "1.5"))
+_OTEL_FLUSH_WAIT_SECONDS = float(os.environ.get("AB_TELEMETRY_FLUSH_WAIT_SECONDS", "1.5"))
 
 
 class OpenClawAgentCondition:

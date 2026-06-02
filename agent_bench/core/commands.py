@@ -43,7 +43,7 @@ def run_main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--render-job", action="store_true", help="Print rendered job script when available.")
     parser.add_argument("--print-job", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-retry-errors", action="store_true", help="Do not retry ERROR runs.")
-    parser.add_argument("--max-workers", type=int, default=int(os.environ.get("EVAL_MAX_WORKERS", "1")))
+    parser.add_argument("--max-workers", type=int, default=int(os.environ.get("AB_RUN_MAX_WORKERS", "1")))
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     args = parser.parse_args(argv)
 

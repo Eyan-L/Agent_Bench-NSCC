@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Compatibility wrapper. Python owns SGLang profile resolution and command planning.
+# Python owns SGLang config resolution and command planning.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-KIT_ROOT="${KIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../.." && pwd)}"
-export KIT_ROOT
+AB_REPO_ROOT="${AB_REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../../.." && pwd)}"
+export AB_REPO_ROOT
 
 SGLANG_PID_FILE="${SGLANG_PID_FILE:-${PROJECT_ROOT}/.sglang.pid}"
 export SGLANG_PID_FILE

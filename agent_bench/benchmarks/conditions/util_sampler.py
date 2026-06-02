@@ -8,8 +8,8 @@ Benchmark-agnostic — used by both ``OpenClawAgentCondition`` (SWE-bench, TB)
 and the ``TerminalBenchReactCondition``. The condition-side context manager
 lives with benchmark utilities; the sampler process itself lives in telemetry.
 
-Toggle off with ``OC_UTIL_SAMPLE=0``; tune cadence with
-``OC_UTIL_SAMPLE_INTERVAL`` (seconds, default 1.0).
+Toggle off with ``AB_TELEMETRY_UTIL_SAMPLE=0``; tune cadence with
+``AB_TELEMETRY_UTIL_SAMPLE_INTERVAL`` (seconds, default 1.0).
 """
 from __future__ import annotations
 
@@ -39,17 +39,17 @@ class UtilSampler:
         self.run_dir = run_dir
         self.proc: Optional[subprocess.Popen] = None
         self.enabled = (
-            os.environ.get("OC_UTIL_SAMPLE", "1") != "0"
+            os.environ.get("AB_TELEMETRY_UTIL_SAMPLE", "1") != "0"
             and _UTIL_SAMPLER_SCRIPT.exists()
         )
         try:
-            self.interval = float(os.environ.get("OC_UTIL_SAMPLE_INTERVAL", "1.0"))
+            self.interval = float(os.environ.get("AB_TELEMETRY_UTIL_SAMPLE_INTERVAL", "1.0"))
         except ValueError:
             self.interval = 1.0
 
         if llm_pid is None:
             try:
-                llm_pid = int(os.environ.get("OC_LLM_PID") or 0) or None
+                llm_pid = int(os.environ.get("AB_TELEMETRY_SERVING_PID") or 0) or None
             except ValueError:
                 llm_pid = None
         if client_pid is None:

@@ -1,7 +1,7 @@
 """LongBench OpenClaw agent condition.
 
 A LongBench *instance* is a whole subtask, so this condition processes its
-``instance_data["examples"]`` CONCURRENTLY (ThreadPoolExecutor, LONGBENCH_CONCURRENCY)
+``instance_data["examples"]`` CONCURRENTLY (ThreadPoolExecutor, AB_BENCHMARK_CONCURRENCY)
 on the warm OC + sandbox containers. Each example is isolated in its OWN ClawRAG
 collection (``lb_<run_id>_<i>``) and its own ``/workspace/ctx_<i>.md`` file, so they
 don't collide and can run in parallel. Per example:
@@ -126,7 +126,7 @@ class LongBenchOpenClawCondition(OpenClawAgentCondition):
         ws_host = Path(self._env_info["workspace_host_path"])
         timeout_s = self.agent_config.max_time_seconds
 
-        conc = max(1, min(len(examples) or 1, int(os.environ.get("LONGBENCH_CONCURRENCY", "5"))))
+        conc = max(1, min(len(examples) or 1, int(os.environ.get("AB_BENCHMARK_CONCURRENCY", "5"))))
         logger.info(
             "LongBench %s: %d examples, concurrency=%d (per-example collections)",
             instance_id, len(examples), conc,
@@ -246,7 +246,7 @@ class LongBenchOpenClawCondition(OpenClawAgentCondition):
         step = {
             "trajectory_id": run_dir.name,
             "step_type": "LLM_INFER",
-            "step_subtype": "LONGBENCH_RAG_SUBTASK_LOOP",
+            "step_subtype": "BENCHMARK_RAG_SUBTASK_LOOP",
             "tool_name": "openclaw.agent",
             "instance_id": instance_id,
             "n_examples": len(preds),

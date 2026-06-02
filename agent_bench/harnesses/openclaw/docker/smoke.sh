@@ -8,24 +8,24 @@
 #
 # Usage:
 #   bash agent_bench/harnesses/openclaw/docker/smoke.sh
-#   OC_IMAGE_TAG=foo/openclaw:dev bash agent_bench/harnesses/openclaw/docker/smoke.sh
+#   AB_AGENT_RUNTIME_IMAGE=foo/openclaw:dev bash agent_bench/harnesses/openclaw/docker/smoke.sh
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HARNESS_DIR="$(dirname "$HERE")"
 VERSION_FILE="$HARNESS_DIR/patch/VERSION"
 OPENCLAW_VERSION="$(awk -F': *' '/^upstream_version:/ {print $2; exit}' "$VERSION_FILE")"
-OC_IMAGE_TAG="${OC_IMAGE_TAG:-agent-bench/openclaw:${OPENCLAW_VERSION}}"
+AB_AGENT_RUNTIME_IMAGE="${AB_AGENT_RUNTIME_IMAGE:-agent-bench/openclaw:${OPENCLAW_VERSION}}"
 
 pass()  { echo "  PASS  $*"; }
 fail()  { echo "  FAIL  $*" >&2; exit 1; }
-banner(){ echo; echo "[smoke] $* ($OC_IMAGE_TAG)"; }
+banner(){ echo; echo "[smoke] $* ($AB_AGENT_RUNTIME_IMAGE)"; }
 
 # 1. Image present + version pin. Bypass any image entrypoint (tini etc.) so
 # `--version` is passed straight to the openclaw bin in both the hand-rolled
 # image and the upstream-layered image.
 banner "1/3 version check"
-raw="$(docker run --rm --entrypoint /usr/local/bin/openclaw "$OC_IMAGE_TAG" --version 2>&1 | tr -d '\r' | tail -1)"
+raw="$(docker run --rm --entrypoint /usr/local/bin/openclaw "$AB_AGENT_RUNTIME_IMAGE" --version 2>&1 | tr -d '\r' | tail -1)"
 # Format: "OpenClaw <version>" or "OpenClaw <version> (<short-sha>)"
 got="$(awk '{print $2}' <<< "$raw")"
 [[ "$got" == "$OPENCLAW_VERSION" ]] || fail "version mismatch: got '$got' (raw: '$raw'), expected '$OPENCLAW_VERSION'"
@@ -34,9 +34,9 @@ pass "openclaw --version: $raw"
 # 2. Patches baked
 banner "2/3 patch markers (mode=baked)"
 docker run --rm \
-    -e OC_PATCH_MODE=baked \
+    -e AB_HARNESS_OPENCLAW_PATCH_MODE=baked \
     --entrypoint python3 \
-    "$OC_IMAGE_TAG" /opt/openclaw-tools/apply_patch.py status \
+    "$AB_AGENT_RUNTIME_IMAGE" /opt/openclaw-tools/apply_patch.py status \
     >/tmp/oc_smoke_patch.txt 2>&1 || {
         cat /tmp/oc_smoke_patch.txt >&2
         fail "patch status command failed"
@@ -56,7 +56,7 @@ banner "3/3 gateway launch (--help / dry path)"
 docker run --rm \
     -e OPENCLAW_GATEWAY_TOKEN=smoke-token \
     --entrypoint /usr/local/bin/openclaw \
-    "$OC_IMAGE_TAG" gateway --help \
+    "$AB_AGENT_RUNTIME_IMAGE" gateway --help \
     >/tmp/oc_smoke_gw.txt 2>&1 || {
         cat /tmp/oc_smoke_gw.txt >&2
         fail "openclaw gateway --help failed"
@@ -68,4 +68,4 @@ grep -qi 'gateway' /tmp/oc_smoke_gw.txt || {
 pass "openclaw gateway --help OK"
 
 echo
-echo "[smoke] all 3 checks passed for $OC_IMAGE_TAG"
+echo "[smoke] all 3 checks passed for $AB_AGENT_RUNTIME_IMAGE"

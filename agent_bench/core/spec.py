@@ -11,7 +11,7 @@ from agent_bench.core.profile_io import ProfileLoadError, load_profile
 
 BENCHMARKS = {"swebench", "terminal_bench", "deepresearch_bench", "longbench"}
 HARNESSES = {"openclaw", "openhands", "hermes", "react", "ar"}
-SERVING_BACKENDS = {"vllm", "sglang", "litellm", "existing_endpoint", "openai_compatible"}
+AB_SERVING_BACKENDS = {"vllm", "sglang", "litellm", "existing_endpoint", "openai_compatible"}
 DEPLOYMENTS = {"client_only", "local_docker", "nscc_pbs", "ccds_cloud"}
 STAGE_NAMES = (
     "prepare_environment",
@@ -142,8 +142,8 @@ def validate_resolved_experiment(resolved: ResolvedExperiment) -> None:
         errors.append("model profile must define model.config_id or model.name")
 
     backend = resolved.serving.get("backend")
-    if backend not in SERVING_BACKENDS:
-        errors.append(f"serving.backend must be one of {sorted(SERVING_BACKENDS)}")
+    if backend not in AB_SERVING_BACKENDS:
+        errors.append(f"serving.backend must be one of {sorted(AB_SERVING_BACKENDS)}")
 
     deployment_kind = resolved.deployment.get("kind") or resolved.deployment.get("name")
     if deployment_kind not in DEPLOYMENTS:

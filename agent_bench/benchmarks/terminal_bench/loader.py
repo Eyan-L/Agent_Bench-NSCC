@@ -36,8 +36,8 @@ except ImportError:  # pragma: no cover
 
 def _tasks_root() -> Path:
     """Vendored TB task tree at `agent_bench/benchmarks/terminal_bench/tasks/`.
-    Override via OC_TB_TASKS_ROOT."""
-    env = os.environ.get("OC_TB_TASKS_ROOT")
+    Override via AB_BENCHMARK_TASKS_ROOT."""
+    env = os.environ.get("AB_BENCHMARK_TASKS_ROOT")
     if env:
         return Path(env)
     return Path(__file__).resolve().parent / "tasks"

@@ -1,5 +1,5 @@
 {
-  "_doc": "SWE-bench phase2 RQ3 serving experiment. This app JSON only supplies instances; choose the concrete serving point with --serving / SERVING=profiles/serving/<engine>/<profile>. Instances and repo_mapping are TODOs that you need to fill in before running this sweep.",
+  "_doc": "SWE-bench phase2 RQ3 serving experiment. This benchmark JSON only supplies instances; choose the concrete serving point with --serving-config / AB_SERVING_CONFIG=profiles/serving/<engine>/<profile>. Instances and repo_mapping are TODOs that you need to fill in before running this sweep.",
   "sweep_name": "phase2_serving_sweep",
   "plan_version": "v1.0",
   "application": "swebench",

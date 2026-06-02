@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stop the host otelcol-contrib started by host_up.sh.
 set -euo pipefail
-DATA_DIR="${OC_OTEL_DATA_DIR:-/tmp/otel}"
+DATA_DIR="${AB_TELEMETRY_DATA_DIR:-/tmp/otel}"
 PID_FILE="$DATA_DIR/otelcol.pid"
 if [ ! -f "$PID_FILE" ]; then
     echo "[otel-down-host] no pid file at $PID_FILE; nothing to do" >&2

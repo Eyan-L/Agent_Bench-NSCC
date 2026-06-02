@@ -10,14 +10,14 @@ import os
 
 
 def resolve_endpoint(backend: str | None = None) -> str:
-    backend = backend or os.environ.get("SERVING_BACKEND")
+    backend = backend or os.environ.get("AB_SERVING_BACKEND")
     if not backend:
-        raise RuntimeError("SERVING_BACKEND not set and no backend argument provided")
+        raise RuntimeError("AB_SERVING_BACKEND not set and no backend argument provided")
 
     if backend in {"existing_endpoint", "openai_compatible"}:
-        endpoint = os.environ.get("MODEL_ENDPOINT") or os.environ.get("OPENAI_BASE_URL")
+        endpoint = os.environ.get("AB_SERVING_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
         if not endpoint:
-            raise RuntimeError("MODEL_ENDPOINT or OPENAI_BASE_URL must be set for existing endpoint serving")
+            raise RuntimeError("AB_SERVING_BASE_URL or OPENAI_BASE_URL must be set for existing endpoint serving")
         return endpoint.rstrip("/")
 
     if backend == "vllm":
@@ -27,8 +27,8 @@ def resolve_endpoint(backend: str | None = None) -> str:
         host = os.environ.get("SGLANG_HOST", "127.0.0.1")
         port = os.environ.get("SGLANG_PORT", "30000")
     elif backend == "litellm":
-        host = os.environ.get("LITELLM_HOST", os.environ.get("CLIENT_HOST", "127.0.0.1"))
-        port = os.environ.get("LITELLM_PORT", os.environ.get("PORT", "8000"))
+        host = os.environ.get("LITELLM_HOST", os.environ.get("AB_SERVING_CLIENT_HOST", "127.0.0.1"))
+        port = os.environ.get("LITELLM_PORT", os.environ.get("AB_SERVING_PORT", "8000"))
     else:
         raise ValueError(f"unsupported backend: {backend}")
 

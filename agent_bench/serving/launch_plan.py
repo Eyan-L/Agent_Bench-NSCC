@@ -76,7 +76,7 @@ def build_launch_plan(
         raise LaunchPlanError(f"unsupported serving backend for launch: {backend}")
 
     model = load_model_config(Path(model_path), serving=serving)
-    selected_mode = mode or base_env.get(_backend_env_name(backend, "MODE")) or base_env.get("SERVING_MODE") or "native"
+    selected_mode = mode or base_env.get(_backend_env_name(backend, "MODE")) or base_env.get("AB_SERVING_MODE") or "native"
     selected_mode = selected_mode.lower()
     log_value = str(log_path) if log_path is not None else _default_log_path(backend, base_env)
 
@@ -92,13 +92,13 @@ def build_launch_plan_from_env(
     backend: str | None = None,
     mode: str | None = None,
     env: Mapping[str, str] | None = None,
-    kit_root: str | Path | None = None,
+    repo_root: str | Path | None = None,
     log_path: str | Path | None = None,
 ) -> ServingLaunchPlan:
     base_env = dict(os.environ if env is None else env)
-    root = Path(kit_root or base_env.get("KIT_ROOT") or Path.cwd()).expanduser().resolve()
+    root = Path(repo_root or base_env.get("AB_REPO_ROOT") or Path.cwd()).expanduser().resolve()
 
-    selected_backend = backend or base_env.get("SERVING_BACKEND")
+    selected_backend = backend or base_env.get("AB_SERVING_BACKEND")
     model_path = _resolve_model_path(base_env, root, selected_backend)
     serving_path = _resolve_serving_path(base_env, root, selected_backend)
     if selected_backend is None:
@@ -136,9 +136,9 @@ def prepare_launch_artifacts(
     plan: ServingLaunchPlan,
     *,
     launch_env: Mapping[str, str],
-    kit_root: str | Path | None = None,
+    repo_root: str | Path | None = None,
 ) -> None:
-    root = Path(kit_root or launch_env.get("KIT_ROOT") or Path.cwd()).expanduser().resolve()
+    root = Path(repo_root or launch_env.get("AB_REPO_ROOT") or Path.cwd()).expanduser().resolve()
     data_dir = root / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "serving_config_id").write_text(plan.config_id, encoding="utf-8")
@@ -179,26 +179,26 @@ def _build_vllm_plan(
 ) -> ServingLaunchPlan:
     if mode not in {"native", "docker", "singularity"}:
         raise LaunchPlanError(f"unsupported vLLM launch mode: {mode}")
-    port = _env_int(env, "VLLM_PORT", "PORT", default=serving.port)
-    bind_host = _env_str(env, "VLLM_HOST", "BIND_HOST", default=serving.bind_host)
-    client_host = _env_str(env, "CLIENT_HOST", default=serving.client_host)
+    port = _env_int(env, "VLLM_PORT", "AB_SERVING_PORT", default=serving.port)
+    bind_host = _env_str(env, "VLLM_HOST", "AB_SERVING_BIND_HOST", default=serving.bind_host)
+    client_host = _env_str(env, "AB_SERVING_CLIENT_HOST", default=serving.client_host)
     endpoint = _endpoint_with_host_port(serving.endpoint, host=client_host, port=port)
-    model_name = _env_str(env, "VLLM_MODEL", "MODEL", default=model.name)
+    model_name = _env_str(env, "VLLM_MODEL", "AB_MODEL_NAME", default=model.name)
     max_model_len = _env_int(
         env,
         "VLLM_MAX_LEN",
-        "MAX_MODEL_LEN",
-        "MODEL_CONTEXT_WINDOW",
+        "AB_SERVING_MAX_MODEL_LEN",
+        "AB_MODEL_CONTEXT_WINDOW",
         default=model.context_window,
     )
-    tp = _env_int(env, "VLLM_TP", "TP", default=1)
+    tp = _env_int(env, "VLLM_TP", "AB_SERVING_TENSOR_PARALLEL_SIZE", default=1)
     mig_uuid = env.get("VLLM_MIG_UUID", "") if mode == "docker" else ""
     if mig_uuid:
         tp = 1
-    gpu_util = _env_float(env, "VLLM_GPU_UTIL", "GPU_MEM_UTIL", default=serving.gpu_mem_util)
-    preset = _env_str(env, "SERVING_PRESET", default=serving.preset)
-    tool_parser = _env_optional(env, "TOOL_CALL_PARSER", default=model.tool_call_parser or "qwen3_coder")
-    reasoning_parser = _env_optional(env, "REASONING_PARSER", default=model.reasoning_parser)
+    gpu_util = _env_float(env, "VLLM_GPU_UTIL", "AB_SERVING_GPU_MEMORY_UTILIZATION", default=serving.gpu_mem_util)
+    preset = _env_str(env, "AB_SERVING_PRESET", default=serving.preset)
+    tool_parser = _env_optional(env, "AB_MODEL_TOOL_CALL_PARSER", default=model.tool_call_parser or "qwen3_coder")
+    reasoning_parser = _env_optional(env, "AB_MODEL_REASONING_PARSER", default=model.reasoning_parser)
     device = _env_str(env, "VLLM_DEVICE", default="cuda")
 
     base_flags = [
@@ -225,27 +225,27 @@ def _build_vllm_plan(
 
     config_id, preset_flags = _vllm_preset_flags(
         preset=preset,
-        config_id=_env_str(env, "SERVING_CONFIG_ID", default=serving.config_id),
-        max_num_seqs=_env_int(env, "MAX_NUM_SEQS", default=serving.max_num_seqs),
+        config_id=_env_str(env, "AB_SERVING_CONFIG_ID", default=serving.config_id),
+        max_num_seqs=_env_int(env, "AB_SERVING_MAX_NUM_SEQS", default=serving.max_num_seqs),
         enable_prefix_caching=_env_bool(
             env,
-            "ENABLE_PREFIX_CACHING",
+            "AB_SERVING_ENABLE_PREFIX_CACHING",
             default=serving.enable_prefix_caching,
         ),
     )
     all_flags = base_flags + preset_flags + _additional_flags(serving.additional_flags)
 
     launch_env = {
-        "MODEL_ENDPOINT": endpoint,
+        "AB_SERVING_BASE_URL": endpoint,
         "OPENAI_BASE_URL": endpoint,
-        "SERVING_BACKEND": "vllm",
-        "SERVING_CONFIG_ID": config_id,
+        "AB_SERVING_BACKEND": "vllm",
+        "AB_SERVING_CONFIG_ID": config_id,
     }
     if mode == "native":
         launch_env["CUDA_VISIBLE_DEVICES"] = _env_str(env, "CUDA_VISIBLE_DEVICES", default="1")
         argv = ("vllm", "serve", model_name, *all_flags)
     elif mode == "docker":
-        image = _env_str(env, "VLLM_IMAGE", "SERVING_IMAGE", default=serving.image or "vllm/vllm-openai:v0.11.0")
+        image = _env_str(env, "VLLM_IMAGE", "AB_SERVING_IMAGE", default=serving.image or "vllm/vllm-openai:v0.11.0")
         container = _env_str(env, "VLLM_CONTAINER_NAME", default="oc-vllm-serve")
         hf_home = _env_str(env, "VLLM_HOST_HF_HOME", "HF_HOME", default=str(Path.home() / ".cache/huggingface"))
         docker_args = ["run", "--name", container, "--network", "host", "--ipc", "host", "--shm-size", "16g"]
@@ -264,7 +264,7 @@ def _build_vllm_plan(
         docker_args.extend(shlex.split(env.get("VLLM_EXTRA_DOCKER_ARGS", "")))
         argv = ("docker", *docker_args, image, "--model", model_name, *all_flags)
     else:
-        sif = _env_str(env, "VLLM_SIF", "SERVING_SIF", default=serving.sif or "")
+        sif = _env_str(env, "VLLM_SIF", "AB_SERVING_SIF", default=serving.sif or "")
         if not sif:
             raise LaunchPlanError("VLLM_SIF or serving.sif is required for singularity mode")
         gpu_flag = ("--nv",) if device == "cuda" else ()
@@ -299,25 +299,25 @@ def _build_sglang_plan(
 ) -> ServingLaunchPlan:
     if mode not in {"native", "singularity"}:
         raise LaunchPlanError(f"unsupported SGLang launch mode: {mode}")
-    port = _env_int(env, "SGLANG_PORT", "PORT", default=serving.port)
-    bind_host = _env_str(env, "SGLANG_HOST", "BIND_HOST", default=serving.bind_host)
-    client_host = _env_str(env, "CLIENT_HOST", default=serving.client_host)
+    port = _env_int(env, "SGLANG_PORT", "AB_SERVING_PORT", default=serving.port)
+    bind_host = _env_str(env, "SGLANG_HOST", "AB_SERVING_BIND_HOST", default=serving.bind_host)
+    client_host = _env_str(env, "AB_SERVING_CLIENT_HOST", default=serving.client_host)
     endpoint = _endpoint_with_host_port(serving.endpoint, host=client_host, port=port)
     cuda_devices = _env_str(env, "SGLANG_CUDA_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", default="0")
     gpu_count = max(1, len([item for item in cuda_devices.split(",") if item]))
-    model_name = _env_str(env, "SGLANG_MODEL_PATH", "MODEL", default=model.name)
-    gpu_util = _env_float(env, "SGLANG_MEM_FRACTION_STATIC", "GPU_MEM_UTIL", default=serving.gpu_mem_util)
+    model_name = _env_str(env, "SGLANG_MODEL_PATH", "AB_MODEL_NAME", default=model.name)
+    gpu_util = _env_float(env, "SGLANG_MEM_FRACTION_STATIC", "AB_SERVING_GPU_MEMORY_UTILIZATION", default=serving.gpu_mem_util)
     context_length = _env_optional(
         env,
         "SGLANG_CONTEXT_LENGTH",
-        "MAX_MODEL_LEN",
-        "MODEL_CONTEXT_WINDOW",
+        "AB_SERVING_MAX_MODEL_LEN",
+        "AB_MODEL_CONTEXT_WINDOW",
         default=str(model.context_window) if model.context_window else None,
     )
     page_size = _env_str(env, "SGLANG_PAGE_SIZE", default="64")
     hicache_size = _env_str(env, "SGLANG_HICACHE_SIZE", default="60")
-    tool_parser = _env_optional(env, "SGLANG_TOOL_CALL_PARSER", "TOOL_CALL_PARSER", default=model.tool_call_parser or "qwen")
-    reasoning_parser = _env_optional(env, "SGLANG_REASONING_PARSER", "REASONING_PARSER", default=model.reasoning_parser)
+    tool_parser = _env_optional(env, "SGLANG_TOOL_CALL_PARSER", "AB_MODEL_TOOL_CALL_PARSER", default=model.tool_call_parser or "qwen")
+    reasoning_parser = _env_optional(env, "SGLANG_REASONING_PARSER", "AB_MODEL_REASONING_PARSER", default=model.reasoning_parser)
     hierarchical_cache = _env_bool(env, "SGLANG_ENABLE_HIERARCHICAL_CACHE", default=True)
 
     server_flags = [
@@ -349,10 +349,10 @@ def _build_sglang_plan(
 
     launch_env = {
         "CUDA_VISIBLE_DEVICES": cuda_devices,
-        "MODEL_ENDPOINT": endpoint,
+        "AB_SERVING_BASE_URL": endpoint,
         "OPENAI_BASE_URL": endpoint,
-        "SERVING_BACKEND": "sglang",
-        "SERVING_CONFIG_ID": _env_str(env, "SERVING_CONFIG_ID", default=serving.config_id),
+        "AB_SERVING_BACKEND": "sglang",
+        "AB_SERVING_CONFIG_ID": _env_str(env, "AB_SERVING_CONFIG_ID", default=serving.config_id),
         "SGLANG_KV_MEMTRACE": "0",
         "SGLANG_KV_MEMTRACE_STRICT": "0",
     }
@@ -363,7 +363,7 @@ def _build_sglang_plan(
     if mode == "native":
         argv = ("python3", "-m", "sglang.launch_server", *server_flags)
     else:
-        sif = _env_str(env, "SGLANG_SIF", "SERVING_SIF", default=serving.sif or "")
+        sif = _env_str(env, "SGLANG_SIF", "AB_SERVING_SIF", default=serving.sif or "")
         if not sif:
             raise LaunchPlanError("SGLANG_SIF or serving.sif is required for singularity mode")
         argv = ("singularity", "exec", "--nv", "--containall", sif, "python3", "-m", "sglang.launch_server", *server_flags)
@@ -378,7 +378,7 @@ def _build_sglang_plan(
         readiness_headers={},
         log_path=log_path,
         pid_name="sglang",
-        config_id=launch_env["SERVING_CONFIG_ID"],
+        config_id=launch_env["AB_SERVING_CONFIG_ID"],
         model_name=model_name,
         metadata={"tensor_parallel_size": str(gpu_count), "mode": mode},
     )
@@ -393,22 +393,22 @@ def _build_litellm_plan(
 ) -> ServingLaunchPlan:
     if mode not in {"native", "docker", "singularity"}:
         raise LaunchPlanError(f"unsupported LiteLLM launch mode: {mode}")
-    port = _env_int(env, "LITELLM_PORT", "PORT", default=serving.port)
-    bind_host = _env_str(env, "LITELLM_HOST", "BIND_HOST", default=serving.bind_host)
-    client_host = _env_str(env, "CLIENT_HOST", default=serving.client_host)
+    port = _env_int(env, "LITELLM_PORT", "AB_SERVING_PORT", default=serving.port)
+    bind_host = _env_str(env, "LITELLM_HOST", "AB_SERVING_BIND_HOST", default=serving.bind_host)
+    client_host = _env_str(env, "AB_SERVING_CLIENT_HOST", default=serving.client_host)
     endpoint = _endpoint_with_host_port(serving.endpoint, host=client_host, port=port)
     master_key = _env_str(env, "LITELLM_MASTER_KEY", "LITELLM_PROXY_API_KEY", default=serving.proxy_api_key or "sk-agent-bench-local")
-    model_alias = _env_str(env, "LITELLM_MODEL_ALIAS", "MODEL", default=model.name)
+    model_alias = _env_str(env, "LITELLM_MODEL_ALIAS", "AB_MODEL_NAME", default=model.name)
     upstream_model = _env_str(
         env,
         "LITELLM_UPSTREAM_MODEL",
         "LITELLM_MODEL",
         default=serving.provider_model or model.litellm_model or model.name,
     )
-    upstream_base_url = _env_optional(env, "LITELLM_UPSTREAM_BASE_URL", "SERVING_PROVIDER_BASE_URL", default=serving.provider_base_url)
+    upstream_base_url = _env_optional(env, "LITELLM_UPSTREAM_BASE_URL", "AB_SERVING_PROVIDER_BASE_URL", default=serving.provider_base_url)
     num_workers = _env_int(env, "LITELLM_NUM_WORKERS", "LITELLM_PROXY_NUM_WORKERS", default=4)
-    upstream_api_key_env = _env_optional(env, "SERVING_PROVIDER_API_KEY_ENV", default=serving.provider_api_key_env)
-    config_path = _env_str(env, "LITELLM_CONFIG_PATH", default=str(Path(env.get("KIT_ROOT", os.getcwd())) / "data" / "litellm" / "litellm_config.yaml"))
+    upstream_api_key_env = _env_optional(env, "AB_SERVING_PROVIDER_API_KEY_ENV", default=serving.provider_api_key_env)
+    config_path = _env_str(env, "LITELLM_CONFIG_PATH", default=str(Path(env.get("AB_REPO_ROOT", os.getcwd())) / "data" / "litellm" / "litellm_config.yaml"))
 
     launch_env = {
         "LITELLM_MASTER_KEY": master_key,
@@ -417,15 +417,14 @@ def _build_litellm_plan(
         "LITELLM_PORT": str(port),
         "LITELLM_NUM_WORKERS": str(num_workers),
         "LITELLM_CONFIG_PATH": config_path,
-        "MODEL_ENDPOINT": endpoint,
+        "AB_SERVING_BASE_URL": endpoint,
         "OPENAI_BASE_URL": endpoint,
-        "MODEL_API_KEY": master_key,
+        "AB_SERVING_API_KEY": master_key,
         "OPENAI_API_KEY": master_key,
-        "OC_VLLM_API_KEY": master_key,
         "HERMES_INFERENCE_PROVIDER": _env_str(env, "LITELLM_AGENT_PROVIDER", default=serving.proxy_agent_provider or "custom"),
         "NO_TELEMETRY": _env_str(env, "NO_TELEMETRY", default="1"),
-        "SERVING_BACKEND": "litellm",
-        "SERVING_CONFIG_ID": _env_str(env, "SERVING_CONFIG_ID", default=serving.config_id),
+        "AB_SERVING_BACKEND": "litellm",
+        "AB_SERVING_CONFIG_ID": _env_str(env, "AB_SERVING_CONFIG_ID", default=serving.config_id),
     }
     if upstream_base_url:
         launch_env["LITELLM_UPSTREAM_BASE_URL"] = upstream_base_url
@@ -448,7 +447,7 @@ def _build_litellm_plan(
             _env_str(
                 env,
                 "LITELLM_IMAGE",
-                "SERVING_IMAGE",
+                "AB_SERVING_IMAGE",
                 default=serving.image or "docker.litellm.ai/berriai/litellm:main-stable",
             )
         )
@@ -488,7 +487,7 @@ def _build_litellm_plan(
         metadata["container_name"] = container_name
         metadata["image"] = image
     else:
-        sif = _env_str(env, "LITELLM_SIF", "SERVING_SIF", default=serving.sif or "")
+        sif = _env_str(env, "LITELLM_SIF", "AB_SERVING_SIF", default=serving.sif or "")
         if not sif:
             raise LaunchPlanError("LITELLM_SIF or serving.sif is required for singularity mode")
         argv = (
@@ -522,7 +521,7 @@ def _build_litellm_plan(
         readiness_headers={"Authorization": f"Bearer {master_key}"},
         log_path=log_path,
         pid_name="litellm",
-        config_id=launch_env["SERVING_CONFIG_ID"],
+        config_id=launch_env["AB_SERVING_CONFIG_ID"],
         model_name=model_alias,
         secret_env_names=secret_names,
         upstream_api_key_env=upstream_api_key_env,
@@ -585,7 +584,7 @@ def _resolve_model_path(env: Mapping[str, str], root: Path, backend: str | None)
         value = env.get(key)
         if value:
             return _resolve_path(value, root)
-    profile = env.get("MODEL_PROFILE", "qwen36_27b")
+    profile = env.get("AB_MODEL_CONFIG", "qwen36_27b")
     return resolve_profile_ref(profile, root / "profiles" / "models", [".json", ".yaml", ".yml"])
 
 
@@ -598,11 +597,7 @@ def _resolve_serving_path(env: Mapping[str, str], root: Path, backend: str | Non
         value = env.get(key)
         if value:
             return _resolve_path(value, root)
-    serving = env.get("SERVING")
-    if not serving and backend:
-        serving = f"{backend}/default"
-    if not serving:
-        serving = "vllm/default"
+    serving = f"{backend}/default" if backend else "vllm/default"
     return resolve_profile_ref(serving, root / "profiles" / "serving", [".yaml", ".yml", ".json", ".toml"])
 
 

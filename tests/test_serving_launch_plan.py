@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _plan(model: str, serving: str, **kwargs):
-    env = {"KIT_ROOT": str(ROOT), **kwargs.pop("env", {})}
+    env = {"AB_REPO_ROOT": str(ROOT), **kwargs.pop("env", {})}
     return build_launch_plan(
         model_path=ROOT / model,
         serving_path=ROOT / serving,
@@ -30,7 +30,7 @@ def test_vllm_native_launch_plan_uses_profile_and_env_overrides() -> None:
         "profiles/models/qwen35_9b.json",
         "profiles/serving/vllm/default.yaml",
         backend="vllm",
-        env={"PORT": "8123", "TP": "2", "CUDA_VISIBLE_DEVICES": "0,1"},
+        env={"AB_SERVING_PORT": "8123", "AB_SERVING_TENSOR_PARALLEL_SIZE": "2", "CUDA_VISIBLE_DEVICES": "0,1"},
     )
 
     assert plan.backend == "vllm"
@@ -78,7 +78,7 @@ def test_sglang_native_and_singularity_launch_plans() -> None:
         "profiles/serving/sglang/default.yaml",
         backend="sglang",
         mode="singularity",
-        env={"SERVING_SIF": "/tmp/sglang.sif"},
+        env={"AB_SERVING_SIF": "/tmp/sglang.sif"},
     )
 
     assert singularity.argv[:4] == ("singularity", "exec", "--nv", "--containall")
@@ -95,7 +95,7 @@ def test_litellm_native_launch_plan_uses_proxy_auth_without_upstream_secret() ->
 
     assert plan.argv[0] == "litellm"
     assert plan.mode == "native"
-    assert plan.env["MODEL_API_KEY"] == "sk-agent-bench-local"
+    assert plan.env["AB_SERVING_API_KEY"] == "sk-agent-bench-local"
     assert plan.readiness_headers == {"Authorization": "Bearer sk-agent-bench-local"}
     assert plan.upstream_api_key_env == "GEMINI_API_KEY"
     assert "GEMINI_API_KEY" in plan.secret_env_names
@@ -139,7 +139,7 @@ def test_litellm_singularity_launch_plan_still_uses_sif() -> None:
         "profiles/serving/litellm/minimax_global.yaml",
         backend="litellm",
         mode="singularity",
-        env={"SERVING_SIF": "/tmp/litellm.sif"},
+        env={"AB_SERVING_SIF": "/tmp/litellm.sif"},
     )
 
     assert plan.argv[:4] == ("singularity", "exec", "--containall", "--bind")
@@ -160,7 +160,7 @@ def test_litellm_launch_environment_and_config_do_not_emit_upstream_secret(tmp_p
     redacted = json.dumps(plan.to_redacted_dict())
     assert "sk-upstream-secret" not in redacted
 
-    prepare_launch_artifacts(plan, launch_env=launch_env, kit_root=tmp_path)
+    prepare_launch_artifacts(plan, launch_env=launch_env, repo_root=tmp_path)
     rendered = (tmp_path / "litellm.yaml").read_text()
     assert 'api_base: "os.environ/LITELLM_UPSTREAM_BASE_URL"' in rendered
     assert "os.environ/LITELLM_UPSTREAM_API_KEY" in rendered
@@ -172,9 +172,9 @@ def test_shell_wrappers_delegate_to_python_launcher_without_launching() -> None:
         [
             "bash",
             str(ROOT / "agent_bench/serving/vllm/serve.sh"),
-            "--model-profile",
+            "--model-config",
             "qwen35_9b",
-            "--serving",
+            "--serving-config",
             "vllm/default",
             "--print-json",
         ],

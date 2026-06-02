@@ -4,10 +4,10 @@
  import { t as clearSessionAuthProfileOverride } from "./session-override-DjycqYZO.js";
  import { n as applyVerboseOverride } from "./level-overrides-DokoW8_5.js";
  import { n as prependInternalEventContext, t as persistSessionEntry$1 } from "./attempt-execution.shared-D208HO4M.js";
-+/* OC_PATCH_MODEL_USAGE_BEGIN */
++/* AB_HARNESS_OPENCLAW_PATCH_MODEL_USAGE_BEGIN */
 +import { n as __ocEmitDiagnosticEvent, r as __ocIsDiagnosticsEnabled } from "./diagnostic-events-DU0Yv8MX.js";
 +import { r as __ocHasNonzeroUsage } from "./usage-CqPmLqIM.js";
-+/* OC_PATCH_MODEL_USAGE_END */
++/* AB_HARNESS_OPENCLAW_PATCH_MODEL_USAGE_END */
  //#region src/agents/agent-runtime-config.ts
  async function resolveAgentRuntimeConfig(runtime, params) {
  	const loadedRaw = loadConfig();
@@ -15,7 +15,7 @@
  					}
  				});
  			}
-+			/* OC_PATCH_MODEL_USAGE_BEGIN */
++			/* AB_HARNESS_OPENCLAW_PATCH_MODEL_USAGE_BEGIN */
 +			try {
 +			    const __ocUsage = result?.meta?.agentMeta?.usage;
 +			    if (__ocIsDiagnosticsEnabled(cfg) && __ocHasNonzeroUsage(__ocUsage)) {
@@ -40,7 +40,7 @@
 +			} catch (__ocErr) {
 +			    try { console.error("oc-eval model.usage emit failed: " + (__ocErr && __ocErr.message || __ocErr)); } catch (_) {}
 +			}
-+			/* OC_PATCH_MODEL_USAGE_END */
++			/* AB_HARNESS_OPENCLAW_PATCH_MODEL_USAGE_END */
  			break;
  		} catch (err) {
  			if (err instanceof LiveSessionModelSwitchError) {

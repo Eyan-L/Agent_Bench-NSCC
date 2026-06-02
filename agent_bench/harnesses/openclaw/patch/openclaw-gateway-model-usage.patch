@@ -4,10 +4,10 @@
  import { randomBytes, randomUUID } from "node:crypto";
  import { CURRENT_SESSION_VERSION, SessionManager } from "@mariozechner/pi-coding-agent";
  import chokidar from "chokidar";
-+/* OC_PATCH_GATEWAY_AGENT_USAGE_BEGIN */
++/* AB_HARNESS_OPENCLAW_PATCH_GATEWAY_AGENT_USAGE_BEGIN */
 +import { n as __ocGwEmitDiagnosticEvent, r as __ocGwIsDiagnosticsEnabled } from "./diagnostic-events-DU0Yv8MX.js";
 +import { r as __ocGwHasNonzeroUsage } from "./usage-CqPmLqIM.js";
-+/* OC_PATCH_GATEWAY_AGENT_USAGE_END */
++/* AB_HARNESS_OPENCLAW_PATCH_GATEWAY_AGENT_USAGE_END */
  //#region src/gateway/control-plane-audit.ts
  function normalizePart$1(value, fallback) {
  	if (typeof value !== "string") return fallback;
@@ -15,7 +15,7 @@
  			summary: "completed",
  			result
  		};
-+		/* OC_PATCH_GATEWAY_AGENT_USAGE_BEGIN */
++		/* AB_HARNESS_OPENCLAW_PATCH_GATEWAY_AGENT_USAGE_BEGIN */
 +		try {
 +		    const __ocAgentMeta = result?.meta?.agentMeta;
 +		    const __ocU = __ocAgentMeta?.usage;
@@ -42,7 +42,7 @@
 +		} catch (__ocErr) {
 +		    try { console.error("oc-eval gateway model.usage emit failed: " + (__ocErr && __ocErr.message || __ocErr)); } catch (_) {}
 +		}
-+		/* OC_PATCH_GATEWAY_AGENT_USAGE_END */
++		/* AB_HARNESS_OPENCLAW_PATCH_GATEWAY_AGENT_USAGE_END */
  		setGatewayDedupeEntry({
  			dedupe: params.context.dedupe,
  			key: `agent:${params.idempotencyKey}`,

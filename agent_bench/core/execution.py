@@ -31,15 +31,6 @@ from agent_bench.serving.launch_plan import (
 
 STAGE_ORDER = STAGE_NAMES
 
-_LEGACY_STAGE_ENV = {
-    "materialize_benchmark": ("STAGE_SWEBENCH", "STAGE_TB_DATA"),
-    "prepare_images": ("STAGE_PULL", "STAGE_TB_PULL"),
-    "start_serving": ("STAGE_SERVING",),
-    "start_otel": ("STAGE_OTEL",),
-    "run_benchmark": ("STAGE_RUN",),
-    "cleanup": ("STAGE_CLEANUP",),
-}
-
 _SWEBENCH_PYTHON_DEPENDENCIES = (
     ("datasets", "datasets"),
     ("swebench.harness.test_spec.test_spec", "swebench"),
@@ -146,7 +137,7 @@ def build_execution_plan(
 
         pbs_spec = build_pbs_job_spec(
             resolved,
-            site=source_env.get("AGENT_BENCH_PBS_SITE", "NSCC"),
+            site=source_env.get("AB_PBS_SITE", "NSCC"),
             env=source_env,
         )
         run_dir = pbs_spec.run_dir
@@ -157,7 +148,7 @@ def build_execution_plan(
         warnings.extend(pbs_spec.warnings)
     else:
         execution_run_id, run_dir = _resolve_execution_run_dir(resolved, source_env)
-        log_dir = _path_from_env_or_default(source_env, "AGENT_BENCH_LOG_DIR", run_dir / "logs")
+        log_dir = _path_from_env_or_default(source_env, "AB_LOG_DIR", run_dir / "logs")
         stage_flags = _default_stage_flags(resolved, source_env)
         serving_plan = _build_serving_plan_if_needed(resolved, source_env, log_dir=log_dir, warnings=warnings)
 
@@ -271,7 +262,7 @@ def materialize_benchmark_data(
     env: dict[str, str] | None = None,
 ) -> Path:
     target_env = os.environ if env is None else env
-    explicit = _optional_path_from_raw_or_env(resolved, "instance_data", "INSTANCE_DATA", target_env)
+    explicit = _optional_path_from_raw_or_env(resolved, "benchmark_instance_data", "AB_BENCHMARK_INSTANCE_DATA", target_env)
     if explicit is not None:
         _set_instance_data_env(target_env, explicit)
         return explicit
@@ -358,29 +349,29 @@ def _prepare_environment(ctx: ExecutionContext) -> None:
     else:
         ctx.plan.run_dir.mkdir(parents=True, exist_ok=True)
         ctx.plan.log_dir.mkdir(parents=True, exist_ok=True)
-        ctx.env.setdefault("KIT_ROOT", str(Path.cwd()))
+        ctx.env.setdefault("AB_REPO_ROOT", str(Path.cwd()))
         ctx.env.setdefault("AB_EXPERIMENT_DIR", str(ctx.plan.run_dir))
-        ctx.env.setdefault("AGENT_BENCH_LOG_DIR", str(ctx.plan.log_dir))
+        ctx.env.setdefault("AB_LOG_DIR", str(ctx.plan.log_dir))
 
-    ctx.env.setdefault("AGENT_BENCH_STAGES", _stage_summary(ctx.plan))
+    ctx.env.setdefault("AB_STAGE_SUMMARY", _stage_summary(ctx.plan))
     ctx.env.setdefault("AB_RUN_STAMP", ctx.plan.run_id)
     ctx.env.setdefault("AB_EXPERIMENT_DIR", str(ctx.plan.run_dir))
-    ctx.env.setdefault("AGENT_BENCH_RUN_DIR", str(ctx.plan.run_dir))
-    ctx.env.setdefault("AGENT_BENCH_LOG_DIR", str(ctx.plan.log_dir))
+    ctx.env.setdefault("AB_RUN_DIR", str(ctx.plan.run_dir))
+    ctx.env.setdefault("AB_LOG_DIR", str(ctx.plan.log_dir))
     _prepare_otel_environment(ctx)
     _prepare_swebench_runtime_root(ctx)
     _prepare_python_dependencies(ctx)
 
 
 def _prepare_otel_environment(ctx: ExecutionContext) -> None:
-    data_dir = Path(ctx.env.get("OC_OTEL_DATA_DIR") or ctx.plan.log_dir / "otel").expanduser()
-    trace_file = Path(ctx.env.get("OC_OTEL_TRACE_FILE") or data_dir / "otel-traces.jsonl").expanduser()
+    data_dir = Path(ctx.env.get("AB_TELEMETRY_DATA_DIR") or ctx.plan.log_dir / "otel").expanduser()
+    trace_file = Path(ctx.env.get("AB_TELEMETRY_TRACE_FILE") or data_dir / "otel-traces.jsonl").expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
     trace_file.parent.mkdir(parents=True, exist_ok=True)
     trace_file.touch(exist_ok=True)
-    ctx.env["OC_OTEL_DATA_DIR"] = str(data_dir)
-    ctx.env["OC_OTEL_TRACE_FILE"] = str(trace_file)
-    ctx.env.setdefault("OC_OTEL_NAME", f"agent-bench-otel-{_sanitize_run_stamp_suffix(ctx.plan.run_id)}")
+    ctx.env["AB_TELEMETRY_DATA_DIR"] = str(data_dir)
+    ctx.env["AB_TELEMETRY_TRACE_FILE"] = str(trace_file)
+    ctx.env.setdefault("AB_TELEMETRY_NAME", f"agent-bench-otel-{_sanitize_run_stamp_suffix(ctx.plan.run_id)}")
 
 
 def _prepare_swebench_runtime_root(ctx: ExecutionContext) -> None:
@@ -389,20 +380,18 @@ def _prepare_swebench_runtime_root(ctx: ExecutionContext) -> None:
 
     root = _optional_path_from_raw_or_env(
         ctx.resolved,
-        "swebench_root",
-        "SWEBENCH_ROOT",
+        "benchmark_data_root",
+        "AB_BENCHMARK_DATA_ROOT",
         ctx.env,
     )
     if root is None:
-        root = ctx.plan.run_dir / "swebench_root"
-        _note("prepare_environment", f"SWEBENCH_ROOT defaulting to {root}")
+        root = ctx.plan.run_dir / "benchmark_data_root"
+        _note("prepare_environment", f"AB_BENCHMARK_DATA_ROOT defaulting to {root}")
 
     root.mkdir(parents=True, exist_ok=True)
     value = str(root.resolve())
-    ctx.env["SWEBENCH_ROOT"] = value
-    ctx.env["AB_SWEBENCH_ROOT"] = value
-    os.environ["SWEBENCH_ROOT"] = value
-    os.environ["AB_SWEBENCH_ROOT"] = value
+    ctx.env["AB_BENCHMARK_DATA_ROOT"] = value
+    os.environ["AB_BENCHMARK_DATA_ROOT"] = value
 
 
 def _prepare_python_dependencies(ctx: ExecutionContext) -> None:
@@ -478,7 +467,7 @@ def _append_unique(values: list[str], value: str) -> None:
 def _python_dependency_install_target(ctx: ExecutionContext) -> Path | None:
     if ctx.plan.pbs_spec is None:
         return None
-    value = ctx.env.get("OC_PYLIB")
+    value = ctx.env.get("AB_RUNTIME_PYLIB")
     return Path(value).expanduser() if value else None
 
 
@@ -508,7 +497,7 @@ def _run_python_dependency_install(
     command = [sys.executable, "-m", "pip", "install", "--upgrade"]
     if install_target is not None:
         command.extend(["--target", str(install_target)])
-        cache_dir = env.get("OC_PIP_CACHE")
+        cache_dir = env.get("AB_RUNTIME_PIP_CACHE")
         if cache_dir:
             Path(cache_dir).mkdir(parents=True, exist_ok=True)
             command.extend(["--cache-dir", cache_dir])
@@ -587,8 +576,8 @@ def _start_serving(ctx: ExecutionContext, stack: ExitStack) -> None:
     if plan.backend == "litellm":
         agent_provider = (ctx.resolved.serving.get("proxy") or {}).get("agent_provider")
         if agent_provider:
-            ctx.env.setdefault("MODEL_PROVIDER", str(agent_provider))
-            os.environ.setdefault("MODEL_PROVIDER", str(agent_provider))
+            ctx.env.setdefault("AB_MODEL_PROVIDER", str(agent_provider))
+            os.environ.setdefault("AB_MODEL_PROVIDER", str(agent_provider))
     if http_ready(plan.readiness_url, headers=plan.readiness_headers):
         _note("start_serving", f"endpoint already ready: {plan.readiness_url}")
         return
@@ -597,7 +586,7 @@ def _start_serving(ctx: ExecutionContext, stack: ExitStack) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         launch_env = build_launch_environment(plan, base_env=ctx.env)
-        launch_env.setdefault("KIT_ROOT", str(Path.cwd()))
+        launch_env.setdefault("AB_REPO_ROOT", str(Path.cwd()))
         prepare_launch_artifacts(plan, launch_env=launch_env)
     except LaunchPlanError as exc:
         raise ConfigError(str(exc)) from exc
@@ -655,7 +644,7 @@ def _start_otel(ctx: ExecutionContext, stack: ExitStack) -> None:
     stop = otel_command(ctx.plan.pbs_spec, ctx.env, "stop")
     try:
         run_stage_commands([start], base_env=ctx.env)
-        _note("start_otel", f"trace file -> {ctx.env.get('OC_OTEL_TRACE_FILE')}")
+        _note("start_otel", f"trace file -> {ctx.env.get('AB_TELEMETRY_TRACE_FILE')}")
     except ConfigError as exc:
         _note("start_otel", f"WARN: collector failed to start; run continues without spans ({exc})")
         return
@@ -670,18 +659,18 @@ def _start_otel(ctx: ExecutionContext, stack: ExitStack) -> None:
 
 
 def _start_local_otel(ctx: ExecutionContext, stack: ExitStack) -> None:
-    mode = ctx.env.get("OC_OTEL_MODE", "docker").strip().lower()
+    mode = ctx.env.get("AB_TELEMETRY_MODE", "docker").strip().lower()
     if mode in {"0", "false", "no", "off", "none", "skip"}:
-        _note("start_otel", "skipped by OC_OTEL_MODE")
+        _note("start_otel", "skipped by AB_TELEMETRY_MODE")
         return
     if mode not in {"docker", "host"}:
-        raise ConfigError(f"unsupported OC_OTEL_MODE={mode!r}; expected docker, host, or off")
+        raise ConfigError(f"unsupported AB_TELEMETRY_MODE={mode!r}; expected docker, host, or off")
 
     start_script = _local_otel_script("host_up.sh" if mode == "host" else "otel_collector_up.sh", ctx)
     stop_script = _local_otel_script("host_down.sh" if mode == "host" else "otel_collector_down.sh", ctx)
     try:
         _run_local_otel_script(ctx, start_script, "start")
-        _note("start_otel", f"{mode} collector trace file -> {ctx.env.get('OC_OTEL_TRACE_FILE')}")
+        _note("start_otel", f"{mode} collector trace file -> {ctx.env.get('AB_TELEMETRY_TRACE_FILE')}")
     except ConfigError as exc:
         _note("start_otel", f"WARN: collector failed to start; run continues without spans ({exc})")
         return
@@ -696,8 +685,8 @@ def _start_local_otel(ctx: ExecutionContext, stack: ExitStack) -> None:
 
 
 def _local_otel_script(name: str, ctx: ExecutionContext) -> Path:
-    kit_root = Path(ctx.env.get("KIT_ROOT") or Path.cwd())
-    return kit_root / "agent_bench" / "telemetry" / "otel" / name
+    repo_root = Path(ctx.env.get("AB_REPO_ROOT") or Path.cwd())
+    return repo_root / "agent_bench" / "telemetry" / "otel" / name
 
 
 def _run_local_otel_script(ctx: ExecutionContext, script: Path, action: str) -> None:
@@ -722,11 +711,11 @@ def _run_benchmark(ctx: ExecutionContext) -> None:
     from agent_bench.runtime.driver import run_sweep
 
     resolved = ctx.resolved
-    app_path = resolved.profile_paths.get("benchmark")
+    benchmark_path = resolved.profile_paths.get("benchmark")
     harness_path = resolved.profile_paths.get("harness")
     model_path = resolved.profile_paths["model"]
     serving_path = resolved.profile_paths["serving"]
-    if app_path is None or harness_path is None:
+    if benchmark_path is None or harness_path is None:
         raise ConfigError("experiments must reference benchmark.profile and harness.profile to execute")
 
     instance_data = ctx.instance_data_path or materialize_benchmark_data(
@@ -734,20 +723,20 @@ def _run_benchmark(ctx: ExecutionContext) -> None:
         pbs_spec=ctx.plan.pbs_spec,
         env=ctx.env,
     )
-    swebench_root = _optional_path_from_raw_or_env(resolved, "swebench_root", "SWEBENCH_ROOT", ctx.env)
+    benchmark_data_root = _optional_path_from_raw_or_env(resolved, "benchmark_data_root", "AB_BENCHMARK_DATA_ROOT", ctx.env)
 
-    ctx.env["AB_APP_CONFIG"] = str(app_path.resolve())
+    ctx.env["AB_BENCHMARK_CONFIG"] = str(benchmark_path.resolve())
     ctx.env["AB_HARNESS_CONFIG"] = str(harness_path.resolve())
     ctx.env["AB_MODEL_CONFIG"] = str(model_path.resolve())
     ctx.env["AB_SERVING_CONFIG"] = str(serving_path.resolve())
-    ctx.env["AB_INSTANCE_DATA"] = str(instance_data.resolve())
+    ctx.env["AB_BENCHMARK_INSTANCE_DATA"] = str(instance_data.resolve())
 
     run_sweep(
-        app_path=app_path,
+        benchmark_path=benchmark_path,
         harness_path=harness_path,
         model_path=model_path,
         serving_path=serving_path,
-        swebench_root=swebench_root,
+        benchmark_data_root=benchmark_data_root,
         instance_data_path=instance_data,
         retry_errors=ctx.retry_errors,
         max_workers=ctx.max_workers,
@@ -785,8 +774,8 @@ def _local_serving_mode(resolved: ResolvedExperiment, backend: str, env: Mapping
     backend_key = f"{backend.upper()}_MODE"
     if backend_key in env:
         return env[backend_key]
-    if "SERVING_MODE" in env:
-        return env["SERVING_MODE"]
+    if "AB_SERVING_MODE" in env:
+        return env["AB_SERVING_MODE"]
     deployment = resolved.deployment.get("kind") or resolved.deployment.get("name")
     if backend == "litellm" and deployment in {"client_only", "local_docker"}:
         return "docker"
@@ -830,10 +819,6 @@ def _apply_stage_overrides(
         new_key = f"AB_STAGE_{stage.upper()}"
         if new_key in env:
             stages[stage] = _parse_bool(env[new_key])
-        for old_key in _LEGACY_STAGE_ENV.get(stage, ()):
-            if old_key in env:
-                stages[stage] = _parse_bool(env[old_key])
-                break
 
 
 def _instance_data_path(resolved: ResolvedExperiment) -> Path:
@@ -868,19 +853,17 @@ def _resolve_user_path(base_dir: Path, value: str) -> Path:
 
 def _set_instance_data_env(env: dict[str, str], path: Path) -> None:
     value = str(path.resolve())
-    env["INSTANCE_DATA"] = value
-    env["AB_INSTANCE_DATA"] = value
-    os.environ["INSTANCE_DATA"] = value
-    os.environ["AB_INSTANCE_DATA"] = value
+    env["AB_BENCHMARK_INSTANCE_DATA"] = value
+    os.environ["AB_BENCHMARK_INSTANCE_DATA"] = value
 
 
 def _export_serving_agent_env(plan: ServingLaunchPlan, env: dict[str, str]) -> None:
-    for key in ("MODEL_ENDPOINT", "OPENAI_BASE_URL", "SERVING_BACKEND"):
+    for key in ("AB_SERVING_BASE_URL", "OPENAI_BASE_URL", "AB_SERVING_BACKEND"):
         if key in plan.env:
             env.setdefault(key, plan.env[key])
             os.environ.setdefault(key, plan.env[key])
     if plan.backend == "litellm":
-        for key in ("MODEL_API_KEY", "OPENAI_API_KEY", "OC_VLLM_API_KEY", "HERMES_INFERENCE_PROVIDER"):
+        for key in ("AB_SERVING_API_KEY", "OPENAI_API_KEY", "HERMES_INFERENCE_PROVIDER"):
             if key in plan.env:
                 env.setdefault(key, plan.env[key])
                 os.environ.setdefault(key, plan.env[key])
@@ -897,7 +880,7 @@ def _resolve_execution_run_dir(
     resolved: ResolvedExperiment,
     env: Mapping[str, str],
 ) -> tuple[str, Path]:
-    explicit = env.get("AGENT_BENCH_RUN_DIR")
+    explicit = env.get("AB_RUN_DIR")
     if explicit:
         run_dir = Path(explicit).expanduser()
         return run_dir.name, run_dir

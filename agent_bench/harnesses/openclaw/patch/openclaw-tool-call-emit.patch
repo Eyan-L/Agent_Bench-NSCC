@@ -4,9 +4,9 @@
  import crypto, { randomUUID } from "node:crypto";
  import { DefaultResourceLoader, SessionManager, createAgentSession, estimateTokens } from "@mariozechner/pi-coding-agent";
  import { createAssistantMessageEventStream } from "@mariozechner/pi-ai";
-+/* OC_PATCH_TOOL_CALL_BEGIN */
++/* AB_HARNESS_OPENCLAW_PATCH_TOOL_CALL_BEGIN */
 +import { n as __ocToolEmitDiagnosticEvent } from "./diagnostic-events-DU0Yv8MX.js";
-+/* OC_PATCH_TOOL_CALL_END */
++/* AB_HARNESS_OPENCLAW_PATCH_TOOL_CALL_END */
  //#region src/trajectory/metadata.ts
  function toSortedUniqueStrings(values) {
  	if (!values || values.length === 0) return;
@@ -14,7 +14,7 @@
  		}
  	});
  	const endedAt = Date.now();
-+	/* OC_PATCH_TOOL_CALL_BEGIN */
++	/* AB_HARNESS_OPENCLAW_PATCH_TOOL_CALL_BEGIN */
 +	try {
 +	    const __ocStartedAt = startData?.startTime;
 +	    __ocToolEmitDiagnosticEvent({
@@ -32,7 +32,7 @@
 +	} catch (__ocErr) {
 +	    try { console.error("oc-eval tool.call emit failed: " + (__ocErr && __ocErr.message || __ocErr)); } catch (_) {}
 +	}
-+	/* OC_PATCH_TOOL_CALL_END */
++	/* AB_HARNESS_OPENCLAW_PATCH_TOOL_CALL_END */
  	emitTrackedItemEvent(ctx, {
  		itemId: buildToolItemId(toolCallId),
  		phase: "end",

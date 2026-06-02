@@ -1,6 +1,6 @@
 # Default vLLM endpoint profile. Model context length comes from
 # profiles/models/*.json; tensor parallelism is selected at launch time via
-# VLLM_TP or TP.
+# AB_SERVING_TENSOR_PARALLEL_SIZE or VLLM_TP.
 serving:
   config_id: vllm-default
   backend: vllm

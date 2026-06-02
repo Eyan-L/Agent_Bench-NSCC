@@ -16,15 +16,6 @@ from agent_bench.serving.launch_plan import LaunchPlanError, ServingLaunchPlan, 
 
 RUNTIME_STAGES = STAGE_NAMES
 
-_LEGACY_STAGE_ENV = {
-    "materialize_benchmark": ("STAGE_SWEBENCH", "STAGE_TB_DATA"),
-    "prepare_images": ("STAGE_PULL", "STAGE_TB_PULL"),
-    "start_serving": ("STAGE_SERVING",),
-    "start_otel": ("STAGE_OTEL",),
-    "run_benchmark": ("STAGE_RUN",),
-    "cleanup": ("STAGE_CLEANUP",),
-}
-
 
 @dataclass(frozen=True)
 class PbsResources:
@@ -82,7 +73,7 @@ class PbsJobSpec:
                 "",
                 "set -euo pipefail",
                 'cd "${PBS_O_WORKDIR:-$PWD}"',
-                f"export AGENT_BENCH_PBS_SITE={shlex.quote(self.site)}",
+                f"export AB_PBS_SITE={shlex.quote(self.site)}",
                 'if [[ -z "${AB_RUN_STAMP:-}" ]]; then',
                 '    AB_RUN_STAMP="$(TZ=Asia/Singapore date +%Y-%m-%d_%H-%M-%S)"',
                 '    if [[ -n "${PBS_JOBID:-}" ]]; then',
@@ -93,9 +84,9 @@ class PbsJobSpec:
                 "export AB_RUN_STAMP",
                 f"export AB_EXPERIMENT_BASE={shlex.quote(str(experiment_base))}",
                 'export AB_EXPERIMENT_DIR="${AB_EXPERIMENT_DIR:-$AB_EXPERIMENT_BASE/$AB_RUN_STAMP}"',
-                'export AGENT_BENCH_RUN_DIR="${AGENT_BENCH_RUN_DIR:-$AB_EXPERIMENT_DIR}"',
-                'export AGENT_BENCH_LOG_DIR="${AGENT_BENCH_LOG_DIR:-$AGENT_BENCH_RUN_DIR/logs}"',
-                f"export AGENT_BENCH_STAGES={shlex.quote(self.stage_summary())}",
+                'export AB_RUN_DIR="${AB_RUN_DIR:-$AB_EXPERIMENT_DIR}"',
+                'export AB_LOG_DIR="${AB_LOG_DIR:-$AB_RUN_DIR/logs}"',
+                f"export AB_STAGE_SUMMARY={shlex.quote(self.stage_summary())}",
                 f"python3 run.py --config {config_arg}",
                 "",
             ]
@@ -139,12 +130,12 @@ def build_pbs_job_spec(
     repo_root: str | Path | None = None,
 ) -> PbsJobSpec:
     source_env = dict(os.environ if env is None else env)
-    root = Path(repo_root or source_env.get("KIT_ROOT") or Path.cwd()).resolve()
+    root = Path(repo_root or source_env.get("AB_REPO_ROOT") or Path.cwd()).resolve()
     deployment = resolved.deployment
     backend = resolved.serving.get("backend")
     scratch = _env_str(source_env, "SCRATCH", default=str(Path.home() / "scratch"))
     run_stamp, run_dir = _resolve_job_run_dir(resolved, source_env)
-    log_dir = _path_from_env_or_default(source_env, "AGENT_BENCH_LOG_DIR", run_dir / "logs")
+    log_dir = _path_from_env_or_default(source_env, "AB_LOG_DIR", run_dir / "logs")
 
     resources = PbsResources(
         job_name=_env_str(source_env, "PBS_JOB_NAME", default=deployment.get("job_name") or f"agent-bench-{resolved.spec.name}"),
@@ -168,7 +159,7 @@ def build_pbs_job_spec(
                 serving_path=resolved.profile_paths["serving"],
                 backend=str(backend),
                 mode=mode,
-                env={**source_env, "KIT_ROOT": str(root)},
+                env={**source_env, "AB_REPO_ROOT": str(root)},
                 log_path=log_dir / f"{backend}.log",
             )
         except LaunchPlanError as exc:
@@ -213,15 +204,11 @@ def _resolve_stages(resolved: ResolvedExperiment, env: Mapping[str, str]) -> dic
         new_key = f"AB_STAGE_{stage.upper()}"
         if new_key in env:
             stages[stage] = _parse_bool(env[new_key])
-        for old_key in _LEGACY_STAGE_ENV.get(stage, ()):
-            if old_key in env:
-                stages[stage] = _parse_bool(env[old_key])
-                break
     return stages
 
 
 def _serving_mode(resolved: ResolvedExperiment, env: Mapping[str, str]) -> str:
-    explicit = env.get("SERVING_MODE")
+    explicit = env.get("AB_SERVING_MODE")
     if explicit:
         return explicit
     backend = resolved.serving.get("backend")
@@ -244,7 +231,7 @@ def _resolve_job_run_dir(
     resolved: ResolvedExperiment,
     env: Mapping[str, str],
 ) -> tuple[str, Path]:
-    explicit = env.get("AGENT_BENCH_RUN_DIR")
+    explicit = env.get("AB_RUN_DIR")
     if explicit:
         run_dir = Path(explicit).expanduser()
         return run_dir.name, run_dir

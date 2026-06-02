@@ -34,7 +34,7 @@ from agent_bench.benchmarks.conditions.gateway_helpers import (
     release_gateway_port as _release_gateway_port,
 )
 from agent_bench.benchmarks.deepresearch_bench.app import DeepResearchHarness
-from agent_bench.benchmarks.swebench.app import DEFAULT_OC_IMAGE, _force_rmtree
+from agent_bench.benchmarks.swebench.app import DEFAULT_OPENCLAW_RUNTIME_IMAGE, _force_rmtree
 from agent_bench.harnesses.openclaw.dispatcher import OpenClawRemoteDispatcher
 from agent_bench.core.config import endpoint_for_container, load_active_model_and_serving
 from agent_bench.core.profile_io import load_profile
@@ -45,13 +45,13 @@ logger = logging.getLogger(__name__)
 # INSIDE the per-task sandbox container. The agent (and the harness's ingest, via
 # `docker exec`) reach it at localhost:8080 inside that container.
 DEFAULT_SANDBOX_IMAGE = os.environ.get(
-    "LONGBENCH_SANDBOX_IMAGE", "agent-bench/longbench-clawrag-sandbox:1.0")
+    "AB_BENCHMARK_SANDBOX_IMAGE", "agent-bench/longbench-clawrag-sandbox:1.0")
 DEFAULT_AGENT_ID = "longbench_rag"
 CLAWRAG_AGENT_URL = "http://localhost:8080"
 # GPU device for the task container's embeddings (vLLM is on the other device) and
 # a host HF cache mount so the embed model is shared/persisted across runs.
-GPU_DEVICE = os.environ.get("LONGBENCH_GPU_DEVICE", "0")
-HF_CACHE_HOST = os.environ.get("LONGBENCH_HF_CACHE", "/mnt/vdb/hongrui/longbench/hf_cache")
+GPU_DEVICE = os.environ.get("AB_BENCHMARK_GPU_DEVICE", "0")
+HF_CACHE_HOST = os.environ.get("AB_BENCHMARK_HF_CACHE", "/mnt/vdb/hongrui/longbench/hf_cache")
 _OPENAI_CHAT_COMPLETIONS_API = "openai-completions"
 _THIS_DIR = Path(__file__).resolve().parent
 _WORKSPACE_AGENT_FILES = ("AGENTS.md", "SOUL.md", "USER.md", "BOOTSTRAP.md")
@@ -301,7 +301,7 @@ class LongBenchHarness(DeepResearchHarness):
                 "-v", "/var/run/docker.sock:/var/run/docker.sock",
                 "-w", "/root",
                 "-e", f"OPENCLAW_GATEWAY_TOKEN={gateway_token}",
-                "-e", f"OPENCLAW_GATEWAY_OTEL_ENDPOINT={os.environ.get('OC_OTEL_ENDPOINT', 'http://vllm-host:4318')}",
+                "-e", f"OPENCLAW_GATEWAY_OTEL_ENDPOINT={os.environ.get('AB_TELEMETRY_ENDPOINT', 'http://vllm-host:4318')}",
                 "-e", f"OPENCLAW_RUN_ID={run_id}",
                 "-e", f"OTEL_RESOURCE_ATTRIBUTES=oc.run_id={run_id}",
                 "-e", "DOCKER_API_VERSION=1.44",
@@ -376,7 +376,7 @@ class LongBenchHarness(DeepResearchHarness):
         sandbox_binds: List[str], container_prefix: str, scope: str = "shared",
         n_agents: int = 1,
     ) -> Path:
-        kit_root = os.environ.get("KIT_ROOT", os.getcwd())
+        repo_root = os.environ.get("AB_REPO_ROOT", os.getcwd())
         state_dir = self.state_base / run_id
         if state_dir.exists():
             _force_rmtree(state_dir)
@@ -389,7 +389,7 @@ class LongBenchHarness(DeepResearchHarness):
 
         harness_path = os.environ.get(
             "AB_HARNESS_CONFIG",
-            os.path.join(kit_root, "profiles/harnesses/openclaw_longbench_clawrag.yaml"),
+            os.path.join(repo_root, "profiles/harnesses/openclaw_longbench_clawrag.yaml"),
         )
         if not os.path.isfile(harness_path):
             raise FileNotFoundError(f"harness config not found at {harness_path}")
@@ -398,18 +398,18 @@ class LongBenchHarness(DeepResearchHarness):
         if not oc_cfg:
             raise ValueError(f"harness config {harness_path} has no `openclaw` block")
 
-        model_cfg, _serving_cfg = load_active_model_and_serving(kit_root=kit_root)
+        model_cfg, _serving_cfg = load_active_model_and_serving(repo_root=repo_root)
         providers = oc_cfg.setdefault("models", {}).setdefault("providers", {})
-        vllm_p = providers.setdefault("vllm", {})
-        vllm_p["api"] = _OPENAI_CHAT_COMPLETIONS_API
-        vllm_p.setdefault("apiKey", model_cfg.api_key or "sk-dummy")
-        vllm_p["models"] = [{
+        agent_model_p = providers.setdefault("agent_model", {})
+        agent_model_p["api"] = _OPENAI_CHAT_COMPLETIONS_API
+        agent_model_p.setdefault("apiKey", model_cfg.api_key or "sk-dummy")
+        agent_model_p["models"] = [{
             "id": model_cfg.name, "name": model_cfg.name,
             "api": _OPENAI_CHAT_COMPLETIONS_API,
             "contextWindow": model_cfg.context_window, "maxTokens": model_cfg.max_tokens,
         }]
         oc_cfg.setdefault("agents", {}).setdefault("defaults", {}).setdefault(
-            "model", {})["primary"] = f"vllm/{model_cfg.name}"
+            "model", {})["primary"] = f"agent_model/{model_cfg.name}"
         # Register one agent per example (each gets its own isolated session).
         # Pin `workspace` on EVERY entry: OC's resolveAgentWorkspaceDir only gives
         # the DEFAULT agent agents.defaults.workspace; non-default agents fall
@@ -424,7 +424,7 @@ class LongBenchHarness(DeepResearchHarness):
         with open(state_dir / "openclaw.json", "w") as fh:
             json.dump(oc_cfg, fh, indent=2)
 
-        lb_agents = os.path.join(kit_root, "agent_bench/benchmarks/longbench/openclaw/agents")
+        lb_agents = os.path.join(repo_root, "agent_bench/benchmarks/longbench/openclaw/agents")
         if os.path.isdir(lb_agents):
             for aid in agent_ids:
                 for f in os.listdir(lb_agents):
@@ -452,12 +452,12 @@ class LongBenchHarness(DeepResearchHarness):
             },
         }
         cfg.setdefault("tools", {}).setdefault("exec", {})["host"] = "sandbox"
-        vllm_endpoint = os.environ.get(
-            "OC_VLLM_BASE_URL", endpoint_for_container(model_cfg.endpoint, "vllm-host"))
-        vp = cfg.setdefault("models", {}).setdefault("providers", {}).setdefault("vllm", {})
-        vp["api"] = _OPENAI_CHAT_COMPLETIONS_API
-        vp["baseUrl"] = vllm_endpoint
-        for m in vp.get("models") or []:
+        serving_endpoint = os.environ.get(
+            "AB_SERVING_BASE_URL", endpoint_for_container(model_cfg.endpoint, "vllm-host"))
+        agent_model_provider = cfg.setdefault("models", {}).setdefault("providers", {}).setdefault("agent_model", {})
+        agent_model_provider["api"] = _OPENAI_CHAT_COMPLETIONS_API
+        agent_model_provider["baseUrl"] = serving_endpoint
+        for m in agent_model_provider.get("models") or []:
             if isinstance(m, dict):
                 m["api"] = _OPENAI_CHAT_COMPLETIONS_API
         with open(cfg_path, "w") as fh:

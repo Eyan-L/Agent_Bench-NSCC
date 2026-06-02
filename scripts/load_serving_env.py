@@ -111,23 +111,23 @@ def main(argv):
     proxy_agent_provider = proxy.get("agent_provider")
 
     values = {
-        "SERVING_CONFIG_ID": serving.get("config_id"),
-        "SERVING_BACKEND": backend,
-        "SERVING_PRESET": serving.get("preset", "default"),
-        "BIND_HOST": endpoint_obj.get("bind_host", endpoint_obj.get("host", "0.0.0.0")),
-        "CLIENT_HOST": endpoint_obj.get("client_host", "127.0.0.1"),
-        "PORT": endpoint_obj.get("port", runtime.get("port", 8000)),
-        "MODEL_ENDPOINT": _endpoint(serving),
-        "GPU_MEM_UTIL": runtime.get("gpu_mem_util", 0.90),
-        "MAX_NUM_SEQS": scheduler.get("max_num_seqs", 128),
-        "ENABLE_PREFIX_CACHING": "1" if scheduler.get("enable_prefix_caching", True) else "0",
-        "SERVING_IMAGE": serving.get("image"),
-        "SERVING_SIF": serving.get("sif"),
-        "SERVING_PROVIDER": provider_name,
-        "SERVING_PROVIDER_NAME": provider_name,
-        "SERVING_PROVIDER_BASE_URL": provider.get("base_url") or provider.get("url"),
-        "SERVING_PROVIDER_INTERNAL_ENDPOINT": _endpoint(serving),
-        "SERVING_PROVIDER_API_KEY_ENV": provider_api_key_env,
+        "AB_SERVING_CONFIG_ID": serving.get("config_id"),
+        "AB_SERVING_BACKEND": backend,
+        "AB_SERVING_PRESET": serving.get("preset", "default"),
+        "AB_SERVING_BIND_HOST": endpoint_obj.get("bind_host", endpoint_obj.get("host", "0.0.0.0")),
+        "AB_SERVING_CLIENT_HOST": endpoint_obj.get("client_host", "127.0.0.1"),
+        "AB_SERVING_PORT": endpoint_obj.get("port", runtime.get("port", 8000)),
+        "AB_SERVING_BASE_URL": _endpoint(serving),
+        "AB_SERVING_GPU_MEMORY_UTILIZATION": runtime.get("gpu_mem_util", 0.90),
+        "AB_SERVING_MAX_NUM_SEQS": scheduler.get("max_num_seqs", 128),
+        "AB_SERVING_ENABLE_PREFIX_CACHING": "1" if scheduler.get("enable_prefix_caching", True) else "0",
+        "AB_SERVING_IMAGE": serving.get("image"),
+        "AB_SERVING_SIF": serving.get("sif"),
+        "AB_SERVING_PROVIDER": provider_name,
+        "AB_SERVING_PROVIDER_NAME": provider_name,
+        "AB_SERVING_PROVIDER_BASE_URL": provider.get("base_url") or provider.get("url"),
+        "AB_SERVING_PROVIDER_INTERNAL_ENDPOINT": _endpoint(serving),
+        "AB_SERVING_PROVIDER_API_KEY_ENV": provider_api_key_env,
         "LITELLM_PROXY_API_KEY": proxy_api_key if backend == "litellm" else None,
         "LITELLM_PROXY_NUM_WORKERS": proxy.get("num_workers"),
         "LITELLM_UPSTREAM_MODEL": provider.get("model"),
@@ -140,12 +140,11 @@ def main(argv):
             continue
         _emit_default(var, val)
     if backend == "litellm":
-        _emit_default("MODEL_API_KEY", proxy_api_key)
+        _emit_default("AB_SERVING_API_KEY", proxy_api_key)
         _emit_default("OPENAI_API_KEY", proxy_api_key)
-        _emit_default("OC_VLLM_API_KEY", proxy_api_key)
         if proxy_agent_provider:
-            print(f"MODEL_PROVIDER={_shell_quote(proxy_agent_provider)}")
-            print("export MODEL_PROVIDER")
+            print(f"AB_MODEL_PROVIDER={_shell_quote(proxy_agent_provider)}")
+            print("export AB_MODEL_PROVIDER")
             print(f"HERMES_INFERENCE_PROVIDER={_shell_quote(proxy_agent_provider)}")
             print("export HERMES_INFERENCE_PROVIDER")
     _emit_default("OPENAI_BASE_URL", _endpoint(serving))

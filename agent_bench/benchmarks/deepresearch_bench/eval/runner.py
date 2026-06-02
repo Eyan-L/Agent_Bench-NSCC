@@ -1,16 +1,16 @@
 """Standalone DR-Bench evaluation CLI.
 
 Re-grade persisted agent reports without re-running the agent. Pairs with
-``DR_SKIP_EVAL=1`` (used by the ``make run_dr_*_agent`` targets), which
+``AB_BENCHMARK_SKIP_EVAL=1`` (used by the ``make run_dr_*_agent`` targets), which
 makes the harness collect the report into ``run_dir/report.md`` and skip
 RACE + FACT. This script then walks the sweep dir and grades each report.
 
 Usage:
     python -m agent_bench.benchmarks.deepresearch_bench.eval.runner \\
-        --sweep data/experiments --app-leaf dr_smoke1 \\
-        --instance-data data/deepresearch_bench/instances.json
+        --sweep data/experiments --benchmark-leaf dr_smoke1 \\
+        --benchmark-instance-data data/deepresearch_bench/instances.json
 
-By default, ``--sweep data/experiments --app-leaf <leaf>`` picks the most
+By default, ``--sweep data/experiments --benchmark-leaf <leaf>`` picks the most
 recent experiment containing ``runs/<leaf>``. You can also point ``--sweep``
 directly at a run directory parent. With ``--force`` it re-grades even if a
 non-DEFERRED ``verdict.json`` already exists.
@@ -48,14 +48,14 @@ def _has_run_dirs(path: Path) -> bool:
         return False
 
 
-def _resolve_run_parent(path: Path, app_leaf: Optional[str]) -> Optional[Path]:
+def _resolve_run_parent(path: Path, benchmark_leaf: Optional[str]) -> Optional[Path]:
     if _has_run_dirs(path):
         return path
     runs_dir = path / "runs"
     if not runs_dir.is_dir():
         return None
-    if app_leaf:
-        candidate = runs_dir / app_leaf
+    if benchmark_leaf:
+        candidate = runs_dir / benchmark_leaf
         return candidate if _has_run_dirs(candidate) else None
     candidates = [p for p in runs_dir.iterdir() if p.is_dir() and _has_run_dirs(p)]
     if len(candidates) == 1:
@@ -63,17 +63,17 @@ def _resolve_run_parent(path: Path, app_leaf: Optional[str]) -> Optional[Path]:
     return None
 
 
-def _pick_stamp_dir(sweep_dir: Path, stamp: Optional[str], app_leaf: Optional[str]) -> Path:
-    direct = _resolve_run_parent(sweep_dir, app_leaf)
+def _pick_stamp_dir(sweep_dir: Path, stamp: Optional[str], benchmark_leaf: Optional[str]) -> Path:
+    direct = _resolve_run_parent(sweep_dir, benchmark_leaf)
     if direct is not None:
         return direct
     if stamp:
         p = sweep_dir / stamp
         if not p.is_dir():
             raise SystemExit(f"--stamp {stamp} not under {sweep_dir}")
-        resolved = _resolve_run_parent(p, app_leaf)
+        resolved = _resolve_run_parent(p, benchmark_leaf)
         if resolved is None:
-            suffix = f"/runs/{app_leaf}" if app_leaf else "/runs/<app-leaf>"
+            suffix = f"/runs/{benchmark_leaf}" if benchmark_leaf else "/runs/<benchmark-leaf>"
             raise SystemExit(f"no run dirs under {p}{suffix}")
         return resolved
     candidates = sorted(
@@ -81,12 +81,12 @@ def _pick_stamp_dir(sweep_dir: Path, stamp: Optional[str], app_leaf: Optional[st
         reverse=True,
     )
     for candidate in candidates:
-        resolved = _resolve_run_parent(candidate, app_leaf)
+        resolved = _resolve_run_parent(candidate, benchmark_leaf)
         if resolved is not None:
             return resolved
     if not candidates:
         raise SystemExit(f"no stamped subdirs or run dirs under {sweep_dir}")
-    suffix = f" containing runs/{app_leaf}" if app_leaf else " containing run dirs"
+    suffix = f" containing runs/{benchmark_leaf}" if benchmark_leaf else " containing run dirs"
     raise SystemExit(f"no experiment under {sweep_dir}{suffix}")
 
 
@@ -108,7 +108,7 @@ def _merge_verdict(existing: Dict, judge_result, host_report: Path, judge_dir: P
     race = asdict(judge_result.race) if judge_result.race else None
     fact = asdict(judge_result.fact) if judge_result.fact else None
     overall = float((race or {}).get("overall", 0.0))
-    threshold = float(os.environ.get("DR_PASS_THRESHOLD", "0.5"))
+    threshold = float(os.environ.get("AB_BENCHMARK_PASS_THRESHOLD", "0.5"))
     passed = race is not None and overall >= threshold and judge_result.race_error is None
     status = (
         "PASS" if passed
@@ -184,16 +184,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sweep", required=True, type=Path,
                         help="experiment root, legacy sweep root, or run-dir parent")
-    parser.add_argument("--app-leaf", default=None,
-                        help="app output leaf under data/experiments/<stamp>/runs/")
-    parser.add_argument("--instance-data", required=True, type=Path,
+    parser.add_argument("--benchmark-leaf", default=None,
+                        help="benchmark output leaf under data/experiments/<stamp>/runs/")
+    parser.add_argument("--benchmark-instance-data", dest="benchmark_instance_data", required=True, type=Path,
                         help="instances.json from the loader")
     parser.add_argument("--stamp", default=None,
                         help="stamped subdir; defaults to most recent")
     parser.add_argument("--force", action="store_true",
                         help="re-grade runs with an existing non-DEFERRED verdict")
     parser.add_argument("--workers", type=int, default=None,
-                        help="override DRB_JUDGE_WORKERS")
+                        help="override AB_BENCHMARK_JUDGE_WORKERS")
     parser.add_argument("--instance", default=None,
                         help="grade only this rid (matches dir name); default all")
     args = parser.parse_args(argv)
@@ -203,8 +203,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    inst_map = _load_instance_map(args.instance_data)
-    stamp_dir = _pick_stamp_dir(args.sweep, args.stamp, args.app_leaf)
+    inst_map = _load_instance_map(args.benchmark_instance_data)
+    stamp_dir = _pick_stamp_dir(args.sweep, args.stamp, args.benchmark_leaf)
     logger.info("Grading sweep %s", stamp_dir)
 
     run_dirs = [p for p in stamp_dir.iterdir() if p.is_dir() and (p / "manifest.json").is_file()]

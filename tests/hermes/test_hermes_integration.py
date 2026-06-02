@@ -20,12 +20,12 @@ def test_hermes_patch_manifest_and_backend_contract():
     assert telemetry_patch.is_file()
     text = patch.read_text()
     assert "tools/environments/docker.py" in text
-    assert "HM_PATCH_EXEC_BRIDGE_BEGIN" in text
-    assert "HM_PATCH_EXEC_BRIDGE_RUN_BEGIN" in text
+    assert "AB_HARNESS_HERMES_PATCH_EXEC_BRIDGE_BEGIN" in text
+    assert "AB_HARNESS_HERMES_PATCH_EXEC_BRIDGE_RUN_BEGIN" in text
     assert "HERMES_EXEC_BRIDGE" in text
     telemetry_text = telemetry_patch.read_text()
-    assert "HM_PATCH_AGENT_BENCH_TELEMETRY_BEGIN" in telemetry_text
-    assert "HERMES_AGENT_BENCH_EVENTS" in telemetry_text
+    assert "AB_HARNESS_HERMES_PATCH_TELEMETRY_BEGIN" in telemetry_text
+    assert "AB_AGENT_RUNTIME_EVENTS_FILE" in telemetry_text
     assert "_hm_ab_coerce_json_string_args" in telemetry_text
 
 
@@ -49,7 +49,7 @@ def test_hermes_app_uses_external_task_container_and_bridge():
     assert 'os.environ.get("OPENAI_API_KEY")' in app
     assert 'os.environ.get("OPENAI_BASE_URL")' in app
     assert '"HERMES_INFERENCE_PROVIDER": provider' in app
-    assert "HERMES_AGENT_BENCH_EVENTS" in app
+    assert "AB_AGENT_RUNTIME_EVENTS_FILE" in app
     assert 'f"{_STATE_DIR_IN_HERMES}/events.jsonl"' in app
     assert "MINIMAX_API_KEY" in app
     assert "/var/run/docker.sock" not in app
@@ -60,7 +60,7 @@ def test_hermes_driver_and_condition_are_registered():
     assert 'condition_type == "hermes_agent"' in driver
     assert 'harness_choice == "hermes"' in driver
     assert "SingularityContainer()" in driver
-    assert "SWEBenchHermesHarness(swebench_root, container=container)" in driver
+    assert "SWEBenchHermesHarness(benchmark_data_root, container=container)" in driver
     condition = (ROOT / "agent_bench/benchmarks/swebench/conditions/hermes_agent.py").read_text()
     assert '_resolve_provider(self.model_config)' in condition
     assert '"--provider", provider' in condition

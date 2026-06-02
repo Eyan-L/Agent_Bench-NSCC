@@ -16,17 +16,17 @@ pin in `patch/VERSION`.
 - `configure.sh` — generate per-run OpenClaw config
 - `apply_profile.sh` — switch agent profile
 - `gateway_up.sh` / `gateway_down.sh` — gateway lifecycle
-- `defaults.env` — `OC_*` env contract
+- `defaults.env` — OpenClaw harness defaults using the `AB_*` env contract
 - `state/` — runtime config templates and agent profile presets
 
 ## Patch modes
 
-`OC_PATCH_MODE`:
+`AB_HARNESS_OPENCLAW_PATCH_MODE`:
 - `runtime` — apply on launcher start, idempotent via marker
 - `baked` — assume image pre-patched, skip apply
 - `skip` — run unpatched OpenClaw (ablation)
 
 ## OTel output
 
-Patched OpenClaw writes JSONL to `OC_OTEL_TRACE_FILE` (default
+Patched OpenClaw writes JSONL to `AB_TELEMETRY_TRACE_FILE` (default
 `/tmp/otel/otel-traces.jsonl`). Reader: `agent_bench/telemetry/otel_reader.py`.

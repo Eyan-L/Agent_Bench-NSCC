@@ -19,7 +19,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not task_ids:
         parser.error("no Terminal-Bench tasks found")
 
-    os.environ["OC_TB_SIF_DIR"] = str(Path(args.sif_dir).expanduser())
+    os.environ["AB_DEPLOYMENT_TASK_IMAGE_DIR"] = str(Path(args.sif_dir).expanduser())
     harness = TerminalBenchSingularityHarness()
     for task_id in task_ids:
         instance = loader.load_task(task_id)

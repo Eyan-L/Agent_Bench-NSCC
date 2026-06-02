@@ -3,9 +3,9 @@
     "purpose": "OpenClaw patch manifest. Apply in listed order via apply_patch.py.",
     "fields": {
       "file": "relative path under patch/ to the unified diff",
-      "target_glob": "glob (relative to OC_HOST_OPENCLAW) for content-hashed bundles; substituted into the patch's CHUNK placeholder",
+      "target_glob": "glob (relative to AB_HARNESS_OPENCLAW_SOURCE_ROOT) for content-hashed bundles; substituted into the patch's CHUNK placeholder",
       "target_path": "exact relative path (used instead of target_glob when filename is stable)",
-      "target_glob_all": "recursive glob (relative to OC_HOST_OPENCLAW); patch is applied to every match (used when the same source file is duplicated across plugin bundles)",
+      "target_glob_all": "recursive glob (relative to AB_HARNESS_OPENCLAW_SOURCE_ROOT); patch is applied to every match (used when the same source file is duplicated across plugin bundles)",
       "chunk_placeholder": "string in patch that maps to the matched glob suffix (default: CHUNK)",
       "idempotent_marker": "literal string in patched output; if present in target file, the patch is treated as already applied",
       "summary": "human-readable description"
@@ -19,41 +19,41 @@
       "file": "openclaw-cli-model-usage.patch",
       "target_glob": "dist/agent-command-*.js",
       "chunk_placeholder": "CHUNK",
-      "idempotent_marker": "OC_PATCH_MODEL_USAGE_BEGIN",
+      "idempotent_marker": "AB_HARNESS_OPENCLAW_PATCH_MODEL_USAGE_BEGIN",
       "summary": "emit model.usage OTel event from CLI agent path"
     },
     {
       "file": "openclaw-gateway-model-usage.patch",
       "target_glob": "dist/server-plugin-bootstrap-*.js",
       "chunk_placeholder": "CHUNK",
-      "idempotent_marker": "OC_PATCH_GATEWAY_AGENT_USAGE_BEGIN",
+      "idempotent_marker": "AB_HARNESS_OPENCLAW_PATCH_GATEWAY_AGENT_USAGE_BEGIN",
       "summary": "emit model.usage OTel event from gateway path"
     },
     {
       "file": "openclaw-tool-call-emit.patch",
       "target_glob": "dist/selection-*.js",
       "chunk_placeholder": "CHUNK",
-      "idempotent_marker": "OC_PATCH_TOOL_CALL_BEGIN",
+      "idempotent_marker": "AB_HARNESS_OPENCLAW_PATCH_TOOL_CALL_BEGIN",
       "summary": "emit tool.call event payloads from selection path"
     },
     {
       "file": "openclaw-diagnostics-otel-tool-call.patch",
       "target_path": "dist/extensions/diagnostics-otel/index.js",
-      "idempotent_marker": "OC_PATCH_TOOL_CALL_HANDLER_BEGIN",
+      "idempotent_marker": "AB_HARNESS_OPENCLAW_PATCH_TOOL_CALL_HANDLER_BEGIN",
       "summary": "tool-call diagnostics handler in OTel extension"
     },
     {
       "file": "openclaw-external-exec-bridge.patch",
       "target_glob": "dist/bash-tools.exec-runtime-*.js",
       "chunk_placeholder": "CHUNK",
-      "idempotent_marker": "OC_PATCH_EXEC_BRIDGE_BEGIN",
+      "idempotent_marker": "AB_HARNESS_OPENCLAW_PATCH_EXEC_BRIDGE_BEGIN",
       "summary": "hijack sandbox tool exec to external bridge when OPENCLAW_EXEC_BRIDGE env is set"
     },
     {
       "file": "openclaw-ensure-sandbox-bridge-bypass.patch",
       "target_glob": "dist/docker-*.js",
       "chunk_placeholder": "CHUNK",
-      "idempotent_marker": "OC_PATCH_ENSURE_BRIDGE_BYPASS_BEGIN",
+      "idempotent_marker": "AB_HARNESS_OPENCLAW_PATCH_ENSURE_BRIDGE_BYPASS_BEGIN",
       "summary": "short-circuit ensureSandboxContainer when OPENCLAW_BYPASS_ENSURE_SANDBOX is set; skip all docker calls (image inspect, container state, create) — singularity mode pre-starts the task container and the bridge owns exec, so OC doesn't need any docker access"
     },
     {
@@ -61,26 +61,26 @@
       "target_glob": "dist/sandbox-*.js",
       "chunk_placeholder": "CHUNK",
       "target_content_hint": "readPinnedFile",
-      "idempotent_marker": "OC_PATCH_FS_BRIDGE_HELPER_BEGIN",
+      "idempotent_marker": "AB_HARNESS_OPENCLAW_PATCH_FS_BRIDGE_HELPER_BEGIN",
       "summary": "route fs-bridge read/write/stat/etc through the same external bridge"
     },
     {
       "file": "pi-ai-validation-jsonstring.patch",
       "target_glob_all": "**/node_modules/@mariozechner/pi-ai/dist/utils/validation.js",
-      "idempotent_marker": "OC_PATCH_PIAI_VALIDATION_JSONSTRING_BEGIN",
+      "idempotent_marker": "AB_HARNESS_OPENCLAW_PATCH_PIAI_VALIDATION_JSONSTRING_BEGIN",
       "summary": "coerce JSON-stringified array/object args into real arrays before AJV validates (Qwen3 emits nested args as JSON strings). Applied to every pi-ai copy (main + per-plugin bundles)."
     },
     {
       "file": "openclaw-ddg-serial.patch",
       "target_glob": "dist/ddg-client-*.js",
       "chunk_placeholder": "CHUNK",
-      "idempotent_marker": "OC_PATCH_DDG_SERIAL_BEGIN",
+      "idempotent_marker": "AB_HARNESS_OPENCLAW_PATCH_DDG_SERIAL_BEGIN",
       "summary": "serialize duckduckgo web_search requests with 400-800ms jittered gap to avoid DDG bot-detection challenge under burst loads"
     },
     {
       "file": "openclaw-pi-ai-raw-response.patch",
       "target_glob_all": "**/node_modules/@mariozechner/pi-ai/dist/providers/openai-completions.js",
-      "idempotent_marker": "OC_PATCH_RAW_RESPONSE_LOG_BEGIN",
+      "idempotent_marker": "AB_HARNESS_OPENCLAW_PATCH_RAW_RESPONSE_LOG_BEGIN",
       "summary": "tee every OpenAI-compatible streaming response (raw SDK chunks) into the file at env OPENCLAW_RAW_RESPONSE_LOG, with agent/session/run id from env. One JSONL line per LLM request. Empty env = no logging."
     }
   ]

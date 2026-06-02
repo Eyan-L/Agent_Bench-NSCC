@@ -4,7 +4,7 @@
  	let sandboxFinalizeToken;
  	const spawnSpec = await (async () => {
  		if (opts.sandbox) {
-+			/* OC_PATCH_EXEC_BRIDGE_BEGIN */
++			/* AB_HARNESS_OPENCLAW_PATCH_EXEC_BRIDGE_BEGIN */
 +			const __ocExecBridge = process.env.OPENCLAW_EXEC_BRIDGE;
 +			console.error("[oc-patch] sandbox-exec enter; bridge=" + (__ocExecBridge || "(unset)") + " cmd=" + execCommand.slice(0, 80));
 +			if (__ocExecBridge) {
@@ -21,7 +21,7 @@
 +					stdinMode: opts.usePty ? "pipe-open" : "pipe-closed"
 +				};
 +			}
-+			/* OC_PATCH_EXEC_BRIDGE_END */
++			/* AB_HARNESS_OPENCLAW_PATCH_EXEC_BRIDGE_END */
  			const backendExecSpec = await opts.sandbox.buildExecSpec?.({
  				command: execCommand,
  				workdir: opts.containerWorkdir ?? opts.sandbox.containerWorkdir,

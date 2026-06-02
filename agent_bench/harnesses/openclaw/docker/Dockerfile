@@ -35,14 +35,14 @@ RUN apt-get update \
 
 # Bake the in-repo patches into upstream's bundled JS. apply_patch.py finds
 # the content-hashed bundle by target_glob.
-ENV OC_HOST_OPENCLAW=/app \
-    OC_PATCH_MODE=runtime \
-    OC_TOOLS_DIR=/opt/openclaw-tools \
+ENV AB_HARNESS_OPENCLAW_SOURCE_ROOT=/app \
+    AB_HARNESS_OPENCLAW_PATCH_MODE=runtime \
+    AB_HARNESS_OPENCLAW_TOOLS_DIR=/opt/openclaw-tools \
     OPENCLAW_VERSION=${OPENCLAW_VERSION}
 
-COPY apply_patch.py ${OC_TOOLS_DIR}/apply_patch.py
-COPY defaults.env   ${OC_TOOLS_DIR}/defaults.env
-COPY patch          ${OC_TOOLS_DIR}/patch
+COPY apply_patch.py ${AB_HARNESS_OPENCLAW_TOOLS_DIR}/apply_patch.py
+COPY defaults.env   ${AB_HARNESS_OPENCLAW_TOOLS_DIR}/defaults.env
+COPY patch          ${AB_HARNESS_OPENCLAW_TOOLS_DIR}/patch
 
 # Plugin runtime-deps pre-warm. OpenClaw lazily npm-installs each plugin's
 # bundled deps (e.g. @mariozechner/pi-ai, typebox, ws) the first time that
@@ -98,11 +98,11 @@ RUN su node -c 'set -e; export HOME=/home/node; cd /home/node; \
  && test -f /app/dist/extensions/openai/node_modules/@mariozechner/pi-ai/package.json \
  && rm -rf /home/node/.openclaw /home/node/ws /tmp/oc_agent_warmup.log
 
-RUN python3 ${OC_TOOLS_DIR}/apply_patch.py apply \
- && OC_PATCH_MODE=baked python3 ${OC_TOOLS_DIR}/apply_patch.py status \
- && chown -R node:node ${OC_TOOLS_DIR}
+RUN python3 ${AB_HARNESS_OPENCLAW_TOOLS_DIR}/apply_patch.py apply \
+ && AB_HARNESS_OPENCLAW_PATCH_MODE=baked python3 ${AB_HARNESS_OPENCLAW_TOOLS_DIR}/apply_patch.py status \
+ && chown -R node:node ${AB_HARNESS_OPENCLAW_TOOLS_DIR}
 
 # Switch back to upstream's runtime profile.
-ENV OC_PATCH_MODE=baked
+ENV AB_HARNESS_OPENCLAW_PATCH_MODE=baked
 USER node
 WORKDIR /app

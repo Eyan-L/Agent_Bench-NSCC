@@ -32,9 +32,9 @@ from typing import Dict, List, Optional, Set, Tuple
 # Per-container Gateway port range. Avoids 18789 (host's other gateway) and
 # leaves headroom for sidecars (Gateway picks port+2 for the browser plugin
 # control surface). Stride of 4 → up to ~25 concurrent runs.
-GATEWAY_PORT_MIN = int(os.environ.get("OC_GATEWAY_PORT_MIN", "18800"))
-GATEWAY_PORT_MAX = int(os.environ.get("OC_GATEWAY_PORT_MAX", "18899"))
-GATEWAY_PORT_STRIDE = 4
+GATEWAY_PORT_MIN = int(os.environ.get("AB_HARNESS_GATEWAY_PORT_MIN", "18800"))
+GATEWAY_PORT_MAX = int(os.environ.get("AB_HARNESS_GATEWAY_PORT_MAX", "18899"))
+GATEWAY_PORT_STRIDE = int(os.environ.get("AB_HARNESS_GATEWAY_PORT_STRIDE", "4"))
 
 # Process-global reservation — the bind probe releases immediately, so two
 # concurrent threads can race on the same port. Hold a logical reservation
@@ -92,7 +92,7 @@ def wrap_singularity_argv(
     absolute paths in env vars (OPENCLAW_STATE_DIR etc) resolve identically
     inside the container.
 
-    OPENCLAW_*, OTEL_*, OC_HOST_* env vars are forwarded into the container
+    OPENCLAW_*, OTEL_*, and AB_* env vars are forwarded into the container
     via the SINGULARITYENV_ prefix.
     """
     bind_args: List[str] = []
@@ -110,6 +110,6 @@ def wrap_singularity_argv(
     )
     new_env = dict(env)
     for k in list(new_env.keys()):
-        if k.startswith(("OPENCLAW_", "OTEL_", "OC_HOST_")):
+        if k.startswith(("OPENCLAW_", "OTEL_", "AB_")):
             new_env[f"SINGULARITYENV_{k}"] = new_env[k]
     return new_argv, new_env

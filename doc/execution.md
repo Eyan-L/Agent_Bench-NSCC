@@ -67,7 +67,7 @@ Override a stage at submission time with `AB_STAGE_<NAME>=0`, for example:
 qsub -v AB_STAGE_PREPARE_IMAGES=0 nscc_vllm.pbs
 ```
 
-`OC_OTEL_MODE` controls how the OTel collector runs (`docker`, `host`, or
+`AB_TELEMETRY_MODE` controls how the OTel collector runs (`docker`, `host`, or
 `off`). Use `[stages].start_otel` or `AB_STAGE_START_OTEL` as the canonical
 on/off switch for the stage itself.
 
@@ -104,12 +104,12 @@ SWE-bench scoring uses the benchmark environment for the selected deployment.
 - Local Docker can score through Docker-backed SWE-bench images.
 - NSCC prefers the per-instance SIFs prepared by the PBS job.
 - A remote Docker scoring service can be used as a fallback by setting
-  `OC_SCORING_URL`.
+  `AB_SCORING_SERVICE_URL`.
 
 Scoring precedence:
 
 ```text
-OC_SCORING_SIF_DIR -> OC_SCORING_URL -> local Docker SWE-bench evaluation
+AB_SCORING_IMAGE_DIR -> AB_SCORING_SERVICE_URL -> local Docker SWE-bench evaluation
 ```
 
 ## Telemetry
@@ -147,5 +147,5 @@ python3 agent_bench/results/analysis/plots/plot_all.py \
 | LiteLLM returns unauthorized | Confirm the upstream provider key env var named by the serving profile is exported. |
 | `spans.jsonl` missing | Check OTel collector logs and OpenClaw runtime patch markers. |
 | NSCC job requests a GPU for provider fallback | Use the CPU deployment profile, as in `experiments/nscc_litellm.toml`. |
-| SWE-bench scoring tries Docker on NSCC | Confirm task SIFs were prepared and `OC_SCORING_SIF_DIR` is set in the job environment. |
+| SWE-bench scoring tries Docker on NSCC | Confirm task SIFs were prepared and `AB_SCORING_IMAGE_DIR` is set in the job environment. |
 | Generated PBS script looks too short | That is expected; it delegates execution back to `run.py`, which runs the shared stage coordinator. |

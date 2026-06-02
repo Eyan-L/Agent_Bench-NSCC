@@ -25,7 +25,7 @@ Required env (resolved by ``run()``):
 Optional:
     RACE_MODEL          override the deepseek-chat default
     FACT_MODEL          override the deepseek-chat default
-    DRB_JUDGE_WORKERS   max RACE thread workers (default 4)
+    AB_BENCHMARK_JUDGE_WORKERS   max RACE thread workers (default 4)
 """
 from __future__ import annotations
 
@@ -307,7 +307,7 @@ def run(
         run_id: run identifier; appended to target_model so parallel runs
             don't collide on the shared raw_data/cleaned_data dirs.
         skip_fact: only run RACE (for cheap smoke testing). Defaults False.
-        workers: thread/process pool size; defaults to env DRB_JUDGE_WORKERS
+        workers: thread/process pool size; defaults to env AB_BENCHMARK_JUDGE_WORKERS
             or 4.
 
     Returns:
@@ -315,7 +315,7 @@ def run(
     """
     if language not in ("en", "zh"):
         raise ValueError(f"language must be 'en' or 'zh', got {language!r}")
-    workers = workers or int(os.environ.get("DRB_JUDGE_WORKERS", "4"))
+    workers = workers or int(os.environ.get("AB_BENCHMARK_JUDGE_WORKERS", "4"))
     env = _prepare_env()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

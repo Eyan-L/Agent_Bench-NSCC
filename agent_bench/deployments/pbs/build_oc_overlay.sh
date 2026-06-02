@@ -11,7 +11,7 @@
 #   pbs/build_oc_overlay.sh \
 #     --sif <oc_runtime.sif> \
 #     --overlay <out_overlay.img> \
-#     --kit-root <repo_root>
+#     --repo-root <repo_root>
 #
 # Optional:
 #   --inside-pkg <path>   path of the openclaw npm pkg inside the sif
@@ -27,7 +27,7 @@ set -euo pipefail
 
 SIF=""
 OVERLAY=""
-KIT_ROOT=""
+AB_REPO_ROOT=""
 INSIDE_PKG="/app"
 SIZE_MB=512
 FORCE=0
@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --sif)        SIF="$2"; shift 2 ;;
         --overlay)    OVERLAY="$2"; shift 2 ;;
-        --kit-root)   KIT_ROOT="$2"; shift 2 ;;
+        --repo-root)   AB_REPO_ROOT="$2"; shift 2 ;;
         --inside-pkg) INSIDE_PKG="$2"; shift 2 ;;
         --size)       SIZE_MB="$2"; shift 2 ;;
         --force)      FORCE=1; shift ;;
@@ -48,13 +48,13 @@ done
 
 [[ -n "$SIF"      ]] || { echo "ERROR: --sif required" >&2; exit 1; }
 [[ -n "$OVERLAY"  ]] || { echo "ERROR: --overlay required" >&2; exit 1; }
-[[ -n "$KIT_ROOT" ]] || { echo "ERROR: --kit-root required" >&2; exit 1; }
+[[ -n "$AB_REPO_ROOT" ]] || { echo "ERROR: --repo-root required" >&2; exit 1; }
 [[ -f "$SIF"      ]] || { echo "ERROR: sif not found: $SIF" >&2; exit 1; }
-[[ -d "$KIT_ROOT" ]] || { echo "ERROR: kit-root not found: $KIT_ROOT" >&2; exit 1; }
+[[ -d "$AB_REPO_ROOT" ]] || { echo "ERROR: repo-root not found: $AB_REPO_ROOT" >&2; exit 1; }
 command -v singularity >/dev/null 2>&1 || { echo "ERROR: singularity not on PATH" >&2; exit 1; }
 
-PATCH_DIR="$KIT_ROOT/agent_bench/harnesses/openclaw/patch"
-APPLY_SCRIPT="$KIT_ROOT/agent_bench/harnesses/openclaw/apply_patch.py"
+PATCH_DIR="$AB_REPO_ROOT/agent_bench/harnesses/openclaw/patch"
+APPLY_SCRIPT="$AB_REPO_ROOT/agent_bench/harnesses/openclaw/apply_patch.py"
 [[ -d "$PATCH_DIR"   ]] || { echo "ERROR: patch dir missing: $PATCH_DIR" >&2; exit 1; }
 [[ -f "$APPLY_SCRIPT" ]] || { echo "ERROR: apply_patch.py missing: $APPLY_SCRIPT" >&2; exit 1; }
 
@@ -84,15 +84,15 @@ echo "  patch dir   : $PATCH_DIR"
 # apply_patch.py resolves MANIFEST.json via its own SCRIPT_DIR (../patch/),
 # so bind the whole agent_bench/harnesses/openclaw/ tree as one. Keeps the layout the
 # .py expects; no hard-coded inside paths to keep in sync.
-OC_HARNESS_DIR="$(dirname "$APPLY_SCRIPT")"
+OPENCLAW_HARNESS_DIR="$(dirname "$APPLY_SCRIPT")"
 singularity exec \
     --overlay "$TMP_OVERLAY:rw" \
-    --bind "$OC_HARNESS_DIR:/oc-harness:ro" \
+    --bind "$OPENCLAW_HARNESS_DIR:/oc-harness:ro" \
     "$SIF" \
     bash -c "
         set -e
-        export OC_HOST_OPENCLAW='$INSIDE_PKG'
-        export OC_PATCH_MODE=runtime
+        export AB_HARNESS_OPENCLAW_SOURCE_ROOT='$INSIDE_PKG'
+        export AB_HARNESS_OPENCLAW_PATCH_MODE=runtime
         python3 /oc-harness/apply_patch.py apply
         python3 /oc-harness/apply_patch.py status
     "

@@ -23,11 +23,11 @@ logger = logging.getLogger(__name__)
 # OpenClaw drops these files into the workspace at agent startup. They are not
 # part of the SWE-bench repo and must be stripped before diffing or the
 # resulting patch will be rejected by run_evaluation.
-_OC_SCAFFOLD_FILES = (
+_OPENCLAW_SCAFFOLD_FILES = (
     "AGENTS.md SOUL.md IDENTITY.md USER.md TOOLS.md HEARTBEAT.md "
     "BOOT.md MEMORY.md fix.patch"
 )
-_OC_SCAFFOLD_DIRS = ".openclaw memory sessions"
+_OPENCLAW_SCAFFOLD_DIRS = ".openclaw memory sessions"
 
 
 class SWEBenchOpenClawCondition(OpenClawAgentCondition):
@@ -70,12 +70,12 @@ class SWEBenchOpenClawCondition(OpenClawAgentCondition):
         # Scaffold cleanup is best-effort because some scaffolds are written
         # by OC running as root in the sandbox container (we're the host user
         # here) and rmtree can't remove root-owned files.
-        for f in _OC_SCAFFOLD_FILES.split():
+        for f in _OPENCLAW_SCAFFOLD_FILES.split():
             try:
                 os.remove(os.path.join(ws, f))
             except (FileNotFoundError, PermissionError):
                 pass
-        for d in _OC_SCAFFOLD_DIRS.split():
+        for d in _OPENCLAW_SCAFFOLD_DIRS.split():
             shutil.rmtree(os.path.join(ws, d), ignore_errors=True)
         # SWE-bench's install step does `git commit -am SWE-bench` after
         # install, so HEAD is the post-setup baseline. `git diff HEAD`
@@ -104,8 +104,8 @@ class SWEBenchOpenClawCondition(OpenClawAgentCondition):
         self._exec(
             container_id,
             ["bash", "-c",
-             f"cd {ws} && rm -f {_OC_SCAFFOLD_FILES} && "
-             f"rm -rf {_OC_SCAFFOLD_DIRS}"],
+             f"cd {ws} && rm -f {_OPENCLAW_SCAFFOLD_FILES} && "
+             f"rm -rf {_OPENCLAW_SCAFFOLD_DIRS}"],
             check=False,
         )
         r = self._exec(container_id,

@@ -8,7 +8,7 @@ Two backends, same surface as ``agent_bench/benchmarks/swebench/app.py``:
                                            exec-bridge so an OpenClaw agent's
                                            sandbox tool execs land in the task
                                            container. Selected when
-                                           ``HARNESS_BACKEND=docker`` (the
+                                           ``AB_DEPLOYMENT_CONTAINER_BACKEND=docker`` (the
                                            default for ``run_tb``).
   - ``TerminalBenchSingularityHarness``  — HPC fallback. One singularity
                                            instance of the task .sif. No OC
@@ -62,7 +62,7 @@ from agent_bench.benchmarks.conditions.gateway_helpers import (
     release_gateway_port as _release_gateway_port,
 )
 from agent_bench.benchmarks.swebench.app import (
-    DEFAULT_OC_IMAGE,
+    DEFAULT_OPENCLAW_RUNTIME_IMAGE,
     _force_rmtree,
     _oc_sandbox_name,
 )
@@ -138,12 +138,12 @@ class TerminalBenchDockerHarness:
     _GATEWAY_READY_TIMEOUT_SECONDS = 180
     _DEFAULT_VERIFIER_TIMEOUT_SECONDS = 900
 
-    def __init__(self, swebench_root: Optional[Path] = None,
+    def __init__(self, benchmark_data_root: Optional[Path] = None,
                  oc_image: Optional[str] = None,
                  workspace_base: Optional[Path] = None):
-        # swebench_root accepted for driver-API parity; unused by TB.
-        self.swebench_root = Path(swebench_root) if swebench_root else None
-        self.oc_image = oc_image or DEFAULT_OC_IMAGE
+        # benchmark_data_root accepted for driver-API parity; unused by TB.
+        self.benchmark_data_root = Path(benchmark_data_root) if benchmark_data_root else None
+        self.oc_image = oc_image or DEFAULT_OPENCLAW_RUNTIME_IMAGE
 
         r = subprocess.run(
             ["docker", "version", "--format", "{{.Server.Version}}"],
@@ -158,7 +158,7 @@ class TerminalBenchDockerHarness:
 
         self.workspace_base = Path(
             workspace_base
-            or os.environ.get("OC_HOST_WORKSPACE_BASE",
+            or os.environ.get("AB_HARNESS_WORKSPACE_BASE",
                               os.path.expanduser("~/.cache/oc-eval/workspaces"))
         )
         self.workspace_base.mkdir(parents=True, exist_ok=True)
@@ -425,7 +425,7 @@ class TerminalBenchDockerHarness:
             "-v", "/var/run/docker.sock:/var/run/docker.sock",
             "-w", "/root",
             "-e", f"OPENCLAW_GATEWAY_TOKEN={gateway_token}",
-            "-e", f"OPENCLAW_GATEWAY_OTEL_ENDPOINT={os.environ.get('OC_OTEL_ENDPOINT', 'http://vllm-host:4318')}",
+            "-e", f"OPENCLAW_GATEWAY_OTEL_ENDPOINT={os.environ.get('AB_TELEMETRY_ENDPOINT', 'http://vllm-host:4318')}",
             "-e", f"OPENCLAW_RUN_ID={run_id}",
             "-e", f"OTEL_RESOURCE_ATTRIBUTES=oc.run_id={run_id}",
             "-e", "DOCKER_API_VERSION=1.44",
@@ -496,7 +496,7 @@ class TerminalBenchDockerHarness:
         container_prefix: str,
         scope: str = "agent",
     ) -> Path:
-        kit_root = os.environ.get("KIT_ROOT", os.getcwd())
+        repo_root = os.environ.get("AB_REPO_ROOT", os.getcwd())
         state_dir = self.state_base / run_id
         if state_dir.exists():
             _force_rmtree(state_dir)
@@ -507,23 +507,23 @@ class TerminalBenchDockerHarness:
         agent_id = self._agent_id_from_harness_cfg() or "terminal_bench"
         os.makedirs(state_dir / "agents" / agent_id, exist_ok=True)
 
-        override = os.environ.get("OC_HOST_STATE_TEMPLATE")
+        override = os.environ.get("AB_HARNESS_STATE_TEMPLATE")
         if override:
             if not os.path.isdir(override):
                 raise FileNotFoundError(
-                    f"OC_HOST_STATE_TEMPLATE points to {override} but is not a directory."
+                    f"AB_HARNESS_STATE_TEMPLATE points to {override} but is not a directory."
                 )
             shutil.rmtree(state_dir)
             shutil.copytree(override, state_dir)
         else:
             harness_path = os.environ.get(
                 "AB_HARNESS_CONFIG",
-                os.path.join(kit_root, "profiles/harnesses/openclaw_terminal_bench.yaml"),
+                os.path.join(repo_root, "profiles/harnesses/openclaw_terminal_bench.yaml"),
             )
             if not os.path.isfile(harness_path):
                 raise FileNotFoundError(
                     f"harness config not found at {harness_path} "
-                    "(set AB_HARNESS_CONFIG or OC_HOST_STATE_TEMPLATE)."
+                    "(set AB_HARNESS_CONFIG or AB_HARNESS_STATE_TEMPLATE)."
                 )
             harness_cfg = load_profile(harness_path)
             oc_cfg = dict(harness_cfg.get("openclaw") or {})
@@ -532,12 +532,12 @@ class TerminalBenchDockerHarness:
                     f"harness config {harness_path} has no `openclaw` block "
                     "(required when use_openclaw=True)."
                 )
-            model_cfg, _serving_cfg = load_active_model_and_serving(kit_root=kit_root)
+            model_cfg, _serving_cfg = load_active_model_and_serving(repo_root=repo_root)
             providers = oc_cfg.setdefault("models", {}).setdefault("providers", {})
-            vllm_p = providers.setdefault("vllm", {})
-            vllm_p["api"] = _OPENAI_CHAT_COMPLETIONS_API
-            vllm_p.setdefault("apiKey", model_cfg.api_key or "sk-dummy")
-            vllm_p["models"] = [{
+            agent_model_p = providers.setdefault("agent_model", {})
+            agent_model_p["api"] = _OPENAI_CHAT_COMPLETIONS_API
+            agent_model_p.setdefault("apiKey", model_cfg.api_key or "sk-dummy")
+            agent_model_p["models"] = [{
                 "id": model_cfg.name,
                 "name": model_cfg.name,
                 "api": _OPENAI_CHAT_COMPLETIONS_API,
@@ -545,14 +545,14 @@ class TerminalBenchDockerHarness:
                 "maxTokens": model_cfg.max_tokens,
             }]
             agents_d = oc_cfg.setdefault("agents", {}).setdefault("defaults", {})
-            agents_d.setdefault("model", {})["primary"] = f"vllm/{model_cfg.name}"
+            agents_d.setdefault("model", {})["primary"] = f"agent_model/{model_cfg.name}"
             with open(state_dir / "openclaw.json", "w") as fh:
                 json.dump(oc_cfg, fh, indent=2)
 
-            tb_agents = os.path.join(kit_root, "agent_bench/benchmarks/terminal_bench/openclaw/agents")
-            tb_skills = os.path.join(kit_root, "agent_bench/benchmarks/terminal_bench/openclaw/skills")
-            swe_agents = os.path.join(kit_root, "agent_bench/benchmarks/swebench/openclaw/agents")
-            swe_skills = os.path.join(kit_root, "agent_bench/benchmarks/swebench/openclaw/skills")
+            tb_agents = os.path.join(repo_root, "agent_bench/benchmarks/terminal_bench/openclaw/agents")
+            tb_skills = os.path.join(repo_root, "agent_bench/benchmarks/terminal_bench/openclaw/skills")
+            swe_agents = os.path.join(repo_root, "agent_bench/benchmarks/swebench/openclaw/agents")
+            swe_skills = os.path.join(repo_root, "agent_bench/benchmarks/swebench/openclaw/skills")
 
             # Prefer TB-specific prompts/skills; fall back to SWE-bench's when
             # the TB dir is empty (current state — see openclaw/agents/).
@@ -601,22 +601,22 @@ class TerminalBenchDockerHarness:
             cfg.setdefault("skills", {}).setdefault("load", {})["extraDirs"] = [
                 "/root/.openclaw/skills"
             ]
-        model_cfg, _serving_cfg = load_active_model_and_serving(kit_root=kit_root)
-        vllm_endpoint = os.environ.get(
-            "OC_VLLM_BASE_URL",
+        model_cfg, _serving_cfg = load_active_model_and_serving(repo_root=repo_root)
+        serving_endpoint = os.environ.get(
+            "AB_SERVING_BASE_URL",
             endpoint_for_container(model_cfg.endpoint, "vllm-host"),
         )
         providers = cfg.setdefault("models", {}).setdefault("providers", {})
-        vllm_provider = providers.setdefault("vllm", {})
-        vllm_provider["api"] = _OPENAI_CHAT_COMPLETIONS_API
-        vllm_provider["baseUrl"] = vllm_endpoint
-        for model in vllm_provider.get("models") or []:
+        agent_model_provider = providers.setdefault("agent_model", {})
+        agent_model_provider["api"] = _OPENAI_CHAT_COMPLETIONS_API
+        agent_model_provider["baseUrl"] = serving_endpoint
+        for model in agent_model_provider.get("models") or []:
             if isinstance(model, dict):
                 model["api"] = _OPENAI_CHAT_COMPLETIONS_API
         otel_cfg = (cfg.get("diagnostics") or {}).get("otel") or {}
         if otel_cfg.get("enabled"):
             cfg["diagnostics"]["otel"]["endpoint"] = os.environ.get(
-                "OC_OTEL_ENDPOINT", "http://vllm-host:4318",
+                "AB_TELEMETRY_ENDPOINT", "http://vllm-host:4318",
             )
         with open(cfg_path, "w") as fh:
             json.dump(cfg, fh, indent=2)
@@ -850,7 +850,7 @@ class TerminalBenchDockerHarness:
             subprocess.run(["docker", "network", "rm", network_name],
                            capture_output=True, check=False)
 
-        keep = os.environ.get("OC_HOST_KEEP_WORKSPACE", "0") == "1"
+        keep = os.environ.get("AB_HARNESS_KEEP_WORKSPACE", "0") == "1"
         if not keep and workspace_host_path and os.path.isdir(workspace_host_path):
             # Workspace root is .../app — also clean the .../logs sibling and
             # the parent run dir so per-run dirs don't pile up.
@@ -897,19 +897,19 @@ class TerminalBenchSingularityHarness:
     _INSTANCE_START_TIMEOUT_SECONDS = 60
     _DEFAULT_VERIFIER_TIMEOUT_SECONDS = 900
 
-    def __init__(self, swebench_root: Optional[Path] = None,
+    def __init__(self, benchmark_data_root: Optional[Path] = None,
                  workspace_base: Optional[Path] = None):
-        self.swebench_root = Path(swebench_root) if swebench_root else None
+        self.benchmark_data_root = Path(benchmark_data_root) if benchmark_data_root else None
         self.workspace_base = Path(
             workspace_base or os.environ.get(
-                "OC_HOST_WORKSPACE_BASE",
+                "AB_HARNESS_WORKSPACE_BASE",
                 os.path.expanduser("~/.cache/oc-eval/workspaces"),
             )
         )
         self.workspace_base.mkdir(parents=True, exist_ok=True)
 
         self.sif_dir = Path(os.environ.get(
-            "OC_TB_SIF_DIR",
+            "AB_DEPLOYMENT_TASK_IMAGE_DIR",
             str(self.workspace_base.parent / "tb-sif"),
         ))
         self.sif_dir.mkdir(parents=True, exist_ok=True)
@@ -1138,7 +1138,7 @@ class TerminalBenchSingularityHarness:
             logger.debug("instance stop %s: ignored exception", name, exc_info=True)
 
 
-# Default export used by the driver when no HARNESS_BACKEND override is set.
+# Default export used by the driver when no AB_DEPLOYMENT_CONTAINER_BACKEND override is set.
 # Picks docker on a host with docker, singularity otherwise.
 def _default_harness_cls():
     if shutil.which("docker"):
@@ -1152,5 +1152,5 @@ def _default_harness_cls():
 
 
 # Back-compat alias for `from agent_bench.benchmarks.terminal_bench.app import TerminalBenchHarness`.
-# Driver selects via HARNESS_BACKEND now (see agent_bench/runtime/driver.py).
+# Driver selects via AB_DEPLOYMENT_CONTAINER_BACKEND now (see agent_bench/runtime/driver.py).
 TerminalBenchHarness = TerminalBenchDockerHarness

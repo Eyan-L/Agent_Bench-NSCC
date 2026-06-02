@@ -10,14 +10,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HARNESS_DIR="$(dirname "$HERE")"
 VERSION_FILE="$HARNESS_DIR/patch/VERSION"
 HERMES_VERSION="$(awk -F': *' '/^upstream_version:/ {print $2; exit}' "$VERSION_FILE")"
-HM_IMAGE_TAG="${HM_IMAGE_TAG:-agent-bench/hermes:${HERMES_VERSION}}"
+AB_AGENT_RUNTIME_IMAGE="${AB_AGENT_RUNTIME_IMAGE:-agent-bench/hermes:${HERMES_VERSION}}"
 
 pass()  { echo "  PASS  $*"; }
 fail()  { echo "  FAIL  $*" >&2; exit 1; }
-banner(){ echo; echo "[smoke] $* ($HM_IMAGE_TAG)"; }
+banner(){ echo; echo "[smoke] $* ($AB_AGENT_RUNTIME_IMAGE)"; }
 
 banner "1/4 cli help"
-docker run --rm "$HM_IMAGE_TAG" hermes --help >/tmp/hm_smoke_help.txt 2>&1 || {
+docker run --rm "$AB_AGENT_RUNTIME_IMAGE" hermes --help >/tmp/hm_smoke_help.txt 2>&1 || {
     cat /tmp/hm_smoke_help.txt >&2
     fail "hermes --help failed"
 }
@@ -30,7 +30,7 @@ pass "hermes --help OK"
 banner "2/4 patch markers (mode=baked)"
 docker run --rm \
     -e HERMES_PATCH_MODE=baked \
-    "$HM_IMAGE_TAG" python3 /opt/hermes-tools/apply_patch.py status \
+    "$AB_AGENT_RUNTIME_IMAGE" python3 /opt/hermes-tools/apply_patch.py status \
     >/tmp/hm_smoke_patch.txt 2>&1 || {
         cat /tmp/hm_smoke_patch.txt >&2
         fail "patch status command failed"
@@ -42,7 +42,7 @@ grep -q 'applied' /tmp/hm_smoke_patch.txt || {
 pass "patch status OK"
 
 banner "3/4 docker backend bridge guard"
-docker run --rm "$HM_IMAGE_TAG" python3 - <<'PY' >/tmp/hm_smoke_agent_bench.serving.txt 2>&1
+docker run --rm "$AB_AGENT_RUNTIME_IMAGE" python3 - <<'PY' >/tmp/hm_smoke_agent_bench.serving.txt 2>&1
 import os
 os.environ["TERMINAL_ENV"] = "docker"
 os.environ["HERMES_EXEC_BRIDGE"] = "/usr/local/bin/hm-exec-bridge"
@@ -63,7 +63,7 @@ cat /tmp/hm_smoke_agent_bench.serving.txt
 pass "docker bridge guard OK"
 
 banner "4/4 docker backend bridge execution"
-docker run --rm "$HM_IMAGE_TAG" python3 - <<'PY' >/tmp/hm_smoke_bridge.txt 2>&1
+docker run --rm "$AB_AGENT_RUNTIME_IMAGE" python3 - <<'PY' >/tmp/hm_smoke_bridge.txt 2>&1
 import os
 from pathlib import Path
 
@@ -128,4 +128,4 @@ cat /tmp/hm_smoke_bridge.txt
 pass "docker bridge execution OK"
 
 echo
-echo "[smoke] all 4 checks passed for $HM_IMAGE_TAG"
+echo "[smoke] all 4 checks passed for $AB_AGENT_RUNTIME_IMAGE"

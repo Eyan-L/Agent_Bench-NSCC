@@ -79,20 +79,20 @@ def _check_axis_boundaries() -> list[str]:
         if isinstance(runtime, dict) and "tp" in runtime:
             errors.append(
                 f"{path}: serving.runtime.tp is runtime launch state; "
-                "set VLLM_TP/SGLANG_TP/TP when starting the job"
+                "set AB_SERVING_TENSOR_PARALLEL_SIZE or backend-specific VLLM_TP/SGLANG_TP when starting the job"
             )
     return errors
 
 
 def _check_combo(args: argparse.Namespace) -> list[str]:
-    if not (args.app and args.harness and args.model and args.serving):
+    if not (args.benchmark_config and args.harness_config and args.model_config and args.serving_config):
         return []
     try:
         load_composed_config(
-            Path(args.app),
-            Path(args.harness),
-            Path(args.model),
-            Path(args.serving),
+            Path(args.benchmark_config),
+            Path(args.harness_config),
+            Path(args.model_config),
+            Path(args.serving_config),
         )
     except Exception as exc:
         return [f"selected combo invalid: {exc}"]
@@ -101,10 +101,10 @@ def _check_combo(args: argparse.Namespace) -> list[str]:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--app")
-    parser.add_argument("--harness")
-    parser.add_argument("--model")
-    parser.add_argument("--serving")
+    parser.add_argument("--benchmark-config")
+    parser.add_argument("--harness-config")
+    parser.add_argument("--model-config")
+    parser.add_argument("--serving-config")
     args = parser.parse_args(argv)
 
     errors = []

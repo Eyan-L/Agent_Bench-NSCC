@@ -1,6 +1,6 @@
 # OpenClaw LongBench harness: agent answers each question via ClawRAG retrieval
 # (clawrag_retrieve skill -> /workspace/clawrag_search.py). RAG-only, no web
-# tools. Model/serving selected separately (--model/--serving).
+# tools. Model/serving selected separately (--model-config/--serving-config).
 harness: openclaw
 openclaw:
   gateway:

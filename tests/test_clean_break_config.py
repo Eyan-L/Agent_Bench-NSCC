@@ -75,7 +75,7 @@ def test_example_experiments_resolve(
     assert resolved.to_dict()["profiles"]["deployment"].endswith(deployment_profile)
 
 
-def test_legacy_wrapped_profiles_are_expanded() -> None:
+def test_wrapped_configs_are_expanded() -> None:
     resolved = load_resolved_experiment(ROOT / "experiments" / "local_vllm.toml", root=ROOT)
 
     assert resolved.model["config_id"] == "qwen35_9b"
@@ -96,7 +96,7 @@ def test_execution_plan_uses_ab_run_stamp_for_run_dir() -> None:
     resolved = load_resolved_experiment(ROOT / "experiments" / "client_only.toml", root=ROOT)
     stamp = "2026-05-28_14-52-37"
 
-    plan = build_execution_plan(resolved, env={"KIT_ROOT": str(ROOT), "AB_RUN_STAMP": stamp})
+    plan = build_execution_plan(resolved, env={"AB_REPO_ROOT": str(ROOT), "AB_RUN_STAMP": stamp})
 
     assert resolved.run_id != stamp
     assert plan.run_id == stamp
@@ -111,7 +111,7 @@ def test_execution_plan_ab_experiment_dir_overrides_stamp(tmp_path: Path) -> Non
     plan = build_execution_plan(
         resolved,
         env={
-            "KIT_ROOT": str(ROOT),
+            "AB_REPO_ROOT": str(ROOT),
             "AB_EXPERIMENT_DIR": str(experiment_dir),
             "AB_RUN_STAMP": "ignored-stamp",
         },
@@ -129,8 +129,8 @@ def test_execution_plan_agent_bench_run_dir_is_strongest_override(tmp_path: Path
     plan = build_execution_plan(
         resolved,
         env={
-            "KIT_ROOT": str(ROOT),
-            "AGENT_BENCH_RUN_DIR": str(run_dir),
+            "AB_REPO_ROOT": str(ROOT),
+            "AB_RUN_DIR": str(run_dir),
             "AB_EXPERIMENT_DIR": str(tmp_path / "custom-exp"),
             "AB_RUN_STAMP": "ignored-stamp",
         },
@@ -159,7 +159,7 @@ def test_execution_plan_uses_canonical_stage_order(
 ) -> None:
     resolved = load_resolved_experiment(ROOT / "experiments" / f"{experiment}.toml", root=ROOT)
 
-    plan = build_execution_plan(resolved, env={"KIT_ROOT": str(ROOT), "USER": "alice"})
+    plan = build_execution_plan(resolved, env={"AB_REPO_ROOT": str(ROOT), "USER": "alice"})
 
     assert tuple(stage.name for stage in plan.stages) == STAGE_ORDER
     assert plan.deployment == deployment
@@ -173,7 +173,7 @@ def test_otel_mode_off_does_not_disable_stage_in_plan() -> None:
 
     plan = build_execution_plan(
         resolved,
-        env={"KIT_ROOT": str(ROOT), "OC_OTEL_MODE": "off"},
+        env={"AB_REPO_ROOT": str(ROOT), "AB_TELEMETRY_MODE": "off"},
     )
 
     assert plan.stage_enabled("start_otel") is True
@@ -183,7 +183,7 @@ def test_experiment_stage_override_disables_local_otel(tmp_path: Path) -> None:
     config = _write_client_only_experiment(tmp_path, stage_lines=["[stages]", "start_otel = false"])
 
     resolved = load_resolved_experiment(config, root=ROOT)
-    plan = build_execution_plan(resolved, env={"KIT_ROOT": str(ROOT)})
+    plan = build_execution_plan(resolved, env={"AB_REPO_ROOT": str(ROOT)})
 
     assert resolved.spec.stages == {"start_otel": False}
     assert plan.stage_enabled("start_otel") is False
@@ -193,7 +193,7 @@ def test_experiment_stage_override_enables_prepare_images(tmp_path: Path) -> Non
     config = _write_client_only_experiment(tmp_path, stage_lines=["[stages]", "prepare_images = true"])
 
     resolved = load_resolved_experiment(config, root=ROOT)
-    plan = build_execution_plan(resolved, env={"KIT_ROOT": str(ROOT)})
+    plan = build_execution_plan(resolved, env={"AB_REPO_ROOT": str(ROOT)})
 
     assert plan.stage_enabled("prepare_images") is True
 
@@ -204,7 +204,7 @@ def test_env_stage_override_wins_over_experiment_stage_override(tmp_path: Path) 
     resolved = load_resolved_experiment(config, root=ROOT)
     plan = build_execution_plan(
         resolved,
-        env={"KIT_ROOT": str(ROOT), "AB_STAGE_START_OTEL": "1"},
+        env={"AB_REPO_ROOT": str(ROOT), "AB_STAGE_START_OTEL": "1"},
     )
 
     assert plan.stage_enabled("start_otel") is True
@@ -230,12 +230,12 @@ def test_experiment_stages_reject_invalid_values(
 
 
 def test_prepare_environment_installs_missing_swebench_deps_in_active_env(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("SWEBENCH_ROOT", "")
-    monkeypatch.setenv("AB_SWEBENCH_ROOT", "")
+    monkeypatch.setenv("AB_BENCHMARK_DATA_ROOT", "")
+    monkeypatch.setenv("AB_BENCHMARK_DATA_ROOT", "")
     resolved = load_resolved_experiment(ROOT / "experiments" / "local_vllm.toml", root=ROOT)
     env = {
-        "AGENT_BENCH_RUN_DIR": str(tmp_path / "run"),
-        "AGENT_BENCH_LOG_DIR": str(tmp_path / "run/logs"),
+        "AB_RUN_DIR": str(tmp_path / "run"),
+        "AB_LOG_DIR": str(tmp_path / "run/logs"),
         "CONDA_DEFAULT_ENV": "agent-bench",
         "CONDA_PREFIX": str(tmp_path / "conda/envs/agent-bench"),
     }
@@ -263,20 +263,20 @@ def test_prepare_environment_installs_missing_swebench_deps_in_active_env(tmp_pa
 
     assert installed == ["datasets", "swebench"]
     assert targets == [None]
-    assert Path(env["AGENT_BENCH_LOG_DIR"]).is_dir()
-    assert env["OC_OTEL_DATA_DIR"] == str(tmp_path / "run/logs/otel")
-    assert env["OC_OTEL_TRACE_FILE"] == str(tmp_path / "run/logs/otel/otel-traces.jsonl")
-    assert Path(env["OC_OTEL_TRACE_FILE"]).is_file()
-    assert env["SWEBENCH_ROOT"] == str((tmp_path / "run" / "swebench_root").resolve())
-    assert Path(env["SWEBENCH_ROOT"]).is_dir()
+    assert Path(env["AB_LOG_DIR"]).is_dir()
+    assert env["AB_TELEMETRY_DATA_DIR"] == str(tmp_path / "run/logs/otel")
+    assert env["AB_TELEMETRY_TRACE_FILE"] == str(tmp_path / "run/logs/otel/otel-traces.jsonl")
+    assert Path(env["AB_TELEMETRY_TRACE_FILE"]).is_file()
+    assert env["AB_BENCHMARK_DATA_ROOT"] == str((tmp_path / "run" / "benchmark_data_root").resolve())
+    assert Path(env["AB_BENCHMARK_DATA_ROOT"]).is_dir()
 
 
 def test_local_otel_stage_runs_docker_scripts(tmp_path: Path, monkeypatch) -> None:
     resolved = load_resolved_experiment(ROOT / "experiments" / "client_only.toml", root=ROOT)
     env = {
-        "KIT_ROOT": str(ROOT),
-        "AGENT_BENCH_RUN_DIR": str(tmp_path / "run"),
-        "AGENT_BENCH_LOG_DIR": str(tmp_path / "run/logs"),
+        "AB_REPO_ROOT": str(ROOT),
+        "AB_RUN_DIR": str(tmp_path / "run"),
+        "AB_LOG_DIR": str(tmp_path / "run/logs"),
     }
     plan = execution.build_execution_plan(resolved, env=env)
     plan.log_dir.mkdir(parents=True, exist_ok=True)
@@ -301,20 +301,20 @@ def test_local_otel_stage_runs_docker_scripts(tmp_path: Path, monkeypatch) -> No
     assert len(calls) == 2
     assert calls[0][0][-1].endswith("otel_collector_up.sh")
     assert calls[1][0][-1].endswith("otel_collector_down.sh")
-    assert calls[0][1]["OC_OTEL_DATA_DIR"] == str(tmp_path / "run/logs/otel")
-    assert calls[0][1]["OC_OTEL_TRACE_FILE"] == str(tmp_path / "run/logs/otel/otel-traces.jsonl")
-    assert calls[0][1]["OC_OTEL_NAME"].startswith("agent-bench-otel-")
+    assert calls[0][1]["AB_TELEMETRY_DATA_DIR"] == str(tmp_path / "run/logs/otel")
+    assert calls[0][1]["AB_TELEMETRY_TRACE_FILE"] == str(tmp_path / "run/logs/otel/otel-traces.jsonl")
+    assert calls[0][1]["AB_TELEMETRY_NAME"].startswith("agent-bench-otel-")
 
 
-def test_prepare_environment_preserves_explicit_swebench_root(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("SWEBENCH_ROOT", "")
-    monkeypatch.setenv("AB_SWEBENCH_ROOT", "")
+def test_prepare_environment_preserves_explicit_benchmark_data_root(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AB_BENCHMARK_DATA_ROOT", "")
+    monkeypatch.setenv("AB_BENCHMARK_DATA_ROOT", "")
     resolved = load_resolved_experiment(ROOT / "experiments" / "local_vllm.toml", root=ROOT)
-    explicit_root = tmp_path / "custom-swebench-root"
+    explicit_root = tmp_path / "custom-benchmark-data-root"
     env = {
-        "AGENT_BENCH_RUN_DIR": str(tmp_path / "run"),
-        "AGENT_BENCH_LOG_DIR": str(tmp_path / "run/logs"),
-        "SWEBENCH_ROOT": str(explicit_root),
+        "AB_RUN_DIR": str(tmp_path / "run"),
+        "AB_LOG_DIR": str(tmp_path / "run/logs"),
+        "AB_BENCHMARK_DATA_ROOT": str(explicit_root),
     }
     plan = execution.build_execution_plan(resolved, env=env)
     ctx = execution.ExecutionContext(
@@ -328,21 +328,21 @@ def test_prepare_environment_preserves_explicit_swebench_root(tmp_path: Path, mo
 
     execution._prepare_environment(ctx)
 
-    assert env["SWEBENCH_ROOT"] == str(explicit_root.resolve())
-    assert env["AB_SWEBENCH_ROOT"] == str(explicit_root.resolve())
+    assert env["AB_BENCHMARK_DATA_ROOT"] == str(explicit_root.resolve())
+    assert env["AB_BENCHMARK_DATA_ROOT"] == str(explicit_root.resolve())
     assert explicit_root.is_dir()
 
 
 def test_prepare_environment_installs_missing_swebench_deps_in_pbs_target(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("SWEBENCH_ROOT", "")
-    monkeypatch.setenv("AB_SWEBENCH_ROOT", "")
+    monkeypatch.setenv("AB_BENCHMARK_DATA_ROOT", "")
+    monkeypatch.setenv("AB_BENCHMARK_DATA_ROOT", "")
     resolved = load_resolved_experiment(ROOT / "experiments" / "nscc_vllm.toml", root=ROOT)
     env = {
-        "KIT_ROOT": str(ROOT),
+        "AB_REPO_ROOT": str(ROOT),
         "SCRATCH": str(tmp_path / "scratch"),
         "USER": "alice",
-        "AGENT_BENCH_RUN_DIR": str(tmp_path / "run"),
-        "AGENT_BENCH_LOG_DIR": str(tmp_path / "run/logs"),
+        "AB_RUN_DIR": str(tmp_path / "run"),
+        "AB_LOG_DIR": str(tmp_path / "run/logs"),
     }
     plan = execution.build_execution_plan(resolved, env=env)
     ctx = execution.ExecutionContext(
@@ -367,21 +367,21 @@ def test_prepare_environment_installs_missing_swebench_deps_in_pbs_target(tmp_pa
     execution._prepare_environment(ctx)
 
     assert installed == ["datasets", "swebench"]
-    assert targets == [Path(env["OC_PYLIB"])]
-    assert Path(env["OC_PIP_CACHE"]).is_dir()
-    assert env["PYTHONPATH"].split(":")[0] == str(Path(env["OC_PYLIB"]).resolve())
+    assert targets == [Path(env["AB_RUNTIME_PYLIB"])]
+    assert Path(env["AB_RUNTIME_PIP_CACHE"]).is_dir()
+    assert env["PYTHONPATH"].split(":")[0] == str(Path(env["AB_RUNTIME_PYLIB"]).resolve())
 
 
 def test_prepare_environment_installs_litellm_for_native_litellm_mode(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("SWEBENCH_ROOT", "")
-    monkeypatch.setenv("AB_SWEBENCH_ROOT", "")
+    monkeypatch.setenv("AB_BENCHMARK_DATA_ROOT", "")
+    monkeypatch.setenv("AB_BENCHMARK_DATA_ROOT", "")
     resolved = load_resolved_experiment(ROOT / "experiments" / "client_only.toml", root=ROOT)
     env = {
-        "AGENT_BENCH_RUN_DIR": str(tmp_path / "run"),
-        "AGENT_BENCH_LOG_DIR": str(tmp_path / "run/logs"),
+        "AB_RUN_DIR": str(tmp_path / "run"),
+        "AB_LOG_DIR": str(tmp_path / "run/logs"),
         "CONDA_DEFAULT_ENV": "agent-bench",
         "CONDA_PREFIX": str(tmp_path / "conda/envs/agent-bench"),
-        "SERVING_MODE": "native",
+        "AB_SERVING_MODE": "native",
     }
     plan = execution.build_execution_plan(resolved, env=env)
     ctx = execution.ExecutionContext(
@@ -410,7 +410,7 @@ def test_prepare_environment_installs_litellm_for_native_litellm_mode(tmp_path: 
 
 def test_litellm_execution_plan_modes_follow_deployment_defaults() -> None:
     local = load_resolved_experiment(ROOT / "experiments" / "client_only.toml", root=ROOT)
-    local_plan = build_execution_plan(local, env={"KIT_ROOT": str(ROOT)})
+    local_plan = build_execution_plan(local, env={"AB_REPO_ROOT": str(ROOT)})
 
     assert local_plan.serving_plan is not None
     assert local_plan.serving_plan.backend == "litellm"
@@ -418,7 +418,7 @@ def test_litellm_execution_plan_modes_follow_deployment_defaults() -> None:
     assert local_plan.serving_plan.argv[:2] == ("docker", "run")
 
     pbs = load_resolved_experiment(ROOT / "experiments" / "nscc_litellm.toml", root=ROOT)
-    pbs_plan = build_execution_plan(pbs, env={"KIT_ROOT": str(ROOT), "USER": "alice"})
+    pbs_plan = build_execution_plan(pbs, env={"AB_REPO_ROOT": str(ROOT), "USER": "alice"})
 
     assert pbs_plan.serving_plan is not None
     assert pbs_plan.serving_plan.backend == "litellm"
@@ -428,9 +428,9 @@ def test_litellm_execution_plan_modes_follow_deployment_defaults() -> None:
 def test_litellm_docker_start_registers_container_cleanup(tmp_path: Path, monkeypatch) -> None:
     resolved = load_resolved_experiment(ROOT / "experiments" / "client_only.toml", root=ROOT)
     env = {
-        "KIT_ROOT": str(ROOT),
-        "AGENT_BENCH_RUN_DIR": str(tmp_path / "run"),
-        "AGENT_BENCH_LOG_DIR": str(tmp_path / "run/logs"),
+        "AB_REPO_ROOT": str(ROOT),
+        "AB_RUN_DIR": str(tmp_path / "run"),
+        "AB_LOG_DIR": str(tmp_path / "run/logs"),
         "QWEN_API_KEY": "sk-upstream",
     }
     plan = build_execution_plan(resolved, env=env)
@@ -468,7 +468,7 @@ def test_litellm_docker_start_registers_container_cleanup(tmp_path: Path, monkey
 
 def test_swebench_instance_data_materializes_from_benchmark_profile(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("INSTANCE_DATA", raising=False)
+    monkeypatch.delenv("AB_BENCHMARK_INSTANCE_DATA", raising=False)
 
     def fake_load_dataset(dataset: str, *, split: str):
         assert dataset == "princeton-nlp/SWE-bench_Verified"
@@ -499,7 +499,7 @@ def test_swebench_instance_data_materializes_from_benchmark_profile(tmp_path: Pa
 
 def test_swebench_instance_data_top_level_override_wins(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("INSTANCE_DATA", raising=False)
+    monkeypatch.delenv("AB_BENCHMARK_INSTANCE_DATA", raising=False)
     instance_data = tmp_path / "instances.json"
     instance_data.write_text("[]", encoding="utf-8")
     config = tmp_path / "override.toml"
@@ -508,7 +508,7 @@ def test_swebench_instance_data_top_level_override_wins(tmp_path: Path, monkeypa
             [
                 'name = "override"',
                 'output_dir = "runs/override"',
-                f'instance_data = "{instance_data.name}"',
+                f'benchmark_instance_data = "{instance_data.name}"',
                 "seeds = [42]",
                 "[benchmark]",
                 'name = "swebench"',
@@ -535,7 +535,7 @@ def test_swebench_instance_data_env_override_wins(tmp_path: Path, monkeypatch) -
     monkeypatch.chdir(tmp_path)
     instance_data = tmp_path / "env_instances.json"
     instance_data.write_text("[]", encoding="utf-8")
-    monkeypatch.setenv("INSTANCE_DATA", str(instance_data))
+    monkeypatch.setenv("AB_BENCHMARK_INSTANCE_DATA", str(instance_data))
     resolved = load_resolved_experiment(ROOT / "experiments" / "client_only.toml", root=ROOT)
 
     assert _instance_data_path(resolved) == instance_data.resolve()
@@ -585,7 +585,7 @@ def test_deployment_plans_render_static_scripts() -> None:
 
     assert ccds_plan.deployment == "ccds_cloud"
     assert ccds_plan.job_script is not None
-    assert "AGENT_BENCH_PROJECT=agent-bench" in ccds_plan.job_script
+    assert "AB_DEPLOYMENT_PROJECT=agent-bench" in ccds_plan.job_script
 
 
 def test_validate_and_run_entrypoints() -> None:

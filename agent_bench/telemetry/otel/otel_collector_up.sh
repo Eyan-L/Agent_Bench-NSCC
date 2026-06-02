@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # Start the OTel collector container that OpenClaw gateways export to.
 #
-# Idempotent: does nothing if a container named OC_OTEL_NAME already runs.
-# Writes a per-run collector config so OC_OTEL_TRACE_FILE can live under the
+# Idempotent: does nothing if a container named AB_TELEMETRY_NAME already runs.
+# Writes a per-run collector config so AB_TELEMETRY_TRACE_FILE can live under the
 # active experiment log directory instead of the historical /tmp/otel path.
 
 set -euo pipefail
 
-KIT_ROOT="${KIT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
-NAME="${OC_OTEL_NAME:-oc-otel}"
-IMAGE="${OC_OTEL_IMAGE:-otel/opentelemetry-collector-contrib:latest}"
-DATA_DIR="${OC_OTEL_DATA_DIR:-/tmp/otel}"
-TRACE_FILE="${OC_OTEL_TRACE_FILE:-$DATA_DIR/otel-traces.jsonl}"
-PORT="${OC_OTEL_PORT:-4318}"
-GRPC_PORT="${OC_OTEL_GRPC_PORT:-4317}"
+AB_REPO_ROOT="${AB_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+NAME="${AB_TELEMETRY_NAME:-oc-otel}"
+IMAGE="${AB_TELEMETRY_IMAGE:-otel/opentelemetry-collector-contrib:latest}"
+DATA_DIR="${AB_TELEMETRY_DATA_DIR:-/tmp/otel}"
+TRACE_FILE="${AB_TELEMETRY_TRACE_FILE:-$DATA_DIR/otel-traces.jsonl}"
+PORT="${AB_TELEMETRY_PORT:-4318}"
+GRPC_PORT="${AB_TELEMETRY_GRPC_PORT:-4317}"
 TRACE_DIR="$(dirname "$TRACE_FILE")"
 TRACE_BASENAME="$(basename "$TRACE_FILE")"
 CONFIG_FILE="$DATA_DIR/otelcol.yaml"

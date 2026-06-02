@@ -15,7 +15,7 @@
 #     [--cache <dir>] \
 #     [--timeout-seconds 240]
 #
-# --cache defaults to $OC_PLUGIN_CACHE or ~/.cache/oc-eval/openclaw-plugin-deps,
+# --cache defaults to $AB_HARNESS_PLUGIN_CACHE or ~/.cache/oc-eval/openclaw-plugin-deps,
 # matching the path SingularityHarness binds at run time.
 #
 # Idempotent: re-running with a populated cache is a no-op past npm's "up to
@@ -25,7 +25,7 @@ set -euo pipefail
 
 SIF=""
 OVERLAY=""
-CACHE="${OC_PLUGIN_CACHE:-$HOME/.cache/oc-eval/openclaw-plugin-deps}"
+CACHE="${AB_HARNESS_PLUGIN_CACHE:-$HOME/.cache/oc-eval/openclaw-plugin-deps}"
 TIMEOUT=240
 STATE_TEMPLATE=""
 

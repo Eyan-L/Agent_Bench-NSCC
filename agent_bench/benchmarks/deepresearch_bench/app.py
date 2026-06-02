@@ -57,7 +57,7 @@ from agent_bench.benchmarks.conditions.gateway_helpers import (
     release_gateway_port as _release_gateway_port,
 )
 from agent_bench.benchmarks.swebench.app import (
-    DEFAULT_OC_IMAGE,
+    DEFAULT_OPENCLAW_RUNTIME_IMAGE,
     _force_rmtree,
     _oc_sandbox_name,
 )
@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_SANDBOX_IMAGE = os.environ.get(
-    "DR_SANDBOX_IMAGE", "hongrui0/dr-sandbox:1.0",
+    "AB_BENCHMARK_SANDBOX_IMAGE", "hongrui0/dr-sandbox:1.0",
 )
 _OPENAI_CHAT_COMPLETIONS_API = "openai-completions"
 
@@ -78,7 +78,7 @@ _OPENAI_CHAT_COMPLETIONS_API = "openai-completions"
 # not require a key in this deployment). Any unset key is silently
 # skipped — the agent will see a missing-key error from OC at tool-call
 # time, which is the correct behaviour.
-_OC_PASSTHROUGH_ENV_KEYS = (
+_OPENCLAW_PASSTHROUGH_ENV_KEYS = (
     "BRAVE_API_KEY",
 )
 
@@ -114,13 +114,13 @@ class DeepResearchHarness:
 
     def __init__(
         self,
-        swebench_root: Optional[Path] = None,
+        benchmark_data_root: Optional[Path] = None,
         oc_image: Optional[str] = None,
         workspace_base: Optional[Path] = None,
     ):
-        # swebench_root accepted for driver-API parity; unused here.
-        self.swebench_root = Path(swebench_root) if swebench_root else None
-        self.oc_image = oc_image or DEFAULT_OC_IMAGE
+        # benchmark_data_root accepted for driver-API parity; unused here.
+        self.benchmark_data_root = Path(benchmark_data_root) if benchmark_data_root else None
+        self.oc_image = oc_image or DEFAULT_OPENCLAW_RUNTIME_IMAGE
 
         r = subprocess.run(
             ["docker", "version", "--format", "{{.Server.Version}}"],
@@ -132,7 +132,7 @@ class DeepResearchHarness:
         self.workspace_base = Path(
             workspace_base
             or os.environ.get(
-                "OC_HOST_WORKSPACE_BASE",
+                "AB_HARNESS_WORKSPACE_BASE",
                 os.path.expanduser("~/.cache/oc-eval/workspaces"),
             )
         )
@@ -353,7 +353,7 @@ class DeepResearchHarness:
             # the agent will get a runtime error from OC if it actually tries
             # to invoke an unconfigured tool.
             web_env_args: List[str] = []
-            for key in _OC_PASSTHROUGH_ENV_KEYS:
+            for key in _OPENCLAW_PASSTHROUGH_ENV_KEYS:
                 val = os.environ.get(key)
                 if val:
                     web_env_args.extend(["-e", f"{key}={val}"])
@@ -383,7 +383,7 @@ class DeepResearchHarness:
                 "-v", "/var/run/docker.sock:/var/run/docker.sock",
                 "-w", "/root",
                 "-e", f"OPENCLAW_GATEWAY_TOKEN={gateway_token}",
-                "-e", f"OPENCLAW_GATEWAY_OTEL_ENDPOINT={os.environ.get('OC_OTEL_ENDPOINT', 'http://vllm-host:4318')}",
+                "-e", f"OPENCLAW_GATEWAY_OTEL_ENDPOINT={os.environ.get('AB_TELEMETRY_ENDPOINT', 'http://vllm-host:4318')}",
                 "-e", f"OPENCLAW_RUN_ID={run_id}",
                 "-e", f"OTEL_RESOURCE_ATTRIBUTES=oc.run_id={run_id}",
                 "-e", "DOCKER_API_VERSION=1.44",
@@ -482,30 +482,30 @@ class DeepResearchHarness:
         container_prefix: str,
         scope: str = "agent",
     ) -> Path:
-        kit_root = os.environ.get("KIT_ROOT", os.getcwd())
+        repo_root = os.environ.get("AB_REPO_ROOT", os.getcwd())
         state_dir = self.state_base / run_id
         if state_dir.exists():
             _force_rmtree(state_dir)
         agent_id = self._agent_id_from_harness_cfg() or "deep_researcher"
         os.makedirs(state_dir / "agents" / agent_id, exist_ok=True)
 
-        override = os.environ.get("OC_HOST_STATE_TEMPLATE")
+        override = os.environ.get("AB_HARNESS_STATE_TEMPLATE")
         if override:
             if not os.path.isdir(override):
                 raise FileNotFoundError(
-                    f"OC_HOST_STATE_TEMPLATE points to {override} but is not a directory."
+                    f"AB_HARNESS_STATE_TEMPLATE points to {override} but is not a directory."
                 )
             shutil.rmtree(state_dir)
             shutil.copytree(override, state_dir)
         else:
             harness_path = os.environ.get(
                 "AB_HARNESS_CONFIG",
-                os.path.join(kit_root, "profiles/harnesses/openclaw_deepresearch_bench_brave.yaml"),
+                os.path.join(repo_root, "profiles/harnesses/openclaw_deepresearch_bench_brave.yaml"),
             )
             if not os.path.isfile(harness_path):
                 raise FileNotFoundError(
                     f"harness config not found at {harness_path} "
-                    "(set AB_HARNESS_CONFIG or OC_HOST_STATE_TEMPLATE)."
+                    "(set AB_HARNESS_CONFIG or AB_HARNESS_STATE_TEMPLATE)."
                 )
             harness_cfg = load_profile(harness_path)
             oc_cfg = dict(harness_cfg.get("openclaw") or {})
@@ -514,12 +514,12 @@ class DeepResearchHarness:
                     f"harness config {harness_path} has no `openclaw` block "
                     "(required when use_openclaw=True)."
                 )
-            model_cfg, _serving_cfg = load_active_model_and_serving(kit_root=kit_root)
+            model_cfg, _serving_cfg = load_active_model_and_serving(repo_root=repo_root)
             providers = oc_cfg.setdefault("models", {}).setdefault("providers", {})
-            vllm_p = providers.setdefault("vllm", {})
-            vllm_p["api"] = _OPENAI_CHAT_COMPLETIONS_API
-            vllm_p.setdefault("apiKey", model_cfg.api_key or "sk-dummy")
-            vllm_p["models"] = [{
+            agent_model_p = providers.setdefault("agent_model", {})
+            agent_model_p["api"] = _OPENAI_CHAT_COMPLETIONS_API
+            agent_model_p.setdefault("apiKey", model_cfg.api_key or "sk-dummy")
+            agent_model_p["models"] = [{
                 "id": model_cfg.name,
                 "name": model_cfg.name,
                 "api": _OPENAI_CHAT_COMPLETIONS_API,
@@ -527,12 +527,12 @@ class DeepResearchHarness:
                 "maxTokens": model_cfg.max_tokens,
             }]
             agents_d = oc_cfg.setdefault("agents", {}).setdefault("defaults", {})
-            agents_d.setdefault("model", {})["primary"] = f"vllm/{model_cfg.name}"
+            agents_d.setdefault("model", {})["primary"] = f"agent_model/{model_cfg.name}"
             with open(state_dir / "openclaw.json", "w") as fh:
                 json.dump(oc_cfg, fh, indent=2)
 
-            dr_agents = os.path.join(kit_root, "agent_bench/benchmarks/deepresearch_bench/openclaw/agents")
-            dr_skills = os.path.join(kit_root, "agent_bench/benchmarks/deepresearch_bench/openclaw/skills")
+            dr_agents = os.path.join(repo_root, "agent_bench/benchmarks/deepresearch_bench/openclaw/agents")
+            dr_skills = os.path.join(repo_root, "agent_bench/benchmarks/deepresearch_bench/openclaw/skills")
 
             if os.path.isdir(dr_agents):
                 # BOOTSTRAP.md is workspace-scoped (seeded into /workspace by
@@ -571,22 +571,22 @@ class DeepResearchHarness:
             cfg.setdefault("skills", {}).setdefault("load", {})["extraDirs"] = [
                 "/root/.openclaw/skills"
             ]
-        model_cfg, _serving_cfg = load_active_model_and_serving(kit_root=kit_root)
-        vllm_endpoint = os.environ.get(
-            "OC_VLLM_BASE_URL",
+        model_cfg, _serving_cfg = load_active_model_and_serving(repo_root=repo_root)
+        serving_endpoint = os.environ.get(
+            "AB_SERVING_BASE_URL",
             endpoint_for_container(model_cfg.endpoint, "vllm-host"),
         )
         providers = cfg.setdefault("models", {}).setdefault("providers", {})
-        vllm_provider = providers.setdefault("vllm", {})
-        vllm_provider["api"] = _OPENAI_CHAT_COMPLETIONS_API
-        vllm_provider["baseUrl"] = vllm_endpoint
-        for model in vllm_provider.get("models") or []:
+        agent_model_provider = providers.setdefault("agent_model", {})
+        agent_model_provider["api"] = _OPENAI_CHAT_COMPLETIONS_API
+        agent_model_provider["baseUrl"] = serving_endpoint
+        for model in agent_model_provider.get("models") or []:
             if isinstance(model, dict):
                 model["api"] = _OPENAI_CHAT_COMPLETIONS_API
         otel_cfg = (cfg.get("diagnostics") or {}).get("otel") or {}
         if otel_cfg.get("enabled"):
             cfg["diagnostics"]["otel"]["endpoint"] = os.environ.get(
-                "OC_OTEL_ENDPOINT", "http://vllm-host:4318",
+                "AB_TELEMETRY_ENDPOINT", "http://vllm-host:4318",
             )
         with open(cfg_path, "w") as fh:
             json.dump(cfg, fh, indent=2)
@@ -738,11 +738,11 @@ class DeepResearchHarness:
                 error_message="empty report",
             )
 
-        # DR_SKIP_EVAL=1 — collect-only mode (agent phase). The driver still
+        # AB_BENCHMARK_SKIP_EVAL=1 — collect-only mode (agent phase). The driver still
         # persists `host_report` to `run_dir/report.md` via verdict["report_path"];
         # re-grade later by running `eval/runner.py` over that sweep dir.
-        if os.environ.get("DR_SKIP_EVAL") == "1":
-            logger.info("DR_SKIP_EVAL=1: skipping RACE+FACT, report.md persisted")
+        if os.environ.get("AB_BENCHMARK_SKIP_EVAL") == "1":
+            logger.info("AB_BENCHMARK_SKIP_EVAL=1: skipping RACE+FACT, report.md persisted")
             return {
                 "status": "DEFERRED",
                 "test_pass_rate": 0.0,
@@ -754,7 +754,7 @@ class DeepResearchHarness:
                 "fact_error": "deferred — run eval phase separately",
                 "report_path": str(host_report),
                 "evaluation_dir": str(out_dir),
-                "error_message": "DR_SKIP_EVAL=1 (agent-only mode)",
+                "error_message": "AB_BENCHMARK_SKIP_EVAL=1 (agent-only mode)",
             }
 
         # Step 2: run RACE + FACT on the host.
@@ -849,7 +849,7 @@ class DeepResearchHarness:
             subprocess.run(["docker", "network", "rm", network_name],
                            capture_output=True, check=False)
 
-        keep = os.environ.get("OC_HOST_KEEP_WORKSPACE", "0") == "1"
+        keep = os.environ.get("AB_HARNESS_KEEP_WORKSPACE", "0") == "1"
         if not keep and workspace_host_path and os.path.isdir(workspace_host_path):
             run_root = Path(workspace_host_path).parent
             _force_rmtree(run_root, ignore_errors=True)
@@ -883,7 +883,7 @@ class DeepResearchHarness:
 
 # RACE overall_score is in [0,1]; we PASS at >= 0.5 by default (the
 # upstream criterion for "competitive with reference"). Tune via env.
-_DR_PASS_THRESHOLD = float(os.environ.get("DR_PASS_THRESHOLD", "0.5"))
+_AB_BENCHMARK_PASS_THRESHOLD = float(os.environ.get("AB_BENCHMARK_PASS_THRESHOLD", "0.5"))
 
 
 def _score_to_run_tests_result(
@@ -899,7 +899,7 @@ def _score_to_run_tests_result(
     overall = float(race.get("overall", 0.0)) if race else 0.0
     passed = (
         race is not None
-        and overall >= _DR_PASS_THRESHOLD
+        and overall >= _AB_BENCHMARK_PASS_THRESHOLD
         and payload.get("race_error") is None
     )
     status = (

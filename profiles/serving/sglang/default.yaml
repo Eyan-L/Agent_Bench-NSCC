@@ -1,6 +1,6 @@
 # Default SGLang endpoint profile. Model context length comes from
 # profiles/models/*.json; tensor parallelism is selected at launch time via
-# SGLANG_TP or TP.
+# AB_SERVING_TENSOR_PARALLEL_SIZE or SGLANG_TP.
 serving:
   config_id: sglang-default
   backend: sglang

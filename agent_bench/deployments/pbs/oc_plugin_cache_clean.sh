@@ -19,7 +19,7 @@
 # Usage:
 #   oc_plugin_cache_clean.sh <cache-dir> [<openclaw.json>]
 #
-# <cache-dir>    : path to the OC_PLUGIN_CACHE root (contains
+# <cache-dir>    : path to the AB_HARNESS_PLUGIN_CACHE root (contains
 #                  openclaw-<version>-<hash>/dist/extensions/<plugin>/...).
 # <openclaw.json>: optional; reads disabled-plugin names from
 #                  plugins.entries. If omitted, only partial-extract cleanup

@@ -52,7 +52,7 @@ from agent_bench.core.profile_io import load_profile
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_HM_DOCKER_IMAGE = "agent-bench/hermes:v2026.5.16"
+DEFAULT_HERMES_RUNTIME_IMAGE = "agent-bench/hermes:v2026.5.16"
 
 _STATE_DIR_IN_HERMES = "/opt/data"
 _WORKSPACE_IN_HERMES = "/workspace"
@@ -64,20 +64,20 @@ class SWEBenchHermesHarness:
 
     backend_id = "container-agnostic"
 
-    _HM_SCAFFOLD_FILES = (
+    _HERMES_SCAFFOLD_FILES = (
         "AGENTS.md SOUL.md IDENTITY.md USER.md TOOLS.md HEARTBEAT.md "
         "BOOT.md MEMORY.md fix.patch"
     )
-    _HM_SCAFFOLD_DIRS = ".hermes memory sessions .pytest_cache"
+    _HERMES_SCAFFOLD_DIRS = ".hermes memory sessions .pytest_cache"
 
     def __init__(
         self,
-        swebench_root: Path,
+        benchmark_data_root: Path,
         hm_image: Optional[str] = None,
         workspace_base: Optional[Path] = None,
         container: Optional[Container] = None,
     ):
-        self.swebench_root = Path(swebench_root)
+        self.benchmark_data_root = Path(benchmark_data_root)
         self.container = container or DockerContainer()
         self.hm_image = hm_image or self._default_hm_image()
 
@@ -95,7 +95,7 @@ class SWEBenchHermesHarness:
         self.workspace_base = Path(
             workspace_base
             or os.environ.get(
-                "OC_HOST_WORKSPACE_BASE",
+                "AB_HARNESS_WORKSPACE_BASE",
                 os.path.expanduser("~/.cache/oc-eval/workspaces"),
             )
         )
@@ -108,12 +108,11 @@ class SWEBenchHermesHarness:
         if self.container.backend_id == "singularity":
             scratch = os.environ.get("SCRATCH") or os.path.expanduser("~")
             return (
-                os.environ.get("HM_RUNTIME_SIF")
-                or os.environ.get("HM_SIF")
-                or os.environ.get("HM_IMAGE")
+                os.environ.get("AB_AGENT_RUNTIME_SIF")
+                or os.environ.get("AB_AGENT_RUNTIME_IMAGE")
                 or str(Path(scratch) / "sif_images" / "hermes_runtime.sif")
             )
-        return os.environ.get("HM_IMAGE", DEFAULT_HM_DOCKER_IMAGE)
+        return os.environ.get("AB_AGENT_RUNTIME_IMAGE", DEFAULT_HERMES_RUNTIME_IMAGE)
 
     def prepare_environment(
         self,
@@ -199,7 +198,7 @@ class SWEBenchHermesHarness:
         logger.info("  exec-bridge: pid=%s sock=%s", dispatcher.pid, dispatcher.socket_path)
 
         model_cfg, _serving_cfg = load_active_model_and_serving()
-        model_name = os.environ.get("HERMES_MODEL") or model_cfg.name
+        model_name = os.environ.get("AB_MODEL_NAME") or model_cfg.name
         provider = os.environ.get("HERMES_INFERENCE_PROVIDER") or model_cfg.provider
         base_url = self._runtime_base_url(model_cfg.endpoint)
         api_key = os.environ.get("OPENAI_API_KEY") or model_cfg.api_key
@@ -215,7 +214,7 @@ class SWEBenchHermesHarness:
             "HERMES_RUN_ID": run_id,
             "HERMES_INFERENCE_MODEL": model_name,
             "HERMES_INFERENCE_PROVIDER": provider,
-            "HERMES_AGENT_BENCH_EVENTS": f"{_STATE_DIR_IN_HERMES}/events.jsonl",
+            "AB_AGENT_RUNTIME_EVENTS_FILE": f"{_STATE_DIR_IN_HERMES}/events.jsonl",
             "OPENAI_API_KEY": api_key,
             "OPENAI_BASE_URL": base_url,
             "MINIMAX_API_KEY": api_key,
@@ -272,10 +271,10 @@ class SWEBenchHermesHarness:
         }
 
     def _load_harness_config(self) -> Dict:
-        kit_root = os.environ.get("KIT_ROOT", os.getcwd())
+        repo_root = os.environ.get("AB_REPO_ROOT", os.getcwd())
         harness_path = os.environ.get(
             "AB_HARNESS_CONFIG",
-            os.path.join(kit_root, "profiles/harnesses/hermes_swebench.yaml"),
+            os.path.join(repo_root, "profiles/harnesses/hermes_swebench.yaml"),
         )
         if not os.path.isfile(harness_path):
             raise FileNotFoundError(
@@ -290,24 +289,24 @@ class SWEBenchHermesHarness:
             _force_rmtree(state_dir)
         state_dir.mkdir(parents=True)
 
-        kit_root = os.environ.get("KIT_ROOT", os.getcwd())
+        repo_root = os.environ.get("AB_REPO_ROOT", os.getcwd())
         harness_cfg = self._load_harness_config()
         hm_cfg = harness_cfg.get("hermes") or {}
-        model_cfg, _serving_cfg = load_active_model_and_serving(kit_root=kit_root)
+        model_cfg, _serving_cfg = load_active_model_and_serving(repo_root=repo_root)
 
         template_path = (
-            Path(kit_root) / "harnesses" / "hermes" / "state" / "config.yaml.template"
+            Path(repo_root) / "harnesses" / "hermes" / "state" / "config.yaml.template"
         )
         if not template_path.is_file():
             raise FileNotFoundError(f"hermes config.yaml.template missing at {template_path}")
 
         values = {
-            "MODEL": os.environ.get("HERMES_MODEL") or model_cfg.name,
+            "AB_MODEL_NAME": os.environ.get("AB_MODEL_NAME") or model_cfg.name,
             "PROVIDER": os.environ.get("HERMES_INFERENCE_PROVIDER") or model_cfg.provider,
             "BASE_URL": self._runtime_base_url(model_cfg.endpoint),
             "API_KEY": os.environ.get("OPENAI_API_KEY") or model_cfg.api_key,
             "TEMPERATURE": str(model_cfg.temperature),
-            "MAX_TOKENS": str(model_cfg.max_tokens),
+            "AB_MODEL_MAX_OUTPUT_TOKENS": str(model_cfg.max_tokens),
             "CONTEXT_LENGTH": str(model_cfg.context_window),
             "MAX_TURNS": str((hm_cfg.get("run") or {}).get("max_turns") or 90),
             "TERMINAL_TIMEOUT": str((hm_cfg.get("run") or {}).get("terminal_timeout") or 180),
@@ -320,10 +319,10 @@ class SWEBenchHermesHarness:
     def _resolve_task_image(self, container_image: str) -> str:
         if self.container.backend_id == "docker":
             return container_image
-        sif_dir = os.environ.get("OC_SCORING_SIF_DIR")
+        sif_dir = os.environ.get("AB_SCORING_IMAGE_DIR")
         if not sif_dir:
             raise RuntimeError(
-                "OC_SCORING_SIF_DIR not set; the singularity backend needs "
+                "AB_SCORING_IMAGE_DIR not set; the singularity backend needs "
                 "the per-instance .sif directory."
             )
         tag = container_image.split(":")[0]
@@ -375,13 +374,13 @@ class SWEBenchHermesHarness:
         ws_host = self._workspace_by_container.get(container_id)
         if self.container.backend_id == "singularity" and ws_host:
             try:
-                for name in self._HM_SCAFFOLD_FILES.split():
+                for name in self._HERMES_SCAFFOLD_FILES.split():
                     path = ws_host / name
                     if path.is_dir():
                         _force_rmtree(path, ignore_errors=True)
                     elif path.exists():
                         path.unlink()
-                for name in self._HM_SCAFFOLD_DIRS.split():
+                for name in self._HERMES_SCAFFOLD_DIRS.split():
                     _force_rmtree(ws_host / name, ignore_errors=True)
                 r = subprocess.run(
                     ["git", "-C", str(ws_host), "diff", "HEAD"],
@@ -395,8 +394,8 @@ class SWEBenchHermesHarness:
         self._exec(
             container_id,
             ["bash", "-c",
-             f"cd {ws} && rm -f {self._HM_SCAFFOLD_FILES} && "
-             f"rm -rf {self._HM_SCAFFOLD_DIRS}"],
+             f"cd {ws} && rm -f {self._HERMES_SCAFFOLD_FILES} && "
+             f"rm -rf {self._HERMES_SCAFFOLD_DIRS}"],
             check=False,
         )
         self._exec(
@@ -446,7 +445,7 @@ class SWEBenchHermesHarness:
             model_name_or_path="hm-eval",
             timeout_seconds=timeout_seconds,
             run_id=run_id,
-            swebench_root=self.swebench_root,
+            benchmark_data_root=self.benchmark_data_root,
             instance_data=instance_data,
         )
         if singularity_verdict is not None:
@@ -482,7 +481,7 @@ class SWEBenchHermesHarness:
             try:
                 proc = subprocess.run(
                     cmd,
-                    cwd=str(self.swebench_root),
+                    cwd=str(self.benchmark_data_root),
                     capture_output=True,
                     text=True,
                     timeout=timeout_seconds + 300,
@@ -513,7 +512,7 @@ class SWEBenchHermesHarness:
 
     def _find_and_parse_verdict(self, run_id: str, instance_id: str) -> Dict:
         report_path = (
-            self.swebench_root
+            self.benchmark_data_root
             / "logs" / "run_evaluation" / run_id / "hm-eval" / instance_id
             / "report.json"
         )
@@ -601,7 +600,7 @@ class SWEBenchHermesHarness:
             except Exception:
                 pass
 
-        keep = os.environ.get("OC_HOST_KEEP_WORKSPACE", "0") == "1"
+        keep = os.environ.get("AB_HARNESS_KEEP_WORKSPACE", "0") == "1"
         if not keep and workspace_host_path and os.path.isdir(workspace_host_path):
             _force_rmtree(Path(workspace_host_path), ignore_errors=True)
         if not keep and state_dir and os.path.isdir(state_dir):

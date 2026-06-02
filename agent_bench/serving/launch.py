@@ -24,12 +24,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--mode", choices=["native", "docker", "singularity"], help="Launch mode.")
     parser.add_argument("--model-config", help="Path to profiles/models/*.json.")
     parser.add_argument("--serving-config", help="Path to a serving profile.")
-    parser.add_argument("--model-profile", help="Model profile name under profiles/models.")
-    parser.add_argument("--serving", help="Serving profile name under profiles/serving.")
     parser.add_argument("--preset", help="Serving preset override.")
-    parser.add_argument("--model", help="Engine model path/name override.")
-    parser.add_argument("--port", help="Serving port override.")
-    parser.add_argument("--max-model-len", help="Max model length override.")
+    parser.add_argument("--model-name", help="Engine model path/name override.")
+    parser.add_argument("--serving-port", help="Serving port override.")
+    parser.add_argument("--serving-max-model-len", help="Max model length override.")
     parser.add_argument("--log-file", help="Redirect backend stdout/stderr to this file before exec.")
     parser.add_argument("--print-json", action="store_true", help="Print the redacted launch plan and exit.")
     parser.add_argument("--dry-run", action="store_true", help="Print the command and exit without launching.")
@@ -40,18 +38,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         env["AB_MODEL_CONFIG"] = args.model_config
     if args.serving_config:
         env["AB_SERVING_CONFIG"] = args.serving_config
-    if args.model_profile:
-        env["MODEL_PROFILE"] = args.model_profile
-    if args.serving:
-        env["SERVING"] = args.serving
     if args.preset:
-        env["SERVING_PRESET"] = args.preset
-    if args.model:
-        env["MODEL"] = args.model
-    if args.port:
-        env["PORT"] = args.port
-    if args.max_model_len:
-        env["MAX_MODEL_LEN"] = args.max_model_len
+        env["AB_SERVING_PRESET"] = args.preset
+    if args.model_name:
+        env["AB_MODEL_NAME"] = args.model_name
+    if args.serving_port:
+        env["AB_SERVING_PORT"] = args.serving_port
+    if args.serving_max_model_len:
+        env["AB_SERVING_MAX_MODEL_LEN"] = args.serving_max_model_len
 
     try:
         plan = build_launch_plan_from_env(

@@ -12,7 +12,7 @@ DEFAULT_SPLIT = "test"
 
 
 def resolve_profile_instance_data(resolved: Any) -> Path | None:
-    value = resolved.benchmark.get("instance_data")
+    value = resolved.benchmark.get("benchmark_instance_data")
     if not isinstance(value, str) or not value:
         return None
 
@@ -35,8 +35,8 @@ def materialize_profile_dataset(resolved: Any, out: Path) -> Path:
 
     if not isinstance(dataset_name, str) or not dataset_name:
         raise ConfigError(
-            "SWE-bench experiments require instance_data in the experiment TOML, "
-            "INSTANCE_DATA in the environment, or benchmark profile dataset/split fields"
+            "SWE-bench experiments require benchmark_instance_data in the benchmark profile or experiment TOML, "
+            "AB_BENCHMARK_INSTANCE_DATA in the environment, or benchmark profile dataset/split fields"
         )
     if not isinstance(split, str) or not split:
         raise ConfigError("SWE-bench benchmark profile split must be a non-empty string")
@@ -48,7 +48,7 @@ def materialize_profile_dataset(resolved: Any, out: Path) -> Path:
     except Exception as exc:  # pragma: no cover - depends on optional local env
         raise ConfigError(
             "SWE-bench dataset materialization requires the `datasets` package "
-            "or an explicit INSTANCE_DATA/instance_data path"
+            "or an explicit AB_BENCHMARK_INSTANCE_DATA/benchmark_instance_data path"
         ) from exc
 
     wanted = {str(instance_id) for instance_id in instances}

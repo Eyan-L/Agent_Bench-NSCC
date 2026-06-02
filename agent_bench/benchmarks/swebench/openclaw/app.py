@@ -57,7 +57,7 @@ from agent_bench.benchmarks.conditions.gateway_helpers import (
     release_gateway_port as _release_gateway_port,
 )
 from agent_bench.benchmarks.swebench.app import (
-    DEFAULT_OC_IMAGE,
+    DEFAULT_OPENCLAW_RUNTIME_IMAGE,
     _force_rmtree,
     _oc_sandbox_name,
 )
@@ -84,8 +84,8 @@ logger = logging.getLogger(__name__)
 # single-run load, which is reliable; the agent loops still run fully
 # concurrent afterward, and the agent CLI reuses the gateway's now-complete
 # plugin-runtime-deps (same instance) so it won't re-install/race.
-_OC_WARMUP_SEM = threading.BoundedSemaphore(
-    int(os.environ.get("OC_WARMUP_CONCURRENCY", "1"))
+_OPENCLAW_WARMUP_SEM = threading.BoundedSemaphore(
+    int(os.environ.get("AB_HARNESS_WARMUP_CONCURRENCY", "1"))
 )
 
 
@@ -122,13 +122,13 @@ class SWEBenchHarness:
 
     def __init__(
         self,
-        swebench_root: Path,
+        benchmark_data_root: Path,
         *,
         container: Container,
         oc_image: Optional[str] = None,
         workspace_base: Optional[Path] = None,
     ):
-        self.swebench_root = Path(swebench_root)
+        self.benchmark_data_root = Path(benchmark_data_root)
         self.container = container
         # `oc_image` is the OC runtime container reference. docker: image tag
         # (e.g. `agent-bench/openclaw:2026.4.22`). singularity: absolute path
@@ -136,8 +136,8 @@ class SWEBenchHarness:
         # building this harness.
         self.oc_image = (
             oc_image
-            or os.environ.get("OC_OC_SIF")
-            or DEFAULT_OC_IMAGE
+            or os.environ.get("AB_AGENT_RUNTIME_SIF")
+            or DEFAULT_OPENCLAW_RUNTIME_IMAGE
         )
 
         # Pre-flight: swebench python pkg + container runtime + OC image.
@@ -153,7 +153,7 @@ class SWEBenchHarness:
 
         self.workspace_base = Path(
             workspace_base
-            or os.environ.get("OC_HOST_WORKSPACE_BASE",
+            or os.environ.get("AB_HARNESS_WORKSPACE_BASE",
                               os.path.expanduser("~/.cache/oc-eval/workspaces"))
         )
         self.workspace_base.mkdir(parents=True, exist_ok=True)
@@ -353,7 +353,7 @@ class SWEBenchHarness:
             "OPENCLAW_GATEWAY_PORT": str(gateway_port),
             "OPENCLAW_GATEWAY_TOKEN": gateway_token,
             "OPENCLAW_GATEWAY_OTEL_ENDPOINT": os.environ.get(
-                "OC_OTEL_ENDPOINT",
+                "AB_TELEMETRY_ENDPOINT",
                 f"http://{self.container.host_address}:4318",
             ),
             "OPENCLAW_RUN_ID": run_id,
@@ -432,11 +432,11 @@ class SWEBenchHarness:
             command=("gateway", "--allow-unconfigured"),
         )
         # Serialize the gateway warmup window (start → plugin npm install →
-        # "[gateway] ready") via _OC_WARMUP_SEM so concurrent runs don't fire
+        # "[gateway] ready") via _OPENCLAW_WARMUP_SEM so concurrent runs don't fire
         # ~11*N parallel npm installs that ENOTEMPTY-race. See the semaphore
         # definition above. Agent loops run concurrently outside this block.
         logger.info("  [warmup] waiting for gateway-warmup slot (run=%s)", run_id)
-        with _OC_WARMUP_SEM:
+        with _OPENCLAW_WARMUP_SEM:
             logger.info("  [warmup] slot acquired; starting gateway (run=%s)", run_id)
             try:
                 oc_handle = self.container.start(oc_spec)
@@ -522,17 +522,17 @@ class SWEBenchHarness:
         into the runtime's expected reference.
 
         docker: pass through unchanged.
-        singularity: a sif filename under `$OC_SCORING_SIF_DIR`. The on-disk
+        singularity: a sif filename under `$AB_SCORING_IMAGE_DIR`. The on-disk
         naming convention is `<instance_id>.sif` (see
         agent_bench/deployments/pbs/pull_images.sh:pull_one). We recover the
         instance_id from the docker tag (last `.` segment before `:`).
         """
         if self.container.backend_id == "docker":
             return container_image
-        sif_dir = os.environ.get("OC_SCORING_SIF_DIR")
+        sif_dir = os.environ.get("AB_SCORING_IMAGE_DIR")
         if not sif_dir:
             raise RuntimeError(
-                "OC_SCORING_SIF_DIR not set; the singularity backend needs "
+                "AB_SCORING_IMAGE_DIR not set; the singularity backend needs "
                 "the per-instance .sif directory (where pull_images.sh "
                 "wrote the pulled SWE-bench task images)."
             )
@@ -563,17 +563,17 @@ class SWEBenchHarness:
         container_prefix: str,
         scope: str = "agent",
     ) -> Path:
-        kit_root = os.environ.get("KIT_ROOT", os.getcwd())
+        repo_root = os.environ.get("AB_REPO_ROOT", os.getcwd())
         state_dir = self.state_base / run_id
         if state_dir.exists():
             _force_rmtree(state_dir)
         os.makedirs(state_dir / "agents/swebench", exist_ok=True)
 
-        override = os.environ.get("OC_HOST_STATE_TEMPLATE")
+        override = os.environ.get("AB_HARNESS_STATE_TEMPLATE")
         if override:
             if not os.path.isdir(override):
                 raise FileNotFoundError(
-                    f"OC_HOST_STATE_TEMPLATE points to {override} but it is not a directory."
+                    f"AB_HARNESS_STATE_TEMPLATE points to {override} but it is not a directory."
                 )
             shutil.rmtree(state_dir)
             shutil.copytree(override, state_dir)
@@ -583,12 +583,12 @@ class SWEBenchHarness:
             # from the separate model/serving axes.
             harness_path = os.environ.get(
                 "AB_HARNESS_CONFIG",
-                os.path.join(kit_root, "profiles/harnesses/openclaw_swebench.yaml"),
+                os.path.join(repo_root, "profiles/harnesses/openclaw_swebench.yaml"),
             )
             if not os.path.isfile(harness_path):
                 raise FileNotFoundError(
                     f"harness config not found at {harness_path} "
-                    "(set AB_HARNESS_CONFIG or OC_HOST_STATE_TEMPLATE)."
+                    "(set AB_HARNESS_CONFIG or AB_HARNESS_STATE_TEMPLATE)."
                 )
             harness_cfg = load_profile(harness_path)
             oc_cfg = dict(harness_cfg.get("openclaw") or {})
@@ -597,12 +597,12 @@ class SWEBenchHarness:
                     f"harness config {harness_path} has no `openclaw` block "
                     "(required for the openclaw harness)."
                 )
-            model_cfg, _serving_cfg = load_active_model_and_serving(kit_root=kit_root)
+            model_cfg, _serving_cfg = load_active_model_and_serving(repo_root=repo_root)
             providers = oc_cfg.setdefault("models", {}).setdefault("providers", {})
-            vllm_p = providers.setdefault("vllm", {})
-            vllm_p["api"] = _OPENAI_CHAT_COMPLETIONS_API
-            vllm_p.setdefault("apiKey", model_cfg.api_key or "sk-dummy")
-            vllm_p["models"] = [{
+            agent_model_p = providers.setdefault("agent_model", {})
+            agent_model_p["api"] = _OPENAI_CHAT_COMPLETIONS_API
+            agent_model_p.setdefault("apiKey", model_cfg.api_key or "sk-dummy")
+            agent_model_p["models"] = [{
                 "id": model_cfg.name,
                 "name": model_cfg.name,
                 "api": _OPENAI_CHAT_COMPLETIONS_API,
@@ -610,12 +610,12 @@ class SWEBenchHarness:
                 "maxTokens": model_cfg.max_tokens,
             }]
             agents_d = oc_cfg.setdefault("agents", {}).setdefault("defaults", {})
-            agents_d.setdefault("model", {})["primary"] = f"vllm/{model_cfg.name}"
+            agents_d.setdefault("model", {})["primary"] = f"agent_model/{model_cfg.name}"
             with open(state_dir / "openclaw.json", "w") as fh:
                 json.dump(oc_cfg, fh, indent=2)
 
-            app_agents = os.path.join(kit_root, "agent_bench/benchmarks/swebench/openclaw/agents")
-            app_skills = os.path.join(kit_root, "agent_bench/benchmarks/swebench/openclaw/skills")
+            app_agents = os.path.join(repo_root, "agent_bench/benchmarks/swebench/openclaw/agents")
+            app_skills = os.path.join(repo_root, "agent_bench/benchmarks/swebench/openclaw/skills")
             if not os.path.isdir(app_agents):
                 raise FileNotFoundError(
                     f"per-app agents dir not found at {app_agents}"
@@ -673,39 +673,39 @@ class SWEBenchHarness:
         # hostname; singularity: `127.0.0.1` shared net namespace). Harness
         # yamls ship with `baseUrl: http://localhost:8000/v1` (host
         # perspective); rewrite per-run.
-        model_cfg, _serving_cfg = load_active_model_and_serving(kit_root=kit_root)
+        model_cfg, _serving_cfg = load_active_model_and_serving(repo_root=repo_root)
         # The serving config is static, but PBS may pick a per-job dynamic
-        # LiteLLM port and publish it through OPENAI_BASE_URL/MODEL_ENDPOINT.
+        # LiteLLM port and publish it through OPENAI_BASE_URL/AB_SERVING_BASE_URL.
         # Use those runtime values so OpenClaw follows the same endpoint as
         # OpenHands/Hermes.
         runtime_endpoint = (
-            os.environ.get("OC_VLLM_BASE_URL")
+            os.environ.get("AB_SERVING_BASE_URL")
             or os.environ.get("OPENAI_BASE_URL")
-            or os.environ.get("MODEL_ENDPOINT")
+            or os.environ.get("AB_SERVING_BASE_URL")
             or model_cfg.endpoint
         )
-        vllm_endpoint = endpoint_for_container(
+        serving_endpoint = endpoint_for_container(
             runtime_endpoint,
             self.container.host_address,
         )
         providers = cfg.setdefault("models", {}).setdefault("providers", {})
-        vllm_provider = providers.setdefault("vllm", {})
-        vllm_provider["api"] = _OPENAI_CHAT_COMPLETIONS_API
-        vllm_provider["baseUrl"] = vllm_endpoint
-        for model in vllm_provider.get("models") or []:
+        agent_model_provider = providers.setdefault("agent_model", {})
+        agent_model_provider["api"] = _OPENAI_CHAT_COMPLETIONS_API
+        agent_model_provider["baseUrl"] = serving_endpoint
+        for model in agent_model_provider.get("models") or []:
             if isinstance(model, dict):
                 model["api"] = _OPENAI_CHAT_COMPLETIONS_API
         # API-backed providers (e.g. DeepSeek) need a real key; inject it
         # from env so the secret isn't committed in the harness config.
-        # sglang/local leaves OC_VLLM_API_KEY unset and keeps the dummy key.
-        _api_key = os.environ.get("OC_VLLM_API_KEY")
+        # sglang/local leaves AB_SERVING_API_KEY unset and keeps the dummy key.
+        _api_key = os.environ.get("AB_SERVING_API_KEY")
         if _api_key:
-            vllm_provider["apiKey"] = _api_key
+            agent_model_provider["apiKey"] = _api_key
         # OTel collector lives on the host too — same rewrite story.
         otel_cfg = (cfg.get("diagnostics") or {}).get("otel") or {}
         if otel_cfg.get("enabled"):
             cfg["diagnostics"]["otel"]["endpoint"] = os.environ.get(
-                "OC_OTEL_ENDPOINT", f"http://{self.container.host_address}:4318",
+                "AB_TELEMETRY_ENDPOINT", f"http://{self.container.host_address}:4318",
             )
         with open(cfg_path, "w") as fh:
             json.dump(cfg, fh, indent=2)
@@ -795,19 +795,19 @@ class SWEBenchHarness:
 
     # OpenClaw scaffolding files agent might write into the workspace; strip
     # before diffing so they don't bleed into the SWE-bench patch.
-    _OC_SCAFFOLD_FILES = (
+    _OPENCLAW_SCAFFOLD_FILES = (
         "AGENTS.md SOUL.md IDENTITY.md USER.md TOOLS.md HEARTBEAT.md "
         "BOOT.md MEMORY.md fix.patch _oc_validate.sh"
     )
-    _OC_SCAFFOLD_DIRS = ".openclaw memory sessions"
+    _OPENCLAW_SCAFFOLD_DIRS = ".openclaw memory sessions"
 
     def collect_patch(self, container_id: str, workspace_root: str) -> str:
         ws = workspace_root
         self._exec(
             container_id,
             ["bash", "-c",
-             f"cd {ws} && rm -f {self._OC_SCAFFOLD_FILES} && "
-             f"rm -rf {self._OC_SCAFFOLD_DIRS}"],
+             f"cd {ws} && rm -f {self._OPENCLAW_SCAFFOLD_FILES} && "
+             f"rm -rf {self._OPENCLAW_SCAFFOLD_DIRS}"],
             check=False,
         )
         # SWE-bench's setup runs `git commit -am SWE-bench` after install
@@ -866,7 +866,7 @@ class SWEBenchHarness:
             model_name_or_path="oc-eval",
             timeout_seconds=timeout_seconds,
             run_id=run_id,
-            swebench_root=self.swebench_root,
+            benchmark_data_root=self.benchmark_data_root,
             instance_data=instance_data,
         )
         if singularity_verdict is not None:
@@ -902,7 +902,7 @@ class SWEBenchHarness:
             ]
             try:
                 proc = subprocess.run(
-                    cmd, cwd=str(self.swebench_root),
+                    cmd, cwd=str(self.benchmark_data_root),
                     capture_output=True, text=True,
                     timeout=timeout_seconds + 300,
                 )
@@ -945,21 +945,21 @@ class SWEBenchHarness:
 
     def _find_and_parse_verdict(self, run_id: str, instance_id: str) -> Dict:
         primary = (
-            self.swebench_root
+            self.benchmark_data_root
             / "logs" / "run_evaluation" / run_id / "oc-eval" / instance_id
             / "report.json"
         )
         if primary.exists():
             return self._parse_verdict(primary, instance_id)
         legacy = (
-            self.swebench_root
+            self.benchmark_data_root
             / "evaluation_results" / run_id / instance_id / "report.json"
         )
         if legacy.exists():
             return self._parse_verdict(legacy, instance_id)
         for root in (
-            self.swebench_root / "logs" / "run_evaluation" / run_id,
-            self.swebench_root / "evaluation_results" / run_id,
+            self.benchmark_data_root / "logs" / "run_evaluation" / run_id,
+            self.benchmark_data_root / "evaluation_results" / run_id,
         ):
             if root.exists():
                 matches = list(root.rglob("report.json"))
@@ -1071,7 +1071,7 @@ class SWEBenchHarness:
             except Exception:
                 pass
 
-        keep = os.environ.get("OC_HOST_KEEP_WORKSPACE", "0") == "1"
+        keep = os.environ.get("AB_HARNESS_KEEP_WORKSPACE", "0") == "1"
         if not keep and workspace_host_path and os.path.isdir(workspace_host_path):
             _force_rmtree(Path(workspace_host_path), ignore_errors=True)
         if not keep and state_dir and os.path.isdir(state_dir):

@@ -74,22 +74,22 @@ def score_via_scoring_server(
     model_name_or_path: str,
     timeout_seconds: int,
 ) -> Optional[Dict]:
-    """Score through OC_SCORING_URL when configured.
+    """Score through AB_SCORING_SERVICE_URL when configured.
 
     Returns None when no scoring server is configured, so callers can fall back
-    to their local run_evaluation path. When OC_SCORING_URL is configured,
+    to their local run_evaluation path. When AB_SCORING_SERVICE_URL is configured,
     failures are returned as ERROR verdicts instead of falling through to
     Docker-backed local scoring, which is exactly what NSCC cannot run.
     """
-    base = (os.environ.get("OC_SCORING_URL") or "").rstrip("/")
+    base = (os.environ.get("AB_SCORING_SERVICE_URL") or "").rstrip("/")
     if not base:
         return None
 
-    dataset = os.environ.get("OC_SCORING_DATASET", _DEFAULT_DATASET)
-    request_timeout = float(os.environ.get("OC_SCORING_REQUEST_TIMEOUT_SECONDS", "30"))
-    poll_s = float(os.environ.get("OC_SCORING_POLL_SECONDS", "10"))
+    dataset = os.environ.get("AB_SCORING_DATASET", _DEFAULT_DATASET)
+    request_timeout = float(os.environ.get("AB_SCORING_REQUEST_TIMEOUT_SECONDS", "30"))
+    poll_s = float(os.environ.get("AB_SCORING_POLL_SECONDS", "10"))
     client_timeout = float(
-        os.environ.get("OC_SCORING_CLIENT_TIMEOUT_SECONDS", str(timeout_seconds + 900))
+        os.environ.get("AB_SCORING_CLIENT_TIMEOUT_SECONDS", str(timeout_seconds + 900))
     )
 
     submit_payload = {
@@ -208,7 +208,7 @@ def _load_instance_data(
     if instance_data:
         return dict(instance_data)
 
-    for key in ("AB_INSTANCE_DATA", "OC_SCORING_DATASET_PATH", "DATASET"):
+    for key in ("AB_BENCHMARK_INSTANCE_DATA", "AB_SCORING_DATASET_PATH"):
         value = os.environ.get(key)
         if not value:
             continue
@@ -221,11 +221,11 @@ def _load_instance_data(
     except Exception as e:
         raise RuntimeError(
             "could not load SWE-bench instance metadata from instance_data, "
-            "AB_INSTANCE_DATA/DATASET, or Hugging Face datasets"
+            "AB_BENCHMARK_INSTANCE_DATA/AB_SCORING_DATASET_PATH, or Hugging Face datasets"
         ) from e
 
-    dataset = os.environ.get("OC_SCORING_DATASET", _DEFAULT_DATASET)
-    split = os.environ.get("OC_HF_SPLIT", "test")
+    dataset = os.environ.get("AB_SCORING_DATASET", _DEFAULT_DATASET)
+    split = os.environ.get("AB_SCORING_DATASET_SPLIT", "test")
     for row in load_dataset(dataset, split=split):
         if row["instance_id"] == instance_id:
             return dict(row)
@@ -276,7 +276,7 @@ def _run_in_sif(
     timeout: Optional[float] = None,
 ) -> subprocess.CompletedProcess:
     cmd = ["singularity", "exec"]
-    if os.environ.get("OC_SCORING_WRITABLE_TMPFS", "1") != "0":
+    if os.environ.get("AB_SCORING_WRITABLE_TMPFS", "1") != "0":
         cmd += ["--writable-tmpfs"]
     if home is not None:
         cmd += ["--home", f"{home}:/root"]
@@ -326,21 +326,21 @@ def score_via_singularity(
     model_name_or_path: str,
     timeout_seconds: int,
     run_id: str,
-    swebench_root: Path,
+    benchmark_data_root: Path,
     instance_data: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict]:
     """Score one SWE-bench patch with the per-instance SIF on NSCC.
 
-    Returns None when OC_SCORING_SIF_DIR is not configured. Once configured,
+    Returns None when AB_SCORING_IMAGE_DIR is not configured. Once configured,
     failures are reported as verdicts instead of falling through to Docker,
     because NSCC compute nodes do not have Docker.
     """
-    sif_dir = os.environ.get("OC_SCORING_SIF_DIR")
+    sif_dir = os.environ.get("AB_SCORING_IMAGE_DIR")
     if not sif_dir:
         return None
     if shutil.which("singularity") is None:
         return _error_verdict(
-            "OC_SCORING_SIF_DIR is set but singularity is not on PATH",
+            "AB_SCORING_IMAGE_DIR is set but singularity is not on PATH",
             backend="singularity",
         )
 
@@ -373,7 +373,7 @@ def score_via_singularity(
 
     model_dir = model_name_or_path.replace("/", "__")
     eval_dir = (
-        Path(swebench_root)
+        Path(benchmark_data_root)
         / RUN_EVALUATION_LOG_DIR
         / run_id
         / model_dir

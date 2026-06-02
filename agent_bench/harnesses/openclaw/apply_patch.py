@@ -5,7 +5,7 @@ Source of truth: the .patch unified diffs under patch/. This script is a thin
 driver that resolves content-hashed bundle filenames, checks idempotency
 markers, runs `patch -p0`, and validates the result with `node --check`.
 
-Modes (env OC_PATCH_MODE):
+Modes (env AB_HARNESS_OPENCLAW_PATCH_MODE):
   runtime  apply patches in-place (backup once at <file>.oc-orig)
   baked    assert markers already present (image was pre-patched at build)
   skip     no-op (used to run unpatched OpenClaw for ablations)
@@ -33,19 +33,19 @@ DEFAULT_MANIFEST = SCRIPT_DIR / "patch" / "MANIFEST.json"
 
 
 def load_oc_root() -> Path:
-    root = os.environ.get("OC_HOST_OPENCLAW")
+    root = os.environ.get("AB_HARNESS_OPENCLAW_SOURCE_ROOT")
     if not root:
         env_file = SCRIPT_DIR / "defaults.env"
         if env_file.exists():
             for line in env_file.read_text().splitlines():
-                if line.startswith(": \"${OC_HOST_OPENCLAW:="):
+                if line.startswith(": \"${AB_HARNESS_OPENCLAW_SOURCE_ROOT:="):
                     root = line.split("=", 1)[1].rstrip("}\"")
                     break
     if not root:
-        sys.exit("OC_HOST_OPENCLAW not set; export it or set in defaults.env")
+        sys.exit("AB_HARNESS_OPENCLAW_SOURCE_ROOT not set; export it or set in defaults.env")
     p = Path(root)
     if not p.is_dir():
-        sys.exit(f"OC_HOST_OPENCLAW={root} does not exist or is not a directory")
+        sys.exit(f"AB_HARNESS_OPENCLAW_SOURCE_ROOT={root} does not exist or is not a directory")
     return p
 
 
@@ -166,8 +166,8 @@ def cmd_apply(args, manifest, oc_root, patch_dir, mode):
 
 
 def cmd_status(args, manifest, oc_root, patch_dir, mode):
-    print(f"OC_HOST_OPENCLAW = {oc_root}")
-    print(f"OC_PATCH_MODE    = {mode}")
+    print(f"AB_HARNESS_OPENCLAW_SOURCE_ROOT = {oc_root}")
+    print(f"AB_HARNESS_OPENCLAW_PATCH_MODE    = {mode}")
     for entry in manifest["patches"]:
         try:
             targets = resolve_targets(entry, oc_root)
@@ -204,7 +204,7 @@ def main() -> int:
     manifest = json.loads(Path(args.manifest).read_text())
     oc_root = load_oc_root()
     patch_dir = Path(args.manifest).resolve().parent
-    mode = os.environ.get("OC_PATCH_MODE", "runtime")
+    mode = os.environ.get("AB_HARNESS_OPENCLAW_PATCH_MODE", "runtime")
 
     {"apply": cmd_apply, "status": cmd_status, "restore": cmd_restore}[cmd](
         args, manifest, oc_root, patch_dir, mode

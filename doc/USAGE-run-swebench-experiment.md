@@ -84,7 +84,7 @@ To change the model, switch the model profile. Model profiles remain JSON
 because they are compact machine-readable aliases.
 
 To change vLLM runtime parallelism, pass launch-time env vars such as `VLLM_TP`
-or `TP`; tensor parallelism is not stored in serving profiles.
+or `AB_SERVING_TENSOR_PARALLEL_SIZE`; tensor parallelism is not stored in serving profiles.
 
 ## Outputs
 
@@ -106,24 +106,24 @@ Important files:
 ## Scoring On NSCC
 
 NSCC jobs cannot assume Docker is available on compute nodes. The PBS stage
-runner prepares task SIFs and exports `OC_SCORING_SIF_DIR` so SWE-bench scoring
+runner prepares task SIFs and exports `AB_SCORING_IMAGE_DIR` so SWE-bench scoring
 uses Singularity first.
 
 Fallback scoring through a Docker-capable remote host is still available:
 
 ```bash
 python3 -m agent_bench.benchmarks.swebench.scoring_server.main \
-  --swebench-root /path/to/SWE-bench \
+  --benchmark-data-root /path/to/SWE-bench \
   --host 0.0.0.0 \
   --port 8765
 
-qsub -v OC_SCORING_URL=http://<docker-host>:8765 nscc_vllm.pbs
+qsub -v AB_SCORING_SERVICE_URL=http://<docker-host>:8765 nscc_vllm.pbs
 ```
 
 Scoring precedence:
 
 ```text
-OC_SCORING_SIF_DIR -> OC_SCORING_URL -> local Docker SWE-bench evaluation
+AB_SCORING_IMAGE_DIR -> AB_SCORING_SERVICE_URL -> local Docker SWE-bench evaluation
 ```
 
 ## Common Pitfalls

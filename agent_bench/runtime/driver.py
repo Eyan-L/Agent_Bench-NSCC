@@ -316,10 +316,10 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
     return manifest
 
 
-def run_sweep(app_path: Path, harness_path: Path, model_path: Path, serving_path: Path,
-              swebench_root: Optional[Path], instance_data_path: Path,
+def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, serving_path: Path,
+              benchmark_data_root: Optional[Path], instance_data_path: Path,
               retry_errors: bool = True, max_workers: int = 1):
-    """Run full sweep, composed from app / harness / backend JSON configs.
+    """Run full sweep, composed from benchmark / harness / backend JSON configs.
 
     `max_workers > 1` runs containers concurrently. Each container has its
     own Gateway on its own port (range 18800-18899 stride 4 → ~25 parallel),
@@ -329,7 +329,7 @@ def run_sweep(app_path: Path, harness_path: Path, model_path: Path, serving_path
     """
 
     # Load sweep config by composing the four axes.
-    sweep_config = load_composed_config(app_path, harness_path, model_path, serving_path)
+    sweep_config = load_composed_config(benchmark_path, harness_path, model_path, serving_path)
 
     # Generate all run configs
     run_configs = sweep_config.generate_runs()
@@ -347,13 +347,13 @@ def run_sweep(app_path: Path, harness_path: Path, model_path: Path, serving_path
     with open(instance_data_path) as f:
         instances = {inst["instance_id"]: inst for inst in json.load(f)}
 
-    # Initialize harness. HARNESS_BACKEND selects the SWE-bench backend:
+    # Initialize harness. AB_DEPLOYMENT_CONTAINER_BACKEND selects the SWE-bench backend:
     #   docker      (default) — SWEBenchHarness;     openclaw container + task container
     #                            on a shared docker network. Host runs only vLLM.
     #   singularity            — SingularityHarness; openclaw .sif + task .sif (peer
     #                            instances). Same isolation model in singularity-land.
     # Terminal-Bench / DR-Bench instances are auto-routed to their respective
-    # harnesses regardless of HARNESS_BACKEND (per-instance dispatch in _one below).
+    # harnesses regardless of AB_DEPLOYMENT_CONTAINER_BACKEND (per-instance dispatch in _one below).
     _NON_SWE_BENCHMARKS = ("terminal_bench", "deepresearch_bench", "longbench")
     needs_swe = any(
         inst.get("benchmark", "swebench") not in _NON_SWE_BENCHMARKS
@@ -381,19 +381,19 @@ def run_sweep(app_path: Path, harness_path: Path, model_path: Path, serving_path
 
     harness = None
     if needs_swe:
-        if swebench_root is None:
+        if benchmark_data_root is None:
             raise RuntimeError(
-                "sweep contains SWE-bench instances but --swebench-root was "
+                "sweep contains SWE-bench instances but --benchmark-data-root was "
                 "not provided"
             )
-        backend = os.environ.get("HARNESS_BACKEND", "docker").lower()
+        backend = os.environ.get("AB_DEPLOYMENT_CONTAINER_BACKEND", "docker").lower()
         if backend == "docker":
             container = DockerContainer()
         elif backend == "singularity":
             container = SingularityContainer()
         else:
             raise ValueError(
-                f"Unknown HARNESS_BACKEND={backend!r}; expected docker|singularity. "
+                f"Unknown AB_DEPLOYMENT_CONTAINER_BACKEND={backend!r}; expected docker|singularity. "
                 "Host mode was removed — agent runtimes must always be containerized."
             )
 
@@ -404,7 +404,7 @@ def run_sweep(app_path: Path, harness_path: Path, model_path: Path, serving_path
                 "(openhands runtime + task container + exec-bridge).",
                 type(container).__name__,
             )
-            harness = SWEBenchOpenHandsHarness(swebench_root, container=container)
+            harness = SWEBenchOpenHandsHarness(benchmark_data_root, container=container)
         elif harness_choice == "hermes":
             from agent_bench.benchmarks.swebench.hermes.app import SWEBenchHermesHarness
             logger.info(
@@ -412,14 +412,14 @@ def run_sweep(app_path: Path, harness_path: Path, model_path: Path, serving_path
                 "(hermes runtime + task container + exec-bridge).",
                 type(container).__name__,
             )
-            harness = SWEBenchHermesHarness(swebench_root, container=container)
+            harness = SWEBenchHermesHarness(benchmark_data_root, container=container)
         elif harness_choice == "openclaw":
             logger.info(
                 "Using SWEBenchHarness with %s "
                 "(openclaw runtime + task container + exec-bridge).",
                 type(container).__name__,
             )
-            harness = SWEBenchHarness(swebench_root, container=container)
+            harness = SWEBenchHarness(benchmark_data_root, container=container)
         else:
             raise ValueError(
                 f"Unknown harness={harness_choice!r}; expected openclaw|openhands|hermes."
@@ -433,10 +433,10 @@ def run_sweep(app_path: Path, harness_path: Path, model_path: Path, serving_path
     dr_harness = None
     if needs_dr:
         from agent_bench.benchmarks.deepresearch_bench.app import DeepResearchHarness
-        dr_backend = os.environ.get("HARNESS_BACKEND", "docker").lower()
+        dr_backend = os.environ.get("AB_DEPLOYMENT_CONTAINER_BACKEND", "docker").lower()
         if dr_backend != "docker":
             raise ValueError(
-                f"deepresearch_bench only supports HARNESS_BACKEND=docker "
+                f"deepresearch_bench only supports AB_DEPLOYMENT_CONTAINER_BACKEND=docker "
                 f"(got {dr_backend!r}); singularity backend not implemented."
             )
         if harness is not None:
@@ -446,7 +446,7 @@ def run_sweep(app_path: Path, harness_path: Path, model_path: Path, serving_path
             )
         else:
             logger.info("Constructing DeepResearchHarness.")
-        dr_harness = DeepResearchHarness(swebench_root)
+        dr_harness = DeepResearchHarness(benchmark_data_root)
 
     # Lazy-build the LongBench harness only if any instance is LongBench.
     # Same two-container model as DR; per-subtask instance loops examples over
@@ -454,16 +454,16 @@ def run_sweep(app_path: Path, harness_path: Path, model_path: Path, serving_path
     lb_harness = None
     if needs_lb:
         from agent_bench.benchmarks.longbench.app import LongBenchHarness
-        lb_backend = os.environ.get("HARNESS_BACKEND", "docker").lower()
+        lb_backend = os.environ.get("AB_DEPLOYMENT_CONTAINER_BACKEND", "docker").lower()
         if lb_backend != "docker":
             raise ValueError(
-                f"longbench only supports HARNESS_BACKEND=docker (got {lb_backend!r})."
+                f"longbench only supports AB_DEPLOYMENT_CONTAINER_BACKEND=docker (got {lb_backend!r})."
             )
         logger.info("Constructing LongBenchHarness.")
-        lb_harness = LongBenchHarness(swebench_root)
+        lb_harness = LongBenchHarness(benchmark_data_root)
 
     # Lazy-build the TB harness only if any instance in this sweep is TB.
-    # Same HARNESS_BACKEND env var as SWE-bench:
+    # Same AB_DEPLOYMENT_CONTAINER_BACKEND env var as SWE-bench:
     #   docker      (default) — TerminalBenchDockerHarness
     #                            (OC container + task container + bridge)
     #   singularity            — TerminalBenchSingularityHarness (HPC fallback)
@@ -473,14 +473,14 @@ def run_sweep(app_path: Path, harness_path: Path, model_path: Path, serving_path
             TerminalBenchDockerHarness,
             TerminalBenchSingularityHarness,
         )
-        tb_backend = os.environ.get("HARNESS_BACKEND", "docker").lower()
+        tb_backend = os.environ.get("AB_DEPLOYMENT_CONTAINER_BACKEND", "docker").lower()
         if tb_backend == "docker":
             tb_cls = TerminalBenchDockerHarness
         elif tb_backend == "singularity":
             tb_cls = TerminalBenchSingularityHarness
         else:
             raise ValueError(
-                f"Unknown HARNESS_BACKEND={tb_backend!r} for terminal_bench; "
+                f"Unknown AB_DEPLOYMENT_CONTAINER_BACKEND={tb_backend!r} for terminal_bench; "
                 "expected docker|singularity."
             )
         if harness is not None:
@@ -491,7 +491,7 @@ def run_sweep(app_path: Path, harness_path: Path, model_path: Path, serving_path
             )
         else:
             logger.info("Constructing %s.", tb_cls.__name__)
-        tb_harness = tb_cls(swebench_root)
+        tb_harness = tb_cls(benchmark_data_root)
 
     completed = 0
     failed = 0
@@ -546,43 +546,43 @@ def run_sweep(app_path: Path, harness_path: Path, model_path: Path, serving_path
 
 def main():
     parser = argparse.ArgumentParser(description="Agent_Bench experiment driver (composed config)")
-    parser.add_argument("--app", type=Path, required=True,
-                       help="Application config (profiles/benchmarks/<app>/<exp>.json)")
-    parser.add_argument("--harness", type=Path, required=True,
+    parser.add_argument("--benchmark-config", type=Path, required=True,
+                       help="Benchmark config (profiles/benchmarks/<benchmark>/<sweep>.json)")
+    parser.add_argument("--harness-config", type=Path, required=True,
                        help="Harness config (profiles/harnesses/<name>.yaml)")
-    parser.add_argument("--model", type=Path, required=True,
+    parser.add_argument("--model-config", type=Path, required=True,
                        help="Model config (profiles/models/<name>.json)")
-    parser.add_argument("--serving", type=Path, required=True,
+    parser.add_argument("--serving-config", type=Path, required=True,
                        help="Serving config (profiles/serving/<engine>/<name>.yaml)")
-    # swebench-root is only required when the sweep contains SWE-bench
+    # benchmark-data-root is only required when the sweep contains SWE-bench
     # instances — pure terminal_bench sweeps don't use it.
-    parser.add_argument("--swebench-root", type=Path, required=False,
-                       help="Path to SWE-bench repository (required for SWE-bench instances)")
-    parser.add_argument("--instance-data", type=Path, required=True,
+    parser.add_argument("--benchmark-data-root", type=Path, required=False,
+                       help="Path to the active benchmark data root (required for SWE-bench instances)")
+    parser.add_argument("--benchmark-instance-data", type=Path, required=True,
                        help="Path to instance data JSON (SWE-bench or TB)")
     parser.add_argument("--no-retry-errors", action="store_true",
                        help="Do not retry ERROR runs")
     parser.add_argument("--max-workers", type=int,
-                       default=int(os.environ.get("EVAL_MAX_WORKERS", "1")),
-                       help="Concurrent containers (default 1; env EVAL_MAX_WORKERS)")
+                       default=int(os.environ.get("AB_RUN_MAX_WORKERS", "1")),
+                       help="Concurrent containers (default 1; env AB_RUN_MAX_WORKERS)")
 
     args = parser.parse_args()
 
     # Stash the composed-config paths in env so harness code can render
     # per-run runtime config without re-parsing CLI args.
-    os.environ["AB_APP_CONFIG"] = str(args.app.resolve())
-    os.environ["AB_HARNESS_CONFIG"] = str(args.harness.resolve())
-    os.environ["AB_MODEL_CONFIG"] = str(args.model.resolve())
-    os.environ["AB_SERVING_CONFIG"] = str(args.serving.resolve())
-    os.environ["AB_INSTANCE_DATA"] = str(args.instance_data.resolve())
+    os.environ["AB_BENCHMARK_CONFIG"] = str(args.benchmark_config.resolve())
+    os.environ["AB_HARNESS_CONFIG"] = str(args.harness_config.resolve())
+    os.environ["AB_MODEL_CONFIG"] = str(args.model_config.resolve())
+    os.environ["AB_SERVING_CONFIG"] = str(args.serving_config.resolve())
+    os.environ["AB_BENCHMARK_INSTANCE_DATA"] = str(args.benchmark_instance_data.resolve())
 
     run_sweep(
-        app_path=args.app,
-        harness_path=args.harness,
-        model_path=args.model,
-        serving_path=args.serving,
-        swebench_root=args.swebench_root,
-        instance_data_path=args.instance_data,
+        benchmark_path=args.benchmark_config,
+        harness_path=args.harness_config,
+        model_path=args.model_config,
+        serving_path=args.serving_config,
+        benchmark_data_root=args.benchmark_data_root,
+        instance_data_path=args.benchmark_instance_data,
         retry_errors=not args.no_retry_errors,
         max_workers=args.max_workers,
     )

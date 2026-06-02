@@ -4,7 +4,7 @@
  			unsubscribe = onDiagnosticEvent((evt) => {
  				try {
  					switch (evt.type) {
-+						/* OC_PATCH_TOOL_CALL_HANDLER_BEGIN */
++						/* AB_HARNESS_OPENCLAW_PATCH_TOOL_CALL_HANDLER_BEGIN */
 +						case "tool.call": {
 +							try {
 +								if (!tracesEnabled) return;
@@ -20,7 +20,7 @@
 +							} catch (__e) { ctx.logger.warn?.("diagnostics-otel: tool.call handler failed: " + (__e && __e.message || __e)); }
 +							return;
 +						}
-+						/* OC_PATCH_TOOL_CALL_HANDLER_END */
++						/* AB_HARNESS_OPENCLAW_PATCH_TOOL_CALL_HANDLER_END */
  						case "model.usage":
  							recordModelUsage(evt);
  							return;

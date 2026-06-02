@@ -4,7 +4,7 @@
   */
  export function validateToolArguments(tool, toolCall) {
      const args = structuredClone(toolCall.arguments);
-+    /* OC_PATCH_PIAI_VALIDATION_JSONSTRING_BEGIN */
++    /* AB_HARNESS_OPENCLAW_PATCH_PIAI_VALIDATION_JSONSTRING_BEGIN */
 +    // Some models (notably Qwen3-coder via vllm's qwen3_coder parser) emit
 +    // nested array/object tool-call arguments as JSON-encoded strings.
 +    // Pre-parse such string values BEFORE typebox/AJV validation runs, so
@@ -20,7 +20,7 @@
 +            }
 +        }
 +    }
-+    /* OC_PATCH_PIAI_VALIDATION_JSONSTRING_END */
++    /* AB_HARNESS_OPENCLAW_PATCH_PIAI_VALIDATION_JSONSTRING_END */
      Value.Convert(tool.parameters, args);
      const validator = getValidator(tool.parameters);
      if (!hasTypeBoxMetadata(tool.parameters) && isJsonSchemaObject(tool.parameters)) {

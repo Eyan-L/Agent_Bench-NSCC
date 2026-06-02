@@ -117,7 +117,7 @@ Goes under the application itself — `agent_bench/benchmarks/<name>/tasks/` (or
 the loader points). There's no required shape; it's just where the loader
 reads from. Examples:
 
-- SWE-bench: external `verified.json` (path via `--instance-data`) — single JSON of all instances. No tasks/ dir because the upstream dataset is one big JSON.
+- SWE-bench: external `verified.json` (path via `--benchmark-instance-data`) — single JSON of all instances. No tasks/ dir because the upstream dataset is one big JSON.
 - Terminal-Bench: `agent_bench/benchmarks/terminal_bench/tasks/<task>/{task.toml, environment/, tests/}` — one folder per task, vendored in-repo.
 
 Pick whichever matches the upstream benchmark's distribution format.

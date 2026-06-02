@@ -8,9 +8,9 @@
      return valid, None
 +
 +
-+# HM_PATCH_AGENT_BENCH_TELEMETRY_BEGIN
++# AB_HARNESS_HERMES_PATCH_TELEMETRY_BEGIN
 +def _hm_ab_events_path() -> str:
-+    return os.getenv("HERMES_AGENT_BENCH_EVENTS", "").strip()
++    return os.getenv("AB_AGENT_RUNTIME_EVENTS_FILE", "").strip()
 +
 +
 +def _hm_ab_write_event(event: dict) -> None:
@@ -191,7 +191,7 @@
 +        })
 +
 +    return emit_model_usage
-+# HM_PATCH_AGENT_BENCH_TELEMETRY_END
++# AB_HARNESS_HERMES_PATCH_TELEMETRY_END
 @@ -336,1 +524,7 @@
 -    return agent.chat(prompt) or ""
 +    hm_ab_emit_model_usage = _hm_ab_attach_agent_bench_telemetry(agent)

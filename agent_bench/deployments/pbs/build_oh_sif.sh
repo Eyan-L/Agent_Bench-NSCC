@@ -25,15 +25,15 @@ set -euo pipefail
 
 USER_NAME="${USER:-$(whoami)}"
 SCRATCH="${SCRATCH:-/scratch/users/ntu/$USER_NAME}"
-KIT_ROOT="${KIT_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+AB_REPO_ROOT="${AB_REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 
 OPENHANDS_VERSION_DEFAULT="1.21.0"
-VERSION_FILE="$KIT_ROOT/agent_bench/harnesses/openhands/VERSION"
+VERSION_FILE="$AB_REPO_ROOT/agent_bench/harnesses/openhands/VERSION"
 if [[ -f "$VERSION_FILE" ]]; then
     OPENHANDS_VERSION_DEFAULT="$(awk -F': *' '$1 == "upstream_version" { print $2; exit }' "$VERSION_FILE")"
 fi
 
-OPENHANDS_VERSION="${OH_RUNTIME_VERSION:-${OPENHANDS_VERSION_DEFAULT:-1.21.0}}"
+OPENHANDS_VERSION="${AB_AGENT_RUNTIME_VERSION:-${OPENHANDS_VERSION_DEFAULT:-1.21.0}}"
 BASE_SIF="$SCRATCH/sif_images/openhands_python3.12.sif"
 OUT_SIF="$SCRATCH/sif_images/openhands_runtime.sif"
 SANDBOX_DIR=""
@@ -46,7 +46,7 @@ while [[ $# -gt 0 ]]; do
         --out)          OUT_SIF="$2"; shift 2 ;;
         --version)      OPENHANDS_VERSION="$2"; shift 2 ;;
         --sandbox-dir)  SANDBOX_DIR="$2"; shift 2 ;;
-        --kit-root)     KIT_ROOT="$2"; shift 2 ;;
+        --repo-root)     AB_REPO_ROOT="$2"; shift 2 ;;
         --keep-sandbox) KEEP_SANDBOX=1; shift ;;
         -h|--help)      sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "unknown arg: $1" >&2; exit 1 ;;
@@ -57,7 +57,7 @@ if [[ "$BASE_SET" == "0" ]]; then
     BASE_SIF="$SCRATCH/sif_images/openhands_python3.12.sif"
 fi
 
-DRIVER="$KIT_ROOT/agent_bench/harnesses/openhands/driver.py"
+DRIVER="$AB_REPO_ROOT/agent_bench/harnesses/openhands/driver.py"
 [[ -f "$BASE_SIF" ]] || { echo "ERROR: --base sif not found: $BASE_SIF" >&2; exit 1; }
 [[ -f "$DRIVER" ]] || { echo "ERROR: OpenHands driver not found: $DRIVER" >&2; exit 1; }
 
@@ -73,7 +73,7 @@ echo "[build-oh-sif] base       = $BASE_SIF"
 echo "[build-oh-sif] out        = $OUT_SIF"
 echo "[build-oh-sif] version    = $OPENHANDS_VERSION"
 echo "[build-oh-sif] sandbox    = $SANDBOX_DIR"
-echo "[build-oh-sif] kit-root   = $KIT_ROOT"
+echo "[build-oh-sif] repo-root   = $AB_REPO_ROOT"
 echo "[build-oh-sif] started    = $(date -u +%FT%TZ)"
 
 rm -rf "$SANDBOX_DIR"

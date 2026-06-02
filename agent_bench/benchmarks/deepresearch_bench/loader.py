@@ -29,8 +29,8 @@ _VENDOR_QUERY = (
 
 
 def _query_path() -> Path:
-    """Vendored upstream query file. Override via OC_DR_QUERY_FILE for testing."""
-    env = os.environ.get("OC_DR_QUERY_FILE")
+    """Vendored upstream query file. Override via AB_BENCHMARK_QUERY_FILE for testing."""
+    env = os.environ.get("AB_BENCHMARK_QUERY_FILE")
     if env:
         return Path(env)
     return _VENDOR_QUERY
@@ -96,7 +96,7 @@ def load_task(task_id: str) -> Dict:
         "report_file": "/workspace/report.md",
         # Generous default; agent loops doing 10+ search rounds can take a
         # while on smaller hosted models. Override per-condition.
-        "agent_timeout_sec": int(os.environ.get("DR_AGENT_TIMEOUT_SEC", "3600")),
+        "agent_timeout_sec": int(os.environ.get("AB_BENCHMARK_AGENT_TIMEOUT_SEC", "3600")),
         # SWE-bench shaped echoes — keeps generic readers (fairness check,
         # manifest emitter) from NPE-ing.
         "repo": "deepresearch_bench",

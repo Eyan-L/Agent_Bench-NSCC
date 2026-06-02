@@ -24,13 +24,13 @@ def _model_entry(model_name: str, upstream_model: str, *, include_api_base: bool
 
 
 def render_config() -> str:
-    alias = os.environ.get("LITELLM_MODEL_ALIAS") or os.environ.get("MODEL")
+    alias = os.environ.get("LITELLM_MODEL_ALIAS") or os.environ.get("AB_MODEL_NAME")
     upstream = os.environ.get("LITELLM_UPSTREAM_MODEL") or os.environ.get("LITELLM_MODEL") or alias
     master_key = os.environ.get("LITELLM_MASTER_KEY") or os.environ.get("LITELLM_PROXY_API_KEY")
     if not alias:
-        raise ValueError("LITELLM_MODEL_ALIAS or MODEL must be set")
+        raise ValueError("LITELLM_MODEL_ALIAS or AB_MODEL_NAME must be set")
     if not upstream:
-        raise ValueError("LITELLM_UPSTREAM_MODEL, LITELLM_MODEL, or MODEL must be set")
+        raise ValueError("LITELLM_UPSTREAM_MODEL, LITELLM_MODEL, or AB_MODEL_NAME must be set")
     if not master_key:
         raise ValueError("LITELLM_MASTER_KEY or LITELLM_PROXY_API_KEY must be set")
 

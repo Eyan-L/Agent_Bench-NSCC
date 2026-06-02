@@ -1,0 +1,471 @@
+{
+  "_doc": "Terminal-Bench 2 verified full 89-task profile. Difficulty distribution is read from official task.toml metadata.",
+  "sweep_name": "terminal_bench_2_verified_full89",
+  "plan_version": "v1.0",
+  "application": "terminal_bench",
+  "source_dataset": "zai-org/terminal-bench-2-verified",
+  "source_dataset_task_count": 89,
+  "task_root_hint": "Set AB_BENCHMARK_TASKS_ROOT to a local snapshot of zai-org/terminal-bench-2-verified before running profiles that reference tasks not vendored in agent_bench/benchmarks/terminal_bench/tasks.",
+  "instances": [
+    "adaptive-rejection-sampler",
+    "bn-fit-modify",
+    "break-filter-js-from-html",
+    "build-cython-ext",
+    "build-pmars",
+    "build-pov-ray",
+    "caffe-cifar-10",
+    "cancel-async-tasks",
+    "chess-best-move",
+    "circuit-fibsqrt",
+    "cobol-modernization",
+    "code-from-image",
+    "compile-compcert",
+    "configure-git-webserver",
+    "constraints-scheduling",
+    "count-dataset-tokens",
+    "crack-7z-hash",
+    "custom-memory-heap-crash",
+    "db-wal-recovery",
+    "distribution-search",
+    "dna-assembly",
+    "dna-insert",
+    "extract-elf",
+    "extract-moves-from-video",
+    "feal-differential-cryptanalysis",
+    "feal-linear-cryptanalysis",
+    "filter-js-from-html",
+    "financial-document-processor",
+    "fix-code-vulnerability",
+    "fix-git",
+    "fix-ocaml-gc",
+    "gcode-to-text",
+    "git-leak-recovery",
+    "git-multibranch",
+    "gpt2-codegolf",
+    "headless-terminal",
+    "hf-model-inference",
+    "install-windows-3.11",
+    "kv-store-grpc",
+    "large-scale-text-editing",
+    "largest-eigenval",
+    "llm-inference-batching-scheduler",
+    "log-summary-date-ranges",
+    "mailman",
+    "make-doom-for-mips",
+    "make-mips-interpreter",
+    "mcmc-sampling-stan",
+    "merge-diff-arc-agi-task",
+    "model-extraction-relu-logits",
+    "modernize-scientific-stack",
+    "mteb-leaderboard",
+    "mteb-retrieve",
+    "multi-source-data-merger",
+    "nginx-request-logging",
+    "openssl-selfsigned-cert",
+    "overfull-hbox",
+    "password-recovery",
+    "path-tracing",
+    "path-tracing-reverse",
+    "polyglot-c-py",
+    "polyglot-rust-c",
+    "portfolio-optimization",
+    "protein-assembly",
+    "prove-plus-comm",
+    "pypi-server",
+    "pytorch-model-cli",
+    "pytorch-model-recovery",
+    "qemu-alpine-ssh",
+    "qemu-startup",
+    "query-optimize",
+    "raman-fitting",
+    "regex-chess",
+    "regex-log",
+    "reshard-c4-data",
+    "rstan-to-pystan",
+    "sam-cell-seg",
+    "sanitize-git-repo",
+    "schemelike-metacircular-eval",
+    "sparql-university",
+    "sqlite-db-truncate",
+    "sqlite-with-gcov",
+    "torch-pipeline-parallelism",
+    "torch-tensor-parallelism",
+    "train-fasttext",
+    "tune-mjcf",
+    "video-processing",
+    "vulnerable-secret",
+    "winning-avg-corewars",
+    "write-compressor"
+  ],
+  "repo_mapping": {
+    "adaptive-rejection-sampler": {
+      "repo_id": "terminal-bench/adaptive-rejection-sampler",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "bn-fit-modify": {
+      "repo_id": "terminal-bench/bn-fit-modify",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "break-filter-js-from-html": {
+      "repo_id": "terminal-bench/break-filter-js-from-html",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "build-cython-ext": {
+      "repo_id": "terminal-bench/build-cython-ext",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "build-pmars": {
+      "repo_id": "terminal-bench/build-pmars",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "build-pov-ray": {
+      "repo_id": "terminal-bench/build-pov-ray",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "caffe-cifar-10": {
+      "repo_id": "terminal-bench/caffe-cifar-10",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "cancel-async-tasks": {
+      "repo_id": "terminal-bench/cancel-async-tasks",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "chess-best-move": {
+      "repo_id": "terminal-bench/chess-best-move",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "circuit-fibsqrt": {
+      "repo_id": "terminal-bench/circuit-fibsqrt",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "cobol-modernization": {
+      "repo_id": "terminal-bench/cobol-modernization",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "code-from-image": {
+      "repo_id": "terminal-bench/code-from-image",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "compile-compcert": {
+      "repo_id": "terminal-bench/compile-compcert",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "configure-git-webserver": {
+      "repo_id": "terminal-bench/configure-git-webserver",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "constraints-scheduling": {
+      "repo_id": "terminal-bench/constraints-scheduling",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "count-dataset-tokens": {
+      "repo_id": "terminal-bench/count-dataset-tokens",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "crack-7z-hash": {
+      "repo_id": "terminal-bench/crack-7z-hash",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "custom-memory-heap-crash": {
+      "repo_id": "terminal-bench/custom-memory-heap-crash",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "db-wal-recovery": {
+      "repo_id": "terminal-bench/db-wal-recovery",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "distribution-search": {
+      "repo_id": "terminal-bench/distribution-search",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "dna-assembly": {
+      "repo_id": "terminal-bench/dna-assembly",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "dna-insert": {
+      "repo_id": "terminal-bench/dna-insert",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "extract-elf": {
+      "repo_id": "terminal-bench/extract-elf",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "extract-moves-from-video": {
+      "repo_id": "terminal-bench/extract-moves-from-video",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "feal-differential-cryptanalysis": {
+      "repo_id": "terminal-bench/feal-differential-cryptanalysis",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "feal-linear-cryptanalysis": {
+      "repo_id": "terminal-bench/feal-linear-cryptanalysis",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "filter-js-from-html": {
+      "repo_id": "terminal-bench/filter-js-from-html",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "financial-document-processor": {
+      "repo_id": "terminal-bench/financial-document-processor",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "fix-code-vulnerability": {
+      "repo_id": "terminal-bench/fix-code-vulnerability",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "fix-git": {
+      "repo_id": "terminal-bench/fix-git",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "fix-ocaml-gc": {
+      "repo_id": "terminal-bench/fix-ocaml-gc",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "gcode-to-text": {
+      "repo_id": "terminal-bench/gcode-to-text",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "git-leak-recovery": {
+      "repo_id": "terminal-bench/git-leak-recovery",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "git-multibranch": {
+      "repo_id": "terminal-bench/git-multibranch",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "gpt2-codegolf": {
+      "repo_id": "terminal-bench/gpt2-codegolf",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "headless-terminal": {
+      "repo_id": "terminal-bench/headless-terminal",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "hf-model-inference": {
+      "repo_id": "terminal-bench/hf-model-inference",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "install-windows-3.11": {
+      "repo_id": "terminal-bench/install-windows-3.11",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "kv-store-grpc": {
+      "repo_id": "terminal-bench/kv-store-grpc",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "large-scale-text-editing": {
+      "repo_id": "terminal-bench/large-scale-text-editing",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "largest-eigenval": {
+      "repo_id": "terminal-bench/largest-eigenval",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "llm-inference-batching-scheduler": {
+      "repo_id": "terminal-bench/llm-inference-batching-scheduler",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "log-summary-date-ranges": {
+      "repo_id": "terminal-bench/log-summary-date-ranges",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "mailman": {
+      "repo_id": "terminal-bench/mailman",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "make-doom-for-mips": {
+      "repo_id": "terminal-bench/make-doom-for-mips",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "make-mips-interpreter": {
+      "repo_id": "terminal-bench/make-mips-interpreter",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "mcmc-sampling-stan": {
+      "repo_id": "terminal-bench/mcmc-sampling-stan",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "merge-diff-arc-agi-task": {
+      "repo_id": "terminal-bench/merge-diff-arc-agi-task",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "model-extraction-relu-logits": {
+      "repo_id": "terminal-bench/model-extraction-relu-logits",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "modernize-scientific-stack": {
+      "repo_id": "terminal-bench/modernize-scientific-stack",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "mteb-leaderboard": {
+      "repo_id": "terminal-bench/mteb-leaderboard",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "mteb-retrieve": {
+      "repo_id": "terminal-bench/mteb-retrieve",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "multi-source-data-merger": {
+      "repo_id": "terminal-bench/multi-source-data-merger",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "nginx-request-logging": {
+      "repo_id": "terminal-bench/nginx-request-logging",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "openssl-selfsigned-cert": {
+      "repo_id": "terminal-bench/openssl-selfsigned-cert",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "overfull-hbox": {
+      "repo_id": "terminal-bench/overfull-hbox",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "password-recovery": {
+      "repo_id": "terminal-bench/password-recovery",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "path-tracing": {
+      "repo_id": "terminal-bench/path-tracing",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "path-tracing-reverse": {
+      "repo_id": "terminal-bench/path-tracing-reverse",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "polyglot-c-py": {
+      "repo_id": "terminal-bench/polyglot-c-py",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "polyglot-rust-c": {
+      "repo_id": "terminal-bench/polyglot-rust-c",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "portfolio-optimization": {
+      "repo_id": "terminal-bench/portfolio-optimization",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "protein-assembly": {
+      "repo_id": "terminal-bench/protein-assembly",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "prove-plus-comm": {
+      "repo_id": "terminal-bench/prove-plus-comm",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "pypi-server": {
+      "repo_id": "terminal-bench/pypi-server",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "pytorch-model-cli": {
+      "repo_id": "terminal-bench/pytorch-model-cli",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "pytorch-model-recovery": {
+      "repo_id": "terminal-bench/pytorch-model-recovery",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "qemu-alpine-ssh": {
+      "repo_id": "terminal-bench/qemu-alpine-ssh",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "qemu-startup": {
+      "repo_id": "terminal-bench/qemu-startup",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "query-optimize": {
+      "repo_id": "terminal-bench/query-optimize",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "raman-fitting": {
+      "repo_id": "terminal-bench/raman-fitting",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "regex-chess": {
+      "repo_id": "terminal-bench/regex-chess",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "regex-log": {
+      "repo_id": "terminal-bench/regex-log",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "reshard-c4-data": {
+      "repo_id": "terminal-bench/reshard-c4-data",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "rstan-to-pystan": {
+      "repo_id": "terminal-bench/rstan-to-pystan",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "sam-cell-seg": {
+      "repo_id": "terminal-bench/sam-cell-seg",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "sanitize-git-repo": {
+      "repo_id": "terminal-bench/sanitize-git-repo",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "schemelike-metacircular-eval": {
+      "repo_id": "terminal-bench/schemelike-metacircular-eval",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "sparql-university": {
+      "repo_id": "terminal-bench/sparql-university",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "sqlite-db-truncate": {
+      "repo_id": "terminal-bench/sqlite-db-truncate",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "sqlite-with-gcov": {
+      "repo_id": "terminal-bench/sqlite-with-gcov",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "torch-pipeline-parallelism": {
+      "repo_id": "terminal-bench/torch-pipeline-parallelism",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "torch-tensor-parallelism": {
+      "repo_id": "terminal-bench/torch-tensor-parallelism",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "train-fasttext": {
+      "repo_id": "terminal-bench/train-fasttext",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "tune-mjcf": {
+      "repo_id": "terminal-bench/tune-mjcf",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "video-processing": {
+      "repo_id": "terminal-bench/video-processing",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "vulnerable-secret": {
+      "repo_id": "terminal-bench/vulnerable-secret",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "winning-avg-corewars": {
+      "repo_id": "terminal-bench/winning-avg-corewars",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "write-compressor": {
+      "repo_id": "terminal-bench/write-compressor",
+      "base_commit": "terminal-bench-2-verified"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 900,
+  "output_dir": "tb_full89",
+  "seeds": [
+    42
+  ],
+  "parallel_limit_gpu": 1,
+  "parallel_limit_cpu_cores": 8,
+  "difficulty_distribution": {
+    "easy": 4,
+    "medium": 55,
+    "hard": 30
+  }
+}

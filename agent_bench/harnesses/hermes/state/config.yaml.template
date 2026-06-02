@@ -1,11 +1,11 @@
 model:
-  default: "$MODEL"
+  default: "$AB_MODEL_NAME"
   provider: "$PROVIDER"
   base_url: "$BASE_URL"
   api_key: "$API_KEY"
   api_mode: "chat_completions"
   temperature: $TEMPERATURE
-  max_tokens: $MAX_TOKENS
+  max_tokens: $AB_MODEL_MAX_OUTPUT_TOKENS
   context_length: $CONTEXT_LENGTH
 
 terminal:

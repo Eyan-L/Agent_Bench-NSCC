@@ -1,13 +1,13 @@
 # bench-platform top-level orchestration.
 #
 # Composed-config run model. A run is the cartesian product of four profiles:
-#   APP      profiles/benchmarks/<app>/<exp>.json   what to run (instances, repos, budgets)
-#   HARNESS  profiles/harnesses/<name>.yaml        how to drive the agent framework
-#   MODEL    profiles/models/<name>.json               which model + model-level limits
-#   SERVING  profiles/serving/<engine>/<name>.yaml serving endpoint / engine deployment
+#   AB_BENCHMARK_PROFILE profiles/benchmarks/<benchmark>/<sweep>.json   what to run
+#   AB_HARNESS_CONFIG    profiles/harnesses/<name>.yaml                 how to drive the agent runtime
+#   AB_MODEL_CONFIG      profiles/models/<name>.json                    model identity + limits
+#   AB_SERVING_CONFIG    profiles/serving/<engine>/<name>.yaml          serving endpoint / engine deployment
 # Override any of them on the command line, e.g.
-#   make run_phase0 SERVING=vllm/debug MODEL_PROFILE=qwen35_9b HARNESS=openclaw_swebench VLLM_TP=1
-# SERVING_BACKEND is derived from SERVING's first path segment by default.
+#   make run_phase0 AB_SERVING_CONFIG=vllm/debug AB_MODEL_CONFIG=qwen35_9b AB_HARNESS_CONFIG=openclaw_swebench AB_SERVING_TENSOR_PARALLEL_SIZE=1
+# AB_SERVING_BACKEND is derived from AB_SERVING_CONFIG's first path segment by default.
 # `make serve` currently has local launchers for vLLM and SGLang; PBS also
 # supports LiteLLM provider proxy profiles.
 
@@ -15,34 +15,34 @@ SHELL := /usr/bin/env bash
 PYTHON ?= python3
 
 # --- composed-config defaults --------------------------------------------
-APP     ?= swebench/phase0
-HARNESS ?= openclaw_swebench
-MODEL_PROFILE ?= qwen36_27b
-SERVING ?= vllm/default
-export APP HARNESS MODEL_PROFILE SERVING
+AB_BENCHMARK_PROFILE ?= swebench/phase0
+AB_HARNESS_CONFIG ?= openclaw_swebench
+AB_MODEL_CONFIG ?= qwen36_27b
+AB_SERVING_CONFIG ?= vllm/default
+export AB_BENCHMARK_PROFILE AB_HARNESS_CONFIG AB_MODEL_CONFIG AB_SERVING_CONFIG
 
-# SERVING_BACKEND := first path segment of SERVING (vllm/... -> vllm).
-SERVING_BACKEND ?= $(firstword $(subst /, ,$(SERVING)))
-export SERVING_BACKEND
+# AB_SERVING_BACKEND := first path segment of AB_SERVING_CONFIG (vllm/... -> vllm).
+AB_SERVING_BACKEND ?= $(firstword $(subst /, ,$(AB_SERVING_CONFIG)))
+export AB_SERVING_BACKEND
 
 # Eval inputs — set via env or CLI:
-#   make run_phase0 SWEBENCH_ROOT=/path/to/SWE-bench INSTANCE_DATA=/path/to/verified.json
-SWEBENCH_ROOT  ?=
-INSTANCE_DATA  ?=
-KIT_ROOT       ?= $(CURDIR)
-export KIT_ROOT
+#   make run_phase0 AB_BENCHMARK_DATA_ROOT=/path/to/SWE-bench AB_BENCHMARK_INSTANCE_DATA=/path/to/verified.json
+AB_BENCHMARK_DATA_ROOT  ?=
+AB_BENCHMARK_INSTANCE_DATA  ?=
+AB_REPO_ROOT       ?= $(CURDIR)
+export AB_REPO_ROOT
 
-APP_PROFILE_PATH = profiles/benchmarks/$(APP).json
-HARNESS_PROFILE_PATH = $(shell $(PYTHON) -c 'from agent_bench.core.profile_io import resolve_profile_ref; print(resolve_profile_ref("$(HARNESS)", "profiles/harnesses", [".yaml", ".yml", ".json"]))' 2>/dev/null || echo profiles/harnesses/$(HARNESS).yaml)
-MODEL_PROFILE_PATH = $(shell $(PYTHON) -c 'from agent_bench.core.profile_io import resolve_profile_ref; print(resolve_profile_ref("$(MODEL_PROFILE)", "profiles/models", [".json", ".yaml", ".yml"]))' 2>/dev/null || echo profiles/models/$(MODEL_PROFILE).json)
-SERVING_PROFILE_PATH = $(shell $(PYTHON) -c 'from agent_bench.core.profile_io import resolve_profile_ref; print(resolve_profile_ref("$(SERVING)", "profiles/serving", [".yaml", ".yml", ".json", ".toml"]))' 2>/dev/null || echo profiles/serving/$(SERVING).yaml)
+AB_BENCHMARK_PROFILE_PATH = profiles/benchmarks/$(AB_BENCHMARK_PROFILE).json
+AB_HARNESS_CONFIG_PATH = $(shell $(PYTHON) -c 'from agent_bench.core.profile_io import resolve_profile_ref; print(resolve_profile_ref("$(AB_HARNESS_CONFIG)", "profiles/harnesses", [".yaml", ".yml", ".json"]))' 2>/dev/null || echo profiles/harnesses/$(AB_HARNESS_CONFIG).yaml)
+AB_MODEL_CONFIG_PATH = $(shell $(PYTHON) -c 'from agent_bench.core.profile_io import resolve_profile_ref; print(resolve_profile_ref("$(AB_MODEL_CONFIG)", "profiles/models", [".json", ".yaml", ".yml"]))' 2>/dev/null || echo profiles/models/$(AB_MODEL_CONFIG).json)
+AB_SERVING_CONFIG_PATH = $(shell $(PYTHON) -c 'from agent_bench.core.profile_io import resolve_profile_ref; print(resolve_profile_ref("$(AB_SERVING_CONFIG)", "profiles/serving", [".yaml", ".yml", ".json", ".toml"]))' 2>/dev/null || echo profiles/serving/$(AB_SERVING_CONFIG).yaml)
 
 # Per-sweep timestamp (Singapore time) + experiment dir. Both Make and the
 # driver use AB_RUN_STAMP so engine logs and per-run dirs end up under one
 # experiment root. Override AB_RUN_STAMP to pin/resume an existing run.
 # Directory layout:
 #   data/experiments/<AB_RUN_STAMP>/logs/
-#   data/experiments/<AB_RUN_STAMP>/runs/<app-output-leaf>/
+#   data/experiments/<AB_RUN_STAMP>/runs/<benchmark-output-leaf>/
 # `?=` honors a value passed on the command line or env.
 # Lock AB_RUN_STAMP to a single timestamp for the whole make run. The old
 # `?=` form left the right-hand side deferred — every $(SERVE_LOG)
@@ -50,16 +50,16 @@ SERVING_PROFILE_PATH = $(shell $(PYTHON) -c 'from agent_bench.core.profile_io im
 # different per-second dirs and the redirect would fail silently.
 AB_RUN_STAMP := $(or $(AB_RUN_STAMP),$(shell TZ=Asia/Singapore date '+%Y-%m-%d_%H-%M-%S'))
 export AB_RUN_STAMP
-AB_EXPERIMENT_DIR ?= $(KIT_ROOT)/data/experiments/$(AB_RUN_STAMP)
+AB_EXPERIMENT_DIR ?= $(AB_REPO_ROOT)/data/experiments/$(AB_RUN_STAMP)
 export AB_EXPERIMENT_DIR
 
-# Deferred (=) so target-specific `APP := <x>` overrides flow through. Reads
-# output_dir from the active app JSON is now a run-set leaf (e.g. phase0).
+# Deferred (=) so target-specific `AB_BENCHMARK_PROFILE := <x>` overrides flow through. Reads
+# output_dir from the active benchmark JSON is now a run-set leaf (e.g. phase0).
 # Fall back to _unknown when the JSON is missing (e.g. `make help` with a
 # half-edited config).
-APP_OUTPUT_DIR = $(shell $(PYTHON) -c 'import json; print(json.load(open("$(APP_PROFILE_PATH)"))["output_dir"])' 2>/dev/null)
-APP_OUTPUT_LEAF = $(notdir $(APP_OUTPUT_DIR))
-SWEEP_DIR      = $(AB_EXPERIMENT_DIR)/runs/$(APP_OUTPUT_LEAF)
+AB_BENCHMARK_OUTPUT_DIR = $(shell $(PYTHON) -c 'import json; print(json.load(open("$(AB_BENCHMARK_PROFILE_PATH)"))["output_dir"])' 2>/dev/null)
+AB_BENCHMARK_OUTPUT_LEAF = $(notdir $(AB_BENCHMARK_OUTPUT_DIR))
+AB_SWEEP_DIR      = $(AB_EXPERIMENT_DIR)/runs/$(AB_BENCHMARK_OUTPUT_LEAF)
 EXPERIMENT_LOG_DIR = $(AB_EXPERIMENT_DIR)/logs
 
 # Serving auto-launch. _ensure_serve polls SERVE_URL; if it can't reach it,
@@ -67,9 +67,9 @@ EXPERIMENT_LOG_DIR = $(AB_EXPERIMENT_DIR)/logs
 # SERVE_LOG, and waits up to SERVE_READY_TIMEOUT seconds for /v1/models to
 # come up. Set SERVE_AUTO=0 to skip (useful when you launch the backend
 # yourself or want to fail fast on missing serving).
-SERVE_PORT           = $(shell $(PYTHON) -c 'from agent_bench.core.profile_io import load_profile; print((load_profile("$(SERVING_PROFILE_PATH)")["serving"].get("endpoint") or {}).get("port", 8000))' 2>/dev/null || echo 8000)
+SERVE_PORT           = $(shell $(PYTHON) -c 'from agent_bench.core.profile_io import load_profile; print((load_profile("$(AB_SERVING_CONFIG_PATH)")["serving"].get("endpoint") or {}).get("port", 8000))' 2>/dev/null || echo 8000)
 SERVE_URL            ?= http://localhost:$(SERVE_PORT)/v1/models
-SERVE_LOG            ?= $(EXPERIMENT_LOG_DIR)/$(SERVING_BACKEND).log
+SERVE_LOG            ?= $(EXPERIMENT_LOG_DIR)/$(AB_SERVING_BACKEND).log
 SERVE_READY_TIMEOUT  ?= 600
 SERVE_AUTO           ?= 1
 
@@ -77,11 +77,11 @@ SERVE_AUTO           ?= 1
 # the recipe's driver finishes (or on Ctrl-C). Skipped when SERVE_AUTO=0
 # (user manages backend lifecycle themselves). One sglang/vllm process per
 # experiment — never reused across runs.
-SERVE_CLEANUP_HOOK = if [ "$(SERVE_AUTO)" != "0" ]; then trap 'echo "[serve] stopping $(SERVING_BACKEND) after experiment"; PORT="$(SERVE_PORT)" bash agent_bench/serving/common/serve.sh stop 2>&1 | sed "s|^|[serve] |" || true' EXIT INT TERM; fi
+SERVE_CLEANUP_HOOK = if [ "$(SERVE_AUTO)" != "0" ]; then trap 'echo "[serve] stopping $(AB_SERVING_BACKEND) after experiment"; AB_SERVING_PORT="$(SERVE_PORT)" bash agent_bench/serving/common/serve.sh stop 2>&1 | sed "s|^|[serve] |" || true' EXIT INT TERM; fi
 
 _check_eval_inputs:
-	@if [ -z "$(SWEBENCH_ROOT)" ] || [ -z "$(INSTANCE_DATA)" ]; then \
-	    echo "ERROR: set SWEBENCH_ROOT and INSTANCE_DATA (env or make var)." >&2; \
+	@if [ -z "$(AB_BENCHMARK_DATA_ROOT)" ] || [ -z "$(AB_BENCHMARK_INSTANCE_DATA)" ]; then \
+	    echo "ERROR: set AB_BENCHMARK_DATA_ROOT and AB_BENCHMARK_INSTANCE_DATA (env or make var)." >&2; \
 	    exit 2; \
 	fi
 
@@ -90,20 +90,20 @@ _ensure_serve:
 	    echo "[serve] SERVE_AUTO=0 — skipping auto-launch"; \
 	else \
 	    auth_args=(); \
-	    if [ "$(SERVING_BACKEND)" = "litellm" ]; then \
-	        key="$${LITELLM_PROXY_API_KEY:-$${MODEL_API_KEY:-sk-agent-bench-local}}"; \
+	    if [ "$(AB_SERVING_BACKEND)" = "litellm" ]; then \
+	        key="$${LITELLM_PROXY_API_KEY:-$${AB_SERVING_API_KEY:-sk-agent-bench-local}}"; \
 	        auth_args=(-H "Authorization: Bearer $$key"); \
 	    fi; \
 	    if curl -s -f -m 2 "$${auth_args[@]}" "$(SERVE_URL)" >/dev/null 2>&1; then \
 	        echo "[serve] $(SERVE_URL) already up — stopping for fresh per-experiment launch"; \
-	        PORT="$(SERVE_PORT)" bash agent_bench/serving/common/serve.sh stop 2>&1 | sed 's/^/[serve] /'; \
+	        AB_SERVING_PORT="$(SERVE_PORT)" bash agent_bench/serving/common/serve.sh stop 2>&1 | sed 's/^/[serve] /'; \
 	        for i in $$(seq 1 20); do \
 	            sleep 1; \
 	            curl -s -f -m 1 "$${auth_args[@]}" "$(SERVE_URL)" >/dev/null 2>&1 || break; \
 	        done; \
 	    fi; \
 	    mkdir -p "$$(dirname "$(SERVE_LOG)")"; \
-	    echo "[serve] launching $(SERVING_BACKEND) → $(SERVE_LOG)"; \
+	    echo "[serve] launching $(AB_SERVING_BACKEND) → $(SERVE_LOG)"; \
 	    nohup bash agent_bench/serving/common/serve.sh >>"$(SERVE_LOG)" 2>&1 </dev/null & \
 	    pid=$$!; \
 	    echo "[serve] PID $$pid — polling $(SERVE_URL) (timeout $(SERVE_READY_TIMEOUT)s)"; \
@@ -136,13 +136,13 @@ _ensure_serve:
 
 help:
 	@echo "Targets:"
-	@echo "  serve       Launch backend (SERVING_BACKEND=$(SERVING_BACKEND))"
-	@echo "  eval        Run driver with current APP/HARNESS/MODEL_PROFILE/SERVING"
+	@echo "  serve       Launch backend (AB_SERVING_BACKEND=$(AB_SERVING_BACKEND))"
+	@echo "  eval        Run driver with current AB_BENCHMARK_PROFILE/AB_HARNESS_CONFIG/AB_MODEL_CONFIG/AB_SERVING_CONFIG"
 	@echo "  validate-configs  Static checks for profiles/benchmarks+harnesses+models+serving"
-	@echo "  run_phase0  SWE-bench phase0 sanity (APP=swebench/phase0)"
-	@echo "  run_phase1  SWE-bench phase1 mini-verified (APP=swebench/phase1)"
-	@echo "  run_phase2  SWE-bench phase2 serving sweep (APP=swebench/phase2_serving)"
-	@echo "  run_tb      Terminal-Bench kv-store-grpc (APP=terminal_bench/kv_store, HARNESS=tb_react_terminal_bench)"
+	@echo "  run_phase0  SWE-bench phase0 sanity (AB_BENCHMARK_PROFILE=swebench/phase0)"
+	@echo "  run_phase1  SWE-bench phase1 mini-verified (AB_BENCHMARK_PROFILE=swebench/phase1)"
+	@echo "  run_phase2  SWE-bench phase2 serving sweep (AB_BENCHMARK_PROFILE=swebench/phase2_serving)"
+	@echo "  run_tb      Terminal-Bench kv-store-grpc (AB_BENCHMARK_PROFILE=terminal_bench/kv_store, AB_HARNESS_CONFIG=tb_react_terminal_bench)"
 	@echo "  run_dr_smoke1[_agent|_eval]  DeepResearch-Bench 1 task (full / agent only / re-judge persisted; ~28/3/20 min)"
 	@echo "  run_dr_smoke[_agent|_eval]   DeepResearch-Bench 3 tasks (same split)"
 	@echo "  run_dr_full[_agent|_eval]    DeepResearch-Bench full 100 tasks (same split)"
@@ -160,17 +160,17 @@ help:
 	@echo "  run_tb_mig  One-command TB smoke against MIG-bound vLLM"
 	@echo ""
 	@echo "Composed config (override any at the command line):"
-	@echo "  APP=$(APP)"
-	@echo "  HARNESS=$(HARNESS)"
-	@echo "  MODEL_PROFILE=$(MODEL_PROFILE)"
-	@echo "  SERVING=$(SERVING)  -> SERVING_BACKEND=$(SERVING_BACKEND)"
-	@echo "  SWEBENCH_ROOT=$(SWEBENCH_ROOT)"
-	@echo "  INSTANCE_DATA=$(INSTANCE_DATA)"
+	@echo "  AB_BENCHMARK_PROFILE=$(AB_BENCHMARK_PROFILE)"
+	@echo "  AB_HARNESS_CONFIG=$(AB_HARNESS_CONFIG)"
+	@echo "  AB_MODEL_CONFIG=$(AB_MODEL_CONFIG)"
+	@echo "  AB_SERVING_CONFIG=$(AB_SERVING_CONFIG)  -> AB_SERVING_BACKEND=$(AB_SERVING_BACKEND)"
+	@echo "  AB_BENCHMARK_DATA_ROOT=$(AB_BENCHMARK_DATA_ROOT)"
+	@echo "  AB_BENCHMARK_INSTANCE_DATA=$(AB_BENCHMARK_INSTANCE_DATA)"
 	@echo ""
 	@echo "Experiment folder (Singapore time):"
 	@echo "  AB_RUN_STAMP=$(AB_RUN_STAMP)"
 	@echo "  AB_EXPERIMENT_DIR=$(AB_EXPERIMENT_DIR)"
-	@echo "  SWEEP_DIR=$(SWEEP_DIR)"
+	@echo "  AB_SWEEP_DIR=$(AB_SWEEP_DIR)"
 	@echo ""
 	@echo "Serving auto-launch (run_phase*):"
 	@echo "  SERVE_AUTO=1                 auto-start backend if down (0 to disable)"
@@ -188,61 +188,61 @@ serve:
 
 validate-configs:
 	$(PYTHON) scripts/validate_configs.py \
-	  --app $(APP_PROFILE_PATH) \
-	  --harness $(HARNESS_PROFILE_PATH) \
-	  --model $(MODEL_PROFILE_PATH) \
-	  --serving $(SERVING_PROFILE_PATH)
+	  --benchmark-config $(AB_BENCHMARK_PROFILE_PATH) \
+	  --harness-config $(AB_HARNESS_CONFIG_PATH) \
+	  --model-config $(AB_MODEL_CONFIG_PATH) \
+	  --serving-config $(AB_SERVING_CONFIG_PATH)
 
 eval: _check_eval_inputs _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
 	$(PYTHON) -m agent_bench.runtime.driver \
-	  --app     $(APP_PROFILE_PATH) \
-	  --harness $(HARNESS_PROFILE_PATH) \
-	  --model   $(MODEL_PROFILE_PATH) \
-	  --serving $(SERVING_PROFILE_PATH) \
-	  --swebench-root $(SWEBENCH_ROOT) \
-	  --instance-data $(INSTANCE_DATA) \
+	  --benchmark-config $(AB_BENCHMARK_PROFILE_PATH) \
+	  --harness-config $(AB_HARNESS_CONFIG_PATH) \
+	  --model-config $(AB_MODEL_CONFIG_PATH) \
+	  --serving-config $(AB_SERVING_CONFIG_PATH) \
+	  --benchmark-data-root $(AB_BENCHMARK_DATA_ROOT) \
+	  --benchmark-instance-data $(AB_BENCHMARK_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
 # Phase shortcuts. Phase 0 uses the public experiment entrypoint; older
 # research shortcuts remain below for parameterized sweeps.
 run_phase0: _check_eval_inputs
-	INSTANCE_DATA="$(INSTANCE_DATA)" SWEBENCH_ROOT="$(SWEBENCH_ROOT)" \
+	AB_BENCHMARK_INSTANCE_DATA="$(AB_BENCHMARK_INSTANCE_DATA)" AB_BENCHMARK_DATA_ROOT="$(AB_BENCHMARK_DATA_ROOT)" \
 	$(PYTHON) run.py --config experiments/swebench_phase0.toml $(EXTRA_ARGS)
 
-run_phase1: APP := swebench/phase1
+run_phase1: AB_BENCHMARK_PROFILE := swebench/phase1
 run_phase1: eval
 
-run_phase2: APP := swebench/phase2_serving
-run_phase2: HARNESS := openclaw_swebench
-run_phase2: MODEL_PROFILE := qwen36_35b_a3b_local
-run_phase2: SERVING := vllm/default
+run_phase2: AB_BENCHMARK_PROFILE := swebench/phase2_serving
+run_phase2: AB_HARNESS_CONFIG := openclaw_swebench
+run_phase2: AB_MODEL_CONFIG := qwen36_35b_a3b_local
+run_phase2: AB_SERVING_CONFIG := vllm/default
 run_phase2: eval
 
 # Terminal-Bench shortcut: defaults to the kv_store task and tb_react_terminal_bench harness.
 # TB doesn't use SWE-bench inputs, so it bypasses `_check_eval_inputs` and
 # materializes its own instance_data via the loader. Override:
-#   make run_tb HARNESS=openclaw_terminal_bench   # OC-driven TB (needs `openclaw` block)
-#   make run_tb HARNESS_BACKEND=singularity   # HPC fallback
-TB_INSTANCE_DATA ?= $(KIT_ROOT)/data/terminal_bench/tasks.json
+#   make run_tb AB_HARNESS_CONFIG=openclaw_terminal_bench   # OpenClaw-driven TB (needs `openclaw` block)
+#   make run_tb AB_DEPLOYMENT_CONTAINER_BACKEND=singularity   # HPC fallback
+AB_TERMINAL_BENCH_INSTANCE_DATA ?= $(AB_REPO_ROOT)/data/terminal_bench/tasks.json
 
 # Materialize the TB tasks.json from agent_bench/benchmarks/terminal_bench/tasks/.
 # Re-runs are idempotent — the loader overwrites the file each time.
 tb-tasks:
-	@mkdir -p "$$(dirname "$(TB_INSTANCE_DATA)")"
-	$(PYTHON) -m agent_bench.benchmarks.terminal_bench.loader "$(TB_INSTANCE_DATA)"
-	@echo "[tb] instance_data -> $(TB_INSTANCE_DATA)"
+	@mkdir -p "$$(dirname "$(AB_TERMINAL_BENCH_INSTANCE_DATA)")"
+	$(PYTHON) -m agent_bench.benchmarks.terminal_bench.loader "$(AB_TERMINAL_BENCH_INSTANCE_DATA)"
+	@echo "[tb] instance_data -> $(AB_TERMINAL_BENCH_INSTANCE_DATA)"
 
-run_tb: APP := terminal_bench/kv_store
-run_tb: HARNESS := tb_react_terminal_bench
+run_tb: AB_BENCHMARK_PROFILE := terminal_bench/kv_store
+run_tb: AB_HARNESS_CONFIG := tb_react_terminal_bench
 run_tb: tb-tasks _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
 	$(PYTHON) -m agent_bench.runtime.driver \
-	  --app     profiles/benchmarks/$(APP).json \
-	  --harness $(HARNESS_PROFILE_PATH) \
-	  --model   $(MODEL_PROFILE_PATH) \
-	  --serving $(SERVING_PROFILE_PATH) \
-	  --instance-data $(TB_INSTANCE_DATA) \
+	  --benchmark-config profiles/benchmarks/$(AB_BENCHMARK_PROFILE).json \
+	  --harness-config $(AB_HARNESS_CONFIG_PATH) \
+	  --model-config $(AB_MODEL_CONFIG_PATH) \
+	  --serving-config $(AB_SERVING_CONFIG_PATH) \
+	  --benchmark-instance-data $(AB_TERMINAL_BENCH_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
 # ----------------------------------------------------------------------
@@ -250,7 +250,7 @@ run_tb: tb-tasks _ensure_serve
 #
 # Three forms per sweep size (smoke1=1 instance, smoke=3, full=100):
 #   run_dr_<sweep>        agent run + judge in one shot   (~28 min for smoke1)
-#   run_dr_<sweep>_agent  agent run only (DR_SKIP_EVAL=1) (~3 min)
+#   run_dr_<sweep>_agent  agent run only (AB_BENCHMARK_SKIP_EVAL=1) (~3 min)
 #   run_dr_<sweep>_eval   re-judge persisted report.md    (~20 min)
 #
 # The _agent / _eval split exists because the judge (RACE + FACT, ~25 min)
@@ -264,135 +264,135 @@ run_tb: tb-tasks _ensure_serve
 #                      agent_bench/benchmarks/deepresearch_bench/eval/judge_runner.py)
 #   DEEPSEEK_API_KEY   RACE + FACT judge (DeepSeek-V4-Pro)
 #
-# Override HARNESS to swap the web_search provider, and MODEL_PROFILE to swap
+# Override AB_HARNESS_CONFIG to swap the web_search provider, and AB_MODEL_CONFIG to swap
 # the agent model. Default is Qwen3.6-35B-A3B local + Brave Search.
 # Use openclaw_deepresearch_bench_ddg for DuckDuckGo (key-free; rate-limited).
 # ----------------------------------------------------------------------
-DR_INSTANCE_DATA ?= $(KIT_ROOT)/data/deepresearch_bench/instances.json
-DR_LOAD_ENV      := set -a; [ -f $(KIT_ROOT)/.env ] && . $(KIT_ROOT)/.env; set +a;
-DR_HARNESS       ?= openclaw_deepresearch_bench_brave
-DR_MODEL_PROFILE ?= qwen36_35b_a3b_local_research
-DR_SERVING       ?= vllm/nscc
+AB_DEEPRESEARCH_INSTANCE_DATA ?= $(AB_REPO_ROOT)/data/deepresearch_bench/instances.json
+AB_DEEPRESEARCH_LOAD_ENV      := set -a; [ -f $(AB_REPO_ROOT)/.env ] && . $(AB_REPO_ROOT)/.env; set +a;
+AB_DEEPRESEARCH_HARNESS_CONFIG       ?= openclaw_deepresearch_bench_brave
+AB_DEEPRESEARCH_MODEL_CONFIG ?= qwen36_35b_a3b_local_research
+AB_DEEPRESEARCH_SERVING_CONFIG       ?= vllm/nscc
 
 # Materialize DR instances.json from eval/vendor/.../query.jsonl. Idempotent.
 dr-tasks:
-	@mkdir -p "$$(dirname "$(DR_INSTANCE_DATA)")"
-	python -m agent_bench.benchmarks.deepresearch_bench.loader "$(DR_INSTANCE_DATA)"
-	@echo "[dr] instance_data -> $(DR_INSTANCE_DATA)"
+	@mkdir -p "$$(dirname "$(AB_DEEPRESEARCH_INSTANCE_DATA)")"
+	python -m agent_bench.benchmarks.deepresearch_bench.loader "$(AB_DEEPRESEARCH_INSTANCE_DATA)"
+	@echo "[dr] instance_data -> $(AB_DEEPRESEARCH_INSTANCE_DATA)"
 
 # --- combined (agent + eval) -----------------------------------------
-run_dr_smoke1: APP := deepresearch_bench/smoke1
-run_dr_smoke1: HARNESS := $(DR_HARNESS)
-run_dr_smoke1: MODEL_PROFILE := $(DR_MODEL_PROFILE)
-run_dr_smoke1: SERVING := $(DR_SERVING)
+run_dr_smoke1: AB_BENCHMARK_PROFILE := deepresearch_bench/smoke1
+run_dr_smoke1: AB_HARNESS_CONFIG := $(AB_DEEPRESEARCH_HARNESS_CONFIG)
+run_dr_smoke1: AB_MODEL_CONFIG := $(AB_DEEPRESEARCH_MODEL_CONFIG)
+run_dr_smoke1: AB_SERVING_CONFIG := $(AB_DEEPRESEARCH_SERVING_CONFIG)
 run_dr_smoke1: dr-tasks _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
-	$(DR_LOAD_ENV) python -m agent_bench.runtime.driver \
-	  --app     profiles/benchmarks/$(APP).json \
-	  --harness $(HARNESS_PROFILE_PATH) \
-	  --model   $(MODEL_PROFILE_PATH) \
-	  --serving $(SERVING_PROFILE_PATH) \
-	  --instance-data $(DR_INSTANCE_DATA) \
+	$(AB_DEEPRESEARCH_LOAD_ENV) python -m agent_bench.runtime.driver \
+	  --benchmark-config profiles/benchmarks/$(AB_BENCHMARK_PROFILE).json \
+	  --harness-config $(AB_HARNESS_CONFIG_PATH) \
+	  --model-config $(AB_MODEL_CONFIG_PATH) \
+	  --serving-config $(AB_SERVING_CONFIG_PATH) \
+	  --benchmark-instance-data $(AB_DEEPRESEARCH_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
-run_dr_smoke: APP := deepresearch_bench/smoke3
-run_dr_smoke: HARNESS := $(DR_HARNESS)
-run_dr_smoke: MODEL_PROFILE := $(DR_MODEL_PROFILE)
-run_dr_smoke: SERVING := $(DR_SERVING)
+run_dr_smoke: AB_BENCHMARK_PROFILE := deepresearch_bench/smoke3
+run_dr_smoke: AB_HARNESS_CONFIG := $(AB_DEEPRESEARCH_HARNESS_CONFIG)
+run_dr_smoke: AB_MODEL_CONFIG := $(AB_DEEPRESEARCH_MODEL_CONFIG)
+run_dr_smoke: AB_SERVING_CONFIG := $(AB_DEEPRESEARCH_SERVING_CONFIG)
 run_dr_smoke: dr-tasks _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
-	$(DR_LOAD_ENV) python -m agent_bench.runtime.driver \
-	  --app     profiles/benchmarks/$(APP).json \
-	  --harness $(HARNESS_PROFILE_PATH) \
-	  --model   $(MODEL_PROFILE_PATH) \
-	  --serving $(SERVING_PROFILE_PATH) \
-	  --instance-data $(DR_INSTANCE_DATA) \
+	$(AB_DEEPRESEARCH_LOAD_ENV) python -m agent_bench.runtime.driver \
+	  --benchmark-config profiles/benchmarks/$(AB_BENCHMARK_PROFILE).json \
+	  --harness-config $(AB_HARNESS_CONFIG_PATH) \
+	  --model-config $(AB_MODEL_CONFIG_PATH) \
+	  --serving-config $(AB_SERVING_CONFIG_PATH) \
+	  --benchmark-instance-data $(AB_DEEPRESEARCH_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
-run_dr_full: APP := deepresearch_bench/full100
-run_dr_full: HARNESS := $(DR_HARNESS)
-run_dr_full: MODEL_PROFILE := $(DR_MODEL_PROFILE)
-run_dr_full: SERVING := $(DR_SERVING)
+run_dr_full: AB_BENCHMARK_PROFILE := deepresearch_bench/full100
+run_dr_full: AB_HARNESS_CONFIG := $(AB_DEEPRESEARCH_HARNESS_CONFIG)
+run_dr_full: AB_MODEL_CONFIG := $(AB_DEEPRESEARCH_MODEL_CONFIG)
+run_dr_full: AB_SERVING_CONFIG := $(AB_DEEPRESEARCH_SERVING_CONFIG)
 run_dr_full: dr-tasks _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
-	$(DR_LOAD_ENV) python -m agent_bench.runtime.driver \
-	  --app     profiles/benchmarks/$(APP).json \
-	  --harness $(HARNESS_PROFILE_PATH) \
-	  --model   $(MODEL_PROFILE_PATH) \
-	  --serving $(SERVING_PROFILE_PATH) \
-	  --instance-data $(DR_INSTANCE_DATA) \
+	$(AB_DEEPRESEARCH_LOAD_ENV) python -m agent_bench.runtime.driver \
+	  --benchmark-config profiles/benchmarks/$(AB_BENCHMARK_PROFILE).json \
+	  --harness-config $(AB_HARNESS_CONFIG_PATH) \
+	  --model-config $(AB_MODEL_CONFIG_PATH) \
+	  --serving-config $(AB_SERVING_CONFIG_PATH) \
+	  --benchmark-instance-data $(AB_DEEPRESEARCH_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
-# --- agent only (DR_SKIP_EVAL=1) -------------------------------------
-run_dr_smoke1_agent: APP := deepresearch_bench/smoke1
-run_dr_smoke1_agent: HARNESS := $(DR_HARNESS)
-run_dr_smoke1_agent: MODEL_PROFILE := $(DR_MODEL_PROFILE)
-run_dr_smoke1_agent: SERVING := $(DR_SERVING)
+# --- agent only (AB_BENCHMARK_SKIP_EVAL=1) -------------------------------------
+run_dr_smoke1_agent: AB_BENCHMARK_PROFILE := deepresearch_bench/smoke1
+run_dr_smoke1_agent: AB_HARNESS_CONFIG := $(AB_DEEPRESEARCH_HARNESS_CONFIG)
+run_dr_smoke1_agent: AB_MODEL_CONFIG := $(AB_DEEPRESEARCH_MODEL_CONFIG)
+run_dr_smoke1_agent: AB_SERVING_CONFIG := $(AB_DEEPRESEARCH_SERVING_CONFIG)
 run_dr_smoke1_agent: dr-tasks _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
-	$(DR_LOAD_ENV) DR_SKIP_EVAL=1 python -m agent_bench.runtime.driver \
-	  --app     profiles/benchmarks/$(APP).json \
-	  --harness $(HARNESS_PROFILE_PATH) \
-	  --model   $(MODEL_PROFILE_PATH) \
-	  --serving $(SERVING_PROFILE_PATH) \
-	  --instance-data $(DR_INSTANCE_DATA) \
+	$(AB_DEEPRESEARCH_LOAD_ENV) AB_BENCHMARK_SKIP_EVAL=1 python -m agent_bench.runtime.driver \
+	  --benchmark-config profiles/benchmarks/$(AB_BENCHMARK_PROFILE).json \
+	  --harness-config $(AB_HARNESS_CONFIG_PATH) \
+	  --model-config $(AB_MODEL_CONFIG_PATH) \
+	  --serving-config $(AB_SERVING_CONFIG_PATH) \
+	  --benchmark-instance-data $(AB_DEEPRESEARCH_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
-run_dr_smoke_agent: APP := deepresearch_bench/smoke3
-run_dr_smoke_agent: HARNESS := $(DR_HARNESS)
-run_dr_smoke_agent: MODEL_PROFILE := $(DR_MODEL_PROFILE)
-run_dr_smoke_agent: SERVING := $(DR_SERVING)
+run_dr_smoke_agent: AB_BENCHMARK_PROFILE := deepresearch_bench/smoke3
+run_dr_smoke_agent: AB_HARNESS_CONFIG := $(AB_DEEPRESEARCH_HARNESS_CONFIG)
+run_dr_smoke_agent: AB_MODEL_CONFIG := $(AB_DEEPRESEARCH_MODEL_CONFIG)
+run_dr_smoke_agent: AB_SERVING_CONFIG := $(AB_DEEPRESEARCH_SERVING_CONFIG)
 run_dr_smoke_agent: dr-tasks _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
-	$(DR_LOAD_ENV) DR_SKIP_EVAL=1 python -m agent_bench.runtime.driver \
-	  --app     profiles/benchmarks/$(APP).json \
-	  --harness $(HARNESS_PROFILE_PATH) \
-	  --model   $(MODEL_PROFILE_PATH) \
-	  --serving $(SERVING_PROFILE_PATH) \
-	  --instance-data $(DR_INSTANCE_DATA) \
+	$(AB_DEEPRESEARCH_LOAD_ENV) AB_BENCHMARK_SKIP_EVAL=1 python -m agent_bench.runtime.driver \
+	  --benchmark-config profiles/benchmarks/$(AB_BENCHMARK_PROFILE).json \
+	  --harness-config $(AB_HARNESS_CONFIG_PATH) \
+	  --model-config $(AB_MODEL_CONFIG_PATH) \
+	  --serving-config $(AB_SERVING_CONFIG_PATH) \
+	  --benchmark-instance-data $(AB_DEEPRESEARCH_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
-run_dr_full_agent: APP := deepresearch_bench/full100
-run_dr_full_agent: HARNESS := $(DR_HARNESS)
-run_dr_full_agent: MODEL_PROFILE := $(DR_MODEL_PROFILE)
-run_dr_full_agent: SERVING := $(DR_SERVING)
+run_dr_full_agent: AB_BENCHMARK_PROFILE := deepresearch_bench/full100
+run_dr_full_agent: AB_HARNESS_CONFIG := $(AB_DEEPRESEARCH_HARNESS_CONFIG)
+run_dr_full_agent: AB_MODEL_CONFIG := $(AB_DEEPRESEARCH_MODEL_CONFIG)
+run_dr_full_agent: AB_SERVING_CONFIG := $(AB_DEEPRESEARCH_SERVING_CONFIG)
 run_dr_full_agent: dr-tasks _ensure_serve
 	@$(SERVE_CLEANUP_HOOK); \
-	$(DR_LOAD_ENV) DR_SKIP_EVAL=1 python -m agent_bench.runtime.driver \
-	  --app     profiles/benchmarks/$(APP).json \
-	  --harness $(HARNESS_PROFILE_PATH) \
-	  --model   $(MODEL_PROFILE_PATH) \
-	  --serving $(SERVING_PROFILE_PATH) \
-	  --instance-data $(DR_INSTANCE_DATA) \
+	$(AB_DEEPRESEARCH_LOAD_ENV) AB_BENCHMARK_SKIP_EVAL=1 python -m agent_bench.runtime.driver \
+	  --benchmark-config profiles/benchmarks/$(AB_BENCHMARK_PROFILE).json \
+	  --harness-config $(AB_HARNESS_CONFIG_PATH) \
+	  --model-config $(AB_MODEL_CONFIG_PATH) \
+	  --serving-config $(AB_SERVING_CONFIG_PATH) \
+	  --benchmark-instance-data $(AB_DEEPRESEARCH_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
 # --- eval only (re-judges latest stamped sweep) ----------------------
 # Picks the most recent experiment under data/experiments that contains the
-# current app's runs/<app-output-leaf> directory.
+# current benchmark's runs/<benchmark-output-leaf> directory.
 # Add EXTRA_ARGS="--force" to re-grade a sweep that already has verdicts.
-DR_EVAL_ROOT ?= $(KIT_ROOT)/data/experiments
-run_dr_smoke1_eval: APP := deepresearch_bench/smoke1
+AB_DEEPRESEARCH_EVAL_ROOT ?= $(AB_REPO_ROOT)/data/experiments
+run_dr_smoke1_eval: AB_BENCHMARK_PROFILE := deepresearch_bench/smoke1
 run_dr_smoke1_eval: dr-tasks
-	$(DR_LOAD_ENV) python -m agent_bench.benchmarks.deepresearch_bench.eval.runner \
-	  --sweep         $(DR_EVAL_ROOT) \
-	  --app-leaf      $(APP_OUTPUT_LEAF) \
-	  --instance-data $(DR_INSTANCE_DATA) \
+	$(AB_DEEPRESEARCH_LOAD_ENV) python -m agent_bench.benchmarks.deepresearch_bench.eval.runner \
+	  --sweep         $(AB_DEEPRESEARCH_EVAL_ROOT) \
+	  --benchmark-leaf      $(AB_BENCHMARK_OUTPUT_LEAF) \
+	  --benchmark-instance-data $(AB_DEEPRESEARCH_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
-run_dr_smoke_eval: APP := deepresearch_bench/smoke3
+run_dr_smoke_eval: AB_BENCHMARK_PROFILE := deepresearch_bench/smoke3
 run_dr_smoke_eval: dr-tasks
-	$(DR_LOAD_ENV) python -m agent_bench.benchmarks.deepresearch_bench.eval.runner \
-	  --sweep         $(DR_EVAL_ROOT) \
-	  --app-leaf      $(APP_OUTPUT_LEAF) \
-	  --instance-data $(DR_INSTANCE_DATA) \
+	$(AB_DEEPRESEARCH_LOAD_ENV) python -m agent_bench.benchmarks.deepresearch_bench.eval.runner \
+	  --sweep         $(AB_DEEPRESEARCH_EVAL_ROOT) \
+	  --benchmark-leaf      $(AB_BENCHMARK_OUTPUT_LEAF) \
+	  --benchmark-instance-data $(AB_DEEPRESEARCH_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
-run_dr_full_eval: APP := deepresearch_bench/full100
+run_dr_full_eval: AB_BENCHMARK_PROFILE := deepresearch_bench/full100
 run_dr_full_eval: dr-tasks
-	$(DR_LOAD_ENV) python -m agent_bench.benchmarks.deepresearch_bench.eval.runner \
-	  --sweep         $(DR_EVAL_ROOT) \
-	  --app-leaf      $(APP_OUTPUT_LEAF) \
-	  --instance-data $(DR_INSTANCE_DATA) \
+	$(AB_DEEPRESEARCH_LOAD_ENV) python -m agent_bench.benchmarks.deepresearch_bench.eval.runner \
+	  --sweep         $(AB_DEEPRESEARCH_EVAL_ROOT) \
+	  --benchmark-leaf      $(AB_BENCHMARK_OUTPUT_LEAF) \
+	  --benchmark-instance-data $(AB_DEEPRESEARCH_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
 # Native OTel collector (no docker). Downloads otelcol-contrib on first run.
@@ -403,11 +403,11 @@ otel-down-host:
 	bash agent_bench/telemetry/otel/host_down.sh
 
 # Self-hosted SWE-bench scoring server (run on a docker host).
-# Clients set OC_SCORING_URL=http://<this-host>:8765 to use it.
+# Clients set AB_SCORING_SERVICE_URL=http://<this-host>:8765 to use it.
 SCORING_PORT ?= 8765
 scoring-server: _check_eval_inputs
 	$(PYTHON) -m agent_bench.benchmarks.swebench.scoring_server.main \
-	  --swebench-root $(SWEBENCH_ROOT) \
+	  --benchmark-data-root $(AB_BENCHMARK_DATA_ROOT) \
 	  --host 0.0.0.0 --port $(SCORING_PORT)
 
 stress:
@@ -430,7 +430,7 @@ clean:
 # driven); `make serve-docker` runs it as a docker container so it can bind
 # to a MIG slice via CDI. See agent_bench/serving/vllm/serve_docker.sh for the env
 # contract (VLLM_IMAGE / VLLM_MIG_UUID / VLLM_DETACH / ...).
-VLLM_CONTAINER_NAME ?= oc-vllm-serve
+VLLM_CONTAINER_NAME ?= agent-bench-vllm-serve
 
 serve-docker:
 	bash agent_bench/serving/vllm/serve_docker.sh $(VLLM_ARGS)
@@ -456,7 +456,7 @@ OPENHANDS_IMAGE       ?= agent-bench/openhands:1.21.0
 OPENHANDS_SDK_VERSION ?= 1.21.0
 
 openhands-image:
-	OH_IMAGE_TAG=$(OPENHANDS_IMAGE) \
+	AB_AGENT_RUNTIME_IMAGE=$(OPENHANDS_IMAGE) \
 	bash agent_bench/harnesses/openhands/docker/build.sh
 
 # ---- MIG management ------------------------------------------------------
@@ -507,15 +507,15 @@ _ensure_mig_serve: _check_mig_uuid
 	    echo "[mig-serve] ready"; \
 	fi
 
-run_tb_mig: APP := terminal_bench/kv_store
-run_tb_mig: HARNESS := tb_react_terminal_bench
+run_tb_mig: AB_BENCHMARK_PROFILE := terminal_bench/kv_store
+run_tb_mig: AB_HARNESS_CONFIG := tb_react_terminal_bench
 run_tb_mig: tb-tasks _ensure_mig_serve
 	$(PYTHON) -m agent_bench.runtime.driver \
-	  --app     profiles/benchmarks/$(APP).json \
-	  --harness $(HARNESS_PROFILE_PATH) \
-	  --model   $(MODEL_PROFILE_PATH) \
-	  --serving $(SERVING_PROFILE_PATH) \
-	  --instance-data $(TB_INSTANCE_DATA) \
+	  --benchmark-config profiles/benchmarks/$(AB_BENCHMARK_PROFILE).json \
+	  --harness-config $(AB_HARNESS_CONFIG_PATH) \
+	  --model-config $(AB_MODEL_CONFIG_PATH) \
+	  --serving-config $(AB_SERVING_CONFIG_PATH) \
+	  --benchmark-instance-data $(AB_TERMINAL_BENCH_INSTANCE_DATA) \
 	  $(EXTRA_ARGS)
 
 mig-prep-test:

@@ -7,7 +7,7 @@
 #   pull_images.sh --instance-ids id1 id2 ...      # explicit list
 #
 # Optional:
-#   --dir <path>        output dir (default: $OC_SIF_DIR or ~/.cache/swebench-sif)
+#   --dir <path>        output dir (default: $AB_SCORING_IMAGE_DIR or ~/.cache/swebench-sif)
 #   --parallel N        concurrent pulls (default: 1; bump cautiously, Docker
 #                       Hub rate-limits anonymous pulls at 100 req/6h)
 #   --tag latest        image tag (default: latest)
@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-DIR="${OC_SIF_DIR:-$HOME/.cache/swebench-sif}"
+DIR="${AB_SCORING_IMAGE_DIR:-$HOME/.cache/swebench-sif}"
 PARALLEL=1
 TAG="latest"
 FORCE=0

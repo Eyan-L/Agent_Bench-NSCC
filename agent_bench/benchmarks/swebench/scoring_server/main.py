@@ -17,7 +17,7 @@ predictable.)
 
 Run:
     python -m agent_bench.benchmarks.swebench.scoring_server.main \\
-        --swebench-root /path/to/SWE-bench \\
+        --benchmark-data-root /path/to/SWE-bench \\
         --host 0.0.0.0 --port 8765 \\
         [--dataset princeton-nlp/SWE-bench_Verified]
 """
@@ -87,7 +87,7 @@ class _Job:
 
 @dataclass
 class _Server:
-    swebench_root: Path
+    benchmark_data_root: Path
     default_dataset: str
     queue: "asyncio.Queue[_Job]" = field(default_factory=asyncio.Queue)
     submissions: Dict[str, _Job] = field(default_factory=dict)
@@ -97,13 +97,13 @@ class _Server:
 SERVER: Optional[_Server] = None
 
 
-def _run_evaluation(job: _Job, swebench_root: Path, dataset: str) -> None:
+def _run_evaluation(job: _Job, benchmark_data_root: Path, dataset: str) -> None:
     """Run swebench.harness.run_evaluation for one instance, parse report."""
     job.state.status = "running"
     job.state.started_at = time.time()
     req = job.request
 
-    with tempfile.TemporaryDirectory(prefix="oc_score_") as tmp:
+    with tempfile.TemporaryDirectory(prefix="ab_score_") as tmp:
         tmp = Path(tmp)
         pred_path = tmp / "predictions.json"
         pred_path.write_text(
@@ -129,7 +129,7 @@ def _run_evaluation(job: _Job, swebench_root: Path, dataset: str) -> None:
         logger.info("[%s] running: %s", req.instance_id, " ".join(cmd))
         try:
             proc = subprocess.run(
-                cmd, cwd=str(swebench_root),
+                cmd, cwd=str(benchmark_data_root),
                 capture_output=True, text=True,
                 timeout=req.timeout_seconds + 600,
             )
@@ -142,17 +142,17 @@ def _run_evaluation(job: _Job, swebench_root: Path, dataset: str) -> None:
         # Locate report even if run_evaluation exits non-zero. SWE-bench can
         # write a valid report and then fail during container teardown.
         candidates = [
-            swebench_root / "logs" / "run_evaluation" / run_id /
+            benchmark_data_root / "logs" / "run_evaluation" / run_id /
             req.model_name_or_path / req.instance_id / "report.json",
-            swebench_root / "evaluation_results" / run_id /
+            benchmark_data_root / "evaluation_results" / run_id /
             req.instance_id / "report.json",
         ]
         report_path = next((p for p in candidates if p.exists()), None)
         if report_path is None:
             # Fallback rglob.
             for root in (
-                swebench_root / "logs" / "run_evaluation" / run_id,
-                swebench_root / "evaluation_results" / run_id,
+                benchmark_data_root / "logs" / "run_evaluation" / run_id,
+                benchmark_data_root / "evaluation_results" / run_id,
             ):
                 if root.exists():
                     matches = list(root.rglob("report.json"))
@@ -208,7 +208,7 @@ async def _worker_loop():
         try:
             await loop.run_in_executor(
                 None, _run_evaluation, job,
-                SERVER.swebench_root, SERVER.default_dataset,
+                SERVER.benchmark_data_root, SERVER.default_dataset,
             )
         except Exception as e:
             logger.exception("worker error on %s", job.submission_id)
@@ -221,7 +221,7 @@ async def _worker_loop():
 
 # ------------------------------------------------------------------ FastAPI
 
-app = FastAPI(title="oc-scoring-server", version="0.1.0")
+app = FastAPI(title="agent-bench-scoring-server", version="0.1.0")
 
 
 @app.get("/healthz")
@@ -267,25 +267,25 @@ async def _startup():
 
 
 def main():
-    p = argparse.ArgumentParser(description="oc-scoring-server")
-    p.add_argument("--swebench-root", required=True, type=Path)
+    p = argparse.ArgumentParser(description="agent-bench-scoring-server")
+    p.add_argument("--benchmark-data-root", required=True, type=Path)
     p.add_argument("--dataset", default="princeton-nlp/SWE-bench_Verified",
                    help="default dataset_name when client omits it")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8765)
     args = p.parse_args()
 
-    if not args.swebench_root.exists():
-        raise SystemExit(f"swebench-root not found: {args.swebench_root}")
+    if not args.benchmark_data_root.exists():
+        raise SystemExit(f"benchmark-data-root not found: {args.benchmark_data_root}")
 
     global SERVER
     SERVER = _Server(
-        swebench_root=args.swebench_root.resolve(),
+        benchmark_data_root=args.benchmark_data_root.resolve(),
         default_dataset=args.dataset,
     )
     logger.info(
-        "scoring server starting on %s:%d (swebench_root=%s, default_dataset=%s)",
-        args.host, args.port, SERVER.swebench_root, SERVER.default_dataset,
+        "scoring server starting on %s:%d (benchmark_data_root=%s, default_dataset=%s)",
+        args.host, args.port, SERVER.benchmark_data_root, SERVER.default_dataset,
     )
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 

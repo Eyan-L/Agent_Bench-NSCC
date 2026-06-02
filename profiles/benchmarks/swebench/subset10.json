@@ -1,0 +1,85 @@
+{
+  "_doc": "SWE-bench Verified 10-task subset selected by deterministic difficulty-stratified sampling from full500.",
+  "sweep_name": "swebench_verified_subset10",
+  "plan_version": "v1.0",
+  "application": "swebench",
+  "dataset": "princeton-nlp/SWE-bench_Verified",
+  "split": "test",
+  "instances": [
+    "django__django-12325",
+    "django__django-13658",
+    "django__django-14559",
+    "django__django-14608",
+    "django__django-15037",
+    "django__django-15278",
+    "django__django-16116",
+    "scikit-learn__scikit-learn-13439",
+    "sympy__sympy-16450",
+    "sympy__sympy-20590"
+  ],
+  "repo_mapping": {
+    "django__django-12325": {
+      "repo_id": "django/django",
+      "base_commit": "29c126bb349526b5f1cd78facbe9f25906f18563"
+    },
+    "django__django-13658": {
+      "repo_id": "django/django",
+      "base_commit": "0773837e15bb632afffb6848a58c59a791008fa1"
+    },
+    "django__django-14559": {
+      "repo_id": "django/django",
+      "base_commit": "d79be3ed39b76d3e34431873eec16f6dd354ab17"
+    },
+    "django__django-14608": {
+      "repo_id": "django/django",
+      "base_commit": "7f33c1e22dbc34a7afae7967783725b10f1f13b1"
+    },
+    "django__django-15037": {
+      "repo_id": "django/django",
+      "base_commit": "dab48b7482295956973879d15bfd4d3bb0718772"
+    },
+    "django__django-15278": {
+      "repo_id": "django/django",
+      "base_commit": "0ab58c120939093fea90822f376e1866fc714d1f"
+    },
+    "django__django-16116": {
+      "repo_id": "django/django",
+      "base_commit": "5d36a8266c7d5d1994d7a7eeb4016f80d9cb0401"
+    },
+    "scikit-learn__scikit-learn-13439": {
+      "repo_id": "scikit-learn/scikit-learn",
+      "base_commit": "a62775e99f2a5ea3d51db7160fad783f6cd8a4c5"
+    },
+    "sympy__sympy-16450": {
+      "repo_id": "sympy/sympy",
+      "base_commit": "aefdd023dc4f73c441953ed51f5f05a076f0862f"
+    },
+    "sympy__sympy-20590": {
+      "repo_id": "sympy/sympy",
+      "base_commit": "cffd4e0f86fefd4802349a9f9b19ed70934ea354"
+    }
+  },
+  "container_image": "swebench/sweb.eval.x86_64.UNUSED:latest",
+  "wall_clock_budget_seconds": 1800,
+  "output_dir": "swebench_subset10",
+  "seeds": [
+    42
+  ],
+  "parallel_limit_gpu": 1,
+  "parallel_limit_cpu_cores": 8,
+  "difficulty_distribution": {
+    "1-4 hours": 42,
+    "15 min - 1 hour": 261,
+    "<15 min fix": 194,
+    ">4 hours": 3
+  },
+  "selection": {
+    "method": "difficulty-stratified deterministic largest-remainder allocation",
+    "seed": 42,
+    "difficulty_counts": {
+      "1-4 hours": 1,
+      "15 min - 1 hour": 5,
+      "<15 min fix": 4
+    }
+  }
+}

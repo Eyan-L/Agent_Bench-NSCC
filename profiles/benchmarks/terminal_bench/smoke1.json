@@ -1,0 +1,39 @@
+{
+  "_doc": "Terminal-Bench 2 verified smoke profile with 1 task selected by deterministic difficulty-stratified sampling from full89.",
+  "sweep_name": "terminal_bench_2_verified_smoke1",
+  "plan_version": "v1.0",
+  "application": "terminal_bench",
+  "source_dataset": "zai-org/terminal-bench-2-verified",
+  "source_dataset_task_count": 89,
+  "task_root_hint": "Set AB_BENCHMARK_TASKS_ROOT to a local snapshot of zai-org/terminal-bench-2-verified before running profiles that reference tasks not vendored in agent_bench/benchmarks/terminal_bench/tasks.",
+  "instances": [
+    "multi-source-data-merger"
+  ],
+  "repo_mapping": {
+    "multi-source-data-merger": {
+      "repo_id": "terminal-bench/multi-source-data-merger",
+      "base_commit": "terminal-bench-2-verified"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 900,
+  "output_dir": "tb_smoke1",
+  "seeds": [
+    42
+  ],
+  "parallel_limit_gpu": 1,
+  "parallel_limit_cpu_cores": 8,
+  "difficulty_distribution": {
+    "easy": 4,
+    "medium": 55,
+    "hard": 30
+  },
+  "selection": {
+    "method": "difficulty-stratified deterministic largest-remainder allocation",
+    "seed": 42,
+    "source_profile": "full89",
+    "difficulty_counts": {
+      "medium": 1
+    }
+  }
+}

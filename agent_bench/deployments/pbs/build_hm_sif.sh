@@ -18,15 +18,15 @@ set -euo pipefail
 
 USER_NAME="${USER:-$(whoami)}"
 SCRATCH="${SCRATCH:-/scratch/users/ntu/$USER_NAME}"
-KIT_ROOT="${KIT_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+AB_REPO_ROOT="${AB_REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 
 HERMES_VERSION_DEFAULT="v2026.5.16"
-VERSION_FILE="$KIT_ROOT/agent_bench/harnesses/hermes/patch/VERSION"
+VERSION_FILE="$AB_REPO_ROOT/agent_bench/harnesses/hermes/patch/VERSION"
 if [[ -f "$VERSION_FILE" ]]; then
     HERMES_VERSION_DEFAULT="$(awk -F': *' '$1 == "upstream_version" { print $2; exit }' "$VERSION_FILE")"
 fi
 
-HERMES_VERSION="${HM_RUNTIME_VERSION:-${HERMES_VERSION_DEFAULT:-v2026.5.16}}"
+HERMES_VERSION="${AB_AGENT_RUNTIME_VERSION:-${HERMES_VERSION_DEFAULT:-v2026.5.16}}"
 BASE_SIF="$SCRATCH/sif_images/hermes_${HERMES_VERSION}.sif"
 OUT_SIF="$SCRATCH/sif_images/hermes_runtime.sif"
 INSIDE_ROOT="/opt/hermes"
@@ -41,7 +41,7 @@ while [[ $# -gt 0 ]]; do
         --version)      HERMES_VERSION="$2"; shift 2 ;;
         --inside-root)  INSIDE_ROOT="$2"; shift 2 ;;
         --sandbox-dir)  SANDBOX_DIR="$2"; shift 2 ;;
-        --kit-root)     KIT_ROOT="$2"; shift 2 ;;
+        --repo-root)     AB_REPO_ROOT="$2"; shift 2 ;;
         --keep-sandbox) KEEP_SANDBOX=1; shift ;;
         -h|--help)      sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "unknown arg: $1" >&2; exit 1 ;;
@@ -53,8 +53,8 @@ if [[ "$BASE_SET" == "0" ]]; then
 fi
 
 [[ -f "$BASE_SIF" ]] || { echo "ERROR: --base sif not found: $BASE_SIF" >&2; exit 1; }
-[[ -f "$KIT_ROOT/agent_bench/harnesses/hermes/apply_patch.py" ]] || { echo "ERROR: Hermes apply_patch.py not under $KIT_ROOT" >&2; exit 1; }
-[[ -d "$KIT_ROOT/agent_bench/harnesses/hermes/patch" ]] || { echo "ERROR: Hermes patch dir not under $KIT_ROOT" >&2; exit 1; }
+[[ -f "$AB_REPO_ROOT/agent_bench/harnesses/hermes/apply_patch.py" ]] || { echo "ERROR: Hermes apply_patch.py not under $AB_REPO_ROOT" >&2; exit 1; }
+[[ -d "$AB_REPO_ROOT/agent_bench/harnesses/hermes/patch" ]] || { echo "ERROR: Hermes patch dir not under $AB_REPO_ROOT" >&2; exit 1; }
 
 if [[ -z "$SANDBOX_DIR" ]]; then
     SANDBOX_DIR="$(mktemp -d "$SCRATCH/.hm_sb_build_XXXXXX")"
@@ -69,7 +69,7 @@ echo "[build-hm-sif] out         = $OUT_SIF"
 echo "[build-hm-sif] version     = $HERMES_VERSION"
 echo "[build-hm-sif] inside-root = $INSIDE_ROOT"
 echo "[build-hm-sif] sandbox     = $SANDBOX_DIR"
-echo "[build-hm-sif] kit-root    = $KIT_ROOT"
+echo "[build-hm-sif] repo-root    = $AB_REPO_ROOT"
 echo "[build-hm-sif] started     = $(date -u +%FT%TZ)"
 
 rm -rf "$SANDBOX_DIR"
@@ -79,7 +79,7 @@ mkdir -p \
     "$SANDBOX_DIR/workspace" \
     "$SANDBOX_DIR/opt/data" \
     "$SANDBOX_DIR/.singularity.d/env"
-cp -r "$KIT_ROOT/agent_bench/harnesses/hermes" "$SANDBOX_DIR/hm-harness"
+cp -r "$AB_REPO_ROOT/agent_bench/harnesses/hermes" "$SANDBOX_DIR/hm-harness"
 
 cat > "$SANDBOX_DIR/.singularity.d/env/90-agent-bench-hermes.sh" <<EOF
 export HERMES_VERSION=${HERMES_VERSION}
@@ -123,7 +123,7 @@ mv "$OUT_NEW" "$OUT_SIF"
 echo "[build-hm-sif] finished    = $(date -u +%FT%TZ)"
 ls -lh "$OUT_SIF"
 echo "[build-hm-sif] applied patches (status from new sif):"
-singularity exec --bind "$KIT_ROOT/agent_bench/harnesses/hermes:/hm-harness:ro" "$OUT_SIF" \
+singularity exec --bind "$AB_REPO_ROOT/agent_bench/harnesses/hermes:/hm-harness:ro" "$OUT_SIF" \
     bash -c "HERMES_AGENT_ROOT='$INSIDE_ROOT' HERMES_PATCH_MODE=baked python3 /hm-harness/apply_patch.py status" \
     2>&1 | sed 's/^/    /'
 echo "[build-hm-sif] smoke:"

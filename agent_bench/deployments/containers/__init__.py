@@ -1,6 +1,6 @@
 """Container runtime abstraction shared by application and harness layers.
 
-Selected at driver time by HARNESS_BACKEND; injected into harness instances
+Selected at driver time by AB_DEPLOYMENT_CONTAINER_BACKEND; injected into harness instances
 so neither application logic nor harness logic carries `docker`/`singularity`
 literals.
 """

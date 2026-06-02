@@ -5,14 +5,14 @@
                  params = nextParams;
              }
 -            const { data: openaiStream, response } = await client.chat.completions
-+            /* OC_PATCH_RAW_RESPONSE_LOG_BEGIN */
++            /* AB_HARNESS_OPENCLAW_PATCH_RAW_RESPONSE_LOG_BEGIN */
 +            const __ocReqStartMs = Date.now();
-+            /* OC_PATCH_RAW_RESPONSE_LOG_END */
++            /* AB_HARNESS_OPENCLAW_PATCH_RAW_RESPONSE_LOG_END */
 +            const { data: __openaiStreamOriginal, response } = await client.chat.completions
                  .create(params, { signal: options?.signal })
                  .withResponse();
              await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
-+            /* OC_PATCH_RAW_RESPONSE_LOG_BEGIN_2 */
++            /* AB_HARNESS_OPENCLAW_PATCH_RAW_RESPONSE_LOG_BEGIN_2 */
 +            let openaiStream = __openaiStreamOriginal;
 +            const __ocRawLogPath = process.env.OPENCLAW_RAW_RESPONSE_LOG;
 +            if (__ocRawLogPath) {
@@ -118,7 +118,7 @@
 +                    }
 +                })();
 +            }
-+            /* OC_PATCH_RAW_RESPONSE_LOG_END_2 */
++            /* AB_HARNESS_OPENCLAW_PATCH_RAW_RESPONSE_LOG_END_2 */
              stream.push({ type: "start", partial: output });
              let currentBlock = null;
              const blocks = output.content;

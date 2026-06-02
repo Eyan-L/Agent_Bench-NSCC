@@ -4,7 +4,7 @@
  import fs from "node:fs";
  import path from "node:path";
  import { spawn } from "node:child_process";
-+/* OC_PATCH_FS_BRIDGE_HELPER_BEGIN */
++/* AB_HARNESS_OPENCLAW_PATCH_FS_BRIDGE_HELPER_BEGIN */
 +const __ocFsBridgeRun = (params) => {
 +	const bridgeBin = process.env.OPENCLAW_EXEC_BRIDGE;
 +	if (!bridgeBin) throw new Error("OPENCLAW_EXEC_BRIDGE not set");
@@ -29,7 +29,7 @@
 +		child.stdin.end();
 +	});
 +};
-+/* OC_PATCH_FS_BRIDGE_HELPER_END */
++/* AB_HARNESS_OPENCLAW_PATCH_FS_BRIDGE_HELPER_END */
  import os from "node:os";
  import fs$1 from "node:fs/promises";
  import crypto from "node:crypto";
@@ -37,7 +37,7 @@
  		return this.readPinnedFile(target);
  	}
  	async writeFile(params) {
-+		/* OC_PATCH_FS_BRIDGE_WRITE_BEGIN */
++		/* AB_HARNESS_OPENCLAW_PATCH_FS_BRIDGE_WRITE_BEGIN */
 +		if (process.env.OPENCLAW_EXEC_BRIDGE) {
 +			const __ocTarget = this.resolveResolvedPath(params);
 +			const __ocBuf = Buffer.isBuffer(params.data) ? params.data : Buffer.from(params.data, params.encoding ?? "utf8");
@@ -54,7 +54,7 @@
 +			}
 +			return;
 +		}
-+		/* OC_PATCH_FS_BRIDGE_WRITE_END */
++		/* AB_HARNESS_OPENCLAW_PATCH_FS_BRIDGE_WRITE_END */
  		const target = this.resolveResolvedPath(params);
  		this.ensureWriteAccess(target, "write files");
  		const writeCheck = {
@@ -62,11 +62,11 @@
  		};
  	}
  	async runCommand(script, options = {}) {
-+		/* OC_PATCH_FS_BRIDGE_RUN_BEGIN */
++		/* AB_HARNESS_OPENCLAW_PATCH_FS_BRIDGE_RUN_BEGIN */
 +		if (process.env.OPENCLAW_EXEC_BRIDGE) {
 +			return await __ocFsBridgeRun({ sandbox: this.sandbox, script, options });
 +		}
-+		/* OC_PATCH_FS_BRIDGE_RUN_END */
++		/* AB_HARNESS_OPENCLAW_PATCH_FS_BRIDGE_RUN_END */
  		const backend = this.sandbox.backend;
  		if (backend) return await backend.runShellCommand({
  			script,
@@ -74,7 +74,7 @@
  		});
  	}
  	async readPinnedFile(target) {
-+		/* OC_PATCH_FS_BRIDGE_READ_BEGIN */
++		/* AB_HARNESS_OPENCLAW_PATCH_FS_BRIDGE_READ_BEGIN */
 +		if (process.env.OPENCLAW_EXEC_BRIDGE) {
 +			const __ocRes = await __ocFsBridgeRun({
 +				sandbox: this.sandbox,
@@ -86,7 +86,7 @@
 +			}
 +			return __ocRes.stdout;
 +		}
-+		/* OC_PATCH_FS_BRIDGE_READ_END */
++		/* AB_HARNESS_OPENCLAW_PATCH_FS_BRIDGE_READ_END */
  		const opened = await this.pathGuard.openReadableFile(target);
  		try {
  			return fs.readFileSync(opened.fd);
@@ -94,12 +94,12 @@
  		}
  	}
  	async runCheckedCommand(plan) {
-+		/* OC_PATCH_FS_BRIDGE_SKIP_CHECK_BEGIN */
++		/* AB_HARNESS_OPENCLAW_PATCH_FS_BRIDGE_SKIP_CHECK_BEGIN */
 +		if (!process.env.OPENCLAW_EXEC_BRIDGE) {
  		await this.pathGuard.assertPathChecks(plan.checks);
  		if (plan.recheckBeforeCommand) await this.pathGuard.assertPathChecks(plan.checks);
 +		}
-+		/* OC_PATCH_FS_BRIDGE_SKIP_CHECK_END */
++		/* AB_HARNESS_OPENCLAW_PATCH_FS_BRIDGE_SKIP_CHECK_END */
  		return await this.runCommand(plan.script, {
  			args: plan.args,
  			stdin: plan.stdin,

@@ -24,7 +24,7 @@ index 7d6d4d8..9c8f9d1 100644
              volumes = []
 
 -        # Fail fast if Docker is not available.
-+        # HM_PATCH_EXEC_BRIDGE_BEGIN
++        # AB_HARNESS_HERMES_PATCH_EXEC_BRIDGE_BEGIN
 +        # Agent_Bench pre-starts the SWE-bench task container and exports
 +        # HERMES_EXEC_BRIDGE*. Keep Hermes on its normal docker backend, but
 +        # skip local Docker container creation; _run_bash below routes every
@@ -48,7 +48,7 @@ index 7d6d4d8..9c8f9d1 100644
 +            )
 +            self.init_session()
 +            return
-+        # HM_PATCH_EXEC_BRIDGE_END
++        # AB_HARNESS_HERMES_PATCH_EXEC_BRIDGE_END
 +
 +        # Fail fast if Docker is not available.
          _ensure_docker_available()
@@ -81,7 +81,7 @@ index 7d6d4d8..9c8f9d1 100644
          if stdin_data is not None:
              cmd.append("-i")
 +
-+        # HM_PATCH_EXEC_BRIDGE_RUN_BEGIN
++        # AB_HARNESS_HERMES_PATCH_EXEC_BRIDGE_RUN_BEGIN
 +        if self._bridge:
 +            env = dict(os.environ)
 +            # The shared Agent_Bench bridge client currently reads the
@@ -106,7 +106,7 @@ index 7d6d4d8..9c8f9d1 100644
 +                "--timeout-ms", str(int(timeout * 1000)),
 +            ]
 +            return _popen_bash(bridge_cmd, stdin_data, env=env)
-+        # HM_PATCH_EXEC_BRIDGE_RUN_END
++        # AB_HARNESS_HERMES_PATCH_EXEC_BRIDGE_RUN_END
 
          # Only inject -e env args during init_session (login=True).
          # Subsequent commands get env vars from the snapshot.
@@ -114,11 +114,11 @@ index 7d6d4d8..9c8f9d1 100644
 
      def cleanup(self):
          """Stop and remove the container. Bind-mount dirs persist if persistent=True."""
-+        # HM_PATCH_EXEC_BRIDGE_CLEANUP_BEGIN
++        # AB_HARNESS_HERMES_PATCH_EXEC_BRIDGE_CLEANUP_BEGIN
 +        if getattr(self, "_bridge", ""):
 +            self._container_id = None
 +            return
-+        # HM_PATCH_EXEC_BRIDGE_CLEANUP_END
++        # AB_HARNESS_HERMES_PATCH_EXEC_BRIDGE_CLEANUP_END
          if self._container_id:
              try:
                  # Stop in background so cleanup doesn't block
@@ -130,7 +130,7 @@ index 31a1c6f..1902fd5 100644
 
          elif env_type == "docker":
              from tools.environments.docker import find_docker
-+            # HM_PATCH_EXEC_BRIDGE_REQUIREMENTS_BEGIN
++            # AB_HARNESS_HERMES_PATCH_EXEC_BRIDGE_REQUIREMENTS_BEGIN
 +            if os.getenv("HERMES_EXEC_BRIDGE"):
 +                ok = bool(
 +                    os.getenv("HERMES_EXEC_BRIDGE_SOCKET")
@@ -139,7 +139,7 @@ index 31a1c6f..1902fd5 100644
 +                if not ok:
 +                    logger.error("HERMES_EXEC_BRIDGE requires socket and token env vars")
 +                return ok
-+            # HM_PATCH_EXEC_BRIDGE_REQUIREMENTS_END
++            # AB_HARNESS_HERMES_PATCH_EXEC_BRIDGE_REQUIREMENTS_END
              docker = find_docker()
              if not docker:
                  logger.error("Docker executable not found in PATH or common install locations")

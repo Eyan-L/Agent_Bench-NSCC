@@ -69,7 +69,7 @@ from agent_bench.core.profile_io import load_profile
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_OH_DOCKER_IMAGE = "agent-bench/openhands:1.21.0"
+DEFAULT_OPENHANDS_RUNTIME_IMAGE = "agent-bench/openhands:1.21.0"
 
 # Canonical in-container paths (must match agent_bench/harnesses/openhands/dispatcher.py
 # and agent_bench/harnesses/openhands/docker/Dockerfile).
@@ -88,17 +88,17 @@ class SWEBenchOpenHandsHarness:
 
     backend_id = "container-agnostic"
 
-    _OH_SCAFFOLD_FILES = ".openhands_instructions .openhands.json"
-    _OH_SCAFFOLD_DIRS = ".openhands"
+    _OPENHANDS_SCAFFOLD_FILES = ".openhands_instructions .openhands.json"
+    _OPENHANDS_SCAFFOLD_DIRS = ".openhands"
 
     def __init__(
         self,
-        swebench_root: Path,
+        benchmark_data_root: Path,
         oh_image: Optional[str] = None,
         workspace_base: Optional[Path] = None,
         container: Optional[Container] = None,
     ):
-        self.swebench_root = Path(swebench_root)
+        self.benchmark_data_root = Path(benchmark_data_root)
         self.container = container or DockerContainer()
         self.oh_image = oh_image or self._default_oh_image()
 
@@ -116,7 +116,7 @@ class SWEBenchOpenHandsHarness:
         self.workspace_base = Path(
             workspace_base
             or os.environ.get(
-                "OC_HOST_WORKSPACE_BASE",
+                "AB_HARNESS_WORKSPACE_BASE",
                 os.path.expanduser("~/.cache/oc-eval/workspaces"),
             )
         )
@@ -129,12 +129,11 @@ class SWEBenchOpenHandsHarness:
         if self.container.backend_id == "singularity":
             scratch = os.environ.get("SCRATCH") or os.path.expanduser("~")
             return (
-                os.environ.get("OH_RUNTIME_SIF")
-                or os.environ.get("OH_SIF")
-                or os.environ.get("OH_IMAGE")
+                os.environ.get("AB_AGENT_RUNTIME_SIF")
+                or os.environ.get("AB_AGENT_RUNTIME_IMAGE")
                 or str(Path(scratch) / "sif_images" / "openhands_runtime.sif")
             )
-        return os.environ.get("OH_IMAGE", DEFAULT_OH_DOCKER_IMAGE)
+        return os.environ.get("AB_AGENT_RUNTIME_IMAGE", DEFAULT_OPENHANDS_RUNTIME_IMAGE)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -295,10 +294,10 @@ class SWEBenchOpenHandsHarness:
     def _resolve_task_image(self, container_image: str) -> str:
         if self.container.backend_id == "docker":
             return container_image
-        sif_dir = os.environ.get("OC_SCORING_SIF_DIR")
+        sif_dir = os.environ.get("AB_SCORING_IMAGE_DIR")
         if not sif_dir:
             raise RuntimeError(
-                "OC_SCORING_SIF_DIR not set; the singularity backend needs "
+                "AB_SCORING_IMAGE_DIR not set; the singularity backend needs "
                 "the per-instance .sif directory."
             )
         tag = container_image.split(":")[0]
@@ -331,11 +330,11 @@ class SWEBenchOpenHandsHarness:
             _force_rmtree(state_dir)
         state_dir.mkdir(parents=True)
 
-        kit_root = os.environ.get("KIT_ROOT", os.getcwd())
+        repo_root = os.environ.get("AB_REPO_ROOT", os.getcwd())
         # Driver sets AB_HARNESS_CONFIG to the resolved harness config path.
         harness_path = os.environ.get(
             "AB_HARNESS_CONFIG",
-            os.path.join(kit_root, "profiles/harnesses/openhands_swebench.yaml"),
+            os.path.join(repo_root, "profiles/harnesses/openhands_swebench.yaml"),
         )
         if not os.path.isfile(harness_path):
             raise FileNotFoundError(
@@ -345,10 +344,10 @@ class SWEBenchOpenHandsHarness:
         harness_cfg = load_profile(harness_path)
 
         oh_cfg = harness_cfg.get("openhands") or {}
-        model_cfg, _serving_cfg = load_active_model_and_serving(kit_root=kit_root)
+        model_cfg, _serving_cfg = load_active_model_and_serving(repo_root=repo_root)
 
         template_path = (
-            Path(kit_root) / "harnesses" / "openhands" / "state" / "config.toml.template"
+            Path(repo_root) / "harnesses" / "openhands" / "state" / "config.toml.template"
         )
         if not template_path.is_file():
             raise FileNotFoundError(
@@ -371,11 +370,11 @@ class SWEBenchOpenHandsHarness:
             else f"openai/{_model_raw}"
         )
         values = {
-            "MODEL": _model_resolved,
+            "AB_MODEL_NAME": _model_resolved,
             "BASE_URL": self._runtime_base_url(model_cfg.endpoint),
             "API_KEY": model_cfg.api_key or "EMPTY",
             "TEMPERATURE": str(model_cfg.temperature),
-            "MAX_TOKENS": str(model_cfg.max_tokens),
+            "AB_MODEL_MAX_OUTPUT_TOKENS": str(model_cfg.max_tokens),
             "CONTEXT_WINDOW": str(model_cfg.context_window),
             "MAX_ITERATIONS": str(
                 (oh_cfg.get("run") or {}).get("max_iterations") or 100
@@ -433,13 +432,13 @@ class SWEBenchOpenHandsHarness:
         ws_host = self._workspace_by_container.get(container_id)
         if self.container.backend_id == "singularity" and ws_host:
             try:
-                for name in self._OH_SCAFFOLD_FILES.split():
+                for name in self._OPENHANDS_SCAFFOLD_FILES.split():
                     path = ws_host / name
                     if path.is_dir():
                         _force_rmtree(path, ignore_errors=True)
                     elif path.exists():
                         path.unlink()
-                for name in self._OH_SCAFFOLD_DIRS.split():
+                for name in self._OPENHANDS_SCAFFOLD_DIRS.split():
                     _force_rmtree(ws_host / name, ignore_errors=True)
                 r = subprocess.run(
                     ["git", "-C", str(ws_host), "diff", "HEAD"],
@@ -461,8 +460,8 @@ class SWEBenchOpenHandsHarness:
         self._exec(
             container_id,
             ["bash", "-c",
-             f"cd {ws} && rm -f {self._OH_SCAFFOLD_FILES} && "
-             f"rm -rf {self._OH_SCAFFOLD_DIRS}"],
+             f"cd {ws} && rm -f {self._OPENHANDS_SCAFFOLD_FILES} && "
+             f"rm -rf {self._OPENHANDS_SCAFFOLD_DIRS}"],
             check=False,
         )
         # Git refuses to operate on a repo whose dir is owned by another uid
@@ -529,7 +528,7 @@ class SWEBenchOpenHandsHarness:
             model_name_or_path="oh-eval",
             timeout_seconds=timeout_seconds,
             run_id=run_id,
-            swebench_root=self.swebench_root,
+            benchmark_data_root=self.benchmark_data_root,
             instance_data=instance_data,
         )
         if singularity_verdict is not None:
@@ -565,7 +564,7 @@ class SWEBenchOpenHandsHarness:
             ]
             try:
                 proc = subprocess.run(
-                    cmd, cwd=str(self.swebench_root),
+                    cmd, cwd=str(self.benchmark_data_root),
                     capture_output=True, text=True,
                     timeout=timeout_seconds + 300,
                 )
@@ -595,7 +594,7 @@ class SWEBenchOpenHandsHarness:
 
     def _find_and_parse_verdict(self, run_id: str, instance_id: str) -> Dict:
         primary = (
-            self.swebench_root
+            self.benchmark_data_root
             / "logs" / "run_evaluation" / run_id / "oh-eval" / instance_id
             / "report.json"
         )
@@ -692,7 +691,7 @@ class SWEBenchOpenHandsHarness:
             except Exception:
                 pass
 
-        keep = os.environ.get("OC_HOST_KEEP_WORKSPACE", "0") == "1"
+        keep = os.environ.get("AB_HARNESS_KEEP_WORKSPACE", "0") == "1"
         if not keep and workspace_host_path and os.path.isdir(workspace_host_path):
             _force_rmtree(Path(workspace_host_path), ignore_errors=True)
         if not keep and state_dir and os.path.isdir(state_dir):

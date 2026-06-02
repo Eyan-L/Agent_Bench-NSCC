@@ -17,7 +17,7 @@
         "tools/environments/docker.py",
         "tools/terminal_tool.py"
       ],
-      "idempotent_marker": "HM_PATCH_EXEC_BRIDGE_BEGIN",
+      "idempotent_marker": "AB_HARNESS_HERMES_PATCH_EXEC_BRIDGE_BEGIN",
       "summary": "hijack Hermes docker terminal exec to Agent_Bench's external exec bridge when HERMES_EXEC_BRIDGE is set"
     },
     {
@@ -25,7 +25,7 @@
       "target_paths": [
         "hermes_cli/oneshot.py"
       ],
-      "idempotent_marker": "HM_PATCH_AGENT_BENCH_TELEMETRY_BEGIN",
+      "idempotent_marker": "AB_HARNESS_HERMES_PATCH_TELEMETRY_BEGIN",
       "summary": "emit Agent_Bench model usage/tool-call events from Hermes oneshot and coerce JSON-stringified compound tool args"
     }
   ]

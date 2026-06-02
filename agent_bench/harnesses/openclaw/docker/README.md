@@ -13,7 +13,7 @@ bash agent_bench/harnesses/openclaw/docker/build.sh
 
 The version is read from `../patch/VERSION` (`upstream_version`); the
 default tag is `agent-bench/openclaw:<version>`. Override the tag with
-`OC_IMAGE_TAG=foo/openclaw:dev`.
+`AB_AGENT_RUNTIME_IMAGE=foo/openclaw:dev`.
 
 What the build does:
 1. `FROM ghcr.io/openclaw/openclaw:<version>` (multi-arch).

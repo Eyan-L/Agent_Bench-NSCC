@@ -222,7 +222,7 @@ class SweepConfig:
 
 
 def load_composed_config(
-    app_path: Path,
+    benchmark_path: Path,
     harness_path: Path,
     model_path: Path,
     serving_path: Path,
@@ -230,14 +230,14 @@ def load_composed_config(
     """Compose a SweepConfig from independent profile files.
 
     Folder convention:
-        profiles/benchmarks/<app>/<exp>.json   instances/repo_mapping/container/budget/output
+        profiles/benchmarks/<benchmark>/<sweep>.json   instances/repo_mapping/container/budget/output
         profiles/harnesses/<name>.yaml        harness/runtime behavior + conditions[]
         profiles/models/<name>.json           model identity and model-level limits
         profiles/serving/<engine>/<name>.yaml serving endpoint / engine deployment
 
     Each call writes under:
 
-        data/experiments/<AB_RUN_STAMP>/runs/<app-output-leaf>/
+        data/experiments/<AB_RUN_STAMP>/runs/<benchmark-output-leaf>/
 
     Override `AB_RUN_STAMP` for stable / human-named runs, or
     `AB_EXPERIMENT_DIR` to move the experiment root.
@@ -249,7 +249,7 @@ def load_composed_config(
     from zoneinfo import ZoneInfo
     import os as _os
 
-    app = _read_profile(app_path)
+    benchmark = _read_profile(benchmark_path)
     harness = _read_profile(harness_path)
     serving = load_serving_config(serving_path)
     model = load_model_config(model_path, serving=serving)
@@ -287,33 +287,33 @@ def load_composed_config(
             ablation_flags=cond.get("ablation_flags", {}),
         ))
 
-    # --- application-level (instances/budget/output) -----------------
+    # --- benchmark-level (instances/budget/output) -----------------
     # Singapore time so experiment folder names match wall-clock on this host.
     # Override AB_RUN_STAMP to pin / resume.
     stamp = (
         _os.environ.get("AB_RUN_STAMP")
         or datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y-%m-%d_%H-%M-%S")
     )
-    app_output_dir = Path(app["output_dir"])
+    benchmark_output_dir = Path(benchmark["output_dir"])
     experiment_dir = _os.environ.get("AB_EXPERIMENT_DIR")
     if experiment_dir:
-        output_dir = Path(experiment_dir) / "runs" / app_output_dir.name
+        output_dir = Path(experiment_dir) / "runs" / benchmark_output_dir.name
     else:
-        output_dir = Path("data/experiments") / stamp / "runs" / app_output_dir.name
+        output_dir = Path("data/experiments") / stamp / "runs" / benchmark_output_dir.name
 
     return SweepConfig(
-        sweep_name=app["sweep_name"],
-        plan_version=app["plan_version"],
-        instances=app["instances"] or [],
+        sweep_name=benchmark["sweep_name"],
+        plan_version=benchmark["plan_version"],
+        instances=benchmark["instances"] or [],
         conditions=conditions,
         serving_configs=serving_configs,
-        seeds=app.get("seeds", [42]),
-        repo_mapping=app.get("repo_mapping") or {},
-        container_image=app["container_image"],
-        wall_clock_budget_seconds=app["wall_clock_budget_seconds"],
+        seeds=benchmark.get("seeds", [42]),
+        repo_mapping=benchmark.get("repo_mapping") or {},
+        container_image=benchmark["container_image"],
+        wall_clock_budget_seconds=benchmark["wall_clock_budget_seconds"],
         output_dir=output_dir,
-        parallel_limit_gpu=app.get("parallel_limit_gpu", 1),
-        parallel_limit_cpu_cores=app.get("parallel_limit_cpu_cores", 8),
+        parallel_limit_gpu=benchmark.get("parallel_limit_gpu", 1),
+        parallel_limit_cpu_cores=benchmark.get("parallel_limit_cpu_cores", 8),
     )
 
 
@@ -475,37 +475,33 @@ def _validate_model_config(
 
 def load_active_model_and_serving(
     *,
-    kit_root: Optional[str] = None,
+    repo_root: Optional[str] = None,
 ) -> tuple[ModelConfig, ServingConfig]:
     """Load model + serving paths injected by the driver or shell launcher."""
     import os
 
-    root = Path(kit_root or os.environ.get("KIT_ROOT", os.getcwd()))
+    root = Path(repo_root or os.environ.get("AB_REPO_ROOT", os.getcwd()))
 
     def _resolve(path: str) -> Path:
         p = Path(path)
         return p if p.is_absolute() else root / p
 
-    model_path = os.environ.get("AB_MODEL_CONFIG")
-    serving_path = os.environ.get("AB_SERVING_CONFIG")
-    if not model_path:
-        model_profile = os.environ.get("MODEL_PROFILE", "qwen36_27b")
-        model_path = str(
-            resolve_profile_ref(
-                model_profile,
-                root / "profiles" / "models",
-                [".json", ".yaml", ".yml"],
-            )
+    model_path = os.environ.get("AB_MODEL_CONFIG", "qwen36_27b")
+    serving_path = os.environ.get("AB_SERVING_CONFIG", "vllm/default")
+    model_path = str(
+        resolve_profile_ref(
+            model_path,
+            root / "profiles" / "models",
+            [".json", ".yaml", ".yml"],
         )
-    if not serving_path:
-        serving_profile = os.environ.get("SERVING", "vllm/default")
-        serving_path = str(
-            resolve_profile_ref(
-                serving_profile,
-                root / "profiles" / "serving",
-                [".yaml", ".yml", ".json", ".toml"],
-            )
+    )
+    serving_path = str(
+        resolve_profile_ref(
+            serving_path,
+            root / "profiles" / "serving",
+            [".yaml", ".yml", ".json", ".toml"],
         )
+    )
 
     model_path_p = _resolve(model_path)
     serving_path_p = _resolve(serving_path)
