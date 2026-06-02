@@ -3,6 +3,9 @@ description = "SWE-bench phase0 run through the migrated experiment entrypoint."
 output_dir = "runs/swebench_phase0"
 seeds = [42]
 
+[telemetry]
+spans_html = true
+
 [benchmark]
 name = "swebench"
 profile = "profiles/benchmarks/swebench/phase0.json"

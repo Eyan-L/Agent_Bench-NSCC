@@ -92,6 +92,11 @@ def test_synthesizes_tool_call_content(tmp_path: Path) -> None:
     span = rows[1]
     attrs = span["attrs"]
     assert span["name"] == "openclaw.tool.call"
+    assert span["start_unix_nano"] == 1780358401000000000
+    assert span["end_unix_nano"] == 1780358401250000000
+    assert span["duration_ms"] == 250.0
+    assert attrs["openclaw.span.source"] == "session_trajectory"
+    assert attrs["openclaw.tool.timing"] == "result_timestamp_minus_duration"
     assert attrs["openclaw.tool.name"] == "edit"
     assert attrs["openclaw.tool.callId"] == "call_1"
     assert attrs["openclaw.tool.isError"] is False
@@ -102,6 +107,53 @@ def test_synthesizes_tool_call_content(tmp_path: Path) -> None:
     assert attrs["openclaw.tool.result_truncated"] is False
     assert attrs["openclaw.sessionId"] == "session-1"
     assert attrs["openclaw.sessionKey"] == "agent:swebench:main"
+
+
+def test_tool_call_timing_uses_result_duration_window(tmp_path: Path) -> None:
+    session_path = tmp_path / "conversation" / "sessions" / "session-1.jsonl"
+    _write_jsonl(
+        session_path,
+        [
+            {"type": "session", "id": "session-1"},
+            {
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "timestamp": 1780358400000,
+                    "content": [
+                        {
+                            "type": "toolCall",
+                            "id": "call_1",
+                            "name": "exec",
+                            "arguments": {"cmd": "pytest"},
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "message",
+                "message": {
+                    "role": "toolResult",
+                    "toolCallId": "call_1",
+                    "timestamp": 1780358405000,
+                    "content": "ok",
+                    "details": {"durationMs": 1200},
+                },
+            },
+        ],
+    )
+    spans_path = tmp_path / "spans.jsonl"
+    spans_path.write_text("")
+
+    count = OpenClawAgentCondition._maybe_synthesize_tool_call_spans(
+        spans_path, tmp_path, "run-1",
+    )
+
+    assert count == 1
+    span = json.loads(spans_path.read_text().splitlines()[0])
+    assert span["start_unix_nano"] == 1780358403800000000
+    assert span["end_unix_nano"] == 1780358405000000000
+    assert span["duration_ms"] == 1200.0
 
 
 def test_detects_synthetic_span_sources(tmp_path: Path) -> None:

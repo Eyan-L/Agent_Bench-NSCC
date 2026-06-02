@@ -356,6 +356,8 @@ class OpenClawAgentCondition:
                             datetime.fromtimestamp(end / 1e9, tz=timezone.utc).isoformat()
                             if end else None
                         )
+                        attrs = _otlp_attrs(sp.get("attributes"))
+                        attrs.setdefault("openclaw.span.source", "diagnostics-otel")
                         spans.append({
                             "name": sp.get("name"),
                             "start_unix_nano": start,
@@ -363,7 +365,7 @@ class OpenClawAgentCondition:
                             "start_iso": start_iso,
                             "end_iso": end_iso,
                             "duration_ms": (end - start) / 1e6 if end and start else 0,
-                            "attrs": _otlp_attrs(sp.get("attributes")),
+                            "attrs": attrs,
                             "resource": res_attrs,
                         })
             if not kept_envelopes:
@@ -812,6 +814,7 @@ class OpenClawAgentCondition:
 
             attrs = {
                 "openclaw.channel": "synth.raw_response",
+                "openclaw.span.source": "raw_response_log",
                 "openclaw.provider": row.get("provider") or "unknown",
                 "openclaw.model": row.get("model") or response.get("model") or "unknown",
                 "openclaw.api": row.get("api") or "unknown",
@@ -916,7 +919,13 @@ class OpenClawAgentCondition:
         def _to_unix_ns(t) -> int:
             if t is None:
                 return 0
-            if isinstance(t, (int, float)):
+            if isinstance(t, int):
+                if t > 10**15:
+                    return t
+                if t > 10**12:
+                    return t * 1_000_000
+                return t * 1_000_000_000
+            if isinstance(t, float):
                 value = float(t)
                 if value > 1e15:
                     return int(value)
@@ -999,9 +1008,17 @@ class OpenClawAgentCondition:
                     end_ns = _to_unix_ns(
                         msg.get("timestamp") or evt.get("timestamp")
                     )
-                    start_ns = _to_unix_ns((info or {}).get("timestamp"))
-                    if not start_ns and end_ns:
+                    start_ns = 0
+                    if end_ns and duration_ms > 0:
                         start_ns = end_ns - int(duration_ms * 1e6)
+                    elif end_ns:
+                        start_ns = end_ns
+                    else:
+                        start_ns = _to_unix_ns((info or {}).get("timestamp"))
+                        end_ns = start_ns
+                    if start_ns and end_ns and start_ns > end_ns:
+                        start_ns = end_ns
+                    duration_ms = (end_ns - start_ns) / 1e6 if start_ns and end_ns else 0.0
                     is_error = bool(
                         msg.get("isError")
                         or details.get("status") == "failed"
@@ -1031,6 +1048,12 @@ class OpenClawAgentCondition:
                         "duration_ms": duration_ms,
                         "attrs": {
                             "openclaw.channel": "synth.tool_call",
+                            "openclaw.span.source": "session_trajectory",
+                            "openclaw.tool.timing": (
+                                "result_timestamp_minus_duration"
+                                if details.get("durationMs") is not None
+                                else "result_timestamp"
+                            ),
                             "openclaw.tool.name": tool_name,
                             "openclaw.tool.callId": cid,
                             "openclaw.tool.isError": is_error,

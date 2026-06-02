@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import sys
 import time
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from agent_bench.core.config import load_composed_config, RunConfig
 from agent_bench.core.manifest import RunManifest, get_manifest_path, load_or_create_manifest
@@ -33,6 +33,84 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+def _telemetry_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on", "enabled"}:
+            return True
+        if lowered in {"0", "false", "no", "off", "disabled", "skip"}:
+            return False
+    return None
+
+
+def _spans_html_enabled_from_config() -> bool:
+    """Read spans HTML generation from experiment/profile config.
+
+    Supported shapes:
+      [telemetry]
+      spans_html = true
+
+      telemetry:
+        spans:
+          html: true
+    """
+    config_env_keys = ("AB_EXPERIMENT_CONFIG", "AB_HARNESS_CONFIG", "AB_APP_CONFIG")
+    for env_key in config_env_keys:
+        path = os.environ.get(env_key)
+        if not path:
+            continue
+        try:
+            profile = load_profile(Path(path))
+        except Exception as exc:  # noqa: BLE001 - missing optional config falls back to default
+            logger.debug("could not read telemetry config from %s=%s: %s", env_key, path, exc)
+            continue
+        telemetry = profile.get("telemetry")
+        if not isinstance(telemetry, dict):
+            continue
+        direct = _telemetry_bool(telemetry.get("spans_html"))
+        if direct is not None:
+            return direct
+        spans = telemetry.get("spans")
+        if isinstance(spans, dict):
+            nested = _telemetry_bool(spans.get("html"))
+            if nested is not None:
+                return nested
+    return True
+
+
+def _maybe_render_spans_timeline(run_dir: Path, telemetry_path: Optional[str]) -> None:
+    """Render spans.jsonl to HTML when telemetry is available.
+
+    This is intentionally best-effort: timeline generation should never turn a
+    benchmark PASS/FAIL into ERROR.
+    """
+    if not _spans_html_enabled_from_config():
+        return
+
+    candidates = []
+    if telemetry_path:
+        candidates.append(Path(telemetry_path))
+    candidates.append(run_dir / "spans.jsonl")
+
+    spans_path = next((p for p in candidates if p.is_file() and p.stat().st_size > 0), None)
+    if spans_path is None:
+        return
+
+    try:
+        from agent_bench.telemetry.otel.visualize_spans import _load_spans, render_html
+
+        spans = _load_spans(spans_path)
+        if not spans:
+            return
+        output_path = run_dir / "spans_timeline.html"
+        output_path.write_text(render_html(spans, spans_path), encoding="utf-8")
+        logger.info("  spans timeline -> %s", output_path)
+    except Exception as exc:  # noqa: BLE001 - best-effort artifact
+        logger.warning("spans timeline generation failed for %s: %s", run_dir.name, exc)
 
 
 def _install_signal_handlers():
@@ -313,7 +391,6 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         manifest.duration_seconds = (
             (manifest.wall_end_ns - manifest.wall_start_ns) / 1e9
         )
-        manifest.save(get_manifest_path(run_id, run_config.output_dir))
         
         # Cleanup. Forward env_info wholesale so harnesses can grab whichever
         # keys they need (oc_container_id / task_container_id / network_name
@@ -328,6 +405,8 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         except Exception:
             logger.exception("cleanup failed")
         finally:
+            _maybe_render_spans_timeline(run_dir, manifest.telemetry_path)
+            manifest.save(get_manifest_path(run_id, run_config.output_dir))
             if hasattr(trace_container, "set_trace_path"):
                 trace_container.set_trace_path(None)
     

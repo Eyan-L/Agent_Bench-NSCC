@@ -387,6 +387,9 @@ def _prepare_environment(ctx: ExecutionContext) -> None:
     ctx.env.setdefault("AB_RUN_STAMP", ctx.plan.run_id)
     _set_aliased_run_dir_env(ctx.env, ctx.plan.run_dir)
     ctx.env.setdefault("AB_LOG_DIR", str(ctx.plan.log_dir))
+    ctx.env.setdefault("AB_EXPERIMENT_CONFIG", str(ctx.resolved.spec.config_path))
+    ctx.env.setdefault("AGENT_BENCH_RUN_DIR", str(ctx.plan.run_dir))
+    ctx.env.setdefault("AGENT_BENCH_LOG_DIR", str(ctx.plan.log_dir))
     _prepare_otel_environment(ctx)
     _prepare_swebench_runtime_root(ctx)
     _prepare_python_dependencies(ctx)
@@ -797,6 +800,8 @@ def _run_benchmark(ctx: ExecutionContext) -> None:
     ctx.env["AB_MODEL_CONFIG"] = str(model_path.resolve())
     ctx.env["AB_SERVING_CONFIG"] = str(serving_path.resolve())
     ctx.env["AB_BENCHMARK_INSTANCE_DATA"] = str(instance_data.resolve())
+    ctx.env["AB_INSTANCE_DATA"] = str(instance_data.resolve())
+    ctx.env["AB_EXPERIMENT_CONFIG"] = str(resolved.spec.config_path.resolve())
 
     run_sweep(
         benchmark_path=benchmark_path,

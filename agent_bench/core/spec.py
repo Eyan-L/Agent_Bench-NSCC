@@ -43,6 +43,7 @@ class ExperimentSpec:
     seeds: tuple[int, ...]
     stages: dict[str, bool]
     limits: dict[str, Any]
+    telemetry: dict[str, Any]
     raw: dict[str, Any]
 
 
@@ -71,6 +72,7 @@ class ResolvedExperiment:
             "seeds": list(self.spec.seeds),
             "stages": dict(self.spec.stages),
             "limits": self.spec.limits,
+            "telemetry": self.spec.telemetry,
             "profiles": {key: str(value) for key, value in self.profile_paths.items()},
         }
 
@@ -169,6 +171,9 @@ def _parse_experiment_spec(raw: dict[str, Any], *, config_path: Path, repo_root:
     output_dir = _resolve_path(config_path.parent, raw.get("output_dir", f"runs/{name}"), repo_root)
     seeds = _parse_seeds(raw.get("seeds", [42]))
     limits = _parse_limits(raw.get("limits", {}))
+    telemetry = raw.get("telemetry", {})
+    if not isinstance(telemetry, dict):
+        raise ConfigError("telemetry must be a table when present")
     stages = _parse_stages(raw.get("stages", {}))
 
     return ExperimentSpec(
@@ -185,6 +190,7 @@ def _parse_experiment_spec(raw: dict[str, Any], *, config_path: Path, repo_root:
         seeds=seeds,
         stages=stages,
         limits=limits,
+        telemetry=telemetry,
         raw=raw,
     )
 

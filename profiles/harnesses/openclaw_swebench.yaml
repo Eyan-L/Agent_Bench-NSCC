@@ -1,6 +1,8 @@
 # OpenClaw SWE-bench harness. Model/provider details are injected from
 # profiles/models and profiles/serving into the per-run openclaw.json.
 harness: openclaw
+telemetry:
+  spans_html: true
 openclaw:
   gateway:
     mode: local
