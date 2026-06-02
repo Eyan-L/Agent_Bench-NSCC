@@ -244,6 +244,15 @@ class OpenClawAgentCondition:
         # 3d. Prefer per-request model usage spans from the raw response log.
         # The older agentMeta.usage fallback is run-level aggregate data, so it
         # is intentionally used only when the per-request log is unavailable.
+        if spans_path is None:
+            existing_spans_path = run_dir / "spans.jsonl"
+            if existing_spans_path.exists():
+                spans_path = existing_spans_path
+            elif self._has_synthetic_span_sources(run_dir):
+                spans_path = existing_spans_path
+                spans_path.touch()
+                logger.info("  created %s for synthesized spans", spans_path.name)
+
         if spans_path is not None:
             raw_usage_spans = self._maybe_synthesize_model_usage_spans_from_raw_log(
                 spans_path, run_dir, run_dir.name,
@@ -369,7 +378,7 @@ class OpenClawAgentCondition:
             return None
 
         spans_path = run_dir / "spans.jsonl"
-        with spans_path.open("w") as fh:
+        with spans_path.open("a") as fh:
             for s in spans:
                 fh.write(json.dumps(s, ensure_ascii=False) + "\n")
         logger.info(
@@ -633,6 +642,14 @@ class OpenClawAgentCondition:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _has_synthetic_span_sources(run_dir: Path) -> bool:
+        conversation_dir = run_dir / "conversation"
+        return (
+            (conversation_dir / "llm-raw-responses.jsonl").is_file()
+            or (conversation_dir / "sessions").is_dir()
+        )
+
+    @staticmethod
     def _maybe_synthesize_model_usage_span(
         spans_path: Path,
         payload: Optional[Dict],
@@ -859,20 +876,53 @@ class OpenClawAgentCondition:
             existing = [json.loads(l) for l in open(spans_path) if l.strip()]
         except (OSError, json.JSONDecodeError):
             existing = []
-        if any(
-            s.get("name") == "openclaw.tool.call"
-            and (s.get("attrs") or {}).get("openclaw.channel") != "synth.tool_call"
-            for s in existing
-        ):
+        if any(s.get("name") == "openclaw.tool.call" for s in existing):
             return 0
 
         from datetime import datetime, timezone
+
+        arg_limit = int(os.environ.get("OC_TOOL_SPAN_ARGUMENT_LIMIT", "20000"))
+        result_limit = int(os.environ.get("OC_TOOL_SPAN_RESULT_LIMIT", "20000"))
+        details_limit = int(os.environ.get("OC_TOOL_SPAN_DETAILS_LIMIT", "20000"))
+
+        def _json_preview(value, limit: int) -> Tuple[str, int, bool]:
+            if value is None:
+                return "", 0, False
+            try:
+                text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+            except (TypeError, ValueError):
+                text = str(value)
+            original_len = len(text)
+            if limit >= 0 and original_len > limit:
+                return text[:limit], original_len, True
+            return text, original_len, False
+
+        def _content_text(content) -> str:
+            if isinstance(content, str):
+                return content
+            if not isinstance(content, list):
+                return "" if content is None else str(content)
+            parts: List[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "text":
+                        parts.append(str(item.get("text") or ""))
+                    else:
+                        parts.append(json.dumps(item, ensure_ascii=False, sort_keys=True))
+                else:
+                    parts.append(str(item))
+            return "\n".join(p for p in parts if p)
 
         def _to_unix_ns(t) -> int:
             if t is None:
                 return 0
             if isinstance(t, (int, float)):
-                return int(float(t) * 1e6)
+                value = float(t)
+                if value > 1e15:
+                    return int(value)
+                if value > 1e12:
+                    return int(value * 1e6)
+                return int(value * 1e9)
             if isinstance(t, str):
                 try:
                     iso = t.replace("Z", "+00:00")
@@ -927,7 +977,11 @@ class OpenClawAgentCondition:
                             cid = c.get("id")
                             if not cid:
                                 continue
-                            pending[cid] = {"name": c.get("name") or "unknown"}
+                            pending[cid] = {
+                                "name": c.get("name") or "unknown",
+                                "arguments": c.get("arguments"),
+                                "timestamp": msg.get("timestamp") or evt.get("timestamp"),
+                            }
                     continue
 
                 if role == "toolResult":
@@ -945,12 +999,22 @@ class OpenClawAgentCondition:
                     end_ns = _to_unix_ns(
                         msg.get("timestamp") or evt.get("timestamp")
                     )
-                    start_ns = (
-                        end_ns - int(duration_ms * 1e6) if end_ns else 0
-                    )
+                    start_ns = _to_unix_ns((info or {}).get("timestamp"))
+                    if not start_ns and end_ns:
+                        start_ns = end_ns - int(duration_ms * 1e6)
                     is_error = bool(
                         msg.get("isError")
                         or details.get("status") == "failed"
+                    )
+                    args_json, args_chars, args_truncated = _json_preview(
+                        (info or {}).get("arguments"), arg_limit,
+                    )
+                    result_text = _content_text(msg.get("content"))
+                    result_chars = len(result_text)
+                    result_preview = result_text[:result_limit]
+                    result_truncated = result_limit >= 0 and result_chars > result_limit
+                    details_json, details_chars, details_truncated = _json_preview(
+                        details, details_limit,
                     )
                     spans_out.append({
                         "name": "openclaw.tool.call",
@@ -970,6 +1034,15 @@ class OpenClawAgentCondition:
                             "openclaw.tool.name": tool_name,
                             "openclaw.tool.callId": cid,
                             "openclaw.tool.isError": is_error,
+                            "openclaw.tool.arguments_json": args_json,
+                            "openclaw.tool.arguments_chars": args_chars,
+                            "openclaw.tool.arguments_truncated": args_truncated,
+                            "openclaw.tool.result_preview": result_preview,
+                            "openclaw.tool.result_chars": result_chars,
+                            "openclaw.tool.result_truncated": result_truncated,
+                            "openclaw.tool.details_json": details_json,
+                            "openclaw.tool.details_chars": details_chars,
+                            "openclaw.tool.details_truncated": details_truncated,
                             "openclaw.runId": run_id,
                             "openclaw.sessionKey": session_key,
                             "openclaw.sessionId": session_id,

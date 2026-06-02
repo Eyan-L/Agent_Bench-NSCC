@@ -71,6 +71,11 @@ from agent_bench.deployments.containers import (
 from agent_bench.harnesses.openclaw.dispatcher import OpenClawRemoteDispatcher
 from agent_bench.core.config import endpoint_for_container, load_active_model_and_serving
 from agent_bench.core.profile_io import load_profile
+from agent_bench.telemetry.harness_spans import (
+    preview_json,
+    preview_text,
+    write_harness_span,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -833,6 +838,7 @@ class SWEBenchHarness:
         patch: Optional[str] = None,
         run_id: Optional[str] = None,
         instance_data: Optional[Dict] = None,
+        run_dir: Optional[Path] = None,
         **_kw,
     ) -> Dict:
         logger.info("Scoring %s", instance_id)
@@ -900,13 +906,69 @@ class SWEBenchHarness:
                 "--cache_level", "env",
                 "--timeout", str(timeout_seconds),
             ]
+            scoring_span_path = Path(run_dir) / "spans.jsonl" if run_dir else None
+            scoring_start_ns = time.time_ns()
+            cmd_json, cmd_chars, cmd_truncated = preview_json(cmd, limit=12000)
+            scoring_attrs = {
+                "agent_bench.channel": "harness",
+                "agent_bench.scoring.backend": "swebench.run_evaluation",
+                "agent_bench.instance_id": instance_id,
+                "agent_bench.run_id": run_id,
+                "agent_bench.command_json": cmd_json,
+                "agent_bench.command_chars": cmd_chars,
+                "agent_bench.command_truncated": cmd_truncated,
+                "agent_bench.cwd": str(self.swebench_root),
+                "agent_bench.timeout_seconds": timeout_seconds + 300,
+            }
             try:
                 proc = subprocess.run(
                     cmd, cwd=str(self.benchmark_data_root),
                     capture_output=True, text=True,
                     timeout=timeout_seconds + 300,
                 )
-            except subprocess.TimeoutExpired:
+                stdout, stdout_chars, stdout_truncated = preview_text(
+                    proc.stdout, limit=8000,
+                )
+                stderr, stderr_chars, stderr_truncated = preview_text(
+                    proc.stderr, limit=8000,
+                )
+                scoring_attrs.update({
+                    "agent_bench.returncode": proc.returncode,
+                    "agent_bench.stdout_preview": stdout,
+                    "agent_bench.stdout_chars": stdout_chars,
+                    "agent_bench.stdout_truncated": stdout_truncated,
+                    "agent_bench.stderr_preview": stderr,
+                    "agent_bench.stderr_chars": stderr_chars,
+                    "agent_bench.stderr_truncated": stderr_truncated,
+                })
+                write_harness_span(
+                    scoring_span_path,
+                    name="agent_bench.swebench.scoring",
+                    attrs=scoring_attrs,
+                    start_ns=scoring_start_ns,
+                )
+            except subprocess.TimeoutExpired as e:
+                stdout, stdout_chars, stdout_truncated = preview_text(
+                    e.stdout, limit=8000,
+                )
+                stderr, stderr_chars, stderr_truncated = preview_text(
+                    e.stderr, limit=8000,
+                )
+                scoring_attrs.update({
+                    "agent_bench.timeout": True,
+                    "agent_bench.stdout_preview": stdout,
+                    "agent_bench.stdout_chars": stdout_chars,
+                    "agent_bench.stdout_truncated": stdout_truncated,
+                    "agent_bench.stderr_preview": stderr,
+                    "agent_bench.stderr_chars": stderr_chars,
+                    "agent_bench.stderr_truncated": stderr_truncated,
+                })
+                write_harness_span(
+                    scoring_span_path,
+                    name="agent_bench.swebench.scoring",
+                    attrs=scoring_attrs,
+                    start_ns=scoring_start_ns,
+                )
                 return {
                     "status": "TIMEOUT",
                     "test_pass_rate": 0.0,

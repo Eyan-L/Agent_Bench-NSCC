@@ -87,6 +87,10 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
     
     container_id = None
     env_info = None
+    harness_spans_path = run_dir / "spans.jsonl"
+    trace_container = getattr(harness, "container", None)
+    if hasattr(trace_container, "set_trace_path"):
+        trace_container.set_trace_path(harness_spans_path)
     try:
         # Prepare environment. Passing instance_data lets benchmark-specific
         # harnesses (e.g. TerminalBenchHarness) read task.toml-derived fields
@@ -263,6 +267,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 patch=patch_path.read_text() if patch_path.exists() else "",
                 run_id=run_id,
                 instance_data=instance_data,
+                run_dir=run_dir,
             )
         else:
             verdict = {
@@ -322,6 +327,9 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             harness.cleanup(container_id, **cleanup_kwargs)
         except Exception:
             logger.exception("cleanup failed")
+        finally:
+            if hasattr(trace_container, "set_trace_path"):
+                trace_container.set_trace_path(None)
     
     return manifest
 

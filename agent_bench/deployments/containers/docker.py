@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -21,12 +22,18 @@ from agent_bench.deployments.containers.base import (
     ContainerSpec,
     Mount,
 )
+from agent_bench.telemetry.harness_spans import (
+    preview_json,
+    preview_text,
+    write_harness_span,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class DockerContainer(Container):
     backend_id = "docker"
+    _trace_local = threading.local()
 
     # OC inside the container talks to the host via the synthetic
     # `host-gateway` hostname added by `--add-host vllm-host:host-gateway`.
@@ -36,6 +43,81 @@ class DockerContainer(Container):
     @property
     def host_address(self) -> str:
         return self._HOST_ADDRESS
+
+    def set_trace_path(self, path: Optional[Path]) -> None:
+        self._trace_local.path = Path(path) if path is not None else None
+
+    def _trace_path(self) -> Optional[Path]:
+        return getattr(self._trace_local, "path", None)
+
+    def _run_traced(
+        self,
+        span_name: str,
+        cmd: list[str],
+        *,
+        attrs: Optional[dict] = None,
+        timeout: Optional[float] = None,
+        input_text: Optional[str] = None,
+    ) -> subprocess.CompletedProcess:
+        start_ns = time.time_ns()
+        cmd_json, cmd_chars, cmd_truncated = preview_json(cmd, limit=8000)
+        span_attrs = {
+            "agent_bench.channel": "harness",
+            "agent_bench.command_json": cmd_json,
+            "agent_bench.command_chars": cmd_chars,
+            "agent_bench.command_truncated": cmd_truncated,
+        }
+        if attrs:
+            span_attrs.update(attrs)
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                input=input_text,
+            )
+            stdout, stdout_chars, stdout_truncated = preview_text(
+                result.stdout, limit=4000,
+            )
+            stderr, stderr_chars, stderr_truncated = preview_text(
+                result.stderr, limit=4000,
+            )
+            span_attrs.update({
+                "agent_bench.returncode": result.returncode,
+                "agent_bench.stdout_preview": stdout,
+                "agent_bench.stdout_chars": stdout_chars,
+                "agent_bench.stdout_truncated": stdout_truncated,
+                "agent_bench.stderr_preview": stderr,
+                "agent_bench.stderr_chars": stderr_chars,
+                "agent_bench.stderr_truncated": stderr_truncated,
+            })
+            return result
+        except subprocess.TimeoutExpired as e:
+            stdout, stdout_chars, stdout_truncated = preview_text(
+                e.stdout, limit=4000,
+            )
+            stderr, stderr_chars, stderr_truncated = preview_text(
+                e.stderr, limit=4000,
+            )
+            span_attrs.update({
+                "agent_bench.timeout": True,
+                "agent_bench.timeout_seconds": timeout,
+                "agent_bench.stdout_preview": stdout,
+                "agent_bench.stdout_chars": stdout_chars,
+                "agent_bench.stdout_truncated": stdout_truncated,
+                "agent_bench.stderr_preview": stderr,
+                "agent_bench.stderr_chars": stderr_chars,
+                "agent_bench.stderr_truncated": stderr_truncated,
+            })
+            raise
+        finally:
+            write_harness_span(
+                self._trace_path(),
+                name=span_name,
+                attrs=span_attrs,
+                start_ns=start_ns,
+            )
 
     # ------------------------------------------------------------------
     # Pre-flight
@@ -64,27 +146,34 @@ class DockerContainer(Container):
     # ------------------------------------------------------------------
 
     def create_network(self, name: str) -> None:
-        r = subprocess.run(
+        r = self._run_traced(
+            "agent_bench.container.network.create",
             ["docker", "network", "create", name],
-            capture_output=True, text=True,
+            attrs={"agent_bench.container.network": name},
         )
         if r.returncode != 0 and "already exists" not in (r.stderr or ""):
             raise RuntimeError(f"docker network create failed: {r.stderr.strip()}")
 
     def remove_network(self, name: str) -> None:
         # Sweep stragglers attached to the network, then drop it.
-        r = subprocess.run(
+        r = self._run_traced(
+            "agent_bench.container.network.list",
             ["docker", "ps", "-aq", "--filter", f"network={name}"],
-            capture_output=True, text=True,
+            attrs={"agent_bench.container.network": name},
         )
         for cid in (r.stdout or "").split():
-            subprocess.run(
+            self._run_traced(
+                "agent_bench.container.stop",
                 ["docker", "rm", "-f", "-v", cid],
-                capture_output=True, check=False,
+                attrs={
+                    "agent_bench.container.id": cid,
+                    "agent_bench.container.network": name,
+                },
             )
-        subprocess.run(
+        self._run_traced(
+            "agent_bench.container.network.remove",
             ["docker", "network", "rm", name],
-            capture_output=True, check=False,
+            attrs={"agent_bench.container.network": name},
         )
 
     # ------------------------------------------------------------------
@@ -114,8 +203,17 @@ class DockerContainer(Container):
         cmd += [spec.image]
         cmd += list(spec.command)
 
-        r = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=spec.pull_timeout_s,
+        r = self._run_traced(
+            "agent_bench.container.start",
+            cmd,
+            timeout=spec.pull_timeout_s,
+            attrs={
+                "agent_bench.container.name": spec.name,
+                "agent_bench.container.image": spec.image,
+                "agent_bench.container.network": spec.network,
+                "agent_bench.container.workdir": spec.workdir,
+                "agent_bench.container.entrypoint": spec.entrypoint,
+            },
         )
         if r.returncode != 0:
             raise RuntimeError(
@@ -127,9 +225,13 @@ class DockerContainer(Container):
     def stop(self, h: ContainerHandle) -> None:
         # `docker rm -f -v` does both: SIGKILL + remove + drop anon vols.
         target = h.id or h.name
-        subprocess.run(
+        self._run_traced(
+            "agent_bench.container.stop",
             ["docker", "rm", "-f", "-v", target],
-            capture_output=True, check=False,
+            attrs={
+                "agent_bench.container.id": h.id,
+                "agent_bench.container.name": h.name,
+            },
         )
 
     # ------------------------------------------------------------------
@@ -154,8 +256,17 @@ class DockerContainer(Container):
             for k, v in env.items():
                 cmd += ["-e", f"{k}={v}"]
         cmd += [h.id, *argv]
-        r = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, input=input_text,
+        r = self._run_traced(
+            "agent_bench.container.exec",
+            cmd,
+            timeout=timeout,
+            input_text=input_text,
+            attrs={
+                "agent_bench.container.id": h.id,
+                "agent_bench.container.name": h.name,
+                "agent_bench.container.workdir": workdir,
+                "agent_bench.exec.argv_json": preview_json(argv, limit=8000)[0],
+            },
         )
         if check and r.returncode != 0:
             raise RuntimeError(
@@ -165,9 +276,15 @@ class DockerContainer(Container):
         return r
 
     def copy_into(self, h: ContainerHandle, src: Path, dst: str) -> None:
-        r = subprocess.run(
+        r = self._run_traced(
+            "agent_bench.container.copy_into",
             ["docker", "cp", str(src), f"{h.id}:{dst}"],
-            capture_output=True, text=True,
+            attrs={
+                "agent_bench.container.id": h.id,
+                "agent_bench.container.name": h.name,
+                "agent_bench.copy.src": str(src),
+                "agent_bench.copy.dst": dst,
+            },
         )
         if r.returncode != 0:
             raise RuntimeError(f"docker cp failed: {r.stderr.strip()}")
@@ -179,9 +296,15 @@ class DockerContainer(Container):
         dst_host: Path,
     ) -> None:
         dst_host.parent.mkdir(parents=True, exist_ok=True)
-        r = subprocess.run(
+        r = self._run_traced(
+            "agent_bench.container.copy_out",
             ["docker", "cp", f"{h.id}:{src_in_container}", str(dst_host)],
-            capture_output=True, text=True,
+            attrs={
+                "agent_bench.container.id": h.id,
+                "agent_bench.container.name": h.name,
+                "agent_bench.copy.src": src_in_container,
+                "agent_bench.copy.dst": str(dst_host),
+            },
         )
         if r.returncode != 0:
             # Caller decides how loud to be (conditions just debug-log).
@@ -196,28 +319,44 @@ class DockerContainer(Container):
         timeout: float = 600.0,
     ) -> None:
         scratch_name = f"oc-eval-prime-{dst_host.name[:12]}-{os.urandom(2).hex()}"
-        r = subprocess.run(
+        r = self._run_traced(
+            "agent_bench.container.image.create_scratch",
             ["docker", "create", "--name", scratch_name,
              "--entrypoint", "true", image],
-            capture_output=True, text=True, timeout=timeout,
+            timeout=timeout,
+            attrs={
+                "agent_bench.container.name": scratch_name,
+                "agent_bench.container.image": image,
+            },
         )
         if r.returncode != 0:
             raise RuntimeError(f"docker create scratch failed: {r.stderr.strip()}")
         try:
             # `:/testbed/.` → flatten contents into dst (without the wrapper dir).
-            r = subprocess.run(
+            r = self._run_traced(
+                "agent_bench.container.copy_from_image",
                 ["docker", "cp", f"{scratch_name}:{src_in_image.rstrip('/')}/.",
                  str(dst_host).rstrip("/") + "/"],
-                capture_output=True, text=True, timeout=timeout,
+                timeout=timeout,
+                attrs={
+                    "agent_bench.container.name": scratch_name,
+                    "agent_bench.container.image": image,
+                    "agent_bench.copy.src": src_in_image,
+                    "agent_bench.copy.dst": str(dst_host),
+                },
             )
             if r.returncode != 0:
                 raise RuntimeError(
                     f"docker cp from {image}:{src_in_image} failed: {r.stderr.strip()}"
                 )
         finally:
-            subprocess.run(
+            self._run_traced(
+                "agent_bench.container.stop",
                 ["docker", "rm", "-f", scratch_name],
-                capture_output=True, check=False,
+                attrs={
+                    "agent_bench.container.name": scratch_name,
+                    "agent_bench.container.image": image,
+                },
             )
 
     # ------------------------------------------------------------------
