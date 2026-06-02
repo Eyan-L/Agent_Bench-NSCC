@@ -1,17 +1,17 @@
 {
-  "_doc": "SWE-bench Verified smoke profile with 1 task.",
+  "_doc": "SWE-bench Verified smoke profile with 1 simple task selected from dataset difficulty '<15 min fix'.",
   "sweep_name": "swebench_verified_smoke1",
   "plan_version": "v1.0",
   "application": "swebench",
   "dataset": "princeton-nlp/SWE-bench_Verified",
   "split": "test",
   "instances": [
-    "django__django-15037"
+    "astropy__astropy-14309"
   ],
   "repo_mapping": {
-    "django__django-15037": {
-      "repo_id": "django/django",
-      "base_commit": "dab48b7482295956973879d15bfd4d3bb0718772"
+    "astropy__astropy-14309": {
+      "repo_id": "astropy/astropy",
+      "base_commit": "cdb66059a2feb44ee49021874605ba90801f9986"
     }
   },
   "container_image": "swebench/sweb.eval.x86_64.UNUSED:latest",

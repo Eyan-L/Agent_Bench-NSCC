@@ -287,6 +287,9 @@ def _build_vllm_plan(
         else:
             docker_args.extend(["--gpus", _docker_gpu_request(cuda_devices)])
         docker_args.extend(["-v", f"{hf_home}:/root/.cache/huggingface:rw", "-e", "VLLM_USAGE_SOURCE=oc-eval-docker"])
+        model_mount = _docker_model_mount(model_name)
+        if model_mount:
+            docker_args.extend(["-v", model_mount])
         if env.get("HUGGING_FACE_HUB_TOKEN"):
             docker_args.extend(["-e", "HUGGING_FACE_HUB_TOKEN"])
         if _env_bool(env, "VLLM_DETACH", default=True):

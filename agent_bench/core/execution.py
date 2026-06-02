@@ -645,14 +645,19 @@ def _start_serving(ctx: ExecutionContext, stack: ExitStack) -> None:
         except OSError as exc:
             raise ConfigError(f"failed to launch serving backend {plan.backend}: {exc}") from exc
         readiness_proc = proc
+        cleanup_proc = proc
         if _is_detached_docker_launch(plan):
             readiness_proc = _wait_for_detached_docker_launch(proc, log_path)
+            cleanup_proc = readiness_proc
 
         container_name = _docker_container_name_for_cleanup(plan)
+        if _is_detached_docker_launch(plan) and readiness_proc is None and container_name:
+            readiness_proc = _start_detached_docker_log_follow(container_name, log_path)
+            cleanup_proc = readiness_proc
+        if cleanup_proc is not None:
+            stack.callback(terminate_process_group, cleanup_proc)
         if container_name:
             stack.callback(_remove_docker_container, container_name)
-        if readiness_proc is not None:
-            stack.callback(terminate_process_group, proc)
         try:
             wait_for_http_ready(
                 url=plan.readiness_url,
@@ -692,6 +697,25 @@ def _wait_for_detached_docker_launch(
             details = f"{details}\n{tail}"
         raise ConfigError(f"detached docker serving command failed with exit code {returncode}{details}")
     return None
+
+
+def _start_detached_docker_log_follow(
+    container_name: str,
+    log_path: Path,
+) -> subprocess.Popen[bytes]:
+    log = log_path.open("ab", buffering=0)
+    try:
+        proc = subprocess.Popen(
+            ["docker", "logs", "-f", container_name],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except Exception:
+        log.close()
+        raise
+    log.close()
+    return proc
 
 
 def _remove_docker_container(name: str) -> None:

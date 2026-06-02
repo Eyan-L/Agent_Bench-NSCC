@@ -547,7 +547,7 @@ def test_litellm_docker_start_registers_container_cleanup(tmp_path: Path, monkey
     ]
 
 
-def test_detached_docker_serving_waits_for_endpoint_after_docker_cli_exits(tmp_path: Path, monkeypatch) -> None:
+def test_detached_docker_serving_follows_container_logs_after_docker_cli_exits(tmp_path: Path, monkeypatch) -> None:
     resolved = load_resolved_experiment(ROOT / "experiments" / "local_vllm.toml", root=ROOT)
     env = {
         "AB_REPO_ROOT": str(ROOT),
@@ -566,16 +566,27 @@ def test_detached_docker_serving_waits_for_endpoint_after_docker_cli_exits(tmp_p
         env=env,
     )
     calls: list[tuple[str, object]] = []
+    popen_argvs: list[tuple[str, ...]] = []
 
     class FakeProc:
+        def __init__(self, label: str):
+            self.label = label
+
         def wait(self, timeout=None):
-            calls.append(("wait", timeout))
+            calls.append((f"{self.label}_wait", timeout))
             return 0
 
-    fake_proc = FakeProc()
+    docker_run_proc = FakeProc("docker_run")
+    docker_logs_proc = FakeProc("docker_logs")
+    popen_results = [docker_run_proc, docker_logs_proc]
+
+    def fake_popen(argv, *args, **kwargs):
+        popen_argvs.append(tuple(argv))
+        return popen_results.pop(0)
+
     monkeypatch.setattr(execution, "http_ready", lambda *args, **kwargs: False)
     monkeypatch.setattr(execution, "prepare_launch_artifacts", lambda *args, **kwargs: None)
-    monkeypatch.setattr(execution.subprocess, "Popen", lambda *args, **kwargs: fake_proc)
+    monkeypatch.setattr(execution.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(
         execution,
         "wait_for_http_ready",
@@ -588,10 +599,14 @@ def test_detached_docker_serving_waits_for_endpoint_after_docker_cli_exits(tmp_p
     execution._start_serving(ctx, stack)
     stack.close()
 
-    assert ("wait", 30) in calls
-    assert ("ready_proc", None) in calls
-    assert ("terminate", fake_proc) not in calls
-    assert ("rm", plan.serving_plan.metadata["container_name"]) in calls
+    container_name = plan.serving_plan.metadata["container_name"]
+    assert ("docker_run_wait", 30) in calls
+    assert popen_argvs[0] == plan.serving_plan.argv
+    assert popen_argvs[1] == ("docker", "logs", "-f", container_name)
+    assert ("ready_proc", docker_logs_proc) in calls
+    assert ("terminate", docker_run_proc) not in calls
+    assert ("rm", container_name) in calls
+    assert ("terminate", docker_logs_proc) in calls
 
 
 def test_swebench_instance_data_materializes_from_benchmark_profile(tmp_path: Path, monkeypatch) -> None:

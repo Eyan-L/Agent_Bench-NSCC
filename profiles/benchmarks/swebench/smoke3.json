@@ -1,27 +1,27 @@
 {
-  "_doc": "SWE-bench Verified smoke profile with 3 tasks.",
+  "_doc": "SWE-bench Verified smoke profile with 3 simple tasks selected from dataset difficulty '<15 min fix'.",
   "sweep_name": "swebench_verified_smoke3",
   "plan_version": "v1.0",
   "application": "swebench",
   "dataset": "princeton-nlp/SWE-bench_Verified",
   "split": "test",
   "instances": [
-    "django__django-15037",
-    "django__django-15278",
-    "sympy__sympy-16450"
+    "astropy__astropy-14309",
+    "astropy__astropy-14995",
+    "astropy__astropy-7166"
   ],
   "repo_mapping": {
-    "django__django-15037": {
-      "repo_id": "django/django",
-      "base_commit": "dab48b7482295956973879d15bfd4d3bb0718772"
+    "astropy__astropy-14309": {
+      "repo_id": "astropy/astropy",
+      "base_commit": "cdb66059a2feb44ee49021874605ba90801f9986"
     },
-    "django__django-15278": {
-      "repo_id": "django/django",
-      "base_commit": "0ab58c120939093fea90822f376e1866fc714d1f"
+    "astropy__astropy-14995": {
+      "repo_id": "astropy/astropy",
+      "base_commit": "b16c7d12ccbc7b2d20364b89fb44285bcbfede54"
     },
-    "sympy__sympy-16450": {
-      "repo_id": "sympy/sympy",
-      "base_commit": "aefdd023dc4f73c441953ed51f5f05a076f0862f"
+    "astropy__astropy-7166": {
+      "repo_id": "astropy/astropy",
+      "base_commit": "26d147868f8a891a6009a25cd6a8576d2e1bd747"
     }
   },
   "container_image": "swebench/sweb.eval.x86_64.UNUSED:latest",
