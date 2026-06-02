@@ -7,6 +7,8 @@ import subprocess
 import sys
 import types
 
+import pytest
+
 from agent_bench.core.execution import materialize_benchmark_data
 from agent_bench.core.spec import load_resolved_experiment
 from agent_bench.deployments.pbs.job_spec import RUNTIME_STAGES, build_pbs_job_spec, dump_spec_json
@@ -43,7 +45,7 @@ def _write_nscc_vllm_experiment(tmp_path: Path, *, stage_lines: list[str]) -> Pa
                 "[deployment]",
                 f'profile = "{ROOT / "profiles/deployments/nscc_pbs.toml"}"',
                 "[limits]",
-                "max_instances = 1",
+                "max_workers = 1",
             ]
         ),
         encoding="utf-8",
@@ -82,6 +84,21 @@ def test_pbs_job_spec_uses_ab_run_stamp_for_run_dir() -> None:
     assert spec.metadata["stable_run_id"] == resolved.run_id
 
 
+def test_pbs_job_spec_rejects_conflicting_run_dir_aliases(tmp_path: Path) -> None:
+    resolved = load_resolved_experiment(ROOT / "experiments/nscc_vllm.toml", root=ROOT)
+
+    with pytest.raises(ValueError, match="AB_RUN_DIR and AB_EXPERIMENT_DIR"):
+        build_pbs_job_spec(
+            resolved,
+            env={
+                "AB_REPO_ROOT": str(ROOT),
+                "USER": "alice",
+                "AB_RUN_DIR": str(tmp_path / "run"),
+                "AB_EXPERIMENT_DIR": str(tmp_path / "experiment"),
+            },
+        )
+
+
 def test_pbs_render_job_uses_short_python_worker() -> None:
     resolved = load_resolved_experiment(ROOT / "experiments/nscc_vllm.toml", root=ROOT)
     script = build_pbs_job_spec(resolved, env={"AB_REPO_ROOT": str(ROOT)}).render_script()
@@ -91,8 +108,9 @@ def test_pbs_render_job_uses_short_python_worker() -> None:
     assert 'cd "${PBS_O_WORKDIR:-$PWD}"' in script
     assert 'AB_RUN_STAMP="$(TZ=Asia/Singapore date +%Y-%m-%d_%H-%M-%S)"' in script
     assert 'AB_JOB_SUFFIX="${PBS_JOBID//[^A-Za-z0-9._-]/_}"' in script
-    assert 'export AB_EXPERIMENT_DIR="${AB_EXPERIMENT_DIR:-$AB_EXPERIMENT_BASE/$AB_RUN_STAMP}"' in script
-    assert 'export AB_RUN_DIR="${AB_RUN_DIR:-$AB_EXPERIMENT_DIR}"' in script
+    assert 'AB_RUN_DIR="${AB_RUN_DIR:-${AB_EXPERIMENT_DIR:-$AB_EXPERIMENT_BASE/$AB_RUN_STAMP}}"' in script
+    assert 'export AB_RUN_DIR' in script
+    assert 'export AB_EXPERIMENT_DIR="$AB_RUN_DIR"' in script
     assert 'export AB_LOG_DIR="${AB_LOG_DIR:-$AB_RUN_DIR/logs}"' in script
     assert "python3 run.py --config experiments/nscc_vllm.toml" in script
     assert "run_benchmark.pbs" not in script

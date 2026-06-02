@@ -6,7 +6,12 @@ import os
 import sys
 from typing import Sequence
 
-from agent_bench.core.execution import build_execution_plan, format_execution_plan, run_experiment_stages
+from agent_bench.core.execution import (
+    build_execution_plan,
+    format_execution_plan,
+    resolve_max_workers,
+    run_experiment_stages,
+)
 from agent_bench.core.spec import ConfigError, load_resolved_experiment
 from agent_bench.deployments.pbs.job_spec import build_pbs_job_spec, dump_spec_json
 
@@ -17,7 +22,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="Resolve and print the shared execution plan without launching work.")
     parser.add_argument("--print-spec", action="store_true", help="Emit redacted PBS job spec JSON.")
     parser.add_argument("--no-retry-errors", action="store_true", help="Do not retry ERROR runs.")
-    parser.add_argument("--max-workers", type=int, default=int(os.environ.get("AB_RUN_MAX_WORKERS", "1")))
+    parser.add_argument("--max-workers", type=int, default=None)
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of text for dry-run.")
     args = parser.parse_args(argv)
 
@@ -52,7 +57,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = run_experiment_stages(
             resolved,
             retry_errors=not args.no_retry_errors,
-            max_workers=args.max_workers,
+            max_workers=resolve_max_workers(resolved, cli_max_workers=args.max_workers),
         )
     except ConfigError as exc:
         print(f"pbs job failed: {exc}", file=sys.stderr)

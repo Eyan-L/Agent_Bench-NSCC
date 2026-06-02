@@ -19,7 +19,5 @@
   "output_dir": "swebench_smoke1",
   "seeds": [
     42
-  ],
-  "parallel_limit_gpu": 1,
-  "parallel_limit_cpu_cores": 8
+  ]
 }

@@ -15,7 +15,5 @@
   "container_image": "alexgshaw/kv-store-grpc:20251031",
   "wall_clock_budget_seconds": 900,
   "output_dir": "tb_kv_store",
-  "seeds": [42],
-  "parallel_limit_gpu": 1,
-  "parallel_limit_cpu_cores": 8
+  "seeds": [42]
 }

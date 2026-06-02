@@ -31,8 +31,6 @@
   "seeds": [
     42
   ],
-  "parallel_limit_gpu": 1,
-  "parallel_limit_cpu_cores": 8,
   "difficulty_distribution": {
     "easy": 4,
     "medium": 55,

@@ -21,4 +21,4 @@ profile = "profiles/serving/litellm/minimax_global.yaml"
 profile = "profiles/deployments/nscc_pbs_cpu.toml"
 
 [limits]
-max_instances = 1
+max_workers = 1

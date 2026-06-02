@@ -168,9 +168,7 @@ def _parse_experiment_spec(raw: dict[str, Any], *, config_path: Path, repo_root:
     harness_name = _required_str(harness, "name", "harness.name")
     output_dir = _resolve_path(config_path.parent, raw.get("output_dir", f"runs/{name}"), repo_root)
     seeds = _parse_seeds(raw.get("seeds", [42]))
-    limits = raw.get("limits", {})
-    if not isinstance(limits, dict):
-        raise ConfigError("limits must be a table when present")
+    limits = _parse_limits(raw.get("limits", {}))
     stages = _parse_stages(raw.get("stages", {}))
 
     return ExperimentSpec(
@@ -279,6 +277,28 @@ def _parse_seeds(value: Any) -> tuple[int, ...]:
             raise ConfigError("seeds must be a non-empty list of integers")
         seeds.append(item)
     return tuple(seeds)
+
+
+def _parse_limits(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError("limits must be a table when present")
+
+    allowed = {"max_workers"}
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ConfigError(
+            f"limits contains unknown key(s): {', '.join(unknown)}; "
+            f"expected one of {', '.join(sorted(allowed))}"
+        )
+
+    limits = dict(value)
+    if "max_workers" in limits:
+        item = limits["max_workers"]
+        if isinstance(item, bool) or not isinstance(item, int) or item < 1:
+            raise ConfigError("limits.max_workers must be a positive integer")
+    return limits
 
 
 def _parse_stages(value: Any) -> dict[str, bool]:

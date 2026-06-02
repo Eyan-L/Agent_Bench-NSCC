@@ -21,4 +21,4 @@ profile = "profiles/serving/vllm/default.yaml"
 profile = "profiles/deployments/ccds_cloud.toml"
 
 [limits]
-max_instances = 1
+max_workers = 1

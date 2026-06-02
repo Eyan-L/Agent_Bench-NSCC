@@ -1,10 +1,13 @@
 # NSCC vLLM endpoint profile. Model context length comes from
-# profiles/models/*.json; tensor parallelism is selected at qsub time via
-# AB_SERVING_TENSOR_PARALLEL_SIZE or VLLM_TP.
+# profiles/models/*.json. Runtime TP/CUDA defaults can be overridden at qsub
+# time via AB_SERVING_TENSOR_PARALLEL_SIZE, VLLM_TP,
+# AB_SERVING_CUDA_VISIBLE_DEVICES, VLLM_CUDA_VISIBLE_DEVICES, or
+# CUDA_VISIBLE_DEVICES.
 serving:
   config_id: vllm-nscc
   backend: vllm
   preset: default
+  serving_mode: singularity
   endpoint:
     scheme: http
     bind_host: 0.0.0.0
@@ -12,6 +15,8 @@ serving:
     port: 8000
     path: /v1
   runtime:
+    tensor_parallel_size: 2
+    cuda_visible_devices: "0,1"
     gpu_mem_util: 0.93
   scheduler:
     max_num_seqs: 128
@@ -19,3 +24,4 @@ serving:
   sif: /scratch/users/ntu/$USER/sif_images/nscc_vllm_openai_cu128.sif
   image: docker://chengzhilu/vllm:0.20.0-torch2.11-cu128-a100-h100
   additional_flags: {}
+  extra_args: []

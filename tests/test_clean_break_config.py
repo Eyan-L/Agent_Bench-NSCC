@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 import json
+import os
 from pathlib import Path
 import types
 import subprocess
@@ -11,7 +12,12 @@ import pytest
 
 import agent_bench.core.execution as execution
 
-from agent_bench.core.execution import STAGE_ORDER, _instance_data_path, build_execution_plan
+from agent_bench.core.execution import (
+    STAGE_ORDER,
+    _instance_data_path,
+    build_execution_plan,
+    resolve_max_workers,
+)
 from agent_bench.core.spec import ConfigError, load_resolved_experiment
 from agent_bench.deployments import plan_deployment
 
@@ -41,7 +47,7 @@ def _write_client_only_experiment(tmp_path: Path, *, stage_lines: list[str]) -> 
                 "[deployment]",
                 f'profile = "{ROOT / "profiles/deployments/client_only.toml"}"',
                 "[limits]",
-                "max_instances = 1",
+                "max_workers = 1",
             ]
         ),
         encoding="utf-8",
@@ -78,7 +84,7 @@ def test_example_experiments_resolve(
 def test_wrapped_configs_are_expanded() -> None:
     resolved = load_resolved_experiment(ROOT / "experiments" / "local_vllm.toml", root=ROOT)
 
-    assert resolved.model["config_id"] == "qwen35_9b"
+    assert resolved.model["config_id"] == "qwen36_35b_a3b_local"
     assert resolved.serving["config_id"] == "vllm-default"
     assert resolved.benchmark["application"] == "swebench"
     assert resolved.harness["harness"] == "openclaw"
@@ -90,6 +96,15 @@ def test_run_id_is_stable() -> None:
 
     assert first.run_id == second.run_id
     assert len(first.run_id) == 12
+
+
+def test_max_workers_controls_default_worker_limit() -> None:
+    resolved = load_resolved_experiment(ROOT / "experiments" / "local_vllm.toml", root=ROOT)
+
+    assert resolved.spec.limits["max_workers"] == 1
+    assert resolve_max_workers(resolved, env={}) == 1
+    assert resolve_max_workers(resolved, env={"AB_RUN_MAX_WORKERS": "3"}) == 3
+    assert resolve_max_workers(resolved, cli_max_workers=4, env={"AB_RUN_MAX_WORKERS": "3"}) == 4
 
 
 def test_execution_plan_uses_ab_run_stamp_for_run_dir() -> None:
@@ -122,23 +137,54 @@ def test_execution_plan_ab_experiment_dir_overrides_stamp(tmp_path: Path) -> Non
     assert plan.log_dir == experiment_dir / "logs"
 
 
-def test_execution_plan_agent_bench_run_dir_is_strongest_override(tmp_path: Path) -> None:
+def test_execution_plan_ab_run_dir_and_experiment_dir_are_aliases(tmp_path: Path) -> None:
     resolved = load_resolved_experiment(ROOT / "experiments" / "client_only.toml", root=ROOT)
     run_dir = tmp_path / "explicit-run"
 
-    plan = build_execution_plan(
+    run_plan = build_execution_plan(
         resolved,
         env={
             "AB_REPO_ROOT": str(ROOT),
             "AB_RUN_DIR": str(run_dir),
-            "AB_EXPERIMENT_DIR": str(tmp_path / "custom-exp"),
+            "AB_RUN_STAMP": "ignored-stamp",
+        },
+    )
+    experiment_plan = build_execution_plan(
+        resolved,
+        env={
+            "AB_REPO_ROOT": str(ROOT),
+            "AB_EXPERIMENT_DIR": str(run_dir),
+            "AB_RUN_STAMP": "ignored-stamp",
+        },
+    )
+    both_plan = build_execution_plan(
+        resolved,
+        env={
+            "AB_REPO_ROOT": str(ROOT),
+            "AB_RUN_DIR": str(run_dir),
+            "AB_EXPERIMENT_DIR": str(run_dir),
             "AB_RUN_STAMP": "ignored-stamp",
         },
     )
 
-    assert plan.run_id == "explicit-run"
-    assert plan.run_dir == run_dir
-    assert plan.log_dir == run_dir / "logs"
+    for plan in (run_plan, experiment_plan, both_plan):
+        assert plan.run_id == "explicit-run"
+        assert plan.run_dir == run_dir
+        assert plan.log_dir == run_dir / "logs"
+
+
+def test_execution_plan_rejects_conflicting_run_dir_aliases(tmp_path: Path) -> None:
+    resolved = load_resolved_experiment(ROOT / "experiments" / "client_only.toml", root=ROOT)
+
+    with pytest.raises(ConfigError, match="AB_RUN_DIR and AB_EXPERIMENT_DIR"):
+        build_execution_plan(
+            resolved,
+            env={
+                "AB_REPO_ROOT": str(ROOT),
+                "AB_RUN_DIR": str(tmp_path / "run"),
+                "AB_EXPERIMENT_DIR": str(tmp_path / "experiment"),
+            },
+        )
 
 
 @pytest.mark.parametrize(
@@ -372,6 +418,41 @@ def test_prepare_environment_installs_missing_swebench_deps_in_pbs_target(tmp_pa
     assert env["PYTHONPATH"].split(":")[0] == str(Path(env["AB_RUNTIME_PYLIB"]).resolve())
 
 
+def test_prepare_environment_installs_missing_swebench_deps_in_local_target(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("AB_RUNTIME_PYLIB", raising=False)
+    resolved = load_resolved_experiment(ROOT / "experiments" / "local_vllm.toml", root=ROOT)
+    env = {
+        "AB_REPO_ROOT": str(ROOT),
+        "AB_RUN_DIR": str(tmp_path / "run"),
+        "AB_LOG_DIR": str(tmp_path / "run/logs"),
+    }
+    plan = execution.build_execution_plan(resolved, env=env)
+    ctx = execution.ExecutionContext(
+        resolved=resolved,
+        plan=plan,
+        retry_errors=True,
+        max_workers=1,
+        env=env,
+    )
+    installed: list[str] = []
+    targets: list[Path | None] = []
+
+    monkeypatch.setattr(execution, "_has_python_module", lambda module: bool(installed))
+
+    def fake_install(packages, *, log_path, env, install_target):
+        installed.extend(packages)
+        targets.append(install_target)
+
+    monkeypatch.setattr(execution, "_run_python_dependency_install", fake_install)
+
+    execution._prepare_environment(ctx)
+
+    target = plan.run_dir / "python_deps"
+    assert installed == ["datasets", "swebench"]
+    assert targets == [target]
+    assert env["PYTHONPATH"].split(":")[0] == str(target.resolve())
+
+
 def test_prepare_environment_installs_litellm_for_native_litellm_mode(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("AB_BENCHMARK_DATA_ROOT", "")
     monkeypatch.setenv("AB_BENCHMARK_DATA_ROOT", "")
@@ -464,6 +545,53 @@ def test_litellm_docker_start_registers_container_cleanup(tmp_path: Path, monkey
         ("terminate", fake_proc),
         ("rm", plan.serving_plan.metadata["container_name"]),
     ]
+
+
+def test_detached_docker_serving_waits_for_endpoint_after_docker_cli_exits(tmp_path: Path, monkeypatch) -> None:
+    resolved = load_resolved_experiment(ROOT / "experiments" / "local_vllm.toml", root=ROOT)
+    env = {
+        "AB_REPO_ROOT": str(ROOT),
+        "AB_RUN_DIR": str(tmp_path / "run"),
+        "AB_LOG_DIR": str(tmp_path / "run/logs"),
+    }
+    plan = build_execution_plan(resolved, env=env)
+    assert plan.serving_plan is not None
+    assert plan.serving_plan.mode == "docker"
+    assert "-d" in plan.serving_plan.argv
+    ctx = execution.ExecutionContext(
+        resolved=resolved,
+        plan=plan,
+        retry_errors=True,
+        max_workers=1,
+        env=env,
+    )
+    calls: list[tuple[str, object]] = []
+
+    class FakeProc:
+        def wait(self, timeout=None):
+            calls.append(("wait", timeout))
+            return 0
+
+    fake_proc = FakeProc()
+    monkeypatch.setattr(execution, "http_ready", lambda *args, **kwargs: False)
+    monkeypatch.setattr(execution, "prepare_launch_artifacts", lambda *args, **kwargs: None)
+    monkeypatch.setattr(execution.subprocess, "Popen", lambda *args, **kwargs: fake_proc)
+    monkeypatch.setattr(
+        execution,
+        "wait_for_http_ready",
+        lambda *args, **kwargs: calls.append(("ready_proc", kwargs["proc"])),
+    )
+    monkeypatch.setattr(execution, "terminate_process_group", lambda proc: calls.append(("terminate", proc)))
+    monkeypatch.setattr(execution, "_remove_docker_container", lambda name: calls.append(("rm", name)))
+
+    stack = ExitStack()
+    execution._start_serving(ctx, stack)
+    stack.close()
+
+    assert ("wait", 30) in calls
+    assert ("ready_proc", None) in calls
+    assert ("terminate", fake_proc) not in calls
+    assert ("rm", plan.serving_plan.metadata["container_name"]) in calls
 
 
 def test_swebench_instance_data_materializes_from_benchmark_profile(tmp_path: Path, monkeypatch) -> None:
@@ -610,3 +738,34 @@ def test_validate_and_run_entrypoints() -> None:
     assert "deployment: client_only" in dry_run.stdout
     assert "stages:" in dry_run.stdout
     assert "prepare_environment: enabled" in dry_run.stdout
+
+
+def test_run_entrypoint_cli_env_overrides(tmp_path: Path) -> None:
+    run_dir = tmp_path / "cli-run"
+    env = dict(os.environ)
+    env["AB_RUN_DIR"] = str(tmp_path / "stale-run")
+    env["AB_EXPERIMENT_DIR"] = str(tmp_path / "stale-experiment")
+    env["VLLM_MODE"] = "native"
+
+    dry_run = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "run.py"),
+            "--config",
+            str(ROOT / "experiments/local_vllm.toml"),
+            "--ab-run-dir",
+            str(run_dir),
+            "--ab-serving-mode",
+            "docker",
+            "--dry-run",
+        ],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert dry_run.returncode == 0, dry_run.stderr
+    assert f"run_dir: {run_dir}" in dry_run.stdout
+    assert "serving: vllm/docker" in dry_run.stdout

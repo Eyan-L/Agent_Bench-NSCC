@@ -19,3 +19,6 @@ profile = "profiles/serving/vllm/default.yaml"
 
 [deployment]
 profile = "profiles/deployments/local_docker.toml"
+
+[limits]
+max_workers = 1

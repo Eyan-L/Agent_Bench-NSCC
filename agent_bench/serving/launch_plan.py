@@ -76,7 +76,13 @@ def build_launch_plan(
         raise LaunchPlanError(f"unsupported serving backend for launch: {backend}")
 
     model = load_model_config(Path(model_path), serving=serving)
-    selected_mode = mode or base_env.get(_backend_env_name(backend, "MODE")) or base_env.get("AB_SERVING_MODE") or "native"
+    selected_mode = (
+        mode
+        or base_env.get(_backend_env_name(backend, "MODE"))
+        or base_env.get("AB_SERVING_MODE")
+        or serving.serving_mode
+        or "native"
+    )
     selected_mode = selected_mode.lower()
     log_value = str(log_path) if log_path is not None else _default_log_path(backend, base_env)
 
@@ -191,7 +197,19 @@ def _build_vllm_plan(
         "AB_MODEL_CONTEXT_WINDOW",
         default=model.context_window,
     )
-    tp = _env_int(env, "VLLM_TP", "AB_SERVING_TENSOR_PARALLEL_SIZE", default=1)
+    tp = _env_int(
+        env,
+        "VLLM_TP",
+        "AB_SERVING_TENSOR_PARALLEL_SIZE",
+        default=serving.tensor_parallel_size or 1,
+    )
+    cuda_devices = _env_str(
+        env,
+        "VLLM_CUDA_VISIBLE_DEVICES",
+        "AB_SERVING_CUDA_VISIBLE_DEVICES",
+        "CUDA_VISIBLE_DEVICES",
+        default=serving.cuda_visible_devices or "1",
+    )
     mig_uuid = env.get("VLLM_MIG_UUID", "") if mode == "docker" else ""
     if mig_uuid:
         tp = 1
@@ -233,16 +251,30 @@ def _build_vllm_plan(
             default=serving.enable_prefix_caching,
         ),
     )
-    all_flags = base_flags + preset_flags + _additional_flags(serving.additional_flags)
+    all_flags = (
+        base_flags
+        + preset_flags
+        + _additional_flags(serving.additional_flags)
+        + _extra_args(serving.extra_args)
+        + shlex.split(env.get("VLLM_EXTRA_ARGS", ""))
+    )
 
     launch_env = {
         "AB_SERVING_BASE_URL": endpoint,
         "OPENAI_BASE_URL": endpoint,
         "AB_SERVING_BACKEND": "vllm",
         "AB_SERVING_CONFIG_ID": config_id,
+        "CUDA_VISIBLE_DEVICES": cuda_devices,
+    }
+    if mode == "singularity":
+        launch_env["SINGULARITYENV_CUDA_VISIBLE_DEVICES"] = cuda_devices
+    metadata = {
+        "tensor_parallel_size": str(tp),
+        "cuda_visible_devices": cuda_devices,
+        "preset": preset,
+        "mode": mode,
     }
     if mode == "native":
-        launch_env["CUDA_VISIBLE_DEVICES"] = _env_str(env, "CUDA_VISIBLE_DEVICES", default="1")
         argv = ("vllm", "serve", model_name, *all_flags)
     elif mode == "docker":
         image = _env_str(env, "VLLM_IMAGE", "AB_SERVING_IMAGE", default=serving.image or "vllm/vllm-openai:v0.11.0")
@@ -253,7 +285,7 @@ def _build_vllm_plan(
             mig = mig_uuid if mig_uuid.startswith("MIG-") else f"MIG-{mig_uuid}"
             docker_args.extend(["--device", f"nvidia.com/gpu={mig}"])
         else:
-            docker_args.extend(["--gpus", "all"])
+            docker_args.extend(["--gpus", _docker_gpu_request(cuda_devices)])
         docker_args.extend(["-v", f"{hf_home}:/root/.cache/huggingface:rw", "-e", "VLLM_USAGE_SOURCE=oc-eval-docker"])
         if env.get("HUGGING_FACE_HUB_TOKEN"):
             docker_args.extend(["-e", "HUGGING_FACE_HUB_TOKEN"])
@@ -263,6 +295,8 @@ def _build_vllm_plan(
             docker_args.extend(["--rm", "-it"])
         docker_args.extend(shlex.split(env.get("VLLM_EXTRA_DOCKER_ARGS", "")))
         argv = ("docker", *docker_args, image, "--model", model_name, *all_flags)
+        metadata["container_name"] = container
+        metadata["image"] = image
     else:
         sif = _env_str(env, "VLLM_SIF", "AB_SERVING_SIF", default=serving.sif or "")
         if not sif:
@@ -282,11 +316,7 @@ def _build_vllm_plan(
         pid_name="vllm",
         config_id=config_id,
         model_name=model_name,
-        metadata={
-            "tensor_parallel_size": str(tp),
-            "preset": preset,
-            "mode": mode,
-        },
+        metadata=metadata,
     )
 
 
@@ -297,14 +327,25 @@ def _build_sglang_plan(
     env: Mapping[str, str],
     log_path: str | None,
 ) -> ServingLaunchPlan:
-    if mode not in {"native", "singularity"}:
+    if mode not in {"native", "docker", "singularity"}:
         raise LaunchPlanError(f"unsupported SGLang launch mode: {mode}")
     port = _env_int(env, "SGLANG_PORT", "AB_SERVING_PORT", default=serving.port)
     bind_host = _env_str(env, "SGLANG_HOST", "AB_SERVING_BIND_HOST", default=serving.bind_host)
     client_host = _env_str(env, "AB_SERVING_CLIENT_HOST", default=serving.client_host)
     endpoint = _endpoint_with_host_port(serving.endpoint, host=client_host, port=port)
-    cuda_devices = _env_str(env, "SGLANG_CUDA_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", default="0")
-    gpu_count = max(1, len([item for item in cuda_devices.split(",") if item]))
+    cuda_devices = _env_str(
+        env,
+        "SGLANG_CUDA_VISIBLE_DEVICES",
+        "AB_SERVING_CUDA_VISIBLE_DEVICES",
+        "CUDA_VISIBLE_DEVICES",
+        default=serving.cuda_visible_devices or "0",
+    )
+    tp = _env_int(
+        env,
+        "SGLANG_TP",
+        "AB_SERVING_TENSOR_PARALLEL_SIZE",
+        default=serving.tensor_parallel_size or 1,
+    )
     model_name = _env_str(env, "SGLANG_MODEL_PATH", "AB_MODEL_NAME", default=model.name)
     gpu_util = _env_float(env, "SGLANG_MEM_FRACTION_STATIC", "AB_SERVING_GPU_MEMORY_UTILIZATION", default=serving.gpu_mem_util)
     context_length = _env_optional(
@@ -334,8 +375,8 @@ def _build_sglang_plan(
         "--page-size",
         page_size,
     ]
-    if gpu_count > 1:
-        server_flags.extend(["--tp", str(gpu_count)])
+    if tp > 1:
+        server_flags.extend(["--tp", str(tp)])
     if context_length:
         server_flags.extend(["--context-length", str(context_length)])
     if hierarchical_cache:
@@ -344,8 +385,9 @@ def _build_sglang_plan(
         server_flags.extend(["--tool-call-parser", tool_parser])
     if reasoning_parser:
         server_flags.extend(["--reasoning-parser", reasoning_parser])
-    server_flags.extend(shlex.split(env.get("SGLANG_EXTRA_ARGS", "")))
     server_flags.extend(_additional_flags(serving.additional_flags))
+    server_flags.extend(_extra_args(serving.extra_args))
+    server_flags.extend(shlex.split(env.get("SGLANG_EXTRA_ARGS", "")))
 
     launch_env = {
         "CUDA_VISIBLE_DEVICES": cuda_devices,
@@ -356,12 +398,48 @@ def _build_sglang_plan(
         "SGLANG_KV_MEMTRACE": "0",
         "SGLANG_KV_MEMTRACE_STRICT": "0",
     }
+    if mode == "singularity":
+        launch_env["SINGULARITYENV_CUDA_VISIBLE_DEVICES"] = cuda_devices
     pid_file = env.get("SGLANG_PID_FILE")
     if pid_file:
         launch_env["SGLANG_PID_FILE"] = pid_file
+    metadata = {
+        "tensor_parallel_size": str(tp),
+        "cuda_visible_devices": cuda_devices,
+        "mode": mode,
+    }
 
     if mode == "native":
         argv = ("python3", "-m", "sglang.launch_server", *server_flags)
+    elif mode == "docker":
+        image = _docker_image_ref(
+            _env_str(
+                env,
+                "SGLANG_IMAGE",
+                "AB_SERVING_IMAGE",
+                default=serving.image or "lmsysorg/sglang:v0.5.12.post1-cu130",
+            )
+        )
+        container = _env_str(env, "SGLANG_CONTAINER_NAME", default="oc-sglang-serve")
+        hf_home = _env_str(env, "SGLANG_HOST_HF_HOME", "HF_HOME", default=str(Path.home() / ".cache/huggingface"))
+        docker_args = ["run", "--name", container, "--network", "host", "--ipc", "host", "--shm-size", "16g"]
+        docker_args.extend(["--gpus", _docker_gpu_request(cuda_devices)])
+        docker_args.extend(["-v", f"{hf_home}:/root/.cache/huggingface:rw"])
+        model_mount = _docker_model_mount(model_name)
+        if model_mount:
+            docker_args.extend(["-v", model_mount])
+        if env.get("HUGGING_FACE_HUB_TOKEN"):
+            docker_args.extend(["-e", "HUGGING_FACE_HUB_TOKEN"])
+        if env.get("HF_TOKEN"):
+            docker_args.extend(["-e", "HF_TOKEN"])
+        if _env_bool(env, "SGLANG_DETACH", default=True):
+            docker_args.append("-d")
+        else:
+            docker_args.extend(["--rm", "-it"])
+        docker_args.extend(shlex.split(env.get("SGLANG_EXTRA_DOCKER_ARGS", "")))
+        argv = ("docker", *docker_args, image, "python3", "-m", "sglang.launch_server", *server_flags)
+        metadata["container_name"] = container
+        metadata["image"] = image
     else:
         sif = _env_str(env, "SGLANG_SIF", "AB_SERVING_SIF", default=serving.sif or "")
         if not sif:
@@ -380,7 +458,7 @@ def _build_sglang_plan(
         pid_name="sglang",
         config_id=launch_env["AB_SERVING_CONFIG_ID"],
         model_name=model_name,
-        metadata={"tensor_parallel_size": str(gpu_count), "mode": mode},
+        metadata=metadata,
     )
 
 
@@ -555,6 +633,33 @@ def _vllm_preset_flags(
     if preset == "context":
         return "vllm-context", ["--max-num-seqs", "32", "--enable-prefix-caching", "--kv-cache-dtype", "fp8"]
     raise LaunchPlanError(f"unknown vLLM preset: {preset}")
+
+
+def _docker_gpu_request(cuda_devices: str) -> str:
+    value = str(cuda_devices).strip()
+    if not value or value.lower() == "all":
+        return "all"
+    return f"device={value}"
+
+
+def _docker_model_mount(model_name: str) -> str | None:
+    path = Path(model_name).expanduser()
+    if not path.is_absolute() or not path.exists():
+        return None
+    mount_root = path
+    if path.parent.name == "snapshots":
+        mount_root = path.parent.parent
+    if path.is_file():
+        mount_root = path.parent
+    return f"{mount_root}:{mount_root}:ro"
+
+
+def _extra_args(args: Sequence[str] | str | None) -> list[str]:
+    if not args:
+        return []
+    if isinstance(args, str):
+        return shlex.split(args)
+    return [str(item) for item in args]
 
 
 def _additional_flags(flags: Mapping[str, Any] | None) -> list[str]:

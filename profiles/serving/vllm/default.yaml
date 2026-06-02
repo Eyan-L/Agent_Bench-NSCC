@@ -1,10 +1,12 @@
 # Default vLLM endpoint profile. Model context length comes from
-# profiles/models/*.json; tensor parallelism is selected at launch time via
-# AB_SERVING_TENSOR_PARALLEL_SIZE or VLLM_TP.
+# profiles/models/*.json. Runtime TP/CUDA defaults can be overridden via
+# AB_SERVING_TENSOR_PARALLEL_SIZE, VLLM_TP, AB_SERVING_CUDA_VISIBLE_DEVICES,
+# VLLM_CUDA_VISIBLE_DEVICES, or CUDA_VISIBLE_DEVICES.
 serving:
   config_id: vllm-default
   backend: vllm
   preset: default
+  serving_mode: docker
   endpoint:
     scheme: http
     bind_host: 0.0.0.0
@@ -12,8 +14,11 @@ serving:
     port: 8000
     path: /v1
   runtime:
+    tensor_parallel_size: 1
+    cuda_visible_devices: "0"
     gpu_mem_util: 0.9
   scheduler:
     max_num_seqs: 128
     enable_prefix_caching: true
   additional_flags: {}
+  extra_args: []

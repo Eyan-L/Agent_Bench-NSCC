@@ -32,15 +32,19 @@ Important boundaries:
 - Model configs own `context_window` and `max_tokens`. `context_window` is
   also the default `--max-model-len` passed to vLLM/SGLang; `max_tokens` is
   the single-response completion cap.
-- Serving configs own endpoint, image/SIF, scheduler, and engine knobs. They
-  must not contain context length or tensor-parallel size.
+- Serving configs own endpoint, image/SIF, scheduler, engine knobs, and
+  launch defaults such as `runtime.tensor_parallel_size` and
+  `runtime.cuda_visible_devices`. They must not contain model context length.
 - Provider-backed serving should normally use `backend: "litellm"`. The PBS
   launcher starts a local LiteLLM OpenAI-compatible proxy, passes the real
   upstream key only to that proxy container via `serving.provider.*.api_key_env`,
   and exposes only a local proxy key to OpenClaw/OpenHands/Hermes. Direct
   `backend: "provider"` / `backend: "api"` profiles are not supported.
-- Tensor parallelism is launch state: set `AB_SERVING_TENSOR_PARALLEL_SIZE` or backend-specific `VLLM_TP`/`SGLANG_TP`
-  when submitting/running the job.
+- Tensor parallelism defaults live in serving profiles. Override them at
+  submission/runtime with `AB_SERVING_TENSOR_PARALLEL_SIZE` or backend-specific
+  `VLLM_TP`/`SGLANG_TP`; override CUDA visibility with
+  `AB_SERVING_CUDA_VISIBLE_DEVICES`, backend-specific CUDA variables, or
+  `CUDA_VISIBLE_DEVICES`.
 - A valid run must satisfy:
 
 ```text

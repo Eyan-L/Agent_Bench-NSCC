@@ -97,6 +97,8 @@ environment and calls the same `run.py --config` path used locally.
 ## Outputs
 
 Runs write under the experiment `output_dir`, usually `runs/<experiment>/<run_id>/`.
+Set either `AB_RUN_DIR` or `AB_EXPERIMENT_DIR` to choose the run directory;
+they are strict aliases and must match if both are set.
 Common files:
 
 - `manifest.json`: run metadata and terminal state

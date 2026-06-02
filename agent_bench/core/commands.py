@@ -11,6 +11,7 @@ from agent_bench.core.execution import (
     _instance_data_path,
     build_execution_plan,
     format_execution_plan,
+    resolve_max_workers,
     run_experiment_stages,
 )
 from agent_bench.core.spec import ConfigError, load_resolved_experiment
@@ -39,19 +40,40 @@ def validate_main(argv: Sequence[str] | None = None) -> int:
 def run_main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Resolve and run an Agent Bench experiment.")
     parser.add_argument("--config", required=True, help="Path to an experiment TOML file.")
+    parser.add_argument(
+        "--run-dir",
+        "--ab-run-dir",
+        dest="run_dir",
+        help="Set AB_RUN_DIR/AB_EXPERIMENT_DIR for this invocation.",
+    )
+    parser.add_argument(
+        "--serving-mode",
+        "--ab-serving-mode",
+        dest="serving_mode",
+        choices=("native", "docker", "singularity"),
+        help="Set AB_SERVING_MODE for this invocation.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Render the execution plan without launching work.")
     parser.add_argument("--render-job", action="store_true", help="Print rendered job script when available.")
     parser.add_argument("--print-job", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-retry-errors", action="store_true", help="Do not retry ERROR runs.")
-    parser.add_argument("--max-workers", type=int, default=int(os.environ.get("AB_RUN_MAX_WORKERS", "1")))
+    parser.add_argument("--max-workers", type=int, default=None)
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     args = parser.parse_args(argv)
+
+    if args.run_dir:
+        _apply_cli_run_dir(args.run_dir)
+    if args.serving_mode:
+        os.environ["AB_SERVING_MODE"] = args.serving_mode
 
     try:
         resolved = load_resolved_experiment(args.config)
     except ConfigError as exc:
         print(f"invalid: {exc}", file=sys.stderr)
         return 2
+
+    if args.serving_mode:
+        _apply_cli_serving_mode(resolved.serving.get("backend"), args.serving_mode)
 
     if args.render_job or args.print_job:
         try:
@@ -83,7 +105,7 @@ def run_main(argv: Sequence[str] | None = None) -> int:
         result = run_experiment_stages(
             resolved,
             retry_errors=not args.no_retry_errors,
-            max_workers=args.max_workers,
+            max_workers=resolve_max_workers(resolved, cli_max_workers=args.max_workers),
         )
     except ConfigError as exc:
         print(f"invalid: {exc}", file=sys.stderr)
@@ -92,6 +114,18 @@ def run_main(argv: Sequence[str] | None = None) -> int:
     if args.json:
         print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
     return 0
+
+
+def _apply_cli_run_dir(value: str) -> None:
+    run_dir = str(Path(value).expanduser())
+    os.environ["AB_RUN_DIR"] = run_dir
+    os.environ["AB_EXPERIMENT_DIR"] = run_dir
+
+
+def _apply_cli_serving_mode(backend: object, value: str) -> None:
+    os.environ["AB_SERVING_MODE"] = value
+    if isinstance(backend, str) and backend:
+        os.environ[f"{backend.upper()}_MODE"] = value
 
 
 def analyze_main(argv: Sequence[str] | None = None) -> int:

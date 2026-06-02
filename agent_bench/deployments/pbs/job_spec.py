@@ -83,8 +83,13 @@ class PbsJobSpec:
                 "fi",
                 "export AB_RUN_STAMP",
                 f"export AB_EXPERIMENT_BASE={shlex.quote(str(experiment_base))}",
-                'export AB_EXPERIMENT_DIR="${AB_EXPERIMENT_DIR:-$AB_EXPERIMENT_BASE/$AB_RUN_STAMP}"',
-                'export AB_RUN_DIR="${AB_RUN_DIR:-$AB_EXPERIMENT_DIR}"',
+                'if [[ -n "${AB_RUN_DIR:-}" && -n "${AB_EXPERIMENT_DIR:-}" && "$AB_RUN_DIR" != "$AB_EXPERIMENT_DIR" ]]; then',
+                '    echo "AB_RUN_DIR and AB_EXPERIMENT_DIR are aliases and must match when both are set" >&2',
+                '    exit 2',
+                'fi',
+                'AB_RUN_DIR="${AB_RUN_DIR:-${AB_EXPERIMENT_DIR:-$AB_EXPERIMENT_BASE/$AB_RUN_STAMP}}"',
+                'export AB_RUN_DIR',
+                'export AB_EXPERIMENT_DIR="$AB_RUN_DIR"',
                 'export AB_LOG_DIR="${AB_LOG_DIR:-$AB_RUN_DIR/logs}"',
                 f"export AB_STAGE_SUMMARY={shlex.quote(self.stage_summary())}",
                 f"python3 run.py --config {config_arg}",
@@ -207,17 +212,28 @@ def _resolve_stages(resolved: ResolvedExperiment, env: Mapping[str, str]) -> dic
     return stages
 
 
-def _serving_mode(resolved: ResolvedExperiment, env: Mapping[str, str]) -> str:
-    explicit = env.get("AB_SERVING_MODE")
-    if explicit:
-        return explicit
+def _serving_mode(resolved: ResolvedExperiment, env: Mapping[str, str]) -> str | None:
     backend = resolved.serving.get("backend")
     backend_key = f"{str(backend).upper()}_MODE"
     if backend_key in env:
         return env[backend_key]
+    explicit = env.get("AB_SERVING_MODE")
+    if explicit:
+        return explicit
+    profile_mode = _serving_mode_from_profile(resolved)
+    if profile_mode:
+        return profile_mode
     if resolved.deployment.get("container_runtime") == "singularity":
         return "singularity"
-    return "native"
+    return None
+
+
+def _serving_mode_from_profile(resolved: ResolvedExperiment) -> str | None:
+    value = resolved.serving.get("serving_mode") or resolved.serving.get("servingmode")
+    runtime = resolved.serving.get("runtime")
+    if not value and isinstance(runtime, dict):
+        value = runtime.get("serving_mode") or runtime.get("servingmode")
+    return str(value).lower() if value else None
 
 
 def _path_from_env_or_default(env: Mapping[str, str], key: str, default: str | Path) -> Path:
@@ -231,18 +247,28 @@ def _resolve_job_run_dir(
     resolved: ResolvedExperiment,
     env: Mapping[str, str],
 ) -> tuple[str, Path]:
-    explicit = env.get("AB_RUN_DIR")
-    if explicit:
-        run_dir = Path(explicit).expanduser()
-        return run_dir.name, run_dir
-
-    experiment_dir = env.get("AB_EXPERIMENT_DIR")
-    if experiment_dir:
-        run_dir = Path(experiment_dir).expanduser()
-        return run_dir.name, run_dir
+    explicit = _aliased_run_dir(env)
+    if explicit is not None:
+        return explicit.name, explicit
 
     stamp = _run_stamp(env)
     return stamp, resolved.spec.output_dir / stamp
+
+
+def _aliased_run_dir(env: Mapping[str, str]) -> Path | None:
+    run_dir = env.get("AB_RUN_DIR")
+    experiment_dir = env.get("AB_EXPERIMENT_DIR")
+    if run_dir and experiment_dir:
+        left = Path(run_dir).expanduser()
+        right = Path(experiment_dir).expanduser()
+        if left != right:
+            raise ConfigError(
+                "AB_RUN_DIR and AB_EXPERIMENT_DIR are aliases and must match "
+                f"when both are set (got {left} and {right})"
+            )
+        return left
+    value = run_dir or experiment_dir
+    return Path(value).expanduser() if value else None
 
 
 def _run_stamp(env: Mapping[str, str]) -> str:

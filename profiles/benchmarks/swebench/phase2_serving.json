@@ -10,7 +10,5 @@
   "repo_mapping": {},
   "container_image": "swebench/swe-bench:latest",
   "wall_clock_budget_seconds": 1800,
-  "output_dir": "phase2_serving",
-  "parallel_limit_gpu": 1,
-  "parallel_limit_cpu_cores": 8
+  "output_dir": "phase2_serving"
 }

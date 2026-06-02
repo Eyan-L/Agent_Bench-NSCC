@@ -1,0 +1,25 @@
+name = "local_vllm"
+description = "Local Docker SWE-bench smoke run with vLLM serving."
+output_dir = "/mnt/vdb/agent-bench"
+seeds = [42]
+
+[benchmark]
+name = "swebench"
+output_dir = "runs/client_only"
+profile = "profiles/benchmarks/swebench/smoke3.json"
+
+[harness]
+name = "openclaw"
+profile = "profiles/harnesses/openclaw_swebench.yaml"
+
+[model]
+profile = "profiles/models/qwen36_35b_a3b_local.json"
+
+[serving]
+profile = "profiles/serving/vllm/default.yaml"
+
+[deployment]
+profile = "profiles/deployments/local_docker.toml"
+
+[limits]
+max_workers = 1

@@ -52,7 +52,5 @@
   "container_image": "longbench/clawrag-sandbox.UNUSED:latest",
   "wall_clock_budget_seconds": 7200,
   "output_dir": "longbench_full21",
-  "seeds": [42],
-  "parallel_limit_gpu": 1,
-  "parallel_limit_cpu_cores": 8
+  "seeds": [42]
 }

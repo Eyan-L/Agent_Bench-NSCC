@@ -4,6 +4,7 @@ serving:
   config_id: vllm-debug
   backend: vllm
   preset: default
+  serving_mode: docker
   endpoint:
     scheme: http
     bind_host: 0.0.0.0
@@ -11,8 +12,11 @@ serving:
     port: 8000
     path: /v1
   runtime:
+    tensor_parallel_size: 1
+    cuda_visible_devices: "0"
     gpu_mem_util: 0.9
   scheduler:
     max_num_seqs: 16
     enable_prefix_caching: true
   additional_flags: {}
+  extra_args: []

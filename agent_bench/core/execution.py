@@ -17,6 +17,7 @@ from agent_bench.core.spec import ConfigError, ResolvedExperiment, STAGE_NAMES
 from agent_bench.deployments.processes import (
     ProcessError,
     http_ready,
+    tail_text,
     terminate_process_group,
     wait_for_http_ready,
 )
@@ -47,6 +48,36 @@ _STAGE_DESCRIPTIONS = {
     "run_benchmark": "run benchmark driver",
     "cleanup": "stop sidecars and flush telemetry",
 }
+
+
+def resolve_max_workers(
+    resolved: ResolvedExperiment,
+    *,
+    cli_max_workers: int | None = None,
+    env: Mapping[str, str] | None = None,
+) -> int:
+    if cli_max_workers is not None:
+        return _positive_int(cli_max_workers, "--max-workers")
+
+    target_env = os.environ if env is None else env
+    env_value = target_env.get("AB_RUN_MAX_WORKERS")
+    if env_value is not None:
+        try:
+            parsed = int(env_value)
+        except ValueError as exc:
+            raise ConfigError("AB_RUN_MAX_WORKERS must be a positive integer") from exc
+        return _positive_int(parsed, "AB_RUN_MAX_WORKERS")
+
+    return _positive_int(
+        resolved.spec.limits.get("max_workers", 1),
+        "limits.max_workers",
+    )
+
+
+def _positive_int(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ConfigError(f"{label} must be a positive integer")
+    return value
 
 
 @dataclass(frozen=True)
@@ -350,17 +381,23 @@ def _prepare_environment(ctx: ExecutionContext) -> None:
         ctx.plan.run_dir.mkdir(parents=True, exist_ok=True)
         ctx.plan.log_dir.mkdir(parents=True, exist_ok=True)
         ctx.env.setdefault("AB_REPO_ROOT", str(Path.cwd()))
-        ctx.env.setdefault("AB_EXPERIMENT_DIR", str(ctx.plan.run_dir))
         ctx.env.setdefault("AB_LOG_DIR", str(ctx.plan.log_dir))
 
     ctx.env.setdefault("AB_STAGE_SUMMARY", _stage_summary(ctx.plan))
     ctx.env.setdefault("AB_RUN_STAMP", ctx.plan.run_id)
-    ctx.env.setdefault("AB_EXPERIMENT_DIR", str(ctx.plan.run_dir))
-    ctx.env.setdefault("AB_RUN_DIR", str(ctx.plan.run_dir))
+    _set_aliased_run_dir_env(ctx.env, ctx.plan.run_dir)
     ctx.env.setdefault("AB_LOG_DIR", str(ctx.plan.log_dir))
     _prepare_otel_environment(ctx)
     _prepare_swebench_runtime_root(ctx)
     _prepare_python_dependencies(ctx)
+
+
+def _set_aliased_run_dir_env(env: dict[str, str], run_dir: Path) -> None:
+    value = str(run_dir)
+    env["AB_RUN_DIR"] = value
+    env["AB_EXPERIMENT_DIR"] = value
+    os.environ["AB_RUN_DIR"] = value
+    os.environ["AB_EXPERIMENT_DIR"] = value
 
 
 def _prepare_otel_environment(ctx: ExecutionContext) -> None:
@@ -465,10 +502,12 @@ def _append_unique(values: list[str], value: str) -> None:
 
 
 def _python_dependency_install_target(ctx: ExecutionContext) -> Path | None:
-    if ctx.plan.pbs_spec is None:
-        return None
     value = ctx.env.get("AB_RUNTIME_PYLIB")
-    return Path(value).expanduser() if value else None
+    if value:
+        return Path(value).expanduser()
+    if ctx.plan.pbs_spec is None:
+        return ctx.plan.run_dir / "python_deps"
+    return None
 
 
 def _missing_python_dependency_packages(dependencies: tuple[tuple[str, str], ...]) -> list[str]:
@@ -602,15 +641,20 @@ def _start_serving(ctx: ExecutionContext, stack: ExitStack) -> None:
             )
         except OSError as exc:
             raise ConfigError(f"failed to launch serving backend {plan.backend}: {exc}") from exc
+        readiness_proc = proc
+        if _is_detached_docker_launch(plan):
+            readiness_proc = _wait_for_detached_docker_launch(proc, log_path)
+
         container_name = _docker_container_name_for_cleanup(plan)
         if container_name:
             stack.callback(_remove_docker_container, container_name)
-        stack.callback(terminate_process_group, proc)
+        if readiness_proc is not None:
+            stack.callback(terminate_process_group, proc)
         try:
             wait_for_http_ready(
                 url=plan.readiness_url,
                 headers=plan.readiness_headers,
-                proc=proc,
+                proc=readiness_proc,
                 timeout_seconds=int(ctx.env.get("SERVE_READY_TIMEOUT", "600")),
                 log_path=log_path,
             )
@@ -619,8 +663,31 @@ def _start_serving(ctx: ExecutionContext, stack: ExitStack) -> None:
 
 
 def _docker_container_name_for_cleanup(plan: ServingLaunchPlan) -> str | None:
-    if plan.backend == "litellm" and plan.mode == "docker":
+    if plan.mode == "docker":
         return plan.metadata.get("container_name")
+    return None
+
+
+def _is_detached_docker_launch(plan: ServingLaunchPlan) -> bool:
+    return plan.mode == "docker" and plan.argv[:2] == ("docker", "run") and (
+        "-d" in plan.argv or "--detach" in plan.argv
+    )
+
+
+def _wait_for_detached_docker_launch(
+    proc: subprocess.Popen[bytes],
+    log_path: Path,
+) -> subprocess.Popen[bytes] | None:
+    try:
+        returncode = proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        return proc
+    if returncode:
+        details = f"; see {log_path}"
+        tail = tail_text(log_path, lines=20)
+        if tail:
+            details = f"{details}\n{tail}"
+        raise ConfigError(f"detached docker serving command failed with exit code {returncode}{details}")
     return None
 
 
@@ -776,10 +843,21 @@ def _local_serving_mode(resolved: ResolvedExperiment, backend: str, env: Mapping
         return env[backend_key]
     if "AB_SERVING_MODE" in env:
         return env["AB_SERVING_MODE"]
+    profile_mode = _serving_mode_from_profile(resolved)
+    if profile_mode:
+        return profile_mode
     deployment = resolved.deployment.get("kind") or resolved.deployment.get("name")
     if backend == "litellm" and deployment in {"client_only", "local_docker"}:
         return "docker"
     return None
+
+
+def _serving_mode_from_profile(resolved: ResolvedExperiment) -> str | None:
+    value = resolved.serving.get("serving_mode") or resolved.serving.get("servingmode")
+    runtime = resolved.serving.get("runtime")
+    if not value and isinstance(runtime, dict):
+        value = runtime.get("serving_mode") or runtime.get("servingmode")
+    return str(value).lower() if value else None
 
 
 def _default_stage_flags(resolved: ResolvedExperiment, env: Mapping[str, str]) -> dict[str, bool]:
@@ -880,18 +958,28 @@ def _resolve_execution_run_dir(
     resolved: ResolvedExperiment,
     env: Mapping[str, str],
 ) -> tuple[str, Path]:
-    explicit = env.get("AB_RUN_DIR")
-    if explicit:
-        run_dir = Path(explicit).expanduser()
-        return run_dir.name, run_dir
-
-    experiment_dir = env.get("AB_EXPERIMENT_DIR")
-    if experiment_dir:
-        run_dir = Path(experiment_dir).expanduser()
-        return run_dir.name, run_dir
+    explicit = _aliased_run_dir(env)
+    if explicit is not None:
+        return explicit.name, explicit
 
     stamp = _run_stamp(env)
     return stamp, resolved.spec.output_dir / stamp
+
+
+def _aliased_run_dir(env: Mapping[str, str]) -> Path | None:
+    run_dir = env.get("AB_RUN_DIR")
+    experiment_dir = env.get("AB_EXPERIMENT_DIR")
+    if run_dir and experiment_dir:
+        left = Path(run_dir).expanduser()
+        right = Path(experiment_dir).expanduser()
+        if left != right:
+            raise ConfigError(
+                "AB_RUN_DIR and AB_EXPERIMENT_DIR are aliases and must match "
+                f"when both are set (got {left} and {right})"
+            )
+        return left
+    value = run_dir or experiment_dir
+    return Path(value).expanduser() if value else None
 
 
 def _run_stamp(env: Mapping[str, str]) -> str:

@@ -78,7 +78,7 @@ Provider-native names are still allowed when they belong to an external API or b
 | `OC_BIN` | `AB_HARNESS_OPENCLAW_BIN` | OpenClaw CLI path. | OpenClaw configure/run scripts. |
 | `OC_PATCH_*` | `AB_HARNESS_OPENCLAW_PATCH_*` | OpenClaw patch marker variables. | Preventing duplicate in-place runtime patches. |
 | `HM_PATCH_*` | `AB_HARNESS_HERMES_PATCH_*` | Hermes patch marker variables. | Preventing duplicate in-place runtime patches. |
-| `OC_PYLIB` | `AB_RUNTIME_PYLIB` | Shared Python library/cache root. | Runtime dependency materialization on PBS. |
+| `OC_PYLIB` | `AB_RUNTIME_PYLIB` | Shared Python library/cache root. | Runtime dependency materialization. |
 | `OC_PIP_CACHE` | `AB_RUNTIME_PIP_CACHE` | Pip cache path. | Faster repeated runtime setup. |
 
 ## Deployment, Scoring, And Telemetry Names
@@ -87,7 +87,7 @@ Provider-native names are still allowed when they belong to an external API or b
 |---|---|---|---|
 | `AGENT_BENCH_PBS_SITE` | `AB_PBS_SITE` | PBS site identifier. | Site-specific PBS defaults and job metadata. |
 | `AGENT_BENCH_PROJECT` | `AB_DEPLOYMENT_PROJECT` | Deployment project/account name. | Cloud/PBS deployment metadata. |
-| `AGENT_BENCH_RUN_DIR` | `AB_RUN_DIR` | Active run directory. | Runtime artifacts, manifests, and per-run outputs. |
+| `AGENT_BENCH_RUN_DIR` | `AB_RUN_DIR` | Active run directory. | Runtime artifacts, manifests, and per-run outputs. `AB_EXPERIMENT_DIR` is a strict alias. |
 | `AGENT_BENCH_LOG_DIR` | `AB_LOG_DIR` | Active log directory. | Stage logs, telemetry files, and serving logs. |
 | `AGENT_BENCH_STAGES` | `AB_STAGE_SUMMARY` | Enabled/disabled stage summary. | Rendered job metadata and debugging. |
 | `STAGE_SERVING`, `STAGE_OTEL`, `STAGE_SWEBENCH`, `STAGE_CLEANUP` | `AB_STAGE_START_SERVING`, `AB_STAGE_START_OTEL`, `AB_STAGE_RUN_BENCHMARK`, `AB_STAGE_CLEANUP` | Per-stage enable flags. | Controlling composed execution stages. |

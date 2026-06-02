@@ -30,6 +30,7 @@ def test_vllm_native_launch_plan_uses_profile_and_env_overrides() -> None:
         "profiles/models/qwen35_9b.json",
         "profiles/serving/vllm/default.yaml",
         backend="vllm",
+        mode="native",
         env={"AB_SERVING_PORT": "8123", "AB_SERVING_TENSOR_PARALLEL_SIZE": "2", "CUDA_VISIBLE_DEVICES": "0,1"},
     )
 
@@ -57,6 +58,7 @@ def test_vllm_docker_launch_plan_does_not_inline_forwarded_token() -> None:
     assert "--gpus" in plan.argv
     assert "--model" in plan.argv
     assert "Qwen/Qwen3.5-9B" in plan.argv
+    assert plan.metadata["container_name"] == "oc-vllm-serve"
     assert "hf-secret" not in " ".join(plan.argv)
 
 
@@ -65,7 +67,8 @@ def test_sglang_native_and_singularity_launch_plans() -> None:
         "profiles/models/qwen35_9b.json",
         "profiles/serving/sglang/default.yaml",
         backend="sglang",
-        env={"SGLANG_CUDA_VISIBLE_DEVICES": "0,1"},
+        mode="native",
+        env={"SGLANG_CUDA_VISIBLE_DEVICES": "0,1", "SGLANG_TP": "2"},
     )
 
     assert native.argv[:3] == ("python3", "-m", "sglang.launch_server")
@@ -83,6 +86,105 @@ def test_sglang_native_and_singularity_launch_plans() -> None:
 
     assert singularity.argv[:4] == ("singularity", "exec", "--nv", "--containall")
     assert "/tmp/sglang.sif" in singularity.argv
+
+
+def test_serving_profile_mode_selects_sglang_docker() -> None:
+    plan = _plan(
+        "profiles/models/qwen35_9b.json",
+        "profiles/serving/sglang/default.yaml",
+        backend="sglang",
+        env={"SGLANG_CUDA_VISIBLE_DEVICES": "0", "SGLANG_DETACH": "0"},
+    )
+
+    assert plan.mode == "docker"
+    assert plan.argv[:2] == ("docker", "run")
+    assert "lmsysorg/sglang:v0.5.12.post1-cu130" in plan.argv
+    assert "python3" in plan.argv
+    assert "sglang.launch_server" in plan.argv
+    assert "--gpus" in plan.argv
+    assert plan.env["CUDA_VISIBLE_DEVICES"] == "0"
+    assert plan.metadata["container_name"] == "oc-sglang-serve"
+
+
+def test_env_serving_mode_overrides_profile_mode() -> None:
+    plan = _plan(
+        "profiles/models/qwen35_9b.json",
+        "profiles/serving/sglang/default.yaml",
+        backend="sglang",
+        env={"AB_SERVING_MODE": "native"},
+    )
+
+    assert plan.mode == "native"
+    assert plan.argv[:3] == ("python3", "-m", "sglang.launch_server")
+
+
+def test_serving_profile_runtime_defaults_and_extra_args(tmp_path: Path) -> None:
+    serving = tmp_path / "vllm_profile.yaml"
+    serving.write_text(
+        """serving:
+  config_id: vllm-profile-runtime
+  backend: vllm
+  preset: default
+  endpoint:
+    scheme: http
+    bind_host: 0.0.0.0
+    client_host: 127.0.0.1
+    port: 8000
+    path: /v1
+  runtime:
+    tensor_parallel_size: 2
+    cuda_visible_devices: "0,1"
+    gpu_mem_util: 0.88
+  scheduler:
+    max_num_seqs: 16
+    enable_prefix_caching: false
+  additional_flags: {}
+  extra_args:
+    - --disable-log-requests
+    - --max-num-batched-tokens
+    - "4096"
+""",
+        encoding="utf-8",
+    )
+
+    plan = _plan(
+        "profiles/models/qwen35_9b.json",
+        str(serving),
+        backend="vllm",
+    )
+
+    assert plan.argv[plan.argv.index("--tensor-parallel-size") + 1] == "2"
+    assert plan.argv[plan.argv.index("--gpu-memory-utilization") + 1] == "0.88"
+    assert plan.env["CUDA_VISIBLE_DEVICES"] == "0,1"
+    assert "--disable-log-requests" in plan.argv
+    assert plan.argv[plan.argv.index("--max-num-batched-tokens") + 1] == "4096"
+    assert plan.metadata["tensor_parallel_size"] == "2"
+    assert plan.metadata["cuda_visible_devices"] == "0,1"
+
+
+def test_sglang_uses_tp_env_instead_of_visible_gpu_count() -> None:
+    plan = _plan(
+        "profiles/models/qwen35_9b.json",
+        "profiles/serving/sglang/default.yaml",
+        backend="sglang",
+        mode="native",
+        env={"SGLANG_CUDA_VISIBLE_DEVICES": "0,1"},
+    )
+
+    assert "--tp" not in plan.argv
+    assert plan.env["CUDA_VISIBLE_DEVICES"] == "0,1"
+    assert plan.metadata["tensor_parallel_size"] == "1"
+
+    override = _plan(
+        "profiles/models/qwen35_9b.json",
+        "profiles/serving/sglang/default.yaml",
+        backend="sglang",
+        mode="native",
+        env={"AB_SERVING_TENSOR_PARALLEL_SIZE": "2", "CUDA_VISIBLE_DEVICES": "0,1"},
+    )
+
+    assert override.argv[override.argv.index("--tp") + 1] == "2"
+    assert override.metadata["tensor_parallel_size"] == "2"
 
 
 def test_litellm_native_launch_plan_uses_proxy_auth_without_upstream_secret() -> None:

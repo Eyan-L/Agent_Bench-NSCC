@@ -21,4 +21,4 @@ profile = "profiles/serving/litellm/qwen36_35b_a3b.yaml"
 profile = "profiles/deployments/client_only.toml"
 
 [limits]
-max_instances = 1
+max_workers = 1

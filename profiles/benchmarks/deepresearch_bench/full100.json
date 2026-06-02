@@ -512,7 +512,5 @@
   "output_dir": "dr_full100",
   "seeds": [
     42
-  ],
-  "parallel_limit_gpu": 1,
-  "parallel_limit_cpu_cores": 8
+  ]
 }

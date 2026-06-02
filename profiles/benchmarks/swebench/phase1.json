@@ -62,7 +62,5 @@
   "container_image": "swebench/sweb.eval.x86_64.UNUSED:latest",
   "wall_clock_budget_seconds": 1800,
   "output_dir": "phase1",
-  "seeds": [42],
-  "parallel_limit_gpu": 1,
-  "parallel_limit_cpu_cores": 8
+  "seeds": [42]
 }
