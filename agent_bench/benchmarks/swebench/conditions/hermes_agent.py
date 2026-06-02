@@ -366,6 +366,7 @@ class HermesAgentCondition:
             duration_ms = float(evt.get("duration_ms"))
         except (TypeError, ValueError):
             duration_ms = max((end_ns - start_ns) / 1e6, 0.0)
+        request_index = self._as_int(evt.get("request_index")) or request_index
         input_tokens = self._as_int(evt.get("input_tokens") or evt.get("prompt_tokens"))
         output_tokens = self._as_int(evt.get("output_tokens") or evt.get("completion_tokens"))
         cache_read = self._as_int(evt.get("cache_read_tokens") or evt.get("cached_tokens"))
@@ -381,7 +382,9 @@ class HermesAgentCondition:
             "agent.session_id": evt.get("session_id") or session_id,
             "agent.sessionId": evt.get("sessionId") or evt.get("session_id") or session_id,
             "agent.llm.request_index": request_index,
+            "agent.llm.requestIndex": request_index,
             "agent.http.status_code": evt.get("http_status") or evt.get("httpStatus"),
+            "agent.http.statusCode": evt.get("httpStatus") or evt.get("http_status"),
             "agent.tokens.input": input_tokens,
             "agent.tokens.output": output_tokens,
             "agent.tokens.cache_read": cache_read,

@@ -27,6 +27,8 @@ def test_hermes_patch_manifest_and_backend_contract():
     assert "AB_HARNESS_HERMES_PATCH_TELEMETRY_BEGIN" in telemetry_text
     assert "AB_AGENT_RUNTIME_EVENTS_FILE" in telemetry_text
     assert "_hm_ab_coerce_json_string_args" in telemetry_text
+    assert "emit_model_usage_delta" in telemetry_text
+    assert '"request_index": usage_events_written' in telemetry_text
 
 
 def test_hermes_docker_smoke_checks_patch_status():

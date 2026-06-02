@@ -411,6 +411,7 @@ class OpenHandsAgentCondition:
             duration_ms = float(evt.get("duration_ms"))
         except (TypeError, ValueError):
             duration_ms = max((end_ns - start_ns) / 1e6, 0.0)
+        request_index = _as_int(evt.get("request_index")) or request_index
         prompt = _as_int(evt.get("input_tokens") or evt.get("prompt_tokens"))
         completion = _as_int(evt.get("output_tokens") or evt.get("completion_tokens"))
         cache_read = _as_int(evt.get("cache_read_tokens") or evt.get("cached_tokens"))
@@ -424,7 +425,9 @@ class OpenHandsAgentCondition:
             "agent.session_id": evt.get("session_id") or evt.get("sessionId") or run_id,
             "agent.run_id": evt.get("run_id") or evt.get("runId") or run_id,
             "agent.llm.request_index": request_index,
+            "agent.llm.requestIndex": request_index,
             "agent.http.status_code": evt.get("http_status") or evt.get("httpStatus"),
+            "agent.http.statusCode": evt.get("httpStatus") or evt.get("http_status"),
             "agent.tokens.input": prompt,
             "agent.tokens.output": completion,
             "agent.tokens.cache_read": cache_read,
@@ -434,6 +437,7 @@ class OpenHandsAgentCondition:
             "agent.tpot_ms": evt.get("tpot_ms") or evt.get("tbt_avg_ms"),
             "agent.headers_ms": evt.get("headers_ms"),
             "agent.chunks.count": evt.get("chunks_count"),
+            "agent.api_calls": _as_int(evt.get("api_calls")),
         }
         return {
             "name": "agent.model.usage",

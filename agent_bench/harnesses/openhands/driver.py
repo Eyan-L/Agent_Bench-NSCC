@@ -99,6 +99,181 @@ def _emit_error(sink: EventSink, kind: str, msg: str, **extra) -> None:
     sink.write({"driver_event": "error", "kind": kind, "message": msg, **extra})
 
 
+def _as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+
+def _get_value(obj: Any, *names: str) -> Any:
+    for name in names:
+        if isinstance(obj, dict) and name in obj:
+            return obj.get(name)
+        if hasattr(obj, name):
+            try:
+                return getattr(obj, name)
+            except Exception:
+                continue
+    return None
+
+
+def _usage_dict(value: Any, *, depth: int = 0) -> Dict[str, Any]:
+    if value is None or depth > 4:
+        return {}
+    if isinstance(value, dict):
+        usage = value.get("usage")
+        if isinstance(usage, dict):
+            return usage
+        for key in ("response", "data", "result", "output"):
+            nested = _usage_dict(value.get(key), depth=depth + 1)
+            if nested:
+                return nested
+        return value if any(k in value for k in ("prompt_tokens", "completion_tokens", "total_tokens")) else {}
+    usage = _get_value(value, "usage")
+    if usage is not None:
+        if isinstance(usage, dict):
+            return usage
+        serialized = _serialize(usage)
+        if isinstance(serialized, dict):
+            return serialized
+    serialized = _serialize(value)
+    if isinstance(serialized, dict) and serialized is not value:
+        return _usage_dict(serialized, depth=depth + 1)
+    return {}
+
+
+def _extract_model_usage(value: Any) -> Dict[str, int]:
+    usage = _usage_dict(value)
+    details = usage.get("prompt_tokens_details") or {}
+    prompt = _as_int(
+        usage.get("prompt_tokens")
+        or usage.get("input_tokens")
+        or usage.get("prompt")
+    )
+    completion = _as_int(
+        usage.get("completion_tokens")
+        or usage.get("output_tokens")
+        or usage.get("completion")
+    )
+    cache_read = _as_int(
+        usage.get("cache_read_tokens")
+        or usage.get("cache_read_input_tokens")
+        or usage.get("cached_tokens")
+        or details.get("cached_tokens")
+    )
+    cache_write = _as_int(
+        usage.get("cache_write_tokens")
+        or usage.get("cache_creation_tokens")
+        or usage.get("cache_creation_input_tokens")
+    )
+    total = _as_int(usage.get("total_tokens") or usage.get("total"))
+    if total == 0:
+        total = prompt + completion
+    return {
+        "input_tokens": prompt,
+        "output_tokens": completion,
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "cache_read_tokens": cache_read,
+        "cache_write_tokens": cache_write,
+        "total_tokens": total,
+    }
+
+
+def _is_stream_like(value: Any) -> bool:
+    if isinstance(value, (str, bytes, bytearray, dict, list, tuple, set)):
+        return False
+    return hasattr(value, "__iter__") and not hasattr(value, "model_dump")
+
+
+class _LLMTelemetryProxy:
+    """Proxy OpenHands SDK LLM calls and emit one model_usage event per call."""
+
+    def __init__(self, llm: Any, sink: EventSink, llm_cfg: Dict[str, Any]):
+        self._ab_llm = llm
+        self._ab_sink = sink
+        self._ab_llm_cfg = llm_cfg
+        self._ab_request_index = 0
+
+    def __getattr__(self, name: str) -> Any:
+        value = getattr(self._ab_llm, name)
+        if name.startswith("_") or not callable(value):
+            return value
+        return self._wrap_callable(name, value)
+
+    def __call__(self, *args, **kwargs):
+        return self._wrap_callable("__call__", self._ab_llm)(*args, **kwargs)
+
+    def _wrap_callable(self, name: str, fn: Callable):
+        def wrapped(*args, **kwargs):
+            start_ns = time.time_ns()
+            try:
+                result = fn(*args, **kwargs)
+            except Exception as exc:
+                self._emit_usage(name, start_ns, time.time_ns(), None, error=str(exc))
+                raise
+            if _is_stream_like(result):
+                return self._wrap_stream(name, result, start_ns)
+            self._emit_usage(name, start_ns, time.time_ns(), result)
+            return result
+        return wrapped
+
+    def _wrap_stream(self, name: str, stream: Any, start_ns: int):
+        chunks = []
+
+        def gen():
+            last = None
+            try:
+                for item in stream:
+                    chunks.append(item)
+                    last = item
+                    yield item
+            finally:
+                usage_source = last if last is not None else (chunks[-1] if chunks else None)
+                self._emit_usage(
+                    name,
+                    start_ns,
+                    time.time_ns(),
+                    usage_source,
+                    chunks_count=len(chunks),
+                )
+        return gen()
+
+    def _emit_usage(
+        self,
+        method: str,
+        start_ns: int,
+        end_ns: int,
+        result: Any,
+        *,
+        error: str | None = None,
+        chunks_count: int | None = None,
+    ) -> None:
+        self._ab_request_index += 1
+        usage = _extract_model_usage(result)
+        _emit(
+            self._ab_sink,
+            "model_usage",
+            type="model.usage",
+            channel="openhands.llm",
+            start_ns=start_ns,
+            end_ns=end_ns,
+            duration_ms=max((end_ns - start_ns) / 1e6, 0.0),
+            request_index=self._ab_request_index,
+            provider=self._ab_llm_cfg.get("provider") or "openhands",
+            model=self._ab_llm_cfg.get("model"),
+            api=method,
+            http_status=200 if error is None else None,
+            error=error,
+            chunks_count=chunks_count,
+            **usage,
+        )
+
+
 # ----------------------------------------------------------------------
 # Bridge invocation
 # ----------------------------------------------------------------------
@@ -462,6 +637,8 @@ def main(argv: Optional[list] = None) -> int:
         _emit_error(sink, "llm_init", f"{e}", traceback=traceback.format_exc())
         sink.close()
         return 4
+
+    llm = _LLMTelemetryProxy(llm, sink, llm_cfg)
 
     try:
         agent = get_default_agent(llm=llm, cli_mode=True)

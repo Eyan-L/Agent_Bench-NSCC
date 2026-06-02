@@ -12,6 +12,7 @@ from agent_bench.benchmarks.swebench.conditions.openhands_agent import (
 )
 from agent_bench.benchmarks.swebench.conditions.hermes_agent import TerminalBenchHermesCondition
 from agent_bench.core.profile_io import load_profile
+from agent_bench.harnesses.openhands.driver import EventSink, _LLMTelemetryProxy
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -115,6 +116,46 @@ def test_openclaw_raw_response_log_synthesizes_per_request_model_usage(tmp_path)
     assert [span["attrs"]["openclaw.tokens.input"] for span in spans] == [10, 20]
     assert [span["attrs"]["openclaw.tokens.output"] for span in spans] == [5, 7]
     assert all(span["attrs"]["openclaw.channel"] == "synth.raw_response" for span in spans)
+
+
+
+def test_openhands_driver_proxy_emits_per_call_model_usage(tmp_path):
+    class FakeLLM:
+        def chat(self, *_args, **_kwargs):
+            return {
+                "usage": {
+                    "prompt_tokens": 13,
+                    "completion_tokens": 8,
+                    "total_tokens": 21,
+                    "prompt_tokens_details": {"cached_tokens": 5},
+                }
+            }
+
+    events_path = tmp_path / "events.jsonl"
+    sink = EventSink(events_path)
+    proxy = _LLMTelemetryProxy(
+        FakeLLM(),
+        sink,
+        {"provider": "openai", "model": "model-a"},
+    )
+
+    proxy.chat("hello")
+    sink.close()
+
+    rows = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["driver_event"] == "model_usage"
+    assert row["type"] == "model.usage"
+    assert row["channel"] == "openhands.llm"
+    assert row["request_index"] == 1
+    assert row["provider"] == "openai"
+    assert row["model"] == "model-a"
+    assert row["api"] == "chat"
+    assert row["input_tokens"] == 13
+    assert row["output_tokens"] == 8
+    assert row["cache_read_tokens"] == 5
+    assert row["total_tokens"] == 21
 
 
 def test_openhands_synthesizes_agent_spans_from_events():

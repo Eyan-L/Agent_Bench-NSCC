@@ -123,6 +123,7 @@
 +        now_ns = time.time_ns()
 +        key = str(call_id or f"{tool_name}:{now_ns}")
 +        starts[key] = now_ns
++        emit_model_usage_delta(now_ns)
 +        _hm_ab_write_event({
 +            "type": "tool.start",
 +            "ts_ns": now_ns,
@@ -157,11 +158,11 @@
 +    agent.tool_start_callback = on_tool_start
 +    agent.tool_complete_callback = on_tool_complete
 +
-+    def emit_model_usage(start_ns: int, end_ns: int) -> None:
-+        input_tokens = int(getattr(agent, "session_input_tokens", 0) or 0)
-+        output_tokens = int(getattr(agent, "session_output_tokens", 0) or 0)
++    def usage_snapshot() -> dict:
 +        prompt_tokens = int(getattr(agent, "session_prompt_tokens", 0) or 0)
 +        completion_tokens = int(getattr(agent, "session_completion_tokens", 0) or 0)
++        input_tokens = int(getattr(agent, "session_input_tokens", 0) or 0)
++        output_tokens = int(getattr(agent, "session_output_tokens", 0) or 0)
 +        cache_read = int(getattr(agent, "session_cache_read_tokens", 0) or 0)
 +        cache_write = int(getattr(agent, "session_cache_write_tokens", 0) or 0)
 +        total_tokens = int(getattr(agent, "session_total_tokens", 0) or 0)
@@ -171,15 +172,7 @@
 +            output_tokens = completion_tokens
 +        if total_tokens == 0:
 +            total_tokens = input_tokens + output_tokens
-+        _hm_ab_write_event({
-+            "type": "model.usage",
-+            "start_ns": start_ns,
-+            "end_ns": end_ns,
-+            "duration_ms": max((end_ns - start_ns) / 1e6, 0.0),
-+            "run_id": run_id,
-+            "session_id": session_id,
-+            "provider": str(getattr(agent, "provider", "") or ""),
-+            "model": str(getattr(agent, "model", "") or ""),
++        return {
 +            "input_tokens": input_tokens,
 +            "output_tokens": output_tokens,
 +            "prompt_tokens": prompt_tokens,
@@ -188,7 +181,49 @@
 +            "cache_write_tokens": cache_write,
 +            "total_tokens": total_tokens,
 +            "api_calls": int(getattr(agent, "session_api_calls", 0) or 0),
++        }
++
++    usage_last = usage_snapshot()
++    usage_last_ns = time.time_ns()
++    usage_events_written = 0
++
++    def emit_model_usage_delta(end_ns: int, *, force: bool = False) -> None:
++        nonlocal usage_last, usage_last_ns, usage_events_written
++        current = usage_snapshot()
++        delta = {
++            key: max(int(current.get(key, 0) or 0) - int(usage_last.get(key, 0) or 0), 0)
++            for key in current
++        }
++        has_usage = any(delta.get(key, 0) for key in (
++            "input_tokens", "output_tokens", "cache_read_tokens",
++            "cache_write_tokens", "total_tokens", "api_calls",
++        ))
++        if not has_usage and (not force or usage_events_written > 0):
++            return
++        usage_events_written += 1
++        start_ns = usage_last_ns or end_ns
++        _hm_ab_write_event({
++            "type": "model.usage",
++            "channel": "hermes.llm",
++            "start_ns": start_ns,
++            "end_ns": end_ns,
++            "duration_ms": max((end_ns - start_ns) / 1e6, 0.0),
++            "request_index": usage_events_written,
++            "run_id": run_id,
++            "session_id": session_id,
++            "provider": str(getattr(agent, "provider", "") or ""),
++            "model": str(getattr(agent, "model", "") or ""),
++            "api": "hermes.chat",
++            **delta,
 +        })
++        usage_last = current
++        usage_last_ns = end_ns
++
++    def emit_model_usage(start_ns: int, end_ns: int) -> None:
++        nonlocal usage_last_ns
++        if not usage_last_ns:
++            usage_last_ns = start_ns
++        emit_model_usage_delta(end_ns, force=True)
 +
 +    return emit_model_usage
 +# AB_HARNESS_HERMES_PATCH_TELEMETRY_END
