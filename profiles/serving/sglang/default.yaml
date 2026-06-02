@@ -18,6 +18,8 @@ serving:
     tensor_parallel_size: 1
     cuda_visible_devices: "0"
     gpu_mem_util: 0.85
+    enable_hierarchical_cache: false
+    hicache_size: 60
   scheduler:
     max_num_seqs: 128
     enable_prefix_caching: true

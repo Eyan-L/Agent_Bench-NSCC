@@ -16,7 +16,7 @@
 # kills it, `make serve-logs` follows its stdout.
 #
 # Env:
-#   VLLM_IMAGE              container image (default: vllm/vllm-openai:v0.11.0)
+#   VLLM_IMAGE              container image (default: vllm/vllm-openai:v0.20.0)
 #   VLLM_MIG_UUID           bind one MIG slice (CDI format `MIG-<uuid>`).
 #                           When set: AB_SERVING_TENSOR_PARALLEL_SIZE is forced to 1 and `--gpus` becomes
 #                           `--device nvidia.com/gpu=MIG-<uuid>`.
@@ -72,7 +72,7 @@ AB_SERVING_MAX_MODEL_LEN="${AB_SERVING_MAX_MODEL_LEN:-${AB_MODEL_CONTEXT_WINDOW:
 AB_SERVING_GPU_MEMORY_UTILIZATION="${AB_SERVING_GPU_MEMORY_UTILIZATION:-0.90}"
 AB_SERVING_BIND_HOST="${AB_SERVING_BIND_HOST:-0.0.0.0}"
 
-VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.11.0}"
+VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.20.0}"
 VLLM_CONTAINER_NAME="${VLLM_CONTAINER_NAME:-oc-vllm-serve}"
 VLLM_DETACH="${VLLM_DETACH:-1}"
 VLLM_TAIL_LOGS="${VLLM_TAIL_LOGS:-1}"

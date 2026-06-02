@@ -55,6 +55,8 @@ class ServingConfig:
     gpu_mem_util: float
     tensor_parallel_size: Optional[int]
     cuda_visible_devices: Optional[str]
+    enable_hierarchical_cache: Optional[bool]
+    hicache_size: Optional[int]
     max_num_seqs: int
     enable_prefix_caching: bool
     preset: str = "default"
@@ -81,6 +83,8 @@ class ServingConfig:
             "gpu_mem_util": self.gpu_mem_util,
             "tensor_parallel_size": self.tensor_parallel_size,
             "cuda_visible_devices": self.cuda_visible_devices,
+            "enable_hierarchical_cache": self.enable_hierarchical_cache,
+            "hicache_size": self.hicache_size,
             "preset": self.preset,
             "serving_mode": self.serving_mode,
             "max_num_seqs": self.max_num_seqs,
@@ -431,6 +435,8 @@ def load_serving_config(serving_path: Path) -> ServingConfig:
         gpu_mem_util=float(runtime.get("gpu_mem_util", 0.90)),
         tensor_parallel_size=_optional_int(runtime.get("tensor_parallel_size", runtime.get("tp"))),
         cuda_visible_devices=_optional_str(runtime.get("cuda_visible_devices")),
+        enable_hierarchical_cache=_optional_bool(runtime.get("enable_hierarchical_cache")),
+        hicache_size=_optional_int(runtime.get("hicache_size")),
         preset=serving_data.get("preset", "default"),
         serving_mode=_optional_serving_mode(serving_data, runtime, backend),
         max_num_seqs=int(scheduler.get("max_num_seqs", 128)),
@@ -483,6 +489,14 @@ def _optional_str(value: Any) -> Optional[str]:
         return None
     text = str(value)
     return text if text else None
+
+
+def _optional_bool(value: Any) -> Optional[bool]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _extra_args_value(value: Any) -> List[str]:

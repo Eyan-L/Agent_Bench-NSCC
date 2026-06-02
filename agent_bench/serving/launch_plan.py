@@ -277,7 +277,7 @@ def _build_vllm_plan(
     if mode == "native":
         argv = ("vllm", "serve", model_name, *all_flags)
     elif mode == "docker":
-        image = _env_str(env, "VLLM_IMAGE", "AB_SERVING_IMAGE", default=serving.image or "vllm/vllm-openai:v0.11.0")
+        image = _env_str(env, "VLLM_IMAGE", "AB_SERVING_IMAGE", default=serving.image or "vllm/vllm-openai:v0.20.0")
         container = _env_str(env, "VLLM_CONTAINER_NAME", default="oc-vllm-serve")
         hf_home = _env_str(env, "VLLM_HOST_HF_HOME", "HF_HOME", default=str(Path.home() / ".cache/huggingface"))
         docker_args = ["run", "--name", container, "--network", "host", "--ipc", "host", "--shm-size", "16g"]
@@ -356,10 +356,12 @@ def _build_sglang_plan(
         default=str(model.context_window) if model.context_window else None,
     )
     page_size = _env_str(env, "SGLANG_PAGE_SIZE", default="64")
-    hicache_size = _env_str(env, "SGLANG_HICACHE_SIZE", default="60")
+    hierarchical_cache_default = serving.enable_hierarchical_cache if serving.enable_hierarchical_cache is not None else False
+    hierarchical_cache = _env_bool(env, "SGLANG_ENABLE_HIERARCHICAL_CACHE", default=hierarchical_cache_default)
+    hicache_size_default = serving.hicache_size if serving.hicache_size is not None else 60
+    hicache_size = _env_str(env, "SGLANG_HICACHE_SIZE", default=str(hicache_size_default))
     tool_parser = _env_optional(env, "SGLANG_TOOL_CALL_PARSER", "AB_MODEL_TOOL_CALL_PARSER", default=model.tool_call_parser or "qwen")
     reasoning_parser = _env_optional(env, "SGLANG_REASONING_PARSER", "AB_MODEL_REASONING_PARSER", default=model.reasoning_parser)
-    hierarchical_cache = _env_bool(env, "SGLANG_ENABLE_HIERARCHICAL_CACHE", default=True)
 
     server_flags = [
         "--model-path",
@@ -395,6 +397,8 @@ def _build_sglang_plan(
         "OPENAI_BASE_URL": endpoint,
         "AB_SERVING_BACKEND": "sglang",
         "AB_SERVING_CONFIG_ID": _env_str(env, "AB_SERVING_CONFIG_ID", default=serving.config_id),
+        "SGLANG_ENABLE_HIERARCHICAL_CACHE": "1" if hierarchical_cache else "0",
+        "SGLANG_HICACHE_SIZE": hicache_size,
         "SGLANG_KV_MEMTRACE": "0",
         "SGLANG_KV_MEMTRACE_STRICT": "0",
     }
@@ -406,6 +410,8 @@ def _build_sglang_plan(
     metadata = {
         "tensor_parallel_size": str(tp),
         "cuda_visible_devices": cuda_devices,
+        "enable_hierarchical_cache": "1" if hierarchical_cache else "0",
+        "hicache_size": hicache_size,
         "mode": mode,
     }
 

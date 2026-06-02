@@ -187,6 +187,67 @@ def test_sglang_uses_tp_env_instead_of_visible_gpu_count() -> None:
     assert override.metadata["tensor_parallel_size"] == "2"
 
 
+def test_sglang_hierarchical_cache_defaults_off_and_can_be_configured(tmp_path: Path) -> None:
+    default_plan = _plan(
+        "profiles/models/qwen35_9b.json",
+        "profiles/serving/sglang/default.yaml",
+        backend="sglang",
+        mode="native",
+    )
+
+    assert "--enable-hierarchical-cache" not in default_plan.argv
+    assert "--hicache-size" not in default_plan.argv
+    assert default_plan.env["SGLANG_ENABLE_HIERARCHICAL_CACHE"] == "0"
+    assert default_plan.metadata["enable_hierarchical_cache"] == "0"
+
+    serving = tmp_path / "sglang_hicache.yaml"
+    serving.write_text(
+        """serving:
+  config_id: sglang-hicache
+  backend: sglang
+  preset: default
+  serving_mode: native
+  endpoint:
+    scheme: http
+    bind_host: 0.0.0.0
+    client_host: 127.0.0.1
+    port: 8000
+    path: /v1
+  runtime:
+    gpu_mem_util: 0.85
+    enable_hierarchical_cache: true
+    hicache_size: 24
+  scheduler:
+    max_num_seqs: 128
+    enable_prefix_caching: true
+  additional_flags: {}
+  extra_args: []
+""",
+        encoding="utf-8",
+    )
+
+    configured_plan = _plan(
+        "profiles/models/qwen35_9b.json",
+        str(serving),
+        backend="sglang",
+    )
+
+    assert configured_plan.argv[configured_plan.argv.index("--hicache-size") + 1] == "24"
+    assert configured_plan.env["SGLANG_ENABLE_HIERARCHICAL_CACHE"] == "1"
+    assert configured_plan.env["SGLANG_HICACHE_SIZE"] == "24"
+    assert configured_plan.metadata["hicache_size"] == "24"
+
+    disabled_by_env = _plan(
+        "profiles/models/qwen35_9b.json",
+        str(serving),
+        backend="sglang",
+        env={"SGLANG_ENABLE_HIERARCHICAL_CACHE": "0"},
+    )
+
+    assert "--enable-hierarchical-cache" not in disabled_by_env.argv
+    assert "--hicache-size" not in disabled_by_env.argv
+
+
 def test_litellm_native_launch_plan_uses_proxy_auth_without_upstream_secret() -> None:
     plan = _plan(
         "profiles/models/gemini_3_5_flash.json",
