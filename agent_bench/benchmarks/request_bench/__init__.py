@@ -1,0 +1,1 @@
+"""Natural request diagnostic benchmark."""

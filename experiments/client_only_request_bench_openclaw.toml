@@ -1,0 +1,27 @@
+name = "client_only_request_bench_openclaw"
+description = "Request-Bench natural prompt diagnostic run through openclaw."
+output_dir = "runs/client_only_request_bench_openclaw"
+seeds = [42]
+
+[benchmark]
+name = "request_bench"
+profile = "profiles/benchmarks/request_bench/llm_comparison.json"
+
+[harness]
+name = "openclaw"
+profile = "profiles/harnesses/openclaw_request_bench.yaml"
+
+[model]
+profile = "profiles/models/deepseek_v4_pro.json"
+
+[serving]
+profile = "profiles/serving/litellm/deepseek_v4_pro.yaml"
+
+[deployment]
+profile = "profiles/deployments/client_only.toml"
+
+[stages]
+start_otel = true
+
+[limits]
+max_workers = 1

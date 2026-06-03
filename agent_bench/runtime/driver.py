@@ -241,6 +241,10 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 from agent_bench.benchmarks.longbench.conditions.openclaw_agent import (
                     LongBenchOpenClawCondition as _Cls,
                 )
+            elif benchmark == "request_bench":
+                from agent_bench.benchmarks.request_bench.conditions.openclaw_agent import (
+                    RequestBenchOpenClawCondition as _Cls,
+                )
             else:
                 from agent_bench.benchmarks.swebench.conditions.openclaw_agent import (
                     SWEBenchOpenClawCondition as _Cls,
@@ -289,6 +293,10 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 from agent_bench.benchmarks.swebench.conditions.hermes_agent import (
                     TerminalBenchHermesCondition as _Cls,
                 )
+            elif benchmark == "request_bench":
+                from agent_bench.benchmarks.request_bench.conditions.hermes_agent import (
+                    RequestBenchHermesCondition as _Cls,
+                )
             else:
                 from agent_bench.benchmarks.swebench.conditions.hermes_agent import (
                     HermesAgentCondition as _Cls,
@@ -334,7 +342,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         benchmark_kind = instance_data.get("benchmark", "swebench")
         # TB and DR-Bench have no git-patch artifact — the agent's work lives
         # inside the task container (TB: services + files; DR: /workspace/report.md).
-        skip_patch_gate = benchmark_kind in ("terminal_bench", "deepresearch_bench", "longbench")
+        skip_patch_gate = benchmark_kind in ("terminal_bench", "deepresearch_bench", "longbench", "request_bench")
 
         if skip_patch_gate or (patch_path.exists() and patch_path.stat().st_size > 0):
             verdict = harness.run_tests(
@@ -371,6 +379,15 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                     shutil.copyfile(src_p, run_dir / "report.md")
             except OSError as e:
                 logger.warning("persist report.md failed for %s: %s", run_id, e)
+        answer_src = verdict.get("answer_path") if isinstance(verdict, dict) else None
+        if answer_src:
+            try:
+                src_p = Path(answer_src)
+                if src_p.is_file() and src_p.stat().st_size > 0:
+                    import shutil
+                    shutil.copyfile(src_p, run_dir / "answer.md")
+            except OSError as e:
+                logger.warning("persist answer.md failed for %s: %s", run_id, e)
         
         # Update manifest
         manifest.status = verdict["status"]
@@ -450,8 +467,8 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
     #   singularity            — SingularityHarness; openclaw .sif + task .sif (peer
     #                            instances). Same isolation model in singularity-land.
     # Terminal-Bench / DR-Bench instances are auto-routed to their respective
-    # harnesses regardless of AB_DEPLOYMENT_CONTAINER_BACKEND (per-instance dispatch in _one below).
-    _NON_SWE_BENCHMARKS = ("terminal_bench", "deepresearch_bench", "longbench")
+    # harnesses regardless of HARNESS_BACKEND (per-instance dispatch in _one below).
+    _NON_SWE_BENCHMARKS = ("terminal_bench", "deepresearch_bench", "longbench", "request_bench")
     needs_swe = any(
         inst.get("benchmark", "swebench") not in _NON_SWE_BENCHMARKS
         for inst in instances.values()
@@ -464,6 +481,9 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
     )
     needs_lb = any(
         inst.get("benchmark") == "longbench" for inst in instances.values()
+    )
+    needs_rb = any(
+        inst.get("benchmark") == "request_bench" for inst in instances.values()
     )
 
     # Peek at the harness config to learn which agent runtime this sweep
@@ -522,7 +542,28 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
                 f"Unknown harness={harness_choice!r}; expected openclaw|openhands|hermes."
             )
     else:
-        logger.info("Sweep is pure terminal-bench; skipping SWE-bench harness build.")
+        logger.info("Sweep has no SWE-bench instances; skipping SWE-bench harness build.")
+
+    # Lazy-build the Request-Bench harness only if any instance is Request-Bench.
+    rb_harness = None
+    if needs_rb:
+        rb_backend = os.environ.get("AB_DEPLOYMENT_CONTAINER_BACKEND", "docker").lower()
+        if rb_backend != "docker":
+            raise ValueError(
+                f"request_bench only supports AB_DEPLOYMENT_CONTAINER_BACKEND=docker (got {rb_backend!r})."
+            )
+        if harness_choice == "hermes":
+            from agent_bench.benchmarks.request_bench.app import RequestBenchHermesHarness
+            logger.info("Constructing RequestBenchHermesHarness.")
+            rb_harness = RequestBenchHermesHarness(benchmark_data_root)
+        elif harness_choice == "openclaw":
+            from agent_bench.benchmarks.request_bench.app import RequestBenchHarness
+            logger.info("Constructing RequestBenchHarness.")
+            rb_harness = RequestBenchHarness(benchmark_data_root)
+        else:
+            raise ValueError(
+                f"request_bench supports harness=openclaw|hermes (got {harness_choice!r})."
+            )
 
     # Lazy-build the DR harness only if any instance in this sweep is DR-Bench.
     # Same two-container model as TB but with a fixed lightweight sandbox image
@@ -625,6 +666,8 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
                 h = dr_harness
             elif bm == "longbench":
                 h = lb_harness
+            elif bm == "request_bench":
+                h = rb_harness
             else:
                 h = harness
             if h is None:

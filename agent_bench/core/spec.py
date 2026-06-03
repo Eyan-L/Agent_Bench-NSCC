@@ -9,7 +9,7 @@ from typing import Any
 from agent_bench.core.profile_io import ProfileLoadError, load_profile
 
 
-BENCHMARKS = {"swebench", "terminal_bench", "deepresearch_bench", "longbench"}
+BENCHMARKS = {"swebench", "terminal_bench", "deepresearch_bench", "longbench", "request_bench"}
 HARNESSES = {"openclaw", "openhands", "hermes", "react", "ar"}
 AB_SERVING_BACKENDS = {"vllm", "sglang", "litellm", "existing_endpoint", "openai_compatible"}
 DEPLOYMENTS = {"client_only", "local_docker", "nscc_pbs", "ccds_cloud"}

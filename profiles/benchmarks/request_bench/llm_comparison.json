@@ -1,0 +1,25 @@
+{
+  "sweep_name": "request_bench_llm_comparison",
+  "plan_version": "request-bench-v1",
+  "application": "request_bench",
+  "instances": ["llm-comparison-table"],
+  "requests": {
+    "llm-comparison-table": {
+      "prompt": "Please search on duckduckgo using tools and subagent, and generate a detailed comparison table of the top three open-source large language models (Gemma 4, DeepseekV4, Qwen3.7) regarding their parameter size, implementation details and differences, and primary use case. Use subagent to gather the necessary information from reliable sources and compile it into a clear and concise table format. Install packages if they are not present.",
+      "description": "Generate a model comparison table for a natural request diagnostic run.",
+      "answer_file": "/workspace/answer.md"
+    }
+  },
+  "repo_mapping": {
+    "llm-comparison-table": {
+      "repo_id": "request_bench/llm-comparison-table",
+      "base_commit": "request-bench-v1"
+    }
+  },
+  "container_image": "python:3.13-slim-bookworm",
+  "wall_clock_budget_seconds": 600,
+  "output_dir": "request_bench_llm_comparison",
+  "seeds": [42],
+  "parallel_limit_gpu": 1,
+  "parallel_limit_cpu_cores": 1
+}

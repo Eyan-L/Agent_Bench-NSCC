@@ -343,6 +343,16 @@ def materialize_benchmark_data(
         _set_instance_data_env(target_env, out)
         return out
 
+    if resolved.spec.benchmark_name == "request_bench":
+        sweep_name = str(resolved.benchmark.get("sweep_name") or resolved.spec.name)
+        out = Path("data/request_bench") / f"{sweep_name}_instances.json"
+        from agent_bench.benchmarks.request_bench import loader
+
+        loader.materialize_profile(resolved.benchmark, out)
+        out = out.resolve()
+        _set_instance_data_env(target_env, out)
+        return out
+
     raise ConfigError(f"unsupported benchmark for instance_data resolution: {resolved.spec.benchmark_name}")
 
 

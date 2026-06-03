@@ -1,0 +1,79 @@
+# OpenClaw Request-Bench harness. Agent reads /workspace/PROMPT.md and writes /workspace/answer.md.
+harness: openclaw
+openclaw:
+  gateway:
+    mode: local
+    bind: loopback
+    auth:
+      mode: token
+      token:
+        source: env
+        provider: env
+        id: OPENCLAW_GATEWAY_TOKEN
+  diagnostics:
+    enabled: true
+    otel:
+      enabled: true
+      endpoint: http://localhost:4318
+      protocol: http/protobuf
+      serviceName: agent-bench-openclaw
+      traces: true
+      metrics: true
+      logs: true
+      sampleRate: 1
+      flushIntervalMs: 20
+    cacheTrace:
+      enabled: true
+      includeMessages: true
+      includePrompt: true
+      includeSystem: true
+  tools:
+    profile: coding
+    web:
+      search:
+        provider: duckduckgo
+        enabled: true
+    # sandbox:
+    #   tools:
+    #     allow:
+    #     - exec
+    #     - process
+    #     - read
+    #     - write
+    #     - edit
+    #     - apply_patch
+    #     - sessions_list
+    #     - sessions_history
+    #     - sessions_send
+    #     - sessions_spawn
+    #     - sessions_yield
+    #     - subagents
+    #     - session_status
+    #     - memory_get
+    #     - memory_search
+  plugins:
+    entries:
+      vllm:
+        enabled: true
+      memory-core:
+        enabled: true
+      diagnostics-otel:
+        enabled: true
+  agents:
+    defaults:
+      workspace: /workspace
+      subagents:
+        maxConcurrent: 2
+        runTimeoutSeconds: 600
+    list:
+    - id: request_writer
+      default: true
+      name: request-writer
+conditions:
+- condition_id: openclaw_agent
+  condition_type: openclaw_agent
+  description: OpenClaw agent answering a Request-Bench natural-language prompt
+  agent:
+    max_steps: 60
+    max_time_seconds: 600
+    retry_limit: 3

@@ -1,0 +1,12 @@
+{
+  "_doc": "Deepseek API profile. The provider model string is an explicit config value, not a latest-model alias.",
+  "model": {
+    "config_id": "deepseek_v4_pro",
+    "name": "deepseek/deepseek-v4-pro",
+    "provider": "litellm",
+    "api_key": "EMPTY",
+    "temperature": 0.0,
+    "max_tokens": 8192,
+    "context_window": 1048576
+  }
+}

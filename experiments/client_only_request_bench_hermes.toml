@@ -1,0 +1,27 @@
+name = "client_only_request_bench_hermes"
+description = "Request-Bench natural prompt diagnostic run through hermes."
+output_dir = "runs/client_only_request_bench_hermes"
+seeds = [42]
+
+[benchmark]
+name = "request_bench"
+profile = "profiles/benchmarks/request_bench/llm_comparison.json"
+
+[harness]
+name = "hermes"
+profile = "profiles/harnesses/hermes_request_bench.yaml"
+
+[model]
+profile = "profiles/models/qwen36_35b_a3b.json"
+
+[serving]
+profile = "profiles/serving/litellm/qwen36_35b_a3b.yaml"
+
+[deployment]
+profile = "profiles/deployments/client_only.toml"
+
+[stages]
+start_otel = true
+
+[limits]
+max_workers = 1
