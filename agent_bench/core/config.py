@@ -1,7 +1,7 @@
 """Configuration schema for experiment runs."""
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 import hashlib
 import json
 from pathlib import Path
@@ -601,3 +601,18 @@ def endpoint_for_container(endpoint: str, host_address: str) -> str:
             _, tail = rest.split(":", 1)
             return f"{scheme}://{host_address}:{tail}"
     return endpoint
+
+
+def runtime_endpoint_for_container(
+    endpoint: str,
+    host_address: str,
+    env: Mapping[str, str] | None = None,
+) -> str:
+    """Resolve the active runtime endpoint and rewrite it for a container caller."""
+    source_env = os.environ if env is None else env
+    runtime_endpoint = (
+        source_env.get("AB_SERVING_BASE_URL")
+        or source_env.get("OPENAI_BASE_URL")
+        or endpoint
+    )
+    return endpoint_for_container(runtime_endpoint, host_address)

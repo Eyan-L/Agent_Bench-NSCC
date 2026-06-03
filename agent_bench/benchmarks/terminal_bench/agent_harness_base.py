@@ -322,6 +322,8 @@ class TerminalBenchAgentHarnessBase:
         patch: Optional[str] = None,
         run_id: Optional[str] = None,
         instance_data: Optional[Dict] = None,
+        run_dir: Optional[Path] = None,
+        **_kw,
     ) -> Dict:
         run_id = run_id or instance_id
         task_name = self._task_container_name(run_id)

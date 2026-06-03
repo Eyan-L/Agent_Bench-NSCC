@@ -36,7 +36,7 @@ from agent_bench.benchmarks.conditions.gateway_helpers import (
 from agent_bench.benchmarks.deepresearch_bench.app import DeepResearchHarness
 from agent_bench.benchmarks.swebench.app import DEFAULT_OPENCLAW_RUNTIME_IMAGE, _force_rmtree
 from agent_bench.harnesses.openclaw.dispatcher import OpenClawRemoteDispatcher
-from agent_bench.core.config import endpoint_for_container, load_active_model_and_serving
+from agent_bench.core.config import runtime_endpoint_for_container, load_active_model_and_serving
 from agent_bench.core.profile_io import load_profile
 
 logger = logging.getLogger(__name__)
@@ -452,8 +452,9 @@ class LongBenchHarness(DeepResearchHarness):
             },
         }
         cfg.setdefault("tools", {}).setdefault("exec", {})["host"] = "sandbox"
-        serving_endpoint = os.environ.get(
-            "AB_SERVING_BASE_URL", endpoint_for_container(model_cfg.endpoint, "vllm-host"))
+        serving_endpoint = runtime_endpoint_for_container(
+            model_cfg.endpoint, "vllm-host"
+        )
         agent_model_provider = cfg.setdefault("models", {}).setdefault("providers", {}).setdefault("agent_model", {})
         agent_model_provider["api"] = _OPENAI_CHAT_COMPLETIONS_API
         agent_model_provider["baseUrl"] = serving_endpoint
@@ -474,6 +475,8 @@ class LongBenchHarness(DeepResearchHarness):
         patch: Optional[str] = None,
         run_id: Optional[str] = None,
         instance_data: Optional[Dict] = None,
+        run_dir: Optional[Path] = None,
+        **_kw,
     ) -> Dict:
         from agent_bench.benchmarks.longbench import scoring
 

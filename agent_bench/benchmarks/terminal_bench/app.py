@@ -67,7 +67,7 @@ from agent_bench.benchmarks.swebench.app import (
     _oc_sandbox_name,
 )
 from agent_bench.harnesses.openclaw.dispatcher import OpenClawRemoteDispatcher
-from agent_bench.core.config import endpoint_for_container, load_active_model_and_serving
+from agent_bench.core.config import runtime_endpoint_for_container, load_active_model_and_serving
 from agent_bench.core.profile_io import load_profile
 
 logger = logging.getLogger(__name__)
@@ -603,9 +603,8 @@ class TerminalBenchDockerHarness:
                 "/root/.openclaw/skills"
             ]
         model_cfg, _serving_cfg = load_active_model_and_serving(repo_root=repo_root)
-        serving_endpoint = os.environ.get(
-            "AB_SERVING_BASE_URL",
-            endpoint_for_container(model_cfg.endpoint, "vllm-host"),
+        serving_endpoint = runtime_endpoint_for_container(
+            model_cfg.endpoint, "vllm-host"
         )
         providers = cfg.setdefault("models", {}).setdefault("providers", {})
         agent_model_provider = providers.setdefault("agent_model", {})
@@ -732,6 +731,8 @@ class TerminalBenchDockerHarness:
         patch: Optional[str] = None,            # ignored — TB has no patch
         run_id: Optional[str] = None,
         instance_data: Optional[Dict] = None,
+        run_dir: Optional[Path] = None,
+        **_kw,
     ) -> Dict:
         """Run /tests/test.sh inside the task container. Read reward.txt from
         the host bind target."""
@@ -1066,6 +1067,8 @@ class TerminalBenchSingularityHarness:
         patch: Optional[str] = None,
         run_id: Optional[str] = None,
         instance_data: Optional[Dict] = None,
+        run_dir: Optional[Path] = None,
+        **_kw,
     ) -> Dict:
         instance_name = self._instance_name_for(run_id or instance_id)
         verifier = "/tests/test.sh"
