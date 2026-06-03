@@ -1,0 +1,66 @@
+{
+  "_doc": "Terminal-Bench 2 tasks: Loader: agent_bench/benchmarks/terminal_bench/loader.py materializes instance_data from agent_bench/benchmarks/terminal_bench/tasks/<task_id>/. Harness: TerminalBenchHarness (auto-selected by driver when instance_data['benchmark'] == 'terminal_bench'). repo_mapping is SWE-bench specific but RunConfig.compute_run_id requires it for deterministic hashing — placeholders fine, TB harness ignores them. container_image is unused for TB instances (TerminalBenchHarness reads docker image from per-task task.toml) but required by SweepConfig schema.",
+  "sweep_name": "short_eval",
+  "plan_version": "v1.0",
+  "application": "terminal_bench",
+  "instances": [
+    "overfull-hbox",
+    "code-from-image",
+    "compile-compcert",
+    "crack-7z-hash",
+    "hf-model-inference",
+    "kv-store-grpc",
+    "circuit-fibsqrt",
+    "fix-code-vulnerability",
+    "protein-assembly",
+    "video-processing"
+  ],
+  "repo_mapping": {
+    "overfull-hbox": {
+      "repo_id": "terminal-bench/overfull-hbox",
+      "base_commit": "tb2"
+    },
+    "code-from-image": {
+      "repo_id": "terminal-bench/code-from-image",
+      "base_commit": "tb2"
+    },
+    "compile-compcert": {
+      "repo_id": "terminal-bench/compile-compcert",
+      "base_commit": "tb2"
+    },
+    "crack-7z-hash": {
+      "repo_id": "terminal-bench/crack-7z-hash",
+      "base_commit": "tb2"
+    },
+    "hf-model-inference": {
+      "repo_id": "terminal-bench/hf-model-inference",
+      "base_commit": "tb2"
+    },
+    "kv-store-grpc": {
+      "repo_id": "terminal-bench/kv-store-grpc",
+      "base_commit": "tb2"
+    },
+    "circuit-fibsqrt": {
+      "repo_id": "terminal-bench/circuit-fibsqrt",
+      "base_commit": "tb2"
+    },
+    "fix-code-vulnerability": {
+      "repo_id": "terminal-bench/fix-code-vulnerability",
+      "base_commit": "tb2"
+    },
+    "protein-assembly": {
+      "repo_id": "terminal-bench/protein-assembly",
+      "base_commit": "tb2"
+    },
+    "video-processing": {
+      "repo_id": "terminal-bench/video-processing",
+      "base_commit": "tb2"
+    }
+  },
+  "container_image": "alexgshaw/kv-store-grpc:20251031",
+  "wall_clock_budget_seconds": 900,
+  "output_dir": "tb_kv_store",
+  "seeds": [42],
+  "parallel_limit_gpu": 1,
+  "parallel_limit_cpu_cores": 8
+}
