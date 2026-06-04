@@ -189,6 +189,8 @@ class HermesAgentCondition:
         patch_path = run_dir / "candidate.patch"
         patch_path.write_text(patch_text)
 
+        self._collect_sessions(env_info, container_id, run_dir, workspace_root)
+
         return {
             "step_trace_path": str(step_path),
             "patch_path": str(patch_path),
@@ -200,6 +202,31 @@ class HermesAgentCondition:
 
     def _build_message(self, instance_data: Dict) -> str:
         return _build_message(instance_data["problem_statement"])
+
+    def _collect_sessions(self, env_info: Dict, container_id: str, run_dir: Path, workspace_root: str) -> None:
+        harness = env_info.get("_harness")
+        try:
+            if harness is not None and hasattr(harness, "exec_in_container"):
+                harness.exec_in_container(
+                    container_id,
+                    ["hermes", "sessions", "export", "sessions.jsonl"],
+                    timeout=120,
+                    env=env_info.get("agent_env"),
+                    workdir=workspace_root,
+                    check=False,
+                )
+                dest = run_dir / "sessions.jsonl"
+                proc = subprocess.run(
+                    ["docker", "cp", f"{container_id}:{workspace_root}/sessions.jsonl", str(dest)],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                if proc.returncode != 0:
+                    logger.warning("Failed to copy sessions.jsonl from container: %s", proc.stderr)
+
+        except Exception as e:
+            logger.warning("exec_in_container failed: %s", e)
 
     def _collect_artifacts(
         self,
