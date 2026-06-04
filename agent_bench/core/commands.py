@@ -4,6 +4,8 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 from typing import Sequence
 
@@ -16,6 +18,43 @@ from agent_bench.core.execution import (
 )
 from agent_bench.core.spec import ConfigError, load_resolved_experiment
 from agent_bench.deployments import plan_deployment
+
+
+def setup_cadvisor(port: int = 8088):
+    """Install/setup cAdvisor if docker is available."""
+    if not shutil.which("docker"):
+        return
+
+    # Check if cadvisor is already running
+    proc = subprocess.run(
+        ["docker", "ps", "--filter", "name=cadvisor", "--format", "{{.Names}}"],
+        capture_output=True, text=True
+    )
+    if "cadvisor" in proc.stdout:
+        print("cAdvisor is already running.")
+        return
+
+    print(f"Starting cAdvisor sidecar on port {port}...")
+    # Standard cadvisor run command
+    cmd = [
+        "docker", "run",
+        "--volume=/:/rootfs:ro",
+        "--volume=/var/run:/var/run:ro",
+        "--volume=/sys:/sys:ro",
+        "--volume=/var/lib/docker/:/var/lib/docker:ro",
+        "--volume=/dev/disk/:/dev/disk:ro",
+        f"--publish={port}:8080",
+        "--detach=true",
+        "--name=cadvisor",
+        "--privileged",
+        "--device=/dev/kmsg",
+        "gcr.io/cadvisor/cadvisor:latest"
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"cAdvisor started on http://localhost:{port}")
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to start cAdvisor: {e}")
 
 
 def validate_main(argv: Sequence[str] | None = None) -> int:
@@ -59,12 +98,18 @@ def run_main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--no-retry-errors", action="store_true", help="Do not retry ERROR runs.")
     parser.add_argument("--max-workers", type=int, default=None)
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    parser.add_argument("--skip-cadvisor-setup", action="store_true", help="Skip cAdvisor sidecar setup for container metrics.")
+    parser.add_argument("--cadvisor-port", type=int, default=8088, help="Port for cAdvisor API (default 8088).")
     args = parser.parse_args(argv)
 
     if args.run_dir:
         _apply_cli_run_dir(args.run_dir)
     if args.serving_mode:
         os.environ["AB_SERVING_MODE"] = args.serving_mode
+    if not args.skip_cadvisor_setup:
+        setup_cadvisor(args.cadvisor_port)
+    # Propagate cadvisor port to environment so telemetry can find it
+    os.environ["AB_CADVISOR_PORT"] = str(args.cadvisor_port)
 
     try:
         resolved = load_resolved_experiment(args.config)

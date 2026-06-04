@@ -171,12 +171,7 @@ class TerminalBenchReactCondition:
         # adequate for a 20-step ReAct loop.
         history: List[Tuple[str, str]] = []  # [(role, content)]
 
-        # TB has no OC gateway; tool processes are children of the driver
-        # (singularity exec subprocesses). Pass the driver pid as the
-        # "tools origin" so the sampler attributes those children to the
-        # tools group; the driver process itself stays under client.
-        import os as _os
-        sampler_cm = UtilSampler(run_dir, gateway_pid=_os.getpid())
+        sampler_cm = UtilSampler(run_dir, client_container=instance_name)
         sampler_cm.__enter__()
         try:
           for step_idx in range(self.max_steps):

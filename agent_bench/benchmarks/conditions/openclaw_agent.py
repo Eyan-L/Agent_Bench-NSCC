@@ -136,11 +136,16 @@ class OpenClawAgentCondition:
         # in agent_bench/harnesses/openclaw/gateway_up.sh via OTEL_RESOURCE_ATTRIBUTES).
         otel_trace_file, pre_offset = otel_trace_offset()
 
-        gw_pid = self._env_info.get("gateway_pid")
-        try:
-            gw_pid = int(gw_pid) if gw_pid else None
-        except (TypeError, ValueError):
-            gw_pid = None
+        llm_container = (
+            self._env_info.get("llm_container_name")
+            or os.environ.get("OC_LLM_CONTAINER")
+            or os.environ.get("VLLM_CONTAINER_NAME")
+            or os.environ.get("LITELLM_CONTAINER_NAME")
+        )
+        client_container = self._env_info.get("container_name")
+        tools_container = self._env_info.get("task_container_name")
+        if tools_container == client_container:
+            tools_container = None
 
         # In-loop verification runs entirely inside the sandbox container —
         # the `verify` skill (agent_bench/benchmarks/<app>/openclaw/skills/verify/) tells
@@ -148,7 +153,12 @@ class OpenClawAgentCondition:
         # harness's final `run_tests` (called by the driver after DONE) is the
         # authoritative score; this in-loop check is for iteration only.
 
-        with UtilSampler(run_dir, gateway_pid=gw_pid):
+        with UtilSampler(
+            run_dir,
+            llm_container=llm_container,
+            client_container=client_container,
+            tools_container=tools_container,
+        ):
             step_start_ns = time.time_ns()
             payload, err = self._invoke_agent(
                 container_id=container_id,

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Sample CPU + GPU utilization at a fixed interval and append JSONL.
 
-Stdlib-only on purpose — runs anywhere python3 + (optionally) nvidia-smi
-exist. Designed to be spawned as a sidecar around an OC run:
+Stdlib-only on purpose — runs anywhere python3 + (optionally) cAdvisor and
+nvidia-smi exist. Designed to be spawned as a sidecar around a containerized
+run:
 
     python3 -m agent_bench.telemetry.util_sampler --output util.jsonl --interval 1.0 &
     PID=$!
@@ -16,16 +17,12 @@ CPU is read from /proc/stat (Linux). On platforms without /proc/stat the
 "cpu" field is null. GPU is read from `nvidia-smi --query-gpu`; if the
 binary is missing the "gpu" field is an empty list.
 
-Per-group CPU split (PID-tree accounting). Pass any of:
-    --llm-pid <pid>        # vLLM root pid (engine; sums itself + descendants)
-    --client-pid <pid>     # driver / agent pid (the harness Python process)
-    --gateway-pid <pid>    # OpenClaw gateway pid (its descendants are tools)
+Per-container utilization uses cAdvisor API and accepts any of:
+    --llm-container <name>     # model-serving container name
+    --client-container <name>  # gateway / client container name
+    --tools-container <name>   # task / sandbox container name
 
-Each --*-pid can be repeated. Tool processes are computed as
-"descendants of {client + gateway} minus the engine tree". CPU% per
-group is summed jiffies in the group between consecutive samples,
-divided by total host jiffies, x100xncpu so values are comparable to the
-host-wide cpu.pct (saturating at ncpux100).
+Each option can be repeated.
 
 Output format — one JSON object per sample, one line:
 
@@ -60,11 +57,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
 import sys
 import time
+import urllib.request
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -79,7 +78,7 @@ def _read_proc_stat() -> Optional[List[Tuple[int, int]]]:
     None if /proc/stat is unavailable.
     """
     try:
-        with open("/proc/stat", "r") as fh:
+        with open("/proc/stat", "r", encoding="utf-8") as fh:
             lines = fh.readlines()
     except (OSError, FileNotFoundError):
         return None
@@ -114,7 +113,7 @@ def _cpu_pct(prev: List[Tuple[int, int]], cur: List[Tuple[int, int]]) -> List[fl
 def _read_meminfo() -> Tuple[Optional[int], Optional[int]]:
     """Return (total_mb, used_mb). MemAvailable preferred over MemFree."""
     try:
-        with open("/proc/meminfo", "r") as fh:
+        with open("/proc/meminfo", "r", encoding="utf-8") as fh:
             lines = fh.readlines()
     except (OSError, FileNotFoundError):
         return None, None
@@ -139,96 +138,107 @@ def _loadavg() -> Optional[List[float]]:
 
 
 # ---------------------------------------------------------------------------
-# Per-process CPU/RSS via /proc/<pid>/stat,status — no psutil dependency.
-# Accumulates utime+stime jiffies per (group, sample); deltas across samples
-# divided by total /proc/stat jiffies give a CPU-percent comparable to the
-# host-wide cpu.pct (with the same x100 normalization, except per-group is
-# left in "% of one core" so tools_pct + engine_pct + client_pct + other_pct
-# = total host work in core-percent).
+# Per-container CPU/RSS via docker stats.
 # ---------------------------------------------------------------------------
-
-def _read_pid_stat(pid: int) -> Optional[Tuple[int, int, int, int]]:
-    """Return (utime, stime, ppid, rss_pages) for `pid`, or None if gone."""
-    try:
-        with open(f"/proc/{pid}/stat", "r") as fh:
-            data = fh.read()
-    except (OSError, FileNotFoundError):
-        return None
-    # comm may contain spaces and parentheses — split off the (..) field first.
-    rp = data.rfind(")")
-    if rp == -1:
-        return None
-    rest = data[rp + 2:].split()
-    # Fields after comm (man 5 proc, 1-indexed):
-    #   3 state, 4 ppid, 14 utime, 15 stime, 24 rss
-    # 0-indexed in `rest`: state=0, ppid=1, utime=11, stime=12, rss=21
-    try:
-        ppid = int(rest[1])
-        utime = int(rest[11])
-        stime = int(rest[12])
-        rss_pages = int(rest[21])
-    except (IndexError, ValueError):
-        return None
-    return utime, stime, ppid, rss_pages
-
-
-def _list_descendants(roots: List[int]) -> List[int]:
-    """Return a deduped list of root PIDs and all descendants by walking
-    /proc once and building a parent -> children index. O(N) per sample.
-
-    Excludes pids in `roots` that are gone; descendants are computed off
-    whatever's currently alive.
-    """
-    if not roots:
-        return []
-    try:
-        all_pids = [int(name) for name in os.listdir("/proc") if name.isdigit()]
-    except OSError:
-        return list(set(roots))
-    children: Dict[int, List[int]] = {}
-    for pid in all_pids:
-        s = _read_pid_stat(pid)
-        if s is None:
-            continue
-        _, _, ppid, _ = s
-        children.setdefault(ppid, []).append(pid)
-    out: set = set()
-    stack = list(roots)
-    while stack:
-        pid = stack.pop()
-        if pid in out:
-            continue
-        out.add(pid)
-        stack.extend(children.get(pid, []))
-    return sorted(out)
-
-
-def _group_jiffies_rss(pids: List[int]) -> Tuple[int, int, int]:
-    """Sum utime+stime jiffies and RSS pages across `pids`. Returns
-    (jiffies, rss_pages, n_alive). Dead pids are silently skipped."""
-    jiffies = 0
-    rss_pages = 0
-    n = 0
-    for pid in pids:
-        s = _read_pid_stat(pid)
-        if s is None:
-            continue
-        u, st, _ppid, r = s
-        jiffies += u + st
-        rss_pages += r
-        n += 1
-    return jiffies, rss_pages, n
-
 
 def _ncpu() -> int:
     return os.cpu_count() or 1
 
 
-def _page_size_bytes() -> int:
+def _read_docker_stats(container_name: str, port: int = 8088, timeout: float = 2.0) -> Optional[Dict]:
+    """Fetch metrics from cAdvisor API (replacing docker stats)."""
+    #   containers/docker/<name>
+    url = f"http://localhost:{port}/api/v1.3/docker/{container_name}"
     try:
-        return os.sysconf("SC_PAGESIZE")
-    except (OSError, ValueError):
-        return 4096
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception:
+        return None
+
+    if not data:
+        return None
+
+    # The response is usually a dict keyed by container path (e.g. "/docker/<id>")
+    info = next(iter(data.values())) if isinstance(data, dict) else data
+    stats = info.get("stats")
+    if not stats or len(stats) < 2:
+        return None
+
+    curr = stats[-1]
+    prev = stats[-2]
+
+    # CPU usage in nanoseconds
+    d_cpu = curr["cpu"]["usage"]["total"] - prev["cpu"]["usage"]["total"]
+
+    def _parse_ts(ts: str) -> float:
+        # Handle RFC3339 with various precision
+        ts = ts.replace("Z", "+00:00")
+        if "." in ts:
+            base, frac = ts.split(".")
+            # truncate/pad frac to 6 digits for %f, keeping only trailing offset
+            # (e.g. 2024-05-24T12:34:56.789123456Z -> 2024-05-24T12:34:56.789123+00:00)
+            frac_part, sep, offset = frac.partition("+")
+            if not sep:
+                frac_part, sep, offset = frac.partition("-")
+            frac_part = (frac_part[:6] + "000000")[:6]
+            ts = f"{base}.{frac_part}{sep}{offset}"
+        return datetime.fromisoformat(ts).timestamp()
+
+    try:
+        d_time = _parse_ts(curr["timestamp"]) - _parse_ts(prev["timestamp"])
+    except Exception:
+        return None
+
+    if d_time <= 0:
+        return None
+
+    # CPU % of total host (as reported by cadvisor stats which is cumulative across cores)
+    cpu_pct = round((d_cpu / (d_time * 1e9)) * 100.0, 2)
+
+    mem_used_bytes = curr["memory"]["usage"]
+    # memory limit is in the spec block
+    mem_total_bytes = info.get("spec", {}).get("memory", {}).get("limit", 0)
+    # 0 or very large numbers mean unlimited
+    is_unlimited = mem_total_bytes == 0 or mem_total_bytes > 2**60
+
+    mem_used_mb = mem_used_bytes // (1024 * 1024)
+    mem_total_mb = (mem_total_bytes // (1024 * 1024)) if not is_unlimited else None
+    mem_pct = round(100.0 * mem_used_bytes / mem_total_bytes, 2) if not is_unlimited and mem_total_bytes > 0 else None
+
+    return {
+        "name": container_name,
+        "pct": cpu_pct,
+        "mem_used_mb": mem_used_mb,
+        "mem_total_mb": mem_total_mb,
+        "mem_pct": mem_pct,
+        "n_proc": None,  # cadvisor v1.3 doesn't easily show PID count in stats block
+    }
+
+
+def _read_container_groups(container_groups: Dict[str, List[str]], port: int = 8088) -> Dict[str, Dict]:
+    out: Dict[str, Dict] = {}
+    for role, names in container_groups.items():
+        sampled = []
+        for name in names:
+            if not name:
+                continue
+            stats = _read_docker_stats(name, port=port)
+            if stats is not None:
+                sampled.append(stats)
+        if not sampled:
+            continue
+        mem_used_mb = sum((stat.get("mem_used_mb") or 0) for stat in sampled)
+        mem_total_mb = sum((stat.get("mem_total_mb") or 0) for stat in sampled)
+        mem_pct = round(100.0 * mem_used_mb / mem_total_mb, 2) if mem_total_mb else None
+        out[role] = {
+            "pct": round(sum((stat.get("pct") or 0.0) for stat in sampled), 2),
+            "mem_used_mb": mem_used_mb,
+            "mem_total_mb": mem_total_mb or None,
+            "mem_pct": mem_pct,
+            "n_proc": sum((stat.get("n_proc") or 0) for stat in sampled) or None,
+            "containers": [stat["name"] for stat in sampled],
+        }
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -250,10 +260,14 @@ def _read_nvidia_smi(timeout: float = 2.0) -> List[Dict]:
         return []
     try:
         proc = subprocess.run(
-            ["nvidia-smi",
-             f"--query-gpu={_NVIDIA_QUERY}",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=timeout,
+            [
+                "nvidia-smi",
+                f"--query-gpu={_NVIDIA_QUERY}",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
     except (subprocess.TimeoutExpired, OSError):
         return []
@@ -264,25 +278,28 @@ def _read_nvidia_smi(timeout: float = 2.0) -> List[Dict]:
         cols = [c.strip() for c in line.split(",")]
         if len(cols) < 8:
             continue
+
         def _f(s: str) -> Optional[float]:
             try:
                 return float(s)
             except ValueError:
                 return None
+
         def _i(s: str) -> Optional[int]:
             try:
                 return int(float(s))
             except ValueError:
                 return None
+
         out.append({
-            "index":        _i(cols[0]),
-            "name":         cols[1],
+            "index": _i(cols[0]),
+            "name": cols[1],
             "util_gpu_pct": _f(cols[2]),
             "util_mem_pct": _f(cols[3]),
-            "mem_used_mb":  _i(cols[4]),
+            "mem_used_mb": _i(cols[4]),
             "mem_total_mb": _i(cols[5]),
-            "power_w":      _f(cols[6]),
-            "temp_c":       _f(cols[7]),
+            "power_w": _f(cols[6]),
+            "temp_c": _f(cols[7]),
         })
     return out
 
@@ -298,6 +315,7 @@ class _Stop:
 def _install_signal_handlers() -> None:
     def _handler(signum, frame):  # noqa: ARG001
         _Stop.flag = True
+
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
             signal.signal(sig, _handler)
@@ -305,32 +323,12 @@ def _install_signal_handlers() -> None:
             pass
 
 
-def _stat_total_jiffies(stat: List[Tuple[int, int]]) -> int:
-    """Sum the aggregate (idx 0) total jiffies from _read_proc_stat output."""
-    if not stat:
-        return 0
-    return stat[0][1]
-
-
-def _group_pct(prev_j: int, cur_j: int, prev_total: int, cur_total: int,
-               ncpu: int) -> float:
-    """Per-group jiffy delta divided by host total jiffy delta, scaled to a
-    "% of one core x ncpu" so it sums comparably with cpu.pct (host-wide)."""
-    d_total = cur_total - prev_total
-    if d_total <= 0:
-        return 0.0
-    d_group = max(cur_j - prev_j, 0)
-    return round(100.0 * ncpu * d_group / d_total, 2)
-
-
 def _build_record(
     prev_stat,
     cur_stat,
     *,
-    prev_groups: Optional[Dict[str, int]] = None,
-    cur_groups: Optional[Dict[str, Tuple[int, int, int]]] = None,
+    cur_groups: Optional[Dict[str, Dict]] = None,
     ncpu: int = 1,
-    page_bytes: int = 4096,
 ) -> Dict:
     now_ns = time.time_ns()
     iso = datetime.fromtimestamp(now_ns / 1e9, tz=timezone.utc).isoformat()
@@ -345,41 +343,41 @@ def _build_record(
             pcts = _cpu_pct(prev_stat, cur_stat)
         mem_total, mem_used = _read_meminfo()
         cpu_block = {
-            "pct":          pcts[0] if pcts else None,
-            "per_cpu_pct":  pcts[1:] if len(pcts) > 1 else [],
-            "loadavg":      _loadavg(),
+            "pct": pcts[0] if pcts else None,
+            "per_cpu_pct": pcts[1:] if len(pcts) > 1 else [],
+            "loadavg": _loadavg(),
             "mem_total_mb": mem_total,
-            "mem_used_mb":  mem_used,
-            "mem_pct":      (round(100.0 * mem_used / mem_total, 2)
-                             if mem_total and mem_used is not None else None),
+            "mem_used_mb": mem_used,
+            "mem_pct": (
+                round(100.0 * mem_used / mem_total, 2)
+                if mem_total and mem_used is not None else None
+            ),
         }
-        # Per-group breakdown (only if pids configured AND we have a delta).
+        # Per-container breakdown.
         if cur_groups is not None:
-            prev_total = _stat_total_jiffies(prev_stat) if prev_stat else 0
-            cur_total = _stat_total_jiffies(cur_stat)
             by_group: Dict[str, Dict] = {}
             sum_pct = 0.0
-            for name, (cur_j, rss_pages, n_alive) in cur_groups.items():
-                pj = (prev_groups or {}).get(name, cur_j)
-                pct = _group_pct(pj, cur_j, prev_total, cur_total, ncpu)
+            for name, stats in cur_groups.items():
+                pct = stats.get("pct")
                 by_group[name] = {
-                    "pct":    pct,
-                    "rss_mb": (rss_pages * page_bytes) // (1024 * 1024),
-                    "n_proc": n_alive,
+                    "pct": pct,
+                    "rss_mb": stats.get("mem_used_mb"),
+                    "n_proc": stats.get("n_proc"),
                 }
-                sum_pct += pct
+                if pct is not None:
+                    sum_pct += pct
             host_pct = cpu_block["pct"] or 0.0
-            # "other" can go negative if descendants drift between samples
-            # (race between _list_descendants and _group_jiffies_rss); clamp.
+            # cAdvisor reports CPU as "% of one core" and can exceed 100.
+            # Scale host-wide CPU to the same unit before deriving "other".
             by_group["other"] = {
-                "pct": round(max(0.0, host_pct - sum_pct), 2),
+                "pct": round(max(0.0, host_pct * ncpu - sum_pct), 2),
             }
             cpu_block["by_group"] = by_group
     return {
         "ts_ns": now_ns,
-        "iso":   iso,
-        "cpu":   cpu_block,
-        "gpu":   _read_nvidia_smi(),
+        "iso": iso,
+        "cpu": cpu_block,
+        "gpu": _read_nvidia_smi(),
     }
 
 
@@ -391,23 +389,27 @@ def main() -> int:
                     help="seconds between samples (default 1.0)")
     ap.add_argument("--duration", type=float, default=0.0,
                     help="stop after N seconds (0 = until SIGTERM)")
-    ap.add_argument("--llm-pid", type=int, action="append", default=[],
-                    help="Engine root pid (vLLM). Repeatable.")
-    ap.add_argument("--client-pid", type=int, action="append", default=[],
-                    help="Driver / agent root pid. Repeatable.")
-    ap.add_argument("--gateway-pid", type=int, action="append", default=[],
-                    help="OpenClaw gateway root pid. Tools = its descendants. "
-                         "Repeatable.")
+    ap.add_argument("--cadvisor-port", type=int, 
+                    default=int(os.environ.get("AB_CADVISOR_PORT", "8088")),
+                    help="cAdvisor API port (default 8088 or AB_CADVISOR_PORT env)")
+    ap.add_argument("--llm-container", type=str, action="append", default=[],
+                    help="model-serving container name. Repeatable.")
+    ap.add_argument("--client-container", type=str, action="append", default=[],
+                    help="agent / gateway container name. Repeatable.")
+    ap.add_argument("--tools-container", type=str, action="append", default=[],
+                    help="tool / sandbox container name. Repeatable.")
     args = ap.parse_args()
 
     _install_signal_handlers()
-    os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".",
-                exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".", exist_ok=True)
 
-    have_groups = bool(args.llm_pid or args.client_pid or args.gateway_pid)
     ncpu = _ncpu()
-    page_bytes = _page_size_bytes()
-    prev_groups: Dict[str, int] = {}
+    container_groups = {
+        "llm_engine": list(args.llm_container),
+        "client": list(args.client_container),
+        "tools": list(args.tools_container),
+    }
+    have_groups = bool(any(container_groups.values()))
 
     deadline = time.monotonic() + args.duration if args.duration > 0 else None
     prev_stat = _read_proc_stat()
@@ -415,60 +417,39 @@ def main() -> int:
     # Open in line-buffered mode so kill -TERM mid-run still leaves the file
     # in a parseable state. JSONL is append-only so each sample is durable
     # the moment its newline hits disk.
-    with open(args.output, "a", buffering=1) as fh:
+    with open(args.output, "a", buffering=1, encoding="utf-8") as fh:
         # Write a header line so consumers can identify the stream.
         header = {
             "_meta": True,
-            "started_iso":   datetime.now(tz=timezone.utc).isoformat(),
+            "started_iso": datetime.now(tz=timezone.utc).isoformat(),
             "started_ts_ns": time.time_ns(),
-            "interval":      args.interval,
-            "pid":           os.getpid(),
-            "host":          os.uname().nodename if hasattr(os, "uname") else None,
-            "nvidia_smi":    _have_nvidia_smi(),
-            "ncpu":          ncpu,
-            "pid_groups":    {
-                "llm_engine": list(args.llm_pid),
-                "client":     list(args.client_pid),
-                "gateway":    list(args.gateway_pid),
+            "interval": args.interval,
+            "pid": os.getpid(),
+            "host": os.uname().nodename if hasattr(os, "uname") else None,
+            "nvidia_smi": _have_nvidia_smi(),
+            "ncpu": ncpu,
+            "container_groups": {
+                "llm_engine": list(args.llm_container),
+                "client": list(args.client_container),
+                "tools": list(args.tools_container),
             },
         }
         fh.write(json.dumps(header) + "\n")
 
         while not _Stop.flag:
             cur_stat = _read_proc_stat()
-            cur_groups: Optional[Dict[str, Tuple[int, int, int]]] = None
+            cur_groups: Optional[Dict[str, Dict]] = None
             if have_groups:
-                # Resolve descendants this sample (process tree changes over time).
-                engine_pids = _list_descendants(args.llm_pid)
-                client_pids = _list_descendants(args.client_pid)
-                gateway_pids = _list_descendants(args.gateway_pid)
-                # Tools = under (client + gateway), excluding engine.
-                engine_set = set(engine_pids)
-                tools_pids = [
-                    p for p in (set(client_pids) | set(gateway_pids))
-                    if p not in engine_set
-                    and p not in args.client_pid          # exclude client roots
-                    and p not in args.gateway_pid         # exclude gateway roots
-                ]
-                cur_groups = {
-                    "llm_engine": _group_jiffies_rss(engine_pids),
-                    "client":     _group_jiffies_rss(args.client_pid),
-                    "tools":      _group_jiffies_rss(tools_pids),
-                }
-                # Add in the gateway's own jiffies under "client" so
-                # client = (driver + gateway roots) and tools = their kids.
-                gw_j, gw_rss, gw_n = _group_jiffies_rss(args.gateway_pid)
-                cl_j, cl_rss, cl_n = cur_groups["client"]
-                cur_groups["client"] = (cl_j + gw_j, cl_rss + gw_rss, cl_n + gw_n)
+                cur_groups = _read_container_groups(container_groups, port=args.cadvisor_port)
+                if not cur_groups:
+                    cur_groups = None
 
             rec = _build_record(
-                prev_stat, cur_stat,
-                prev_groups=prev_groups if prev_groups else None,
+                prev_stat,
+                cur_stat,
                 cur_groups=cur_groups,
-                ncpu=ncpu, page_bytes=page_bytes,
+                ncpu=ncpu,
             )
-            if cur_groups is not None:
-                prev_groups = {k: v[0] for k, v in cur_groups.items()}
             prev_stat = cur_stat
             fh.write(json.dumps(rec) + "\n")
             if deadline is not None and time.monotonic() >= deadline:

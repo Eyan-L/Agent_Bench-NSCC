@@ -182,8 +182,8 @@ def load_util_telemetry(run_dir: Path) -> pd.DataFrame:
             gpu_mem = sum((g.get("mem_used_mb") or 0) for g in gpus)
             gpu_mem_total = sum((g.get("mem_total_mb") or 0) for g in gpus)
             gpu_power = sum((g.get("power_w") or 0) for g in gpus)
-            # Per-group CPU split — only present when the sampler had pids
-            # configured (see agent_bench.telemetry.util_sampler --llm-pid/--client-pid).
+            # Per-group CPU split — only present when the sampler had container
+            # names configured (see agent_bench.telemetry.util_sampler --llm-container/--client-container).
             # Use NaN for absent groups so plot code can detect "not measured"
             # vs "measured zero" with .notna().
             by_group = (cpu.get("by_group") or {})

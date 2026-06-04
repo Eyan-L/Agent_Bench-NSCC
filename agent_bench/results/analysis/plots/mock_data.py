@@ -24,7 +24,7 @@ run looks the same:
 Schema produced per mock run:
     <out>/<sweep>/<run_id>/
       steps.jsonl       — LLM_INFER + TOOL_{READ,WRITE,EXEC} + WAIT_STALL
-      util.jsonl        — _meta header (with ncpu + pid_groups), then
+      util.jsonl        — _meta header (with ncpu + container_groups), then
                           per-second samples carrying cpu.by_group
       spans.jsonl       — synthetic openclaw.model.usage one per LLM step
       verdict.json      — status PASS/FAIL/TIMEOUT
@@ -454,7 +454,7 @@ def _gen_util_jsonl(family: str, profile: WorkloadProfile, duration_s: int,
         "host":          "mock-host",
         "nvidia_smi":    True,
         "ncpu":          ncpu,
-        "pid_groups":    {"llm_engine": [101], "client": [102], "gateway": [103]},
+        "container_groups": {"llm_engine": ["oc-vllm-serve"], "client": ["oc-gateway"], "tools": ["task-sandbox"]},
     })
     budget = profile.cpu_budget_ar if family == "AR" else profile.cpu_budget_agent
 

@@ -373,8 +373,8 @@ def plot_cpu_vs_gpu_scatter(long: pd.DataFrame, runs_dir: Path, out_dir: Path,
 # Per-condition grouped bar; one bar group per condition, four bars per
 # condition (engine / client / tools / other). Values are mean across the
 # trajectory, in "% of one core x ncpu" units (same scale as host-wide).
-# Requires the sampler to have been launched with --llm-pid/--client-pid/
-# --gateway-pid; runs without those args contribute NaN and are excluded
+# Requires the sampler to have been launched with --llm-container/--client-container/
+# --tools-container; runs without those args contribute NaN and are excluded
 # from this figure (the existing rq2_cpu_and_memory plot still works).
 # ---------------------------------------------------------------------------
 

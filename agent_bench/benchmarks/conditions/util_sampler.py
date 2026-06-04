@@ -1,8 +1,8 @@
 """Resource-utilization sampler - sidecar around an in-flight condition run.
 
 Spawns ``agent_bench/telemetry/util_sampler.py`` as a child process. Each sample lands as
-one JSON line in ``<run_dir>/util.jsonl`` (CPU/mem/loadavg/GPU, plus per-PID-
-group CPU split when llm_pid/client_pid/gateway_pid are provided).
+one JSON line in ``<run_dir>/util.jsonl`` (CPU/mem/loadavg/GPU, plus per-container
+split when llm/client/tools container names are provided).
 
 Benchmark-agnostic — used by both ``OpenClawAgentCondition`` (SWE-bench, TB)
 and the ``TerminalBenchReactCondition``. The condition-side context manager
@@ -32,9 +32,9 @@ class UtilSampler:
         self,
         run_dir: Path,
         *,
-        llm_pid: Optional[int] = None,
-        client_pid: Optional[int] = None,
-        gateway_pid: Optional[int] = None,
+        llm_container: Optional[str] = None,
+        client_container: Optional[str] = None,
+        tools_container: Optional[str] = None,
     ):
         self.run_dir = run_dir
         self.proc: Optional[subprocess.Popen] = None
@@ -47,16 +47,27 @@ class UtilSampler:
         except ValueError:
             self.interval = 1.0
 
-        if llm_pid is None:
-            try:
-                llm_pid = int(os.environ.get("AB_TELEMETRY_SERVING_PID") or 0) or None
-            except ValueError:
-                llm_pid = None
-        if client_pid is None:
-            client_pid = os.getpid()
-        self.llm_pid = llm_pid
-        self.client_pid = client_pid
-        self.gateway_pid = gateway_pid
+        if llm_container is None:
+            llm_container = (
+                os.environ.get("OC_LLM_CONTAINER")
+                or os.environ.get("VLLM_CONTAINER_NAME")
+                or os.environ.get("LITELLM_CONTAINER_NAME")
+            )
+        if client_container is None:
+            client_container = (
+                os.environ.get("OC_CLIENT_CONTAINER")
+                or os.environ.get("OC_GATEWAY_CONTAINER")
+                or os.environ.get("OC_GATEWAY_NAME")
+            )
+        if tools_container is None:
+            tools_container = (
+                os.environ.get("OC_TOOLS_CONTAINER")
+                or os.environ.get("OC_TASK_CONTAINER")
+                or os.environ.get("TASK_CONTAINER_NAME")
+            )
+        self.llm_container = llm_container
+        self.client_container = client_container
+        self.tools_container = tools_container
 
     def __enter__(self) -> "UtilSampler":
         if not self.enabled:
@@ -67,12 +78,12 @@ class UtilSampler:
             "--output", str(out_path),
             "--interval", str(self.interval),
         ]
-        if self.llm_pid:
-            argv += ["--llm-pid", str(self.llm_pid)]
-        if self.client_pid:
-            argv += ["--client-pid", str(self.client_pid)]
-        if self.gateway_pid:
-            argv += ["--gateway-pid", str(self.gateway_pid)]
+        if self.llm_container:
+            argv += ["--llm-container", self.llm_container]
+        if self.client_container:
+            argv += ["--client-container", self.client_container]
+        if self.tools_container and self.tools_container != self.client_container:
+            argv += ["--tools-container", self.tools_container]
         try:
             self.proc = subprocess.Popen(
                 argv,
@@ -83,9 +94,9 @@ class UtilSampler:
             )
             logger.info(
                 "  util sampler pid=%s -> %s (interval=%.2fs, "
-                "llm=%s client=%s gateway=%s)",
+                "llm=%s client=%s tools=%s)",
                 self.proc.pid, out_path.name, self.interval,
-                self.llm_pid, self.client_pid, self.gateway_pid,
+                self.llm_container, self.client_container, self.tools_container,
             )
         except Exception as e:
             logger.warning("util sampler launch failed: %s", e)
