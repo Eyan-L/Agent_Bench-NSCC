@@ -104,6 +104,18 @@ def test_openclaw_docker_harnesses_use_bridge_mounts_and_env():
         assert "*dispatcher.agent_container_args()" not in app
 
 
+def test_terminal_bench_bridge_dispatcher_uses_backend_attrs():
+    legacy_app = (ROOT / "agent_bench/benchmarks/terminal_bench/app.py").read_text()
+    agent_base = (
+        ROOT / "agent_bench/benchmarks/terminal_bench/agent_harness_base.py"
+    ).read_text()
+
+    assert "backend=self.backend_id" in legacy_app
+    assert "backend=self.container.backend_id" in agent_base
+    assert 'backend="docker"' not in legacy_app
+    assert 'backend="docker"' not in agent_base
+
+
 def test_openclaw_forces_chat_completions_transport():
     stages = (ROOT / "agent_bench/deployments/pbs/stages.py").read_text()
     configure = (ROOT / "agent_bench/harnesses/openclaw/configure.sh").read_text()

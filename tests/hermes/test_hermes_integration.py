@@ -28,6 +28,12 @@ def test_hermes_patch_manifest_and_backend_contract():
     assert "AB_AGENT_RUNTIME_EVENTS_FILE" in telemetry_text
     assert "_hm_ab_coerce_json_string_args" in telemetry_text
     assert "emit_model_usage_delta" in telemetry_text
+    assert "_hm_ab_post_otel_spans" in telemetry_text
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT" in telemetry_text
+    assert "AB_RUN_ID" in telemetry_text
+    assert "agent.model.usage" in telemetry_text
+    assert "agent.tool.call" in telemetry_text
+    assert "raise RuntimeError" not in telemetry_text
     assert '"request_index": usage_events_written' in telemetry_text
 
 
@@ -52,9 +58,11 @@ def test_hermes_app_uses_external_task_container_and_bridge():
     assert 'os.environ.get("OPENAI_BASE_URL")' in app
     assert '"HERMES_INFERENCE_PROVIDER": provider' in app
     assert "AB_AGENT_RUNTIME_EVENTS_FILE" in app
+    assert '"AB_RUN_ID": run_id' in app
     assert 'f"{_STATE_DIR_IN_HERMES}/events.jsonl"' in app
     assert "MINIMAX_API_KEY" in app
     assert "otel_env(" in app
+    assert "otel_config_values(" in app
     assert 'service_name="agent-bench-hermes"' in app
     assert 'extra_attrs={"hm.run_id": run_id}' in app
     assert "/var/run/docker.sock" not in app
@@ -215,3 +223,7 @@ def test_hermes_config_template_selects_docker_backend():
     assert "docker_image" in template
     assert "terminal" in template
     assert "platform_toolsets" in template
+    assert "telemetry:" in template
+    assert "otel:" in template
+    assert 'endpoint: "$OTEL_ENDPOINT"' in template
+    assert 'run_id: "$AB_RUN_ID"' in template

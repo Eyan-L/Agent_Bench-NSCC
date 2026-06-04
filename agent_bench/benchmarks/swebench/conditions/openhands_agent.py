@@ -12,11 +12,10 @@ The events follow openhands-sdk 1.21 schema:
     {"kind": "ObservationEvent", source: "environment", tool_name, tool_call_id, ...}
     {"driver_event": "summary",  metrics: {prompt_tokens, completion_tokens, ...}}
 
-We collapse them into:
-    - one `agent.model.usage` span (totals from the driver-emitted summary)
-    - one `agent.tool.call` span per (Action, Observation) pair
-written to <run_dir>/spans.jsonl. Plus one coarse LLM_INFER step row in
-<run_dir>/steps.jsonl and the candidate.patch (collected by the harness).
+The driver emits `agent.model.usage` and `agent.tool.call` spans to the shared
+collector. This condition slices collector output by `oc.run_id`, then writes one
+coarse LLM_INFER step row in <run_dir>/steps.jsonl and the candidate.patch
+(collected by the harness).
 
 Returns the dict shape the driver expects.
 """
@@ -24,7 +23,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import shlex
 import shutil
 import subprocess
@@ -33,7 +31,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from agent_bench.benchmarks.conditions.agent_otel import optional_int, write_spans_and_otlp
+from agent_bench.benchmarks.conditions.agent_otel import (
+    optional_int,
+    otel_trace_offset,
+    snapshot_otel_spans,
+    wait_for_otel_flush,
+)
 from agent_bench.benchmarks.conditions.util_sampler import UtilSampler
 from agent_bench.deployments.containers.base import Container, ContainerHandle
 
@@ -120,6 +123,7 @@ class OpenHandsAgentCondition:
             f"--workspace {shlex.quote(workspace_root)}"
         )
         timeout = getattr(self.agent_config, "max_time_seconds", 1800)
+        otel_trace_file, pre_offset = otel_trace_offset()
         sampler_cm = UtilSampler(run_dir, gateway_pid=optional_int(env_info.get("bridge_pid")))
         sampler_cm.__enter__()
         step_start_ns = time.time_ns()
@@ -151,18 +155,18 @@ class OpenHandsAgentCondition:
             step_end_ns = time.time_ns()
             sampler_cm.__exit__(None, None, None)
 
-        # 2. Parse events.jsonl + build spans.
+        # 2. Parse events.jsonl for token totals; spans come from the collector.
         events = self._load_events(Path(events_path_host))
         run_id = run_dir.name
-        spans = self._build_spans(events, run_id, step_start_ns, step_end_ns)
-        spans_path = run_dir / "spans.jsonl"
-        write_spans_and_otlp(
-            spans_path,
-            spans,
-            scope_name="agent-bench-openhands",
-            resource_defaults=self._resource_attrs(run_id, instance_id),
+        wait_for_otel_flush()
+        spans_path = snapshot_otel_spans(
+            otel_trace_file, pre_offset, run_dir, expected_run_id=run_id,
         )
-        logger.info("  wrote %d span(s) -> %s", len(spans), spans_path.name)
+        if spans_path is None:
+            spans_path = run_dir / "spans.jsonl"
+            spans_path.touch()
+            (run_dir / "spans_raw.jsonl").touch()
+        logger.info("  sliced OpenHands OTel -> %s", spans_path.name)
 
         prompt_tokens, completion_tokens = self._aggregate_tokens(events)
 

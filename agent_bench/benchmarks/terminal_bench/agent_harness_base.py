@@ -105,6 +105,8 @@ class TerminalBenchAgentHarnessBase:
         agent_name = f"{self.short_name}-tb-{rid_short}"
         task_name = self._task_container_name(run_id)
 
+        self._preflight_cleanup(net_name, agent_name, task_name)
+
         run_root = self.workspace_base / run_id
         if run_root.exists():
             _force_rmtree(run_root, ignore_errors=True)
@@ -149,14 +151,18 @@ class TerminalBenchAgentHarnessBase:
         )
         try:
             task_handle = self.container.start(task_spec)
-        except Exception:
+        except BaseException:
             self._best_effort_cleanup(net_name, agent_name, task_name)
             raise
 
         dispatcher = self.dispatcher_cls()
         try:
-            dispatcher.start(state_dir=state_dir, backend="docker", target=task_name)
-        except Exception:
+            dispatcher.start(
+                state_dir=state_dir,
+                backend=self.container.backend_id,
+                target=task_name,
+            )
+        except BaseException:
             self._best_effort_cleanup(net_name, agent_name, task_name)
             raise
         bridge_mounts, bridge_env = dispatcher.agent_mounts_and_env()
@@ -184,7 +190,7 @@ class TerminalBenchAgentHarnessBase:
         )
         try:
             agent_handle = self.container.start(agent_spec)
-        except Exception:
+        except BaseException:
             dispatcher.stop()
             self._best_effort_cleanup(net_name, agent_name, task_name)
             raise
@@ -233,6 +239,13 @@ class TerminalBenchAgentHarnessBase:
 
     def _task_container_name(self, run_id: str) -> str:
         return f"{self.short_name}-tb-task-{run_id[:12]}"
+
+    def _preflight_cleanup(self, net: str, agent: str, task: Optional[str]) -> None:
+        logger.info(
+            "preflight cleanup for TB %s run resources: agent=%s task=%s net=%s",
+            self.harness_name, agent, task, net,
+        )
+        self._best_effort_cleanup(net, agent, task)
 
     def _runtime_base_url(self, configured: Optional[str]) -> str:
         from agent_bench.core.config import endpoint_for_container

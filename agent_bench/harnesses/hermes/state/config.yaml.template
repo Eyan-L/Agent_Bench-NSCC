@@ -26,3 +26,15 @@ platform_toolsets:
     - terminal
     - file
     - code_execution
+
+telemetry:
+  otel:
+    enabled: $OTEL_ENABLED
+    endpoint: "$OTEL_ENDPOINT"
+    protocol: "$OTEL_PROTOCOL"
+    service_name: "$OTEL_SERVICE_NAME"
+    run_id: "$AB_RUN_ID"
+    resource_attributes: "$OTEL_RESOURCE_ATTRIBUTES"
+    traces: true
+    metrics: false
+    logs: false

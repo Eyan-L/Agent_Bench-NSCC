@@ -2,9 +2,11 @@
 +++ b/hermes_cli/oneshot.py
 @@ -24,0 +25,1 @@
 +import json
-@@ -28,0 +30,1 @@
+@@ -28,0 +30,3 @@
 +import time
-@@ -121,1 +123,187 @@
++import urllib.error
++import urllib.request
+@@ -121,1 +123,379 @@
      return valid, None
 +
 +
@@ -25,6 +27,120 @@
 +            fh.write(json.dumps(event, ensure_ascii=False) + "\n")
 +    except Exception:
 +        logging.debug("Agent_Bench Hermes telemetry event write failed", exc_info=True)
++
++
++def _hm_ab_otel_endpoint() -> str:
++    endpoint = (
++        os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
++        or os.getenv("AB_TELEMETRY_ENDPOINT")
++        or ""
++    ).strip().rstrip("/")
++    if not endpoint:
++        return ""
++    return endpoint if endpoint.endswith("/v1/traces") else f"{endpoint}/v1/traces"
++
++
++def _hm_ab_otel_value(value: object) -> dict:
++    if isinstance(value, bool):
++        return {"boolValue": value}
++    if isinstance(value, int):
++        return {"intValue": value}
++    if isinstance(value, float):
++        return {"doubleValue": value}
++    if isinstance(value, (list, tuple)):
++        return {"arrayValue": {"values": [_hm_ab_otel_value(item) for item in value]}}
++    if isinstance(value, dict):
++        return {"stringValue": json.dumps(value, ensure_ascii=False, sort_keys=True)}
++    return {"stringValue": str(value)}
++
++
++def _hm_ab_otel_attrs(values: dict) -> list[dict]:
++    return [
++        {"key": str(key), "value": _hm_ab_otel_value(value)}
++        for key, value in values.items()
++        if value is not None
++    ]
++
++
++def _hm_ab_resource_attrs(run_id: str) -> dict:
++    return {
++        "ab.run_id": run_id,
++        "oc.run_id": run_id,
++        "agent.run_id": run_id,
++        "hm.run_id": run_id,
++        "service.name": "agent-bench-hermes",
++    }
++
++
++def _hm_ab_post_otel_spans(spans: list[dict], run_id: str) -> None:
++    endpoint = _hm_ab_otel_endpoint()
++    if not endpoint or not run_id or not spans:
++        return
++    try:
++        trace_id = os.urandom(16).hex()
++        body = {
++            "resourceSpans": [{
++                "resource": {"attributes": _hm_ab_otel_attrs(_hm_ab_resource_attrs(run_id))},
++                "scopeSpans": [{
++                    "scope": {"name": "agent-bench-hermes"},
++                    "spans": [
++                        {
++                            "traceId": trace_id,
++                            "spanId": os.urandom(8).hex(),
++                            "name": span["name"],
++                            "kind": 1,
++                            "startTimeUnixNano": str(int(span.get("start_ns") or 0)),
++                            "endTimeUnixNano": str(int(span.get("end_ns") or span.get("start_ns") or 0)),
++                            "attributes": _hm_ab_otel_attrs(span.get("attrs") or {}),
++                        }
++                        for span in spans
++                    ],
++                }],
++            }],
++        }
++        req = urllib.request.Request(
++            endpoint,
++            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
++            headers={"Content-Type": "application/json"},
++            method="POST",
++        )
++        with urllib.request.urlopen(req, timeout=1.0):
++            pass
++    except Exception:
++        logging.debug("Agent_Bench Hermes OTLP export failed", exc_info=True)
++
++
++def _hm_ab_emit_otel_span(
++    name: str,
++    start_ns: int,
++    end_ns: int,
++    attrs: dict,
++    run_id: str,
++) -> None:
++    span_attrs = {
++        "agent.canonical_name": name,
++        "agent.run_id": run_id,
++        "agent.session_id": run_id,
++        "agent.span.source": "hermes.telemetry_patch",
++    }
++    span_attrs.update(attrs)
++    _hm_ab_post_otel_spans([{
++        "name": name,
++        "start_ns": start_ns,
++        "end_ns": end_ns,
++        "attrs": span_attrs,
++    }], run_id)
++
++
++def _hm_ab_json_preview(value: object, limit: int = 8192) -> tuple[str, bool, int]:
++    try:
++        text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
++    except Exception:
++        text = str(value)
++    original_len = len(text)
++    if original_len > limit:
++        return text[:limit], True, original_len
++    return text, False, original_len
 +
 +
 +def _hm_ab_schema_expects_compound(schema: object) -> tuple[bool, bool]:
@@ -109,10 +225,10 @@
 +
 +
 +def _hm_ab_attach_agent_bench_telemetry(agent):
-+    if not _hm_ab_events_path():
++    if not _hm_ab_events_path() and not _hm_ab_otel_endpoint():
 +        return None
 +
-+    run_id = os.getenv("HERMES_RUN_ID") or os.getenv("OPENCLAW_RUN_ID") or ""
++    run_id = os.getenv("AB_RUN_ID") or os.getenv("HERMES_RUN_ID") or os.getenv("OPENCLAW_RUN_ID") or ""
 +    session_id = str(getattr(agent, "session_id", "") or run_id)
 +    starts: dict[str, int] = {}
 +    prior_start = getattr(agent, "tool_start_callback", None)
@@ -140,7 +256,7 @@
 +        end_ns = time.time_ns()
 +        key = str(call_id or f"{tool_name}:{end_ns}")
 +        start_ns = starts.pop(key, end_ns)
-+        _hm_ab_write_event({
++        tool_event = {
 +            "type": "tool.call",
 +            "start_ns": start_ns,
 +            "end_ns": end_ns,
@@ -151,7 +267,29 @@
 +            "tool_call_id": key,
 +            "is_error": _hm_ab_tool_result_is_error(str(tool_name or ""), result),
 +            "result_chars": len(str(result)) if result is not None else 0,
-+        })
++        }
++        _hm_ab_write_event(tool_event)
++        args_json, args_truncated, _args_chars = _hm_ab_json_preview(args)
++        result_preview, result_truncated, result_chars = _hm_ab_json_preview(result, limit=4096)
++        _hm_ab_emit_otel_span(
++            "agent.tool.call",
++            start_ns,
++            end_ns,
++            {
++                "agent.channel": "hermes.oneshot",
++                "agent.tool.name": tool_event["tool_name"],
++                "agent.tool.call_id": key,
++                "agent.tool.callId": key,
++                "agent.tool.is_error": tool_event["is_error"],
++                "agent.tool.isError": tool_event["is_error"],
++                "agent.tool.arguments_json": args_json,
++                "agent.tool.arguments_truncated": args_truncated,
++                "agent.tool.result_preview": result_preview,
++                "agent.tool.result_chars": result_chars,
++                "agent.tool.result_truncated": result_truncated,
++            },
++            run_id,
++        )
 +        if prior_complete:
 +            prior_complete(call_id, tool_name, args, result)
 +
@@ -202,7 +340,7 @@
 +            return
 +        usage_events_written += 1
 +        start_ns = usage_last_ns or end_ns
-+        _hm_ab_write_event({
++        usage_event = {
 +            "type": "model.usage",
 +            "channel": "hermes.llm",
 +            "start_ns": start_ns,
@@ -215,7 +353,28 @@
 +            "model": str(getattr(agent, "model", "") or ""),
 +            "api": "hermes.chat",
 +            **delta,
-+        })
++        }
++        _hm_ab_write_event(usage_event)
++        _hm_ab_emit_otel_span(
++            "agent.model.usage",
++            start_ns,
++            end_ns,
++            {
++                "agent.channel": "hermes.llm",
++                "agent.provider": usage_event["provider"],
++                "agent.model": usage_event["model"],
++                "agent.api": "hermes.chat",
++                "agent.llm.request_index": usage_events_written,
++                "agent.llm.requestIndex": usage_events_written,
++                "agent.tokens.input": delta["input_tokens"],
++                "agent.tokens.output": delta["output_tokens"],
++                "agent.tokens.cache_read": delta["cache_read_tokens"],
++                "agent.tokens.cache_write": delta["cache_write_tokens"],
++                "agent.tokens.total": delta["total_tokens"],
++                "agent.api_calls": delta["api_calls"],
++            },
++            run_id,
++        )
 +        usage_last = current
 +        usage_last_ns = end_ns
 +

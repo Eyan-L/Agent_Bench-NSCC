@@ -46,7 +46,7 @@ from agent_bench.deployments.containers import (
     DockerContainer,
     Mount,
 )
-from agent_bench.benchmarks.conditions.agent_otel import otel_env, otel_endpoint_for_container
+from agent_bench.benchmarks.conditions.agent_otel import otel_config_values, otel_env, otel_endpoint_for_container
 from agent_bench.harnesses.hermes.dispatcher import HermesDispatcher
 from agent_bench.core.config import endpoint_for_container, load_active_model_and_serving
 from agent_bench.core.profile_io import load_profile
@@ -115,6 +115,13 @@ class SWEBenchHermesHarness:
             )
         return os.environ.get("AB_AGENT_RUNTIME_IMAGE", DEFAULT_HERMES_RUNTIME_IMAGE)
 
+    def _preflight_cleanup(self, net: str, hm: str, task: Optional[str]) -> None:
+        logger.info(
+            "preflight cleanup for Hermes run resources: hm=%s task=%s net=%s",
+            hm, task, net,
+        )
+        self._best_effort_cleanup(net, hm, task)
+
     def prepare_environment(
         self,
         instance_id: str,
@@ -139,6 +146,8 @@ class SWEBenchHermesHarness:
         sandbox_prefix = f"oc-sbx-{rid_short}-"
         scope_key = "agent:swebench"
         task_container_name = _oc_sandbox_name(sandbox_prefix, scope_key)
+
+        self._preflight_cleanup(net_name, hm_name, task_container_name)
 
         logger.info(
             "Preparing run %s [runtime=%s] (hm=%s, sandbox=%s, repo=%s@%s, task=%s)",
@@ -181,7 +190,7 @@ class SWEBenchHermesHarness:
         )
         try:
             task_handle = self.container.start(task_spec)
-        except Exception:
+        except BaseException:
             self._best_effort_cleanup(net_name, hm_name, task_container_name)
             raise
         task_container_id = task_handle.id
@@ -193,7 +202,7 @@ class SWEBenchHermesHarness:
                 backend=self.container.backend_id,
                 target=task_container_name,
             )
-        except Exception:
+        except BaseException:
             self._best_effort_cleanup(net_name, hm_name, task_container_name)
             raise
         logger.info("  exec-bridge: pid=%s sock=%s", dispatcher.pid, dispatcher.socket_path)
@@ -212,6 +221,7 @@ class SWEBenchHermesHarness:
         hm_mounts.extend(b_mounts)
         hm_env = {
             "HERMES_HOME": _STATE_DIR_IN_HERMES,
+            "AB_RUN_ID": run_id,
             "HERMES_RUN_ID": run_id,
             "HERMES_INFERENCE_MODEL": model_name,
             "HERMES_INFERENCE_PROVIDER": provider,
@@ -245,7 +255,7 @@ class SWEBenchHermesHarness:
         )
         try:
             hm_handle = self.container.start(hm_spec)
-        except Exception:
+        except BaseException:
             dispatcher.stop()
             self._best_effort_cleanup(net_name, hm_name, task_container_name)
             raise
@@ -318,6 +328,13 @@ class SWEBenchHermesHarness:
             "TERMINAL_TIMEOUT": str((hm_cfg.get("run") or {}).get("terminal_timeout") or 180),
             "TERMINAL_CWD": _TASK_WORKSPACE,
             "SANDBOX_IMAGE": sandbox_image,
+            **otel_config_values(
+                service_name="agent-bench-hermes",
+                run_id=run_id,
+                endpoint=otel_endpoint_for_container(self.container.host_address),
+                extra_attrs={"hm.run_id": run_id},
+                enabled=((harness_cfg.get("telemetry") or {}).get("otel") or {}).get("enabled", True) is not False,
+            ),
         }
         rendered = string.Template(template_path.read_text()).safe_substitute(values)
         (state_dir / "config.yaml").write_text(rendered)

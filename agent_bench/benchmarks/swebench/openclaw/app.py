@@ -217,6 +217,12 @@ class SWEBenchHarness:
         task_container_name = _oc_sandbox_name(sandbox_prefix, scope_key)
 
         logger.info(
+            "preflight cleanup for OpenClaw run resources: oc=%s task=%s net=%s",
+            oc_name, task_container_name, net_name,
+        )
+        self._best_effort_cleanup(net_name, oc_name, task_container_name)
+
+        logger.info(
             "Preparing run %s [runtime=%s] (sandbox image=%s, oc=%s, repo=%s@%s, task=%s)",
             run_id, self.container.backend_id, container_image, self.oc_image,
             repo_id, base_commit[:12], task_container_name,
@@ -250,7 +256,7 @@ class SWEBenchHarness:
         #    pre-checked-out repo and the agent would see /testbed as empty.
         try:
             self._prime_workspace_from_image(task_image, ws_host)
-        except Exception:
+        except BaseException:
             self._best_effort_cleanup(net_name, oc_name, task_container_name)
             raise
 
@@ -288,7 +294,7 @@ class SWEBenchHarness:
         )
         try:
             task_handle = self.container.start(task_spec)
-        except Exception:
+        except BaseException:
             self._best_effort_cleanup(net_name, oc_name, task_container_name)
             raise
         task_container_id = task_handle.id
@@ -304,7 +310,7 @@ class SWEBenchHarness:
                 backend=self.container.backend_id,
                 target=task_container_name,
             )
-        except Exception:
+        except BaseException:
             self._best_effort_cleanup(net_name, oc_name, task_container_name)
             raise
         logger.info(
@@ -445,7 +451,7 @@ class SWEBenchHarness:
             logger.info("  [warmup] slot acquired; starting gateway (run=%s)", run_id)
             try:
                 oc_handle = self.container.start(oc_spec)
-            except Exception:
+            except BaseException:
                 _release_gateway_port(gateway_port)
                 dispatcher.stop()
                 self._best_effort_cleanup(net_name, oc_name, task_container_name)
@@ -455,7 +461,7 @@ class SWEBenchHarness:
             # 6. Wait for gateway readiness (plugin install completes here).
             try:
                 self._wait_for_gateway_ready(oc_handle)
-            except Exception:
+            except BaseException:
                 _release_gateway_port(gateway_port)
                 dispatcher.stop()
                 self._best_effort_cleanup(net_name, oc_name, task_container_name)
@@ -491,10 +497,16 @@ class SWEBenchHarness:
             gw_env += (
                 f"export OPENCLAW_PLUGIN_STAGE_DIR=/tmp/oc-plugin-deps/{run_id}-cli\n"
             )
-        self.container.exec(
-            oc_handle,
-            ["bash", "-c", f"cat > /tmp/oc_gateway_env <<'EOF'\n{gw_env}EOF"],
-        )
+        try:
+            self.container.exec(
+                oc_handle,
+                ["bash", "-c", f"cat > /tmp/oc_gateway_env <<'EOF'\n{gw_env}EOF"],
+            )
+        except BaseException:
+            _release_gateway_port(gateway_port)
+            dispatcher.stop()
+            self._best_effort_cleanup(net_name, oc_name, task_container_name)
+            raise
 
         logger.info(
             "  ready: oc=%s task=%s bridge_pid=%s net=%s",

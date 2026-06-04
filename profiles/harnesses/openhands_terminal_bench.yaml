@@ -1,6 +1,16 @@
 # OpenHands Terminal-Bench harness. Agent workspace is /app; tool calls are
 # routed through Agent_Bench's exec bridge into the Terminal-Bench task container.
 harness: openhands
+telemetry:
+  spans_html: true
+  otel:
+    enabled: true
+    endpoint: http://localhost:4318
+    protocol: http/json
+    service_name: agent-bench-openhands
+    traces: true
+    metrics: false
+    logs: false
 openhands:
   agent:
     name: CodeActAgent

@@ -243,6 +243,12 @@ class TerminalBenchDockerHarness:
         sandbox_prefix = f"oc-sbx-{rid_short}-"
         task_container_name = _oc_sandbox_name(sandbox_prefix, scope_key)
 
+        logger.info(
+            "preflight cleanup for TB OpenClaw run resources: oc=%s task=%s net=%s",
+            oc_name, task_container_name, net_name,
+        )
+        self._best_effort_cleanup(net_name, oc_name, task_container_name)
+
         # Per-run host dirs: /app workspace + /logs/verifier (where reward.txt
         # lands) bind targets.
         run_root = self.workspace_base / run_id
@@ -323,10 +329,10 @@ class TerminalBenchDockerHarness:
             try:
                 dispatcher.start(
                     state_dir=state_dir,
-                    backend="docker",
+                    backend=self.backend_id,
                     target=task_container_name,
                 )
-            except Exception:
+            except BaseException:
                 self._best_effort_cleanup(net_name, oc_name, task_container_name)
                 raise
 
@@ -349,7 +355,13 @@ class TerminalBenchDockerHarness:
             docker_image,
             "infinity",
         ]
-        r = subprocess.run(task_run_cmd, capture_output=True, text=True, timeout=600)
+        try:
+            r = subprocess.run(task_run_cmd, capture_output=True, text=True, timeout=600)
+        except BaseException:
+            if dispatcher:
+                dispatcher.stop()
+            self._best_effort_cleanup(net_name, oc_name, task_container_name)
+            raise
         if r.returncode != 0:
             if dispatcher:
                 dispatcher.stop()
@@ -435,7 +447,13 @@ class TerminalBenchDockerHarness:
             self.oc_image,
             "gateway", "--allow-unconfigured",
         ]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        except BaseException:
+            _release_gateway_port(gateway_port)
+            dispatcher.stop()
+            self._best_effort_cleanup(net_name, oc_name, task_container_name)
+            raise
         if r.returncode != 0:
             _release_gateway_port(gateway_port)
             dispatcher.stop()
@@ -445,7 +463,7 @@ class TerminalBenchDockerHarness:
 
         try:
             self._wait_for_gateway_ready(oc_container_id)
-        except Exception:
+        except BaseException:
             _release_gateway_port(gateway_port)
             dispatcher.stop()
             self._best_effort_cleanup(net_name, oc_name, task_container_name)
@@ -456,11 +474,17 @@ class TerminalBenchDockerHarness:
             f"export OPENCLAW_GATEWAY_TOKEN={gateway_token}\n"
             f"export OPENCLAW_RUN_ID={run_id}\n"
         )
-        subprocess.run(
-            ["docker", "exec", oc_container_id, "bash", "-c",
-             f"cat > /tmp/oc_gateway_env <<'EOF'\n{gw_env}EOF"],
-            capture_output=True, text=True,
-        )
+        try:
+            subprocess.run(
+                ["docker", "exec", oc_container_id, "bash", "-c",
+                 f"cat > /tmp/oc_gateway_env <<'EOF'\n{gw_env}EOF"],
+                capture_output=True, text=True,
+            )
+        except BaseException:
+            _release_gateway_port(gateway_port)
+            dispatcher.stop()
+            self._best_effort_cleanup(net_name, oc_name, task_container_name)
+            raise
 
         logger.info(
             "  ready: oc=%s task=%s bridge_pid=%s net=%s",

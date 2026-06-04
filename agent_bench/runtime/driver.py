@@ -1,10 +1,12 @@
 """Main experiment driver."""
 
 import argparse
+from contextlib import contextmanager
 import logging
 import multiprocessing as mp
 import os
 import signal
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import sys
@@ -114,24 +116,50 @@ def _maybe_render_spans_timeline(run_dir: Path, telemetry_path: Optional[str]) -
 
 
 def _install_signal_handlers():
-    """Convert SIGTERM/SIGHUP into KeyboardInterrupt so `finally` blocks run.
+    """Convert termination signals into KeyboardInterrupt so `finally` blocks run.
 
-    SIGINT already raises KeyboardInterrupt by default — Python's default for
-    SIGTERM is to exit without unwinding, which skips the `finally` in
-    execute_run that calls `harness.cleanup`. We can't catch SIGKILL, but
-    converting SIGTERM/SIGHUP into KeyboardInterrupt covers the common
-    "user kill -15 / supervisor stop / parent terminal closed" cases —
-    cleanup runs and both containers come down deterministically.
+    Python's default for SIGTERM is to exit without unwinding, which skips the
+    `finally` in execute_run that calls `harness.cleanup`. We can't catch
+    SIGKILL, but converting SIGINT/SIGTERM/SIGHUP into KeyboardInterrupt covers
+    the common "Ctrl+C / kill -15 / supervisor stop / terminal closed" cases.
     """
     def _to_interrupt(signum, _frame):
         logger.warning("received signal %s — raising KeyboardInterrupt to trigger cleanup", signum)
         raise KeyboardInterrupt()
-    for sig in (signal.SIGTERM, signal.SIGHUP):
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         try:
             signal.signal(sig, _to_interrupt)
         except (ValueError, OSError):
             # SIGHUP is unavailable on Windows; secondary threads can't install.
             pass
+
+
+@contextmanager
+def _protect_cleanup_from_interrupts():
+    """Let cleanup finish after the first interrupt has started unwinding."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    previous: dict[int, Any] = {}
+
+    def _log_deferred(signum, _frame):
+        logger.warning("received signal %s during cleanup; finishing cleanup first", signum)
+
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        try:
+            previous[sig] = signal.getsignal(sig)
+            signal.signal(sig, _log_deferred)
+        except (ValueError, OSError):
+            pass
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError):
+                pass
 
 
 def execute_run(run_config: RunConfig, harness: SWEBenchHarness, 
@@ -418,8 +446,9 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             cleanup_kwargs = dict(env_info or {})
             for k in ("container_id", "_harness"):
                 cleanup_kwargs.pop(k, None)
-            harness.cleanup(container_id, **cleanup_kwargs)
-        except Exception:
+            with _protect_cleanup_from_interrupts():
+                harness.cleanup(container_id, **cleanup_kwargs)
+        except BaseException:
             logger.exception("cleanup failed")
         finally:
             _maybe_render_spans_timeline(run_dir, manifest.telemetry_path)

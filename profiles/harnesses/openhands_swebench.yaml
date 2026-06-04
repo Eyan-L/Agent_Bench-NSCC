@@ -1,6 +1,16 @@
 # OpenHands SWE-bench harness. Model and serving deployment are selected by
 # profiles/models and profiles/serving.
 harness: openhands
+telemetry:
+  spans_html: true
+  otel:
+    enabled: true
+    endpoint: http://localhost:4318
+    protocol: http/json
+    service_name: agent-bench-openhands
+    traces: true
+    metrics: false
+    logs: false
 openhands:
   agent:
     name: CodeActAgent

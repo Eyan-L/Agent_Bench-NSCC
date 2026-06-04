@@ -1,6 +1,16 @@
 # Hermes Terminal-Bench harness. Agent workspace is /app; terminal/file/code
 # tool calls route through Agent_Bench's exec bridge into the task container.
 harness: hermes
+telemetry:
+  spans_html: true
+  otel:
+    enabled: true
+    endpoint: http://localhost:4318
+    protocol: http/json
+    service_name: agent-bench-hermes
+    traces: true
+    metrics: false
+    logs: false
 hermes:
   run:
     max_turns: 90

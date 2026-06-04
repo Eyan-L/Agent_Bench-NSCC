@@ -62,7 +62,7 @@ from agent_bench.deployments.containers import (
     DockerContainer,
     Mount,
 )
-from agent_bench.benchmarks.conditions.agent_otel import otel_env, otel_endpoint_for_container
+from agent_bench.benchmarks.conditions.agent_otel import otel_config_values, otel_env, otel_endpoint_for_container
 from agent_bench.harnesses.openhands.dispatcher import OpenHandsDispatcher
 from agent_bench.core.config import endpoint_for_container, load_active_model_and_serving
 from agent_bench.core.profile_io import load_profile
@@ -136,6 +136,13 @@ class SWEBenchOpenHandsHarness:
             )
         return os.environ.get("AB_AGENT_RUNTIME_IMAGE", DEFAULT_OPENHANDS_RUNTIME_IMAGE)
 
+    def _preflight_cleanup(self, net: str, oh: str, task: Optional[str]) -> None:
+        logger.info(
+            "preflight cleanup for OpenHands run resources: oh=%s task=%s net=%s",
+            oh, task, net,
+        )
+        self._best_effort_cleanup(net, oh, task)
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -164,6 +171,8 @@ class SWEBenchOpenHandsHarness:
         sandbox_prefix = f"oc-sbx-{rid_short}-"
         scope_key = "agent:swebench"
         task_container_name = _oc_sandbox_name(sandbox_prefix, scope_key)
+
+        self._preflight_cleanup(net_name, oh_name, task_container_name)
 
         logger.info(
             "Preparing run %s [runtime=%s] (oh=%s, sandbox=%s, repo=%s@%s, task=%s)",
@@ -209,7 +218,7 @@ class SWEBenchOpenHandsHarness:
         )
         try:
             task_handle = self.container.start(task_spec)
-        except Exception:
+        except BaseException:
             self._best_effort_cleanup(net_name, oh_name, task_container_name)
             raise
         task_container_id = task_handle.id
@@ -225,7 +234,7 @@ class SWEBenchOpenHandsHarness:
                 backend=self.container.backend_id,
                 target=task_container_name,
             )
-        except Exception:
+        except BaseException:
             self._best_effort_cleanup(net_name, oh_name, task_container_name)
             raise
         logger.info(
@@ -242,7 +251,10 @@ class SWEBenchOpenHandsHarness:
         b_mounts, b_env = dispatcher.agent_mounts_and_env()
         oh_mounts.extend(b_mounts)
         oh_env = {
+            "AB_RUN_ID": run_id,
             "OPENHANDS_RUN_ID": run_id,
+            "OPENHANDS_EXEC_BRIDGE_AGENT_WORKSPACE": _WORKSPACE_IN_OH,
+            "OPENHANDS_EXEC_BRIDGE_TASK_WORKSPACE": "/testbed",
             **otel_env(
                 service_name="agent-bench-openhands",
                 run_id=run_id,
@@ -263,7 +275,7 @@ class SWEBenchOpenHandsHarness:
         )
         try:
             oh_handle = self.container.start(oh_spec)
-        except Exception:
+        except BaseException:
             dispatcher.stop()
             self._best_effort_cleanup(net_name, oh_name, task_container_name)
             raise
@@ -389,6 +401,13 @@ class SWEBenchOpenHandsHarness:
             "RUNTIME": (oh_cfg.get("run") or {}).get("runtime") or "process",
             "WORKSPACE": _WORKSPACE_IN_OH,
             "EVENTS_PATH": f"{_STATE_DIR_IN_OH}/events.jsonl",
+            **otel_config_values(
+                service_name="agent-bench-openhands",
+                run_id=run_id,
+                endpoint=otel_endpoint_for_container(self.container.host_address),
+                extra_attrs={"oh.run_id": run_id},
+                enabled=((harness_cfg.get("telemetry") or {}).get("otel") or {}).get("enabled", True) is not False,
+            ),
         }
         rendered = string.Template(template_path.read_text()).safe_substitute(values)
         (state_dir / "config.toml").write_text(rendered)

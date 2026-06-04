@@ -6,7 +6,7 @@ import string
 from pathlib import Path
 from typing import Dict
 
-from agent_bench.benchmarks.conditions.agent_otel import otel_env
+from agent_bench.benchmarks.conditions.agent_otel import otel_config_values, otel_env
 from agent_bench.benchmarks.terminal_bench.agent_harness_base import TerminalBenchAgentHarnessBase
 from agent_bench.core.config import load_active_model_and_serving
 from agent_bench.core.profile_io import load_profile
@@ -54,6 +54,16 @@ class TerminalBenchHermesHarness(TerminalBenchAgentHarnessBase):
             "TERMINAL_TIMEOUT": str((hm_cfg.get("run") or {}).get("terminal_timeout") or 180),
             "TERMINAL_CWD": self.task_workspace,
             "SANDBOX_IMAGE": docker_image,
+            **otel_config_values(
+                service_name="agent-bench-hermes",
+                run_id=run_id,
+                endpoint=self._otel_endpoint(),
+                extra_attrs={
+                    "hm.run_id": run_id,
+                    "tb.instance_id": instance_data.get("instance_id", ""),
+                },
+                enabled=((harness_cfg.get("telemetry") or {}).get("otel") or {}).get("enabled", True) is not False,
+            ),
         }
         rendered = string.Template(template_path.read_text()).safe_substitute(values)
         (state_dir / "config.yaml").write_text(rendered)
@@ -67,6 +77,7 @@ class TerminalBenchHermesHarness(TerminalBenchAgentHarnessBase):
         api_key = os.environ.get("OPENAI_API_KEY") or model_cfg.api_key
         env = {
             "HERMES_HOME": self.state_dir_in_agent,
+            "AB_RUN_ID": run_id,
             "HERMES_RUN_ID": run_id,
             "HERMES_INFERENCE_MODEL": model_name,
             "HERMES_INFERENCE_PROVIDER": provider,

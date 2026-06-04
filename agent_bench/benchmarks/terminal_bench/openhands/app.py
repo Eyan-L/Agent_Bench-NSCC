@@ -6,7 +6,7 @@ import string
 from pathlib import Path
 from typing import Dict
 
-from agent_bench.benchmarks.conditions.agent_otel import otel_env
+from agent_bench.benchmarks.conditions.agent_otel import otel_config_values, otel_env
 from agent_bench.benchmarks.terminal_bench.agent_harness_base import TerminalBenchAgentHarnessBase
 from agent_bench.core.config import load_active_model_and_serving
 from agent_bench.core.profile_io import load_profile
@@ -58,6 +58,16 @@ class TerminalBenchOpenHandsHarness(TerminalBenchAgentHarnessBase):
             "RUNTIME": (oh_cfg.get("run") or {}).get("runtime") or "process",
             "WORKSPACE": self.workspace_in_agent,
             "EVENTS_PATH": f"{self.state_dir_in_agent}/events.jsonl",
+            **otel_config_values(
+                service_name="agent-bench-openhands",
+                run_id=run_id,
+                endpoint=self._otel_endpoint(),
+                extra_attrs={
+                    "oh.run_id": run_id,
+                    "tb.instance_id": instance_data.get("instance_id", ""),
+                },
+                enabled=((harness_cfg.get("telemetry") or {}).get("otel") or {}).get("enabled", True) is not False,
+            ),
         }
         rendered = string.Template(template_path.read_text()).safe_substitute(values)
         (state_dir / "config.toml").write_text(rendered)
@@ -66,7 +76,10 @@ class TerminalBenchOpenHandsHarness(TerminalBenchAgentHarnessBase):
 
     def _agent_env(self, *, run_id: str, docker_image: str, instance_data: Dict) -> dict[str, str]:
         env = {
+            "AB_RUN_ID": run_id,
             "OPENHANDS_RUN_ID": run_id,
+            "OPENHANDS_EXEC_BRIDGE_AGENT_WORKSPACE": self.workspace_in_agent,
+            "OPENHANDS_EXEC_BRIDGE_TASK_WORKSPACE": self.task_workspace,
         }
         env.update(otel_env(
             service_name="agent-bench-openhands",

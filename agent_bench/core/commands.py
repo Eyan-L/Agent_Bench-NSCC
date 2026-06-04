@@ -102,6 +102,9 @@ def run_main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     try:
+        from agent_bench.runtime.driver import _install_signal_handlers
+
+        _install_signal_handlers()
         result = run_experiment_stages(
             resolved,
             retry_errors=not args.no_retry_errors,

@@ -35,6 +35,11 @@ import time
 from pathlib import Path
 from typing import ClassVar, Dict, List, Optional, Tuple
 
+from agent_bench.benchmarks.conditions.agent_otel import (
+    otel_trace_offset,
+    snapshot_otel_spans,
+    wait_for_otel_flush,
+)
 from agent_bench.benchmarks.conditions.util_sampler import UtilSampler
 from agent_bench.deployments.containers.base import Container, ContainerHandle
 
@@ -129,11 +134,7 @@ class OpenClawAgentCondition:
         # multiple gateways write to the same file, so we ALSO filter the
         # captured envelopes by the resource attribute `oc.run_id` (set
         # in agent_bench/harnesses/openclaw/gateway_up.sh via OTEL_RESOURCE_ATTRIBUTES).
-        otel_trace_file = _OTEL_TRACE_FILE_DEFAULT
-        try:
-            pre_offset = os.path.getsize(otel_trace_file)
-        except FileNotFoundError:
-            pre_offset = 0
+        otel_trace_file, pre_offset = otel_trace_offset()
 
         gw_pid = self._env_info.get("gateway_pid")
         try:
@@ -180,8 +181,8 @@ class OpenClawAgentCondition:
                     )
             except Exception as e:
                 logger.warning("gateway SIGTERM failed: %s", e)
-        time.sleep(_OTEL_FLUSH_WAIT_SECONDS)
-        spans_path = self._snapshot_otel_spans(
+        wait_for_otel_flush()
+        spans_path = snapshot_otel_spans(
             otel_trace_file, pre_offset, run_dir, expected_run_id=run_dir.name,
         )
 
@@ -691,9 +692,22 @@ class OpenClawAgentCondition:
             "openclaw.tokens.cache_read": int(usage.get("cacheRead") or 0),
             "openclaw.tokens.cache_write": int(usage.get("cacheWrite") or 0),
             "openclaw.tokens.total": int(usage.get("total") or 0),
+            "agent.canonical_name": "agent.model.usage",
+            "agent.channel": "synth.agent_call",
+            "agent.provider": am.get("provider") or "unknown",
+            "agent.model": am.get("model") or "unknown",
+            "agent.session_id": am.get("sessionId") or "",
+            "agent.run_id": run_id,
+            "agent.llm.request_index": 1,
+            "agent.tokens.input": int(usage.get("input") or 0),
+            "agent.tokens.output": int(usage.get("output") or 0),
+            "agent.tokens.cache_read": int(usage.get("cacheRead") or 0),
+            "agent.tokens.cache_write": int(usage.get("cacheWrite") or 0),
+            "agent.tokens.total": int(usage.get("total") or 0),
         }
         span = {
             "name": "openclaw.model.usage",
+            "canonical_name": "agent.model.usage",
             "start_unix_nano": start_ns,
             "end_unix_nano": end_ns,
             "start_iso": datetime.fromtimestamp(start_ns / 1e9, tz=timezone.utc).isoformat(),
@@ -831,9 +845,28 @@ class OpenClawAgentCondition:
                 "openclaw.tpot_ms": metrics.get("tbt_avg_ms"),
                 "openclaw.headers_ms": metrics.get("headers_ms"),
                 "openclaw.chunks.count": metrics.get("chunks_count"),
+                "agent.canonical_name": "agent.model.usage",
+                "agent.channel": "synth.raw_response",
+                "agent.provider": row.get("provider") or "unknown",
+                "agent.model": row.get("model") or response.get("model") or "unknown",
+                "agent.api": row.get("api") or "unknown",
+                "agent.session_id": row.get("sessionId") or "",
+                "agent.run_id": row.get("runId") or run_id,
+                "agent.llm.request_index": len(spans_out) + 1,
+                "agent.http.status_code": row.get("httpStatus"),
+                "agent.tokens.input": prompt_tokens,
+                "agent.tokens.output": completion_tokens,
+                "agent.tokens.cache_read": cached_tokens,
+                "agent.tokens.cache_write": 0,
+                "agent.tokens.total": total_tokens,
+                "agent.ttft_ms": metrics.get("ttft_ms"),
+                "agent.tpot_ms": metrics.get("tbt_avg_ms"),
+                "agent.headers_ms": metrics.get("headers_ms"),
+                "agent.chunks.count": metrics.get("chunks_count"),
             }
             spans_out.append({
                 "name": "openclaw.model.usage",
+                "canonical_name": "agent.model.usage",
                 "start_unix_nano": start_ns,
                 "end_unix_nano": end_ns,
                 "start_iso": start_iso,
@@ -1035,6 +1068,7 @@ class OpenClawAgentCondition:
                     )
                     spans_out.append({
                         "name": "openclaw.tool.call",
+                        "canonical_name": "agent.tool.call",
                         "start_unix_nano": start_ns,
                         "end_unix_nano": end_ns,
                         "start_iso": (
@@ -1069,6 +1103,19 @@ class OpenClawAgentCondition:
                             "openclaw.runId": run_id,
                             "openclaw.sessionKey": session_key,
                             "openclaw.sessionId": session_id,
+                            "agent.canonical_name": "agent.tool.call",
+                            "agent.channel": "synth.tool_call",
+                            "agent.tool.name": tool_name,
+                            "agent.tool.call_id": cid,
+                            "agent.tool.is_error": is_error,
+                            "agent.tool.arguments_json": args_json,
+                            "agent.tool.arguments_chars": args_chars,
+                            "agent.tool.arguments_truncated": args_truncated,
+                            "agent.tool.result_preview": result_preview,
+                            "agent.tool.result_chars": result_chars,
+                            "agent.tool.result_truncated": result_truncated,
+                            "agent.run_id": run_id,
+                            "agent.session_id": session_id,
                         },
                         "resource": {
                             "oc.run_id": run_id,

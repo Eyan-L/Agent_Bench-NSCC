@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from agent_bench.benchmarks.conditions.agent_otel import otel_config_values
 from agent_bench.benchmarks.conditions.gateway_helpers import (
     pick_free_gateway_port as _pick_free_gateway_port,
     release_gateway_port as _release_gateway_port,
@@ -625,6 +626,7 @@ class RequestBenchHermesHarness(RequestBenchHarness):
                 docker_args += ["-v", f"{mount.host}:{mount.container}:{mount.mode}"]
             hm_env = {
                 "HERMES_HOME": _STATE_DIR_IN_HERMES,
+                "AB_RUN_ID": run_id,
                 "HERMES_RUN_ID": run_id,
                 "HERMES_INFERENCE_MODEL": model_name,
                 "HERMES_INFERENCE_PROVIDER": provider,
@@ -705,6 +707,17 @@ class RequestBenchHermesHarness(RequestBenchHarness):
             "MAX_TURNS": str((hm_cfg.get("run") or {}).get("max_turns") or 20),
             "TERMINAL_TIMEOUT": str((hm_cfg.get("run") or {}).get("terminal_timeout") or 180),
             "SANDBOX_IMAGE": sandbox_image,
+            **otel_config_values(
+                service_name="agent-bench-hermes",
+                run_id=run_id,
+                endpoint=(
+                    os.environ.get("AB_TELEMETRY_CONTAINER_ENDPOINT")
+                    or os.environ.get("OC_OTEL_ENDPOINT")
+                    or "http://vllm-host:4318"
+                ),
+                extra_attrs={"hm.run_id": run_id},
+                enabled=((harness_cfg.get("telemetry") or {}).get("otel") or {}).get("enabled", True) is not False,
+            ),
         }
         template = string.Template(
             "model:\n"
@@ -731,6 +744,17 @@ class RequestBenchHermesHarness(RequestBenchHarness):
             "    - terminal\n"
             "    - file\n"
             "    - code_execution\n"
+            "telemetry:\n"
+            "  otel:\n"
+            "    enabled: $OTEL_ENABLED\n"
+            "    endpoint: \"$OTEL_ENDPOINT\"\n"
+            "    protocol: \"$OTEL_PROTOCOL\"\n"
+            "    service_name: \"$OTEL_SERVICE_NAME\"\n"
+            "    run_id: \"$AB_RUN_ID\"\n"
+            "    resource_attributes: \"$OTEL_RESOURCE_ATTRIBUTES\"\n"
+            "    traces: true\n"
+            "    metrics: false\n"
+            "    logs: false\n"
         )
         (state_dir / "config.yaml").write_text(
             template.safe_substitute(values), encoding="utf-8"

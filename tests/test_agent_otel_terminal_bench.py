@@ -4,7 +4,12 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from agent_bench.benchmarks.conditions.agent_otel import otel_env, write_spans_and_otlp
+from agent_bench.benchmarks.conditions.agent_otel import (
+    otel_endpoint_for_container,
+    otel_env,
+    snapshot_otel_spans,
+    write_spans_and_otlp,
+)
 from agent_bench.benchmarks.conditions.openclaw_agent import OpenClawAgentCondition
 from agent_bench.benchmarks.swebench.conditions.openhands_agent import (
     OpenHandsAgentCondition,
@@ -12,7 +17,18 @@ from agent_bench.benchmarks.swebench.conditions.openhands_agent import (
 )
 from agent_bench.benchmarks.swebench.conditions.hermes_agent import TerminalBenchHermesCondition
 from agent_bench.core.profile_io import load_profile
-from agent_bench.harnesses.openhands.driver import EventSink, _LLMTelemetryProxy
+from agent_bench.harnesses.openhands import driver as openhands_driver
+from agent_bench.harnesses.openhands.driver import (
+    _BridgeToolExecutor,
+    EventSink,
+    _LLMTelemetryProxy,
+    _action_to_bridge_call,
+    _file_editor_action_payload,
+    _instrument_llm_for_telemetry,
+    _missing_required_bridge_tools,
+    _shell_result_to_observation,
+    _wrap_tool_executors,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,7 +58,7 @@ def test_shared_otel_writes_flat_and_raw_spans(tmp_path):
 
     assert flat[0]["canonical_name"] == "agent.model.usage"
     attrs = raw["resourceSpans"][0]["resource"]["attributes"]
-    assert {item["key"] for item in attrs} >= {"oc.run_id", "agent.run_id", "service.name"}
+    assert {item["key"] for item in attrs} >= {"ab.run_id", "oc.run_id", "agent.run_id", "service.name"}
 
 
 def test_otel_env_aligns_agent_resource_with_openclaw_run_id():
@@ -53,10 +69,69 @@ def test_otel_env_aligns_agent_resource_with_openclaw_run_id():
         extra_attrs={"hm.run_id": "run-1"},
     )
 
+    assert env["AB_TELEMETRY_ENDPOINT"] == "http://collector:4318"
     assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://collector:4318"
+    assert "ab.run_id=run-1" in env["OTEL_RESOURCE_ATTRIBUTES"]
     assert "oc.run_id=run-1" in env["OTEL_RESOURCE_ATTRIBUTES"]
     assert "agent.run_id=run-1" in env["OTEL_RESOURCE_ATTRIBUTES"]
     assert "hm.run_id=run-1" in env["OTEL_RESOURCE_ATTRIBUTES"]
+
+
+def test_otel_endpoint_for_container_ignores_loopback_host_endpoint(monkeypatch):
+    monkeypatch.setenv("AB_TELEMETRY_ENDPOINT", "http://127.0.0.1:4318")
+    monkeypatch.delenv("AB_TELEMETRY_CONTAINER_ENDPOINT", raising=False)
+
+    assert otel_endpoint_for_container("vllm-host") == "http://vllm-host:4318"
+
+    monkeypatch.setenv("AB_TELEMETRY_CONTAINER_ENDPOINT", "http://collector:4318")
+    assert otel_endpoint_for_container("vllm-host") == "http://collector:4318"
+
+
+def test_snapshot_otel_spans_filters_by_ab_run_id_and_canonicalizes(tmp_path):
+    trace_file = tmp_path / "otel-traces.jsonl"
+    trace_file.write_text(
+        json.dumps({
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": [
+                        {"key": "oc.run_id", "value": {"stringValue": "run-1"}},
+                        {"key": "service.name", "value": {"stringValue": "agent-bench-openclaw"}},
+                    ]},
+                    "scopeSpans": [{"spans": [{
+                        "name": "openclaw.tool.call",
+                        "startTimeUnixNano": "1000000000",
+                        "endTimeUnixNano": "1100000000",
+                        "attributes": [
+                            {"key": "openclaw.tool.name", "value": {"stringValue": "bash"}},
+                            {"key": "openclaw.tool.callId", "value": {"stringValue": "call-1"}},
+                            {"key": "openclaw.tool.isError", "value": {"boolValue": False}},
+                        ],
+                    }]}],
+                },
+                {
+                    "resource": {"attributes": [
+                        {"key": "oc.run_id", "value": {"stringValue": "run-2"}},
+                    ]},
+                    "scopeSpans": [{"spans": [{
+                        "name": "agent.model.usage",
+                        "startTimeUnixNano": "1",
+                        "endTimeUnixNano": "2",
+                    }]}],
+                },
+            ]
+        }) + "\n"
+    )
+    run_dir = tmp_path / "run-1"
+    run_dir.mkdir()
+
+    spans_path = snapshot_otel_spans(str(trace_file), 0, run_dir, expected_run_id="run-1")
+
+    spans = [json.loads(line) for line in spans_path.read_text().splitlines()]
+    raw = json.loads((run_dir / "spans_raw.jsonl").read_text())
+    assert len(raw["resourceSpans"]) == 1
+    assert [span["canonical_name"] for span in spans] == ["agent.tool.call"]
+    assert spans[0]["attrs"]["agent.tool.name"] == "bash"
+    assert spans[0]["attrs"]["agent.tool.call_id"] == "call-1"
 
 
 def test_openclaw_raw_response_log_synthesizes_per_request_model_usage(tmp_path):
@@ -158,6 +233,259 @@ def test_openhands_driver_proxy_emits_per_call_model_usage(tmp_path):
     assert row["total_tokens"] == 21
 
 
+def test_openhands_driver_instruments_llm_without_replacing_instance(tmp_path):
+    class FakeLLM:
+        def model_copy(self):
+            return self
+
+        def completion(self, *_args, **_kwargs):
+            return {"usage": {"prompt_tokens": 2, "completion_tokens": 3}}
+
+    events_path = tmp_path / "events.jsonl"
+    sink = EventSink(events_path)
+    llm = FakeLLM()
+
+    instrumented = _instrument_llm_for_telemetry(
+        llm,
+        sink,
+        {"provider": "openai", "model": "model-a"},
+    )
+    assert instrumented is llm
+
+    llm.model_copy()
+    llm.completion("hello")
+    sink.close()
+
+    rows = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert rows[0]["driver_event"] == "llm_telemetry_wrap"
+    assert rows[0]["methods_wrapped"] == ["completion"]
+    usage_rows = [row for row in rows if row["driver_event"] == "model_usage"]
+    assert len(usage_rows) == 1
+    assert usage_rows[0]["api"] == "completion"
+    assert usage_rows[0]["input_tokens"] == 2
+    assert usage_rows[0]["output_tokens"] == 3
+
+
+def test_openhands_bridge_wraps_resolved_tools_map(monkeypatch):
+    monkeypatch.setattr(openhands_driver, "_BRIDGE_BIN", "/usr/local/bin/oh-exec-bridge")
+    monkeypatch.setattr(openhands_driver, "_BRIDGE_SOCKET", "/tmp/exec-bridge.sock")
+    monkeypatch.setattr(openhands_driver, "_BRIDGE_TOKEN", "token")
+
+    class FakeExecutor:
+        def __call__(self, *_args, **_kwargs):
+            return {"content": [{"type": "text", "text": "local"}], "is_error": False}
+
+    class FakeTool:
+        def __init__(self, name, executor):
+            self.name = name
+            self.executor = executor
+
+        def set_executor(self, executor):
+            return FakeTool(self.name, executor)
+
+    task_tracker_executor = FakeExecutor()
+    tools = {
+        "terminal": FakeTool("terminal", FakeExecutor()),
+        "file_editor": FakeTool("file_editor", FakeExecutor()),
+        "task_tracker": FakeTool("task_tracker", task_tracker_executor),
+    }
+
+    wrapped = _wrap_tool_executors(tools, "/app")
+
+    assert wrapped == 2
+    assert isinstance(tools["terminal"].executor, _BridgeToolExecutor)
+    assert isinstance(tools["file_editor"].executor, _BridgeToolExecutor)
+    assert tools["task_tracker"].executor is task_tracker_executor
+    assert _missing_required_bridge_tools(tools) == []
+
+
+def test_openhands_bridge_detects_missing_required_tool(monkeypatch):
+    monkeypatch.setattr(openhands_driver, "_BRIDGE_BIN", "/usr/local/bin/oh-exec-bridge")
+    monkeypatch.setattr(openhands_driver, "_BRIDGE_SOCKET", "/tmp/exec-bridge.sock")
+    monkeypatch.setattr(openhands_driver, "_BRIDGE_TOKEN", "token")
+
+    class FakeTool:
+        def __init__(self, name, executor=None):
+            self.name = name
+            self.executor = executor
+
+    tools = {
+        "terminal": FakeTool("terminal", object()),
+        "file_editor": FakeTool("file_editor", None),
+    }
+
+    _wrap_tool_executors(tools, "/app")
+
+    assert _missing_required_bridge_tools(tools) == ["file_editor"]
+
+
+def test_openhands_file_editor_bridge_payload_covers_writes():
+    class FileAction:
+        command = "str_replace"
+        path = "/app/input.txt"
+        file_text = None
+        view_range = None
+        old_str = "old"
+        new_str = "new"
+        insert_line = None
+
+    payload = _file_editor_action_payload(FileAction())
+
+    assert payload["command"] == "str_replace"
+    assert payload["path"] == "/app/input.txt"
+    assert payload["old_str"] == "old"
+    assert payload["new_str"] == "new"
+
+
+def test_openhands_file_editor_bridge_uses_shell_fs_ops(monkeypatch, tmp_path):
+    files = {"/app/input.txt": b"hello old\n"}
+    dirs = {"/app"}
+    calls = []
+
+    def fake_bridge_exec_argv(argv, *, workdir, stdin_bytes=None, **_kwargs):
+        calls.append(argv)
+        tag = argv[3]
+        path = argv[4]
+        stdout = b""
+        stderr = b""
+        exit_code = 0
+        if tag == "openhands-file-stat":
+            if path in dirs:
+                stdout = b"dir"
+            elif path in files:
+                stdout = b"file"
+            else:
+                stdout = b"missing"
+        elif tag == "openhands-file-read":
+            stdout = files[path]
+        elif tag == "openhands-file-write":
+            files[path] = stdin_bytes or b""
+        else:
+            exit_code = 127
+            stderr = f"unknown tag {tag}".encode()
+        return {
+            "exit_code": exit_code,
+            "stdout_bytes": stdout,
+            "stderr_bytes": stderr,
+            "stdout": stdout.decode("utf-8", errors="replace"),
+            "stderr": stderr.decode("utf-8", errors="replace"),
+        }
+
+    class FileAction:
+        command = "str_replace"
+        path = "/app/input.txt"
+        file_text = None
+        view_range = None
+        old_str = "old"
+        new_str = "new"
+        insert_line = None
+
+    monkeypatch.setattr(openhands_driver, "bridge_exec_argv", fake_bridge_exec_argv)
+    monkeypatch.setattr(
+        openhands_driver,
+        "_FILE_EDITOR_HISTORY_PATH",
+        tmp_path / "file_editor_history.json",
+    )
+
+    obs = openhands_driver._run_file_editor_action(FileAction(), "/app")
+
+    assert obs["is_error"] is False
+    assert files["/app/input.txt"] == b"hello new\n"
+    assert obs["old_content"] == "hello old\n"
+    assert obs["new_content"] == "hello new\n"
+    assert calls
+    assert all(call[:2] == ["sh", "-c"] for call in calls)
+    assert "python3" not in json.dumps(calls)
+
+
+def test_openhands_bridge_translates_swebench_workspace_paths(monkeypatch):
+    monkeypatch.setattr(openhands_driver, "_BRIDGE_AGENT_WORKSPACE", "/workspace")
+    monkeypatch.setattr(openhands_driver, "_BRIDGE_TASK_WORKSPACE", "/testbed")
+
+    class TerminalAction:
+        command = "python /workspace/tools/check.py"
+        timeout = None
+
+    terminal_call = _action_to_bridge_call("terminal", TerminalAction(), "/workspace")
+    assert terminal_call.command == "python /testbed/tools/check.py"
+    assert terminal_call.workdir == "/testbed"
+
+    class FileAction:
+        command = "view"
+        path = "/workspace/input.txt"
+        file_text = None
+        view_range = None
+        old_str = None
+        new_str = None
+        insert_line = None
+
+    payload = _file_editor_action_payload(FileAction())
+    assert payload["path"] == "/testbed/input.txt"
+
+    file_payload = {
+        "ab_bridge_file_editor": True,
+        "observation": {
+            "content": [{"type": "text", "text": "contents", "cache_prompt": False}],
+            "is_error": False,
+            "command": "view",
+            "path": "/testbed/input.txt",
+            "prev_exist": True,
+            "old_content": None,
+            "new_content": None,
+        },
+    }
+    file_obs = _shell_result_to_observation(
+        "file_editor",
+        FileAction(),
+        {"exit_code": 0, "stdout": json.dumps(file_payload), "stderr": ""},
+        workdir="/testbed",
+    )
+    assert file_obs["path"] == "/workspace/input.txt"
+
+
+def test_openhands_bridge_observations_match_sdk_shapes():
+    class TerminalAction:
+        command = "echo ok"
+
+    terminal_obs = _shell_result_to_observation(
+        "terminal",
+        TerminalAction(),
+        {"exit_code": 0, "stdout": "ok\n", "stderr": ""},
+        workdir="/app",
+    )
+
+    assert terminal_obs["content"][0]["type"] == "text"
+    assert terminal_obs["exit_code"] == 0
+    assert terminal_obs["metadata"]["working_dir"] == "/app"
+
+    class FileAction:
+        command = "view"
+        path = "/app/input.txt"
+
+    file_payload = {
+        "ab_bridge_file_editor": True,
+        "observation": {
+            "content": [{"type": "text", "text": "contents", "cache_prompt": False}],
+            "is_error": False,
+            "command": "view",
+            "path": "/app/input.txt",
+            "prev_exist": True,
+            "old_content": None,
+            "new_content": None,
+        },
+    }
+    file_obs = _shell_result_to_observation(
+        "file_editor",
+        FileAction(),
+        {"exit_code": 0, "stdout": json.dumps(file_payload), "stderr": ""},
+        workdir="/app",
+    )
+
+    assert file_obs["command"] == "view"
+    assert file_obs["path"] == "/app/input.txt"
+    assert file_obs["content"][0]["text"] == "contents"
+
+
 def test_openhands_synthesizes_agent_spans_from_events():
     condition = OpenHandsAgentCondition(
         model_config=SimpleNamespace(name="model"),
@@ -227,6 +555,42 @@ def test_openhands_prefers_model_usage_events_over_summary():
     assert spans[0]["attrs"]["agent.ttft_ms"] == 50
 
 
+def test_openhands_runtime_and_condition_use_collector_otel():
+    driver = (ROOT / "agent_bench/harnesses/openhands/driver.py").read_text()
+    condition = (
+        ROOT / "agent_bench/benchmarks/swebench/conditions/openhands_agent.py"
+    ).read_text()
+    swe_app = (ROOT / "agent_bench/benchmarks/swebench/openhands/app.py").read_text()
+    tb_app = (ROOT / "agent_bench/benchmarks/terminal_bench/openhands/app.py").read_text()
+
+    template = (
+        ROOT / "agent_bench/harnesses/openhands/state/config.toml.template"
+    ).read_text()
+    profile = (ROOT / "profiles/harnesses/openhands_swebench.yaml").read_text()
+
+    assert "class _OtelEmitter" in driver
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT" in driver
+    assert "telemetry_cfg" in driver
+    assert "AB_RUN_ID" in driver
+    assert "agent.model.usage" in driver
+    assert "agent.tool.call" in driver
+    assert "_ensure_agent_ready" in driver
+    assert "_wrap_tool_executors(tools_map" in driver
+    assert "_wrap_tool_executors(list(agent.tools)" not in driver
+    assert "missing_required_tools" in driver
+    assert "OPENHANDS_EXEC_BRIDGE_AGENT_WORKSPACE" in swe_app
+    assert "OPENHANDS_EXEC_BRIDGE_TASK_WORKSPACE" in swe_app
+    assert "OPENHANDS_EXEC_BRIDGE_AGENT_WORKSPACE" in tb_app
+    assert "OPENHANDS_EXEC_BRIDGE_TASK_WORKSPACE" in tb_app
+    assert "snapshot_otel_spans(" in condition
+    assert "write_spans_and_otlp(" not in condition
+    assert "[telemetry.otel]" in template
+    assert 'endpoint = "${OTEL_ENDPOINT}"' in template
+    assert 'run_id = "${AB_RUN_ID}"' in template
+    assert "telemetry:" in profile
+    assert "service_name: agent-bench-openhands" in profile
+
+
 def test_terminal_bench_harness_profiles_and_driver_wiring():
     driver = (ROOT / "agent_bench/runtime/driver.py").read_text()
     assert "TerminalBenchOpenHandsCondition" in driver
@@ -240,6 +604,42 @@ def test_terminal_bench_harness_profiles_and_driver_wiring():
     assert hm["harness"] == "hermes"
     assert oh["conditions"][0]["condition_type"] == "openhands_agent"
     assert hm["conditions"][0]["condition_type"] == "hermes_agent"
+
+
+def test_bridge_harnesses_preclean_deterministic_run_resources():
+    sources = [
+        ROOT / "agent_bench/benchmarks/terminal_bench/agent_harness_base.py",
+        ROOT / "agent_bench/benchmarks/swebench/hermes/app.py",
+        ROOT / "agent_bench/benchmarks/swebench/openhands/app.py",
+    ]
+    for source in sources:
+        text = source.read_text()
+        assert "def _preflight_cleanup(" in text
+        assert text.index("self._preflight_cleanup(") < text.index(
+            "self.container.create_network("
+        )
+
+
+def test_interrupt_cleanup_wiring_is_baseexception_safe():
+    commands = (ROOT / "agent_bench/core/commands.py").read_text()
+    driver = (ROOT / "agent_bench/runtime/driver.py").read_text()
+    assert "_install_signal_handlers()" in commands
+    assert "signal.SIGINT" in driver
+    assert "def _protect_cleanup_from_interrupts(" in driver
+    assert "with _protect_cleanup_from_interrupts():" in driver
+    assert "except BaseException:" in driver
+
+    sources = [
+        ROOT / "agent_bench/benchmarks/terminal_bench/agent_harness_base.py",
+        ROOT / "agent_bench/benchmarks/swebench/hermes/app.py",
+        ROOT / "agent_bench/benchmarks/swebench/openhands/app.py",
+        ROOT / "agent_bench/benchmarks/swebench/openclaw/app.py",
+        ROOT / "agent_bench/benchmarks/terminal_bench/app.py",
+    ]
+    for source in sources:
+        text = source.read_text()
+        assert "except BaseException:" in text
+        assert "_best_effort_cleanup(" in text
 
 
 def test_terminal_bench_conditions_prompt_and_marker_patch():

@@ -17,7 +17,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from agent_bench.benchmarks.conditions.agent_otel import optional_int, write_spans_and_otlp
+from agent_bench.benchmarks.conditions.agent_otel import (
+    optional_int,
+    otel_trace_offset,
+    snapshot_otel_spans,
+    wait_for_otel_flush,
+    write_spans_and_otlp,
+)
 from agent_bench.benchmarks.conditions.util_sampler import UtilSampler
 from agent_bench.core.profile_io import load_profile
 
@@ -96,6 +102,7 @@ class HermesAgentCondition:
         ]
         harness = env_info.get("_harness")
 
+        otel_trace_file, pre_offset = otel_trace_offset()
         sampler_cm = UtilSampler(run_dir, gateway_pid=optional_int(env_info.get("bridge_pid")))
         sampler_cm.__enter__()
         start_ns = time.time_ns()
@@ -138,19 +145,14 @@ class HermesAgentCondition:
         events = self._read_hermes_events(env_info, run_dir)
         usage = self._aggregate_usage(events)
 
-        spans_path = run_dir / "spans.jsonl"
-        self._write_spans(
-            spans_path,
-            run_id=run_dir.name,
-            session_id=run_dir.name,
-            start_ns=start_ns,
-            end_ns=end_ns,
-            model_name=model_name,
-            provider=provider,
-            exit_code=rc,
-            events=events,
-            usage=usage,
+        wait_for_otel_flush()
+        spans_path = snapshot_otel_spans(
+            otel_trace_file, pre_offset, run_dir, expected_run_id=run_dir.name,
         )
+        if spans_path is None:
+            spans_path = run_dir / "spans.jsonl"
+            spans_path.touch()
+            (run_dir / "spans_raw.jsonl").touch()
 
         step = {
             "trajectory_id": run_dir.name,
