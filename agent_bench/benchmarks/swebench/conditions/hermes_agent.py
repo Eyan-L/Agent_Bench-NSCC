@@ -103,7 +103,30 @@ class HermesAgentCondition:
         harness = env_info.get("_harness")
 
         otel_trace_file, pre_offset = otel_trace_offset()
-        sampler_cm = UtilSampler(run_dir, gateway_pid=optional_int(env_info.get("bridge_pid")))
+
+        llm_container = (
+            env_info.get("llm_container_name")
+            or os.environ.get("OC_LLM_CONTAINER")
+            or os.environ.get("VLLM_CONTAINER_NAME")
+            or os.environ.get("LITELLM_CONTAINER_NAME")
+        )
+        client_container = env_info.get("container_name")
+        tools_container = env_info.get("task_container_name")
+        if tools_container == client_container:
+            tools_container = None
+
+        # In-loop verification runs entirely inside the sandbox container —
+        # the `verify` skill (agent_bench/benchmarks/<app>/openclaw/skills/verify/) tells
+        # the agent how to invoke the test command via its exec tool. The
+        # harness's final `run_tests` (called by the driver after DONE) is the
+        # authoritative score; this in-loop check is for iteration only.
+
+        sampler_cm = UtilSampler(
+            run_dir,
+            llm_container=llm_container,
+            client_container=client_container,
+            tools_container=tools_container,
+        )
         sampler_cm.__enter__()
         start_ns = time.time_ns()
         try:

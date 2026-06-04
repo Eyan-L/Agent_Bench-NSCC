@@ -122,9 +122,24 @@ class OpenHandsAgentCondition:
             f"--events {shlex.quote(events_path_in)} "
             f"--workspace {shlex.quote(workspace_root)}"
         )
+
+        llm_container = (
+            env_info.get("llm_container_name")
+            or os.environ.get("OC_LLM_CONTAINER")
+            or os.environ.get("VLLM_CONTAINER_NAME")
+            or os.environ.get("LITELLM_CONTAINER_NAME")
+        )
+        client_container = env_info.get("container_name")
+        tools_container = env_info.get("task_container_name")
+        if tools_container == client_container:
+            tools_container = None
+
         timeout = getattr(self.agent_config, "max_time_seconds", 1800)
+
         otel_trace_file, pre_offset = otel_trace_offset()
-        sampler_cm = UtilSampler(run_dir, gateway_pid=optional_int(env_info.get("bridge_pid")))
+
+        sampler_cm = UtilSampler(run_dir, llm_container=llm_container, client_container=client_container, tools_container=tools_container)
+
         sampler_cm.__enter__()
         step_start_ns = time.time_ns()
         try:
