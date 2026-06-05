@@ -1,0 +1,54 @@
+{
+  "_doc": "Terminal-Bench 2 verified 5-task subset selected as the easiest five tasks from subset10 after task.toml difficulty ordering.",
+  "sweep_name": "terminal_bench_2_verified_subset5",
+  "plan_version": "v1.0",
+  "application": "terminal_bench",
+  "source_dataset": "zai-org/terminal-bench-2-verified",
+  "source_dataset_task_count": 89,
+  "task_root_hint": "All tasks in this subset are vendored under agent_bench/benchmarks/terminal_bench/tasks; AB_BENCHMARK_TASKS_ROOT is not required for this profile.",
+  "instances": [
+    "overfull-hbox",
+    "code-from-image",
+    "compile-compcert",
+    "crack-7z-hash",
+    "hf-model-inference"
+  ],
+  "repo_mapping": {
+    "overfull-hbox": {
+      "repo_id": "terminal-bench/overfull-hbox",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "code-from-image": {
+      "repo_id": "terminal-bench/code-from-image",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "compile-compcert": {
+      "repo_id": "terminal-bench/compile-compcert",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "crack-7z-hash": {
+      "repo_id": "terminal-bench/crack-7z-hash",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "hf-model-inference": {
+      "repo_id": "terminal-bench/hf-model-inference",
+      "base_commit": "terminal-bench-2-verified"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 900,
+  "output_dir": "tb_subset5",
+  "seeds": [
+    42
+  ],
+  "selection": {
+    "method": "first five tasks from subset10 after difficulty ordering",
+    "seed": 42,
+    "source_profile": "profiles/benchmarks/terminal_bench/subset10.json",
+    "ordering": "task.toml difficulty ascending, alphabetical within each difficulty",
+    "difficulty_counts": {
+      "easy": 1,
+      "medium": 4
+    }
+  }
+}

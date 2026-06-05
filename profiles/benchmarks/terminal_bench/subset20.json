@@ -1,0 +1,144 @@
+{
+  "_doc": "Terminal-Bench 2 verified 20-task subset built by preserving the updated subset10 and filling to match the full89 difficulty distribution as closely as possible.",
+  "sweep_name": "terminal_bench_2_verified_subset20",
+  "plan_version": "v1.0",
+  "application": "terminal_bench",
+  "source_dataset": "zai-org/terminal-bench-2-verified",
+  "source_dataset_task_count": 89,
+  "task_root_hint": "Set AB_BENCHMARK_TASKS_ROOT to a local snapshot of zai-org/terminal-bench-2-verified before running profiles that reference tasks not vendored in agent_bench/benchmarks/terminal_bench/tasks.",
+  "instances": [
+    "code-from-image",
+    "compile-compcert",
+    "crack-7z-hash",
+    "fix-code-vulnerability",
+    "hf-model-inference",
+    "kv-store-grpc",
+    "overfull-hbox",
+    "circuit-fibsqrt",
+    "protein-assembly",
+    "video-processing",
+    "break-filter-js-from-html",
+    "constraints-scheduling",
+    "count-dataset-tokens",
+    "dna-assembly",
+    "filter-js-from-html",
+    "financial-document-processor",
+    "git-leak-recovery",
+    "regex-log",
+    "sparql-university",
+    "torch-tensor-parallelism"
+  ],
+  "repo_mapping": {
+    "code-from-image": {
+      "repo_id": "terminal-bench/code-from-image",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "compile-compcert": {
+      "repo_id": "terminal-bench/compile-compcert",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "crack-7z-hash": {
+      "repo_id": "terminal-bench/crack-7z-hash",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "fix-code-vulnerability": {
+      "repo_id": "terminal-bench/fix-code-vulnerability",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "hf-model-inference": {
+      "repo_id": "terminal-bench/hf-model-inference",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "kv-store-grpc": {
+      "repo_id": "terminal-bench/kv-store-grpc",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "overfull-hbox": {
+      "repo_id": "terminal-bench/overfull-hbox",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "circuit-fibsqrt": {
+      "repo_id": "terminal-bench/circuit-fibsqrt",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "protein-assembly": {
+      "repo_id": "terminal-bench/protein-assembly",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "video-processing": {
+      "repo_id": "terminal-bench/video-processing",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "break-filter-js-from-html": {
+      "repo_id": "terminal-bench/break-filter-js-from-html",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "constraints-scheduling": {
+      "repo_id": "terminal-bench/constraints-scheduling",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "count-dataset-tokens": {
+      "repo_id": "terminal-bench/count-dataset-tokens",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "dna-assembly": {
+      "repo_id": "terminal-bench/dna-assembly",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "filter-js-from-html": {
+      "repo_id": "terminal-bench/filter-js-from-html",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "financial-document-processor": {
+      "repo_id": "terminal-bench/financial-document-processor",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "git-leak-recovery": {
+      "repo_id": "terminal-bench/git-leak-recovery",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "regex-log": {
+      "repo_id": "terminal-bench/regex-log",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "sparql-university": {
+      "repo_id": "terminal-bench/sparql-university",
+      "base_commit": "terminal-bench-2-verified"
+    },
+    "torch-tensor-parallelism": {
+      "repo_id": "terminal-bench/torch-tensor-parallelism",
+      "base_commit": "terminal-bench-2-verified"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 900,
+  "output_dir": "tb_subset20",
+  "seeds": [
+    42
+  ],
+  "difficulty_distribution": {
+    "easy": 4,
+    "medium": 55,
+    "hard": 30
+  },
+  "selection": {
+    "method": "preserve updated subset10, then deterministic difficulty-stratified fill from remaining full89 tasks",
+    "seed": 42,
+    "source_profile": "full89",
+    "base_profile": "subset10",
+    "target_difficulty_counts": {
+      "easy": 1,
+      "medium": 12,
+      "hard": 7
+    },
+    "added_difficulty_counts": {
+      "medium": 7,
+      "hard": 3
+    },
+    "difficulty_counts": {
+      "easy": 1,
+      "medium": 12,
+      "hard": 7
+    }
+  }
+}
