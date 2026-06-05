@@ -30,8 +30,7 @@ Architecture (docker mode):
     ┌─────────────────────────────────────┐
     │ openclaw-sandbox-<sess>             │
     │ image: <task.toml docker_image>     │
-    │ - /app     (rw, agent workspace)    │
-    │ - /tests   (ro, vendored tests)     │
+    │ - task WORKDIR (rw, workspace)      │
     │ - /logs/verifier (rw, reward.txt)   │
     └─────────────────────────────────────┘
 
@@ -39,9 +38,10 @@ For the ``tb_react`` condition (no OC), the harness still brings up the task
 container but skips the OC container + bridge; ``env_info["task_container_id"]``
 is what the condition's docker-exec calls use.
 
-Anti-cheat note:
-    /tests is bound :ro so the agent can't rewrite the test file. /logs/verifier
-    is bind-mounted rw — the verifier (`test.sh`) overwrites
+Scoring isolation:
+    /tests is not mounted while the agent is solving the task. run_tests copies
+    the vendored tests into the live task container immediately before running
+    the verifier. /logs/verifier is bind-mounted rw so the verifier can write
     /logs/verifier/reward.txt as its last step.
 """
 from __future__ import annotations
@@ -49,6 +49,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import posixpath
 import re
 import secrets
 import shutil
@@ -74,38 +75,140 @@ logger = logging.getLogger(__name__)
 
 
 # ----------------------------------------------------------------------
-# Workspace seeding — drop TB-flavoured BOOTSTRAP.md + _oc_validate.sh
-# from the per-app prompts/skills tree into the live /app workspace.
+# Workspace helpers — Terminal-Bench tasks normally use /app, but a few task
+# images set a different WORKDIR. Keep every harness on the task/image workdir
+# so priming, binds, cwd, and scoring all see the same filesystem root.
 # ----------------------------------------------------------------------
 
 _THIS_DIR = Path(__file__).resolve().parent
 _BOOTSTRAP_SRC = _THIS_DIR / "openclaw" / "agents" / "BOOTSTRAP.md"
-_VALIDATE_SRC = _THIS_DIR / "openclaw" / "skills" / "verify" / "_oc_validate.sh"
 _OPENAI_CHAT_COMPLETIONS_API = "openai-completions"
 
 
-def _seed_workspace_helpers(app_dir: Path, instance_data: Dict) -> None:
-    """Drop BOOTSTRAP.md + _oc_validate.sh into the per-run /app workspace.
+def _normalize_container_path(raw: Optional[str], default: str = "/app") -> str:
+    path = (raw or "").strip() or default
+    if not path.startswith("/"):
+        path = f"/{path}"
+    normalized = posixpath.normpath(path)
+    if normalized in {"", "."}:
+        return default
+    return normalized
+
+
+def _docker_image_workdir(docker_image: str) -> Optional[str]:
+    try:
+        r = subprocess.run(
+            [
+                "docker",
+                "image",
+                "inspect",
+                docker_image,
+                "--format",
+                "{{.Config.WorkingDir}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.debug("docker image workdir inspect failed for %s: %s", docker_image, exc)
+        return None
+    if r.returncode != 0:
+        logger.debug(
+            "docker image workdir inspect failed for %s: %s",
+            docker_image,
+            r.stderr.strip(),
+        )
+        return None
+    workdir = (r.stdout or "").strip()
+    if not workdir or workdir == "<no value>":
+        return None
+    return _normalize_container_path(workdir)
+
+
+def _resolve_task_workspace(
+    instance_data: Optional[Dict],
+    image_workdir: Optional[str] = None,
+) -> str:
+    """Resolve the task container workspace for both new and old datasets.
+
+    New materialized Terminal-Bench rows carry `workspace_source`. Old rows may
+    have the loader's previous `/app` default even when the image WORKDIR is
+    `/workspace`, so image metadata is allowed to override only that legacy
+    default shape.
+    """
+    instance_data = instance_data or {}
+    workspace = instance_data.get("workspace")
+    source = str(instance_data.get("workspace_source") or "")
+    image_workspace = (
+        _normalize_container_path(image_workdir)
+        if image_workdir and str(image_workdir).strip() not in {"/", "."}
+        else None
+    )
+
+    if source == "task.toml" and workspace:
+        return _normalize_container_path(str(workspace))
+    if image_workspace:
+        return image_workspace
+    if workspace and str(workspace).strip() != "/app":
+        return _normalize_container_path(str(workspace))
+    if workspace:
+        return _normalize_container_path(str(workspace))
+    return "/app"
+
+
+def _require_tests_host_path(instance_data: Optional[Dict]) -> Path:
+    if not instance_data:
+        raise RuntimeError(
+            "TerminalBench scoring requires instance_data with tests_host_path."
+        )
+    raw = instance_data.get("tests_host_path")
+    if not raw:
+        raise RuntimeError(
+            "TerminalBench scoring requires instance_data['tests_host_path']."
+        )
+    tests_host = Path(raw)
+    if not tests_host.is_dir():
+        raise FileNotFoundError(f"TerminalBench tests directory missing: {tests_host}")
+    return tests_host
+
+
+def _clear_reward_file(host_logs_dir: Path) -> Path:
+    host_logs_dir.mkdir(parents=True, exist_ok=True)
+    host_reward = host_logs_dir / "reward.txt"
+    host_reward.unlink(missing_ok=True)
+    return host_reward
+
+
+def _render_workspace_doc_text(text: str, task_workspace: str) -> str:
+    workspace = _normalize_container_path(task_workspace)
+    if workspace == "/app":
+        return text
+    return text.replace("/app", workspace)
+
+
+def _seed_workspace_helpers(
+    app_dir: Path,
+    instance_data: Dict,
+    task_workspace: str = "/app",
+) -> None:
+    """Drop BOOTSTRAP.md into the per-run task workspace bind.
 
     Sources of truth (edit these files, not inline strings):
       - `agent_bench/benchmarks/terminal_bench/openclaw/agents/BOOTSTRAP.md` — silences
         OC's `[Bootstrap pending] read BOOTSTRAP.md` injection
         (system-prompt-BDZ2g8e3.js:133-139) and replaces it with explicit
-        container-path rules.
-      - `agent_bench/benchmarks/terminal_bench/openclaw/skills/verify/_oc_validate.sh`
-        — the helper the TB `verify` SKILL.md points at; without it the
-        agent either fails the call or hallucinates a host path.
+        container-path rules. The file is rendered with the task/image
+        workdir so non-/app tasks do not get misleading path instructions.
 
     Idempotent. Best-effort: warn on OSError; the run can proceed without
     these helpers, it'll just be more brittle.
     """
     try:
-        shutil.copyfile(_BOOTSTRAP_SRC, app_dir / "BOOTSTRAP.md")
-        dst_validate = app_dir / "_oc_validate.sh"
-        shutil.copyfile(_VALIDATE_SRC, dst_validate)
-        os.chmod(dst_validate, 0o755)
+        text = _render_workspace_doc_text(_BOOTSTRAP_SRC.read_text(), task_workspace)
+        (app_dir / "BOOTSTRAP.md").write_text(text)
     except OSError as e:
-        logger.warning("workspace seed (BOOTSTRAP.md/_oc_validate.sh) failed: %s", e)
+        logger.warning("workspace seed (BOOTSTRAP.md) failed: %s", e)
 
 
 # ----------------------------------------------------------------------
@@ -119,8 +222,9 @@ class TerminalBenchDockerHarness:
     Mirrors ``SWEBenchHarness`` end-to-end: per-run network, pre-started task
     container with the OC-predicted name, exec-bridge dispatcher on the host,
     optional OpenClaw container with state_dir + gateway. The only TB-specific
-    pieces are the bind layout (``/app`` + ``/tests`` + ``/logs/verifier``
-    instead of ``/testbed``) and the scoring path (``bash /tests/test.sh`` →
+    pieces are the solve-time bind layout (task/image workdir +
+    ``/logs/verifier`` instead of ``/testbed``), scoring-time test injection
+    into ``/tests``, and the scoring path (``bash /tests/test.sh`` →
     ``reward.txt`` instead of SWE-bench's ``run_evaluation``).
 
     OC is **optional**: the harness only starts it when the active harness
@@ -202,7 +306,7 @@ class TerminalBenchDockerHarness:
         repo_id: str,                           # ignored — TB
         base_commit: str,                       # ignored — TB
         container_image: Optional[str] = None,  # ignored — read from task.toml
-        workspace_root: Optional[str] = None,   # ignored — TB uses /app
+        workspace_root: Optional[str] = None,   # ignored — TB uses task/image workdir
         run_id: Optional[str] = None,
         instance_data: Optional[Dict] = None,
     ) -> Dict:
@@ -218,9 +322,8 @@ class TerminalBenchDockerHarness:
             )
 
         docker_image = instance_data["docker_image"]
-        tests_host = Path(instance_data["tests_host_path"])
-        if not tests_host.is_dir():
-            raise FileNotFoundError(f"task tests dir missing: {tests_host}")
+        image_workdir = _docker_image_workdir(docker_image)
+        task_workspace = _resolve_task_workspace(instance_data, image_workdir)
 
         run_id = run_id or instance_id
         rid_short = run_id[:12]
@@ -249,8 +352,10 @@ class TerminalBenchDockerHarness:
         )
         self._best_effort_cleanup(net_name, oc_name, task_container_name)
 
-        # Per-run host dirs: /app workspace + /logs/verifier (where reward.txt
-        # lands) bind targets.
+        # Per-run host dirs: task workspace + /logs/verifier (where reward.txt
+        # lands) bind targets. The host directory remains named "app" for
+        # backward-compatible env_info/cleanup paths; its container target is
+        # task_workspace.
         run_root = self.workspace_base / run_id
         if run_root.exists():
             _force_rmtree(run_root, ignore_errors=True)
@@ -275,9 +380,9 @@ class TerminalBenchDockerHarness:
                 )
 
         logger.info(
-            "Preparing TB run %s (task image=%s, oc=%s, use_openclaw=%s)",
-            run_id, docker_image, self.oc_image if use_openclaw else "(skipped)",
-            use_openclaw,
+            "Preparing TB run %s (task image=%s, task_workspace=%s, oc=%s, use_openclaw=%s)",
+            run_id, docker_image, task_workspace,
+            self.oc_image if use_openclaw else "(skipped)", use_openclaw,
         )
 
         # 1. Per-run docker network.
@@ -288,21 +393,18 @@ class TerminalBenchDockerHarness:
         if r.returncode != 0 and "already exists" not in (r.stderr or ""):
             raise RuntimeError(f"docker network create failed: {r.stderr.strip()}")
 
-        # 2. (Optional) prime /app from the task image so a pre-seeded image
-        #    (Dockerfile that drops starter files at WORKDIR) isn't masked by
-        #    the empty bind. kv-store-grpc's /app is empty by design so this
-        #    is a no-op there.
+        # 2. (Optional) prime the task workspace from the task image so
+        #    starter files at WORKDIR are not masked by the empty bind.
         try:
-            self._prime_app_from_image(docker_image, app_dir)
+            self._prime_workspace_from_image(docker_image, task_workspace, app_dir)
         except Exception as e:
             logger.warning("TB workspace prime skipped: %s", e)
 
-        # 2b. Seed BOOTSTRAP.md + _oc_validate.sh into /app. BOOTSTRAP.md
+        # 2b. Seed BOOTSTRAP.md into the task workspace bind. BOOTSTRAP.md
         #     silences OC's "[Bootstrap pending] please read BOOTSTRAP.md"
         #     injection (system-prompt-BDZ2g8e3.js:133+) and replaces it
-        #     with explicit TB path rules. _oc_validate.sh is what the
-        #     `verify` skill claims is present — wire it for real.
-        _seed_workspace_helpers(app_dir, instance_data)
+        #     with explicit TB path rules.
+        _seed_workspace_helpers(app_dir, instance_data, task_workspace)
 
         # 3. (Optional) per-run state_dir for OC — only when OC is in play.
         state_dir: Optional[Path] = None
@@ -310,11 +412,10 @@ class TerminalBenchDockerHarness:
         if use_openclaw:
             state_dir = self._build_state_dir(
                 run_id=run_id,
-                workspace_root="/app",
+                workspace_root=task_workspace,
                 sandbox_image=docker_image,
                 sandbox_binds=[
-                    f"{app_dir}:/app:rw",
-                    f"{tests_host}:/tests:ro",
+                    f"{app_dir}:{task_workspace}:rw",
                     f"{logs_dir}:/logs/verifier:rw",
                 ],
                 container_prefix=sandbox_prefix,
@@ -347,10 +448,9 @@ class TerminalBenchDockerHarness:
             "--label", "openclaw.sandbox=1",
             "--label", f"openclaw.sessionKey={scope_key}",
             "--label", f"oc-eval.run_id={run_id}",
-            "-v", f"{app_dir}:/app:rw",
-            "-v", f"{tests_host}:/tests:ro",
+            "-v", f"{app_dir}:{task_workspace}:rw",
             "-v", f"{logs_dir}:/logs/verifier:rw",
-            "-w", "/app",
+            "-w", task_workspace,
             "--entrypoint", "sleep",
             docker_image,
             "infinity",
@@ -382,7 +482,8 @@ class TerminalBenchDockerHarness:
             "task_container_id": task_container_id,
             "task_container_name": task_container_name,
             "network_name": net_name,
-            "workspace_root": "/app",
+            "workspace_root": task_workspace,
+            "task_workspace_root": task_workspace,
             "workspace_host_path": str(app_dir),
             "host_logs_dir": str(logs_dir),
             "sandbox_image": docker_image,
@@ -590,7 +691,7 @@ class TerminalBenchDockerHarness:
                 else swe_skills
             )
             if os.path.isdir(src_agents):
-                # BOOTSTRAP.md is workspace-scoped (lives in /app at runtime,
+                # BOOTSTRAP.md is workspace-scoped (lives in task workspace at runtime,
                 # see _seed_workspace_helpers). The file in agents/ is just
                 # the source-of-truth — don't also copy it into
                 # state_dir/agents/<id>/, where it'd be agent-persona context.
@@ -599,7 +700,14 @@ class TerminalBenchDockerHarness:
                         continue
                     s = os.path.join(src_agents, f)
                     if os.path.isfile(s):
-                        shutil.copyfile(s, state_dir / "agents" / agent_id / f)
+                        dst = state_dir / "agents" / agent_id / f
+                        if f.endswith((".md", ".txt")):
+                            text = Path(s).read_text()
+                            dst.write_text(
+                                _render_workspace_doc_text(text, workspace_root)
+                            )
+                        else:
+                            shutil.copyfile(s, dst)
             if os.path.isdir(src_skills):
                 shutil.copytree(src_skills, state_dir / "skills")
 
@@ -648,9 +756,13 @@ class TerminalBenchDockerHarness:
 
     # ------------------------------------------------------------------
 
-    def _prime_app_from_image(self, docker_image: str, app_dir: Path) -> None:
-        """Best-effort copy of /app from the image into the host bind dir.
-        No-op when the image's /app is empty (kv-store-grpc)."""
+    def _prime_workspace_from_image(
+        self,
+        docker_image: str,
+        task_workspace: str,
+        app_dir: Path,
+    ) -> None:
+        """Best-effort copy of the image WORKDIR into the host bind dir."""
         scratch_name = f"oc-eval-tb-prime-{app_dir.name[:12]}-{os.urandom(2).hex()}"
         r = subprocess.run(
             ["docker", "create", "--name", scratch_name,
@@ -661,15 +773,20 @@ class TerminalBenchDockerHarness:
             raise RuntimeError(f"docker create scratch failed: {r.stderr.strip()}")
         try:
             r = subprocess.run(
-                ["docker", "cp", f"{scratch_name}:/app/.", str(app_dir) + "/"],
+                [
+                    "docker",
+                    "cp",
+                    f"{scratch_name}:{task_workspace.rstrip('/')}/.",
+                    str(app_dir) + "/",
+                ],
                 capture_output=True, text=True, timeout=600,
             )
             if r.returncode != 0:
-                # docker cp from an empty source dir succeeds with "no such
-                # file" on some daemons; treat any failure as "nothing to prime".
+                # docker cp from an empty/missing source can fail on some
+                # daemons; treat it as "nothing to prime".
                 logger.debug(
-                    "TB prime: docker cp returned %d (likely empty /app): %s",
-                    r.returncode, r.stderr.strip(),
+                    "TB prime: docker cp returned %d for %s (likely empty): %s",
+                    r.returncode, task_workspace, r.stderr.strip(),
                 )
         finally:
             subprocess.run(["docker", "rm", "-f", scratch_name],
@@ -715,8 +832,12 @@ class TerminalBenchDockerHarness:
         argv: List[str],
         timeout_seconds: int = 300,
         stdin_text: Optional[str] = None,
+        workdir: Optional[str] = None,
     ) -> Dict:
-        full = ["docker", "exec", "-i", container, *argv]
+        full = ["docker", "exec", "-i"]
+        if workdir:
+            full.extend(["-w", workdir])
+        full.extend([container, *argv])
         try:
             r = subprocess.run(
                 full,
@@ -746,6 +867,24 @@ class TerminalBenchDockerHarness:
 
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _copy_tests_into_docker_container(
+        container_name: str,
+        tests_host: Path,
+    ) -> None:
+        for cmd, timeout in (
+            (["docker", "exec", container_name, "rm", "-rf", "/tests"], 60),
+            (["docker", "cp", str(tests_host), f"{container_name}:/tests"], 300),
+        ):
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            if r.returncode != 0:
+                raise RuntimeError(
+                    "failed to inject TerminalBench tests into docker "
+                    f"container {container_name}: {r.stderr.strip()}"
+                )
+
+    # ------------------------------------------------------------------
+
     def run_tests(
         self,
         container_id: Optional[str],
@@ -758,8 +897,7 @@ class TerminalBenchDockerHarness:
         run_dir: Optional[Path] = None,
         **_kw,
     ) -> Dict:
-        """Run /tests/test.sh inside the task container. Read reward.txt from
-        the host bind target."""
+        """Inject tests, run the verifier, then read reward.txt from host logs."""
         # Target the task container by name (deterministic from run_id + the
         # agent id used at prepare_environment time).
         run_id = run_id or instance_id
@@ -770,6 +908,12 @@ class TerminalBenchDockerHarness:
         task_container_name = _oc_sandbox_name(sandbox_prefix, scope_key)
 
         host_logs_dir = self.workspace_base / run_id / "logs" / "verifier"
+        image_workdir = (
+            _docker_image_workdir(instance_data["docker_image"])
+            if instance_data and instance_data.get("docker_image")
+            else None
+        )
+        task_workspace = _resolve_task_workspace(instance_data, image_workdir)
 
         timeout = timeout_seconds or self._DEFAULT_VERIFIER_TIMEOUT_SECONDS
         if instance_data:
@@ -778,17 +922,20 @@ class TerminalBenchDockerHarness:
         verifier = (instance_data or {}).get(
             "verifier_entrypoint", "/tests/test.sh"
         )
+        tests_host = _require_tests_host_path(instance_data)
         logger.info(
-            "scoring TB container %s (verifier=%s, timeout=%ds)",
-            task_container_name, verifier, timeout,
+            "scoring TB container %s (workdir=%s, verifier=%s, tests=%s, timeout=%ds)",
+            task_container_name, task_workspace, verifier, tests_host, timeout,
         )
+        self._copy_tests_into_docker_container(task_container_name, tests_host)
+        host_reward = _clear_reward_file(host_logs_dir)
         result = self.exec_in_container(
             task_container_name,
             ["bash", verifier],
             timeout_seconds=timeout,
+            workdir=task_workspace,
         )
 
-        host_reward = host_logs_dir / "reward.txt"
         reward_text = ""
         try:
             reward_text = host_reward.read_text().strip()
@@ -878,8 +1025,8 @@ class TerminalBenchDockerHarness:
 
         keep = os.environ.get("AB_HARNESS_KEEP_WORKSPACE", "0") == "1"
         if not keep and workspace_host_path and os.path.isdir(workspace_host_path):
-            # Workspace root is .../app — also clean the .../logs sibling and
-            # the parent run dir so per-run dirs don't pile up.
+            # workspace_host_path points at the host bind dir; also clean the
+            # logs sibling and parent run dir so per-run dirs don't pile up.
             run_root = Path(workspace_host_path).parent
             _force_rmtree(run_root, ignore_errors=True)
         if not keep and state_dir and os.path.isdir(state_dir):
@@ -971,6 +1118,59 @@ class TerminalBenchSingularityHarness:
         tmp.rename(sif_path)
         return sif_path
 
+    @staticmethod
+    def _prime_workspace_from_sif(
+        sif_path: Path,
+        task_workspace: str,
+        app_dir: Path,
+    ) -> None:
+        app_dir.mkdir(parents=True, exist_ok=True)
+        pack = subprocess.Popen(
+            [
+                "singularity",
+                "exec",
+                str(sif_path),
+                "tar",
+                "-C",
+                task_workspace,
+                "-cf",
+                "-",
+                ".",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            extract = subprocess.run(
+                ["tar", "-C", str(app_dir), "-xf", "-"],
+                stdin=pack.stdout,
+                capture_output=True,
+                timeout=600,
+            )
+        finally:
+            if pack.stdout:
+                pack.stdout.close()
+
+        pack_stderr = b""
+        if pack.stderr:
+            pack_stderr = pack.stderr.read()
+        try:
+            pack_rc = pack.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            pack.kill()
+            pack_rc = -1
+            pack_stderr += b"\n[harness] tar pack timeout"
+
+        def _decode(value: bytes) -> str:
+            return value.decode("utf-8", errors="replace")
+
+        if pack_rc != 0 or extract.returncode != 0:
+            stderr = _decode(pack_stderr) + _decode(extract.stderr or b"")
+            raise RuntimeError(
+                "failed to prime TerminalBench workspace from sif "
+                f"{sif_path}:{task_workspace}: {stderr.strip()}"
+            )
+
     def prepare_environment(
         self,
         instance_id: str,
@@ -994,9 +1194,7 @@ class TerminalBenchSingularityHarness:
             )
 
         docker_image = instance_data["docker_image"]
-        tests_host = Path(instance_data["tests_host_path"])
-        if not tests_host.is_dir():
-            raise FileNotFoundError(f"task tests dir missing: {tests_host}")
+        task_workspace = _resolve_task_workspace(instance_data)
 
         sif_path = self._ensure_sif(docker_image)
 
@@ -1009,7 +1207,12 @@ class TerminalBenchSingularityHarness:
         app_dir.mkdir(parents=True, exist_ok=True)
         logs_dir.mkdir(parents=True, exist_ok=True)
 
-        _seed_workspace_helpers(app_dir, instance_data)
+        try:
+            self._prime_workspace_from_sif(sif_path, task_workspace, app_dir)
+        except Exception as exc:  # noqa: BLE001 - empty/missing workdir is non-fatal
+            logger.debug("TB singularity workspace prime skipped: %s", exc)
+
+        _seed_workspace_helpers(app_dir, instance_data, task_workspace)
 
         instance_name = self._instance_name_for(run_id)
         self._try_stop_instance(instance_name)
@@ -1017,8 +1220,7 @@ class TerminalBenchSingularityHarness:
         argv = [
             "singularity", "instance", "start",
             "--writable-tmpfs",
-            "--bind", f"{app_dir}:/app:rw",
-            "--bind", f"{tests_host}:/tests:ro",
+            "--bind", f"{app_dir}:{task_workspace}:rw",
             "--bind", f"{logs_dir}:/logs/verifier:rw",
             str(sif_path),
             instance_name,
@@ -1038,8 +1240,10 @@ class TerminalBenchSingularityHarness:
             "container_id": None,
             "container_name": instance_name,
             "backend": self.backend_id,
-            "workspace_root": "/app",
+            "workspace_root": task_workspace,
+            "task_workspace_root": task_workspace,
             "host_workspace_root": str(app_dir),
+            "workspace_host_path": str(app_dir),
             "host_logs_dir": str(logs_dir),
             "task_sif": str(sif_path),
             "instance_name": instance_name,
@@ -1059,8 +1263,12 @@ class TerminalBenchSingularityHarness:
         argv: List[str],
         timeout_seconds: int = 300,
         stdin_text: Optional[str] = None,
+        workdir: Optional[str] = None,
     ) -> Dict:
-        full = ["singularity", "exec", f"instance://{instance_name}", *argv]
+        full = ["singularity", "exec"]
+        if workdir:
+            full.extend(["--pwd", workdir])
+        full.extend([f"instance://{instance_name}", *argv])
         try:
             r = subprocess.run(
                 full,
@@ -1082,6 +1290,84 @@ class TerminalBenchSingularityHarness:
             "timed_out": False,
         }
 
+    @staticmethod
+    def _copy_tests_into_singularity_instance(
+        instance_name: str,
+        tests_host: Path,
+    ) -> None:
+        reset = subprocess.run(
+            [
+                "singularity",
+                "exec",
+                f"instance://{instance_name}",
+                "sh",
+                "-lc",
+                "rm -rf /tests && mkdir -p /tests",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if reset.returncode != 0:
+            raise RuntimeError(
+                "failed to prepare /tests in singularity instance "
+                f"{instance_name}: {reset.stderr.strip()}"
+            )
+
+        pack = subprocess.Popen(
+            ["tar", "-C", str(tests_host), "-cf", "-", "."],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            extract = subprocess.run(
+                [
+                    "singularity",
+                    "exec",
+                    f"instance://{instance_name}",
+                    "tar",
+                    "-C",
+                    "/tests",
+                    "-xf",
+                    "-",
+                ],
+                stdin=pack.stdout,
+                capture_output=True,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired as exc:
+            if pack.stdout:
+                pack.stdout.close()
+            pack.kill()
+            pack.wait(timeout=30)
+            raise RuntimeError(
+                "timed out injecting TerminalBench tests into singularity "
+                f"instance {instance_name}"
+            ) from exc
+        finally:
+            if pack.stdout:
+                pack.stdout.close()
+
+        pack_stderr = b""
+        if pack.stderr:
+            pack_stderr = pack.stderr.read()
+        try:
+            pack_rc = pack.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            pack.kill()
+            pack_rc = -1
+            pack_stderr += b"\n[harness] tar pack timeout"
+
+        def _decode(value: bytes) -> str:
+            return value.decode("utf-8", errors="replace")
+
+        if pack_rc != 0 or extract.returncode != 0:
+            stderr = _decode(pack_stderr) + _decode(extract.stderr or b"")
+            raise RuntimeError(
+                "failed to inject TerminalBench tests into singularity "
+                f"instance {instance_name}: {stderr.strip()}"
+            )
+
     def run_tests(
         self,
         container_id: Optional[str],
@@ -1095,24 +1381,30 @@ class TerminalBenchSingularityHarness:
         **_kw,
     ) -> Dict:
         instance_name = self._instance_name_for(run_id or instance_id)
-        verifier = "/tests/test.sh"
+        verifier = (instance_data or {}).get("verifier_entrypoint", "/tests/test.sh")
         host_logs_dir = (
             self.workspace_base / (run_id or instance_id) / "logs" / "verifier"
         )
+        task_workspace = _resolve_task_workspace(instance_data)
 
         timeout = timeout_seconds or self._DEFAULT_VERIFIER_TIMEOUT_SECONDS
         if instance_data:
             timeout = int(instance_data.get("verifier_timeout_sec", timeout))
 
-        logger.info("scoring TB instance %s (verifier=%s, timeout=%ds)",
-                    instance_name, verifier, timeout)
+        tests_host = _require_tests_host_path(instance_data)
+        logger.info(
+            "scoring TB instance %s (workdir=%s, verifier=%s, tests=%s, timeout=%ds)",
+            instance_name, task_workspace, verifier, tests_host, timeout,
+        )
+        self._copy_tests_into_singularity_instance(instance_name, tests_host)
+        host_reward = _clear_reward_file(host_logs_dir)
         result = self.exec_in_container(
             instance_name,
             ["bash", verifier],
             timeout_seconds=timeout,
+            workdir=task_workspace,
         )
 
-        host_reward = host_logs_dir / "reward.txt"
         reward_text = ""
         try:
             reward_text = host_reward.read_text().strip()

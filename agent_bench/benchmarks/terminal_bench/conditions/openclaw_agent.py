@@ -4,8 +4,8 @@ Overrides:
   - ``agent_id = "terminal_bench"`` — OC registers the agent under this id
     in the per-run openclaw.json (see ``profiles/harnesses/openclaw_terminal_bench.yaml``).
   - ``_build_message`` — TB-flavoured task framing ("Carry out this terminal
-    task ... Use the verify skill before declaring DONE") instead of SWE-bench's
-    "fixing a bug" framing.
+    task ... Declare DONE only when the task is complete") instead of
+    SWE-bench's "fixing a bug" framing.
 
 Patch collection is intentionally NOT overridden — TB has no patch artifact
 (the agent's effects live inside the task container). The base class writes
@@ -29,8 +29,7 @@ class TerminalBenchOpenClawCondition(OpenClawAgentCondition):
         return (
             "Carry out this terminal task in the current container. Install "
             "any required packages, write the required files, and start any "
-            "required services so the verifier passes. Use the `verify` skill "
-            "before declaring DONE — only declare DONE when the verifier "
-            "returns PASS.\n\n"
+            "required services so the verifier passes. Declare DONE only when "
+            "the task is complete.\n\n"
             f"Task:\n{instance_data['instruction']}"
         )

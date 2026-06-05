@@ -14,8 +14,8 @@ Vendored task layout (one task per dir):
         ├── environment/Dockerfile     # only used as documentation; we pull
         │                              # the prebuilt docker_image instead
         └── tests/
-            ├── test.sh                # verifier entrypoint (mounted at /tests)
-            └── test_outputs.py        # pytest cases, mounted at /tests
+            ├── test.sh                # verifier entrypoint, injected at /tests
+            └── test_outputs.py        # pytest cases, injected at /tests
 
 The driver expects `instance_data["instance_id"]`. We use the task directory
 name (e.g. "kv-store-grpc"). All other fields are TB-specific and ignored by
@@ -25,8 +25,10 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
+import shlex
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 try:
     import tomllib  # Python 3.11+
@@ -57,6 +59,81 @@ def list_task_ids() -> List[str]:
     return out
 
 
+def _normalize_workdir(path: str, current: str = "/") -> str:
+    """Normalize a Docker WORKDIR operand using Docker's relative-path rule."""
+    raw = (path or "").strip()
+    if not raw:
+        return current
+    if not raw.startswith("/"):
+        raw = f"{current.rstrip('/')}/{raw}"
+    normalized = posixpath.normpath(raw)
+    return normalized if normalized.startswith("/") else f"/{normalized}"
+
+
+def _strip_dockerfile_comment(line: str) -> str:
+    """Strip comments while respecting Dockerfile quoting well enough for WORKDIR."""
+    quote: Optional[str] = None
+    escaped = False
+    out: List[str] = []
+    for ch in line:
+        if escaped:
+            out.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            out.append(ch)
+            escaped = True
+            continue
+        if quote:
+            out.append(ch)
+            if ch == quote:
+                quote = None
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            out.append(ch)
+            continue
+        if ch == "#":
+            break
+        out.append(ch)
+    return "".join(out).strip()
+
+
+def _dockerfile_workdir(dockerfile: Path) -> Optional[str]:
+    """Return the final WORKDIR from a task Dockerfile, if one is declared."""
+    if not dockerfile.is_file():
+        return None
+    workdir = "/"
+    found = False
+    try:
+        lines = dockerfile.read_text().splitlines()
+    except OSError:
+        return None
+    for raw_line in lines:
+        line = _strip_dockerfile_comment(raw_line)
+        if not line:
+            continue
+        try:
+            parts = shlex.split(line, posix=True)
+        except ValueError:
+            parts = line.split()
+        if len(parts) < 2 or parts[0].upper() != "WORKDIR":
+            continue
+        workdir = _normalize_workdir(parts[1], workdir)
+        found = True
+    return workdir if found else None
+
+
+def _task_workspace(task_dir: Path, env: Dict) -> Tuple[str, str]:
+    """Pick the task workspace and record why for runtime compatibility."""
+    if env.get("workdir"):
+        return _normalize_workdir(str(env["workdir"])), "task.toml"
+    dockerfile_workdir = _dockerfile_workdir(task_dir / "environment" / "Dockerfile")
+    if dockerfile_workdir:
+        return dockerfile_workdir, "dockerfile"
+    return "/app", "default"
+
+
 def load_task(task_id: str) -> Dict:
     """Build the instance_data dict for a single TB task."""
     task_dir = _tasks_root() / task_id
@@ -75,16 +152,16 @@ def load_task(task_id: str) -> Dict:
     if not docker_image:
         raise ValueError(f"task.toml for {task_id}: missing environment.docker_image")
 
+    workspace, workspace_source = _task_workspace(task_dir, env)
+
     return {
         "instance_id": task_id,
         "benchmark": "terminal_bench",
         "task_name": meta.get("task", {}).get("name", task_id),
         "instruction": instruction,
         "docker_image": docker_image,
-        # TB tasks all run inside /app per the official environment convention;
-        # the per-task Dockerfile sets WORKDIR /app. Override via task.toml
-        # in future if a task needs a different root.
-        "workspace": env.get("workdir", "/app"),
+        "workspace": workspace,
+        "workspace_source": workspace_source,
         "tests_host_path": str(task_dir / "tests"),
         "tests_container_path": "/tests",
         "logs_container_path": "/logs/verifier",

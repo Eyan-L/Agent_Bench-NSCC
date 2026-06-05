@@ -20,9 +20,17 @@ class TerminalBenchOpenHandsHarness(TerminalBenchAgentHarnessBase):
     dispatcher_cls = OpenHandsDispatcher
     state_dir_in_agent = "/etc/agent-bench/state"
     workspace_in_agent = "/app"
-    task_workspace = "/app"
 
-    def _build_state_dir(self, *, run_id: str, docker_image: str, app_dir: Path, logs_dir: Path, instance_data: Dict) -> Path:
+    def _build_state_dir(
+        self,
+        *,
+        run_id: str,
+        docker_image: str,
+        app_dir: Path,
+        logs_dir: Path,
+        instance_data: Dict,
+        task_workspace: str,
+    ) -> Path:
         state_dir = self.state_base / run_id
         if state_dir.exists():
             from agent_bench.benchmarks.swebench.app import _force_rmtree
@@ -74,12 +82,19 @@ class TerminalBenchOpenHandsHarness(TerminalBenchAgentHarnessBase):
         (state_dir / "events.jsonl").touch()
         return state_dir
 
-    def _agent_env(self, *, run_id: str, docker_image: str, instance_data: Dict) -> dict[str, str]:
+    def _agent_env(
+        self,
+        *,
+        run_id: str,
+        docker_image: str,
+        instance_data: Dict,
+        task_workspace: str,
+    ) -> dict[str, str]:
         env = {
             "AB_RUN_ID": run_id,
             "OPENHANDS_RUN_ID": run_id,
             "OPENHANDS_EXEC_BRIDGE_AGENT_WORKSPACE": self.workspace_in_agent,
-            "OPENHANDS_EXEC_BRIDGE_TASK_WORKSPACE": self.task_workspace,
+            "OPENHANDS_EXEC_BRIDGE_TASK_WORKSPACE": task_workspace,
         }
         env.update(otel_env(
             service_name="agent-bench-openhands",

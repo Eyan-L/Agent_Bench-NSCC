@@ -481,25 +481,3 @@ class OpenHandsAgentCondition:
             "total_completion_tokens": 0,
             "telemetry_path": None,
         }
-
-
-class TerminalBenchOpenHandsCondition(OpenHandsAgentCondition):
-    """OpenHands agent driving a Terminal-Bench task container."""
-
-    def _build_message(self, instance_data: Dict) -> str:
-        return (
-            "Carry out this terminal task in the current container. Install "
-            "any required packages, write the required files, and start any "
-            "required services so the verifier passes. Before stopping, run "
-            "`bash /tests/test.sh && cat /logs/verifier/reward.txt`; only stop "
-            "once the reward is 1.\n\n"
-            f"Task:\n{instance_data['instruction']}"
-        )
-
-    def _collect_artifacts(
-        self,
-        env_info: Dict,
-        container_id: str,
-        workspace_root: str,
-    ) -> str:
-        return "# terminal_bench: no patch - agent state in container\n"

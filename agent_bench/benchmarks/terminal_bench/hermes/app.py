@@ -20,7 +20,6 @@ class TerminalBenchHermesHarness(TerminalBenchAgentHarnessBase):
     dispatcher_cls = HermesDispatcher
     state_dir_in_agent = "/opt/data"
     workspace_in_agent = "/app"
-    task_workspace = "/app"
 
     def _load_harness_config(self) -> Dict:
         repo_root = os.environ.get("AB_REPO_ROOT", os.getcwd())
@@ -30,7 +29,16 @@ class TerminalBenchHermesHarness(TerminalBenchAgentHarnessBase):
         )
         return load_profile(harness_path)
 
-    def _build_state_dir(self, *, run_id: str, docker_image: str, app_dir: Path, logs_dir: Path, instance_data: Dict) -> Path:
+    def _build_state_dir(
+        self,
+        *,
+        run_id: str,
+        docker_image: str,
+        app_dir: Path,
+        logs_dir: Path,
+        instance_data: Dict,
+        task_workspace: str,
+    ) -> Path:
         state_dir = self.state_base / run_id
         if state_dir.exists():
             from agent_bench.benchmarks.swebench.app import _force_rmtree
@@ -52,7 +60,7 @@ class TerminalBenchHermesHarness(TerminalBenchAgentHarnessBase):
             "CONTEXT_LENGTH": str(model_cfg.context_window),
             "MAX_TURNS": str((hm_cfg.get("run") or {}).get("max_turns") or 90),
             "TERMINAL_TIMEOUT": str((hm_cfg.get("run") or {}).get("terminal_timeout") or 180),
-            "TERMINAL_CWD": self.task_workspace,
+            "TERMINAL_CWD": task_workspace,
             "SANDBOX_IMAGE": docker_image,
             **otel_config_values(
                 service_name="agent-bench-hermes",
@@ -69,7 +77,14 @@ class TerminalBenchHermesHarness(TerminalBenchAgentHarnessBase):
         (state_dir / "config.yaml").write_text(rendered)
         return state_dir
 
-    def _agent_env(self, *, run_id: str, docker_image: str, instance_data: Dict) -> dict[str, str]:
+    def _agent_env(
+        self,
+        *,
+        run_id: str,
+        docker_image: str,
+        instance_data: Dict,
+        task_workspace: str,
+    ) -> dict[str, str]:
         model_cfg, _serving_cfg = load_active_model_and_serving()
         model_name = os.environ.get("AB_MODEL_NAME") or model_cfg.name
         provider = os.environ.get("HERMES_INFERENCE_PROVIDER") or model_cfg.provider
@@ -87,7 +102,7 @@ class TerminalBenchHermesHarness(TerminalBenchAgentHarnessBase):
             "MINIMAX_API_KEY": api_key,
             "MINIMAX_BASE_URL": base_url,
             "TERMINAL_ENV": "docker",
-            "TERMINAL_CWD": self.task_workspace,
+            "TERMINAL_CWD": task_workspace,
             "TERMINAL_DOCKER_IMAGE": docker_image,
         }
         env.update(otel_env(

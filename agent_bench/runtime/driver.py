@@ -296,7 +296,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         elif condition_type == "openhands_agent":
             benchmark = instance_data.get("benchmark", "swebench")
             if benchmark == "terminal_bench":
-                from agent_bench.benchmarks.swebench.conditions.openhands_agent import (
+                from agent_bench.benchmarks.terminal_bench.conditions.openhands_agent import (
                     TerminalBenchOpenHandsCondition as _Cls,
                 )
             else:
@@ -318,7 +318,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         elif condition_type == "hermes_agent":
             benchmark = instance_data.get("benchmark", "swebench")
             if benchmark == "terminal_bench":
-                from agent_bench.benchmarks.swebench.conditions.hermes_agent import (
+                from agent_bench.benchmarks.terminal_bench.conditions.hermes_agent import (
                     TerminalBenchHermesCondition as _Cls,
                 )
             elif benchmark == "request_bench":

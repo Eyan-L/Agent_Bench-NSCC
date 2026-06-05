@@ -48,13 +48,14 @@ compute nodes without internet. Add a new task by dropping its `instruction.md`
    is unaffected).
 4. For each TB run:
    - `prepare_environment` starts a singularity instance of the task .sif
-     with binds for `/app` (rw, agent workspace), `/tests` (ro, vendored
-     tests), `/logs/verifier` (rw, reward output).
+     with binds for `/app` (rw, agent workspace) and `/logs/verifier` (rw,
+     reward output). Vendored tests are not present during the agent stage.
    - `TerminalBenchReactCondition.run` loops: LLM → parse `<bash>` blocks →
      `singularity exec instance://<name> bash -lc <cmd>` → feed results
      back. Stops on `DONE` or `max_steps`.
-   - `run_tests` runs `bash /tests/test.sh` inside the instance, reads
-     `/logs/verifier/reward.txt`, returns PASS/FAIL.
+   - `run_tests` copies the vendored `tests/` directory into `/tests`, clears
+     any stale reward, runs `bash /tests/test.sh`, reads
+     `/logs/verifier/reward.txt`, and returns PASS/FAIL.
    - `cleanup` stops the instance.
 
 ## Driver wiring (the two SWE-bench-side changes)
@@ -102,8 +103,9 @@ for tid in loader.list_task_ids():
 
 ## Scoring
 
-`/tests/test.sh` (bound from the vendored `tests/`) `pip install`s pytest +
-deps, runs `pytest /tests/test_outputs.py`, writes `1` or `0` to
+At scoring time, the harness injects the vendored `tests/` directory into
+`/tests`. `/tests/test.sh` `pip install`s pytest + deps, runs
+`pytest /tests/test_outputs.py`, writes `1` or `0` to
 `/logs/verifier/reward.txt`. The harness reads that file from the host bind
 target and emits a verdict dict shaped like the SWE-bench one:
 

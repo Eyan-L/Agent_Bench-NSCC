@@ -814,7 +814,7 @@ class SWEBenchHarness:
     # before diffing so they don't bleed into the SWE-bench patch.
     _OPENCLAW_SCAFFOLD_FILES = (
         "AGENTS.md SOUL.md IDENTITY.md USER.md TOOLS.md HEARTBEAT.md "
-        "BOOT.md MEMORY.md fix.patch _oc_validate.sh"
+        "BOOT.md MEMORY.md fix.patch"
     )
     _OPENCLAW_SCAFFOLD_DIRS = ".openclaw memory sessions"
 

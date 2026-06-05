@@ -13,9 +13,18 @@ from agent_bench.benchmarks.conditions.agent_otel import (
 from agent_bench.benchmarks.conditions.openclaw_agent import OpenClawAgentCondition
 from agent_bench.benchmarks.swebench.conditions.openhands_agent import (
     OpenHandsAgentCondition,
+)
+from agent_bench.benchmarks.terminal_bench import app as tb_app
+from agent_bench.benchmarks.terminal_bench import loader as tb_loader
+from agent_bench.benchmarks.terminal_bench.conditions.hermes_agent import (
+    TerminalBenchHermesCondition,
+)
+from agent_bench.benchmarks.terminal_bench.conditions.openhands_agent import (
     TerminalBenchOpenHandsCondition,
 )
-from agent_bench.benchmarks.swebench.conditions.hermes_agent import TerminalBenchHermesCondition
+from agent_bench.benchmarks.terminal_bench.conditions.react import (
+    TerminalBenchReactCondition,
+)
 from agent_bench.core.profile_io import load_profile
 from agent_bench.harnesses.openhands import driver as openhands_driver
 from agent_bench.harnesses.openhands.driver import (
@@ -606,6 +615,80 @@ def test_terminal_bench_harness_profiles_and_driver_wiring():
     assert hm["conditions"][0]["condition_type"] == "hermes_agent"
 
 
+def test_terminal_bench_tests_are_scoring_only():
+    app = (ROOT / "agent_bench/benchmarks/terminal_bench/app.py").read_text()
+    base = (
+        ROOT / "agent_bench/benchmarks/terminal_bench/agent_harness_base.py"
+    ).read_text()
+    openclaw_profile = (
+        ROOT / "profiles/harnesses/openclaw_terminal_bench.yaml"
+    ).read_text()
+
+    assert 'f"{logs_dir}:/logs/verifier:rw"' in app
+    assert ':/tests:ro' not in app
+    assert 'self.container.copy_into(self._handle(task_container_name)' not in app
+    assert '["docker", "cp", str(tests_host), f"{container_name}:/tests"]' in app
+    assert "_copy_tests_into_singularity_instance(instance_name, tests_host)" in app
+
+    assert 'Mount(host=logs_dir, container="/logs/verifier", mode="rw")' in base
+    assert 'Mount(host=tests' not in base
+    assert 'self.container.copy_into(handle, tests_host, "/tests")' in base
+    assert "_clear_reward_file(host_logs_dir)" in base
+
+    assert "- verify" not in openclaw_profile
+
+
+def test_terminal_bench_workspace_follows_task_image_workdir(tmp_path):
+    row = tb_loader.load_task("prove-plus-comm")
+    assert row["workspace"] == "/workspace"
+    assert row["workspace_source"] == "dockerfile"
+
+    assert tb_app._resolve_task_workspace({"workspace": "/app"}, "/workspace") == "/workspace"
+    assert (
+        tb_app._resolve_task_workspace(
+            {"workspace": "/app", "workspace_source": "task.toml"},
+            "/workspace",
+        )
+        == "/app"
+    )
+    assert (
+        tb_app._resolve_task_workspace(
+            {"workspace": "/from-dockerfile", "workspace_source": "dockerfile"},
+            "/from-image",
+        )
+        == "/from-image"
+    )
+
+    tb_app._seed_workspace_helpers(tmp_path, row, "/workspace")
+    bootstrap = (tmp_path / "BOOTSTRAP.md").read_text()
+    assert "`/workspace`" in bootstrap
+    assert "`/app`" not in bootstrap
+
+    app_source = (ROOT / "agent_bench/benchmarks/terminal_bench/app.py").read_text()
+    base_source = (
+        ROOT / "agent_bench/benchmarks/terminal_bench/agent_harness_base.py"
+    ).read_text()
+    assert 'f"{app_dir}:{task_workspace}:rw"' in app_source
+    assert '"-w", task_workspace' in app_source
+    assert "workdir=task_workspace" in app_source
+    assert "Mount(host=app_dir, container=task_workspace, mode=\"rw\")" in base_source
+    assert "workdir=task_workspace" in base_source
+
+
+def test_terminal_bench_react_uses_dynamic_task_workspace():
+    cond = TerminalBenchReactCondition(SimpleNamespace(name="model"))
+    prompt = cond._compose_prompt("Create the answer.", [], "/workspace")
+    assert "The task workspace is `/workspace`" in prompt
+    assert "cat > /workspace/foo.py" in prompt
+    assert "cat > /app/foo.py" not in prompt
+
+    source = (
+        ROOT / "agent_bench/benchmarks/terminal_bench/conditions/react.py"
+    ).read_text()
+    assert '"docker", "exec", "-i", "-w", self._task_workspace' in source
+    assert '"singularity", "exec", "--pwd", self._task_workspace' in source
+
+
 def test_bridge_harnesses_preclean_deterministic_run_resources():
     sources = [
         ROOT / "agent_bench/benchmarks/terminal_bench/agent_harness_base.py",
@@ -647,7 +730,9 @@ def test_terminal_bench_conditions_prompt_and_marker_patch():
     oh = TerminalBenchOpenHandsCondition(SimpleNamespace(name="model"), SimpleNamespace())
     hm = TerminalBenchHermesCondition(SimpleNamespace(name="model"), SimpleNamespace())
 
-    assert "/tests/test.sh" in oh._build_message(data)
-    assert "/logs/verifier/reward.txt" in hm._build_message(data)
+    for message in (oh._build_message(data), hm._build_message(data)):
+        assert "/tests/test.sh" not in message
+        assert "/logs/verifier" not in message
+        assert "Declare DONE only when the task is complete" in message
     assert oh._collect_artifacts({}, "cid", "/app").startswith("# terminal_bench: no patch")
     assert hm._collect_artifacts({}, "cid", "/app").startswith("# terminal_bench: no patch")

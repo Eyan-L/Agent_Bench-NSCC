@@ -58,8 +58,6 @@ openclaw:
     - id: terminal_bench
       default: true
       name: terminal-bench-operator
-      skills:
-      - verify
 conditions:
 - condition_id: openclaw_agent
   condition_type: openclaw_agent

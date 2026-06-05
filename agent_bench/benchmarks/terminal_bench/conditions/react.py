@@ -33,6 +33,7 @@ from typing import Dict, List, Optional, Tuple
 
 from agent_bench.benchmarks.conditions._llm_client import call_llm
 from agent_bench.benchmarks.conditions.util_sampler import UtilSampler
+from agent_bench.benchmarks.terminal_bench.app import _normalize_container_path
 
 logger = logging.getLogger(__name__)
 
@@ -70,26 +71,26 @@ You are an autonomous shell agent solving a Terminal-Bench task. You are
 running on a host that has shell access to a Linux container where the task
 must be completed.
 
+The task workspace is `{workspace}`. Each command runs from that directory.
+
 You can execute one or more shell commands per turn by wrapping them in
 <bash>...</bash> blocks. Each block runs as `bash -lc <content>` inside the
 task container. You will receive the combined stdout+stderr (truncated) and
 exit code as the assistant's next user message.
 
 Rules:
-- Write files with heredocs: cat > /app/foo.py <<'EOF' ... EOF
+- Write files with heredocs: cat > {workspace}/foo.py <<'EOF' ... EOF
 - Background processes: append `&` to keep them running across turns.
 - pip install must specify exact versions when the task asks for them.
 - Do not emit DONE while a required server is not yet running.
 - If a command fails, read the stderr and try a different approach.
 - One <bash> block per turn is preferred; multiple is allowed.
 
-Validation before DONE:
-- Before emitting DONE, verify the verifier will pass by running:
-      <bash>bash /tests/test.sh && cat /logs/verifier/reward.txt</bash>
-  The reward file holds `1` for pass, `0` for fail. Only emit DONE on `1`.
-- If reward is `0`, read the verifier output, fix the issue, and re-run.
-- If you've tried several iterations and the verifier still fails, emit DONE
-  anyway so the run is recorded — repeated identical failures waste budget.
+Completion:
+- Use your own checks from the task description and files in the task workspace.
+- Final scoring is handled after you emit DONE.
+- If you've made a serious attempt and cannot improve further, emit DONE so
+  the run is recorded.
 """
 
 
@@ -135,6 +136,13 @@ class TerminalBenchReactCondition:
             or env_info.get("task_container_name")
             or instance_name
         )
+        self._task_workspace = _normalize_container_path(
+            env_info.get("task_workspace_root")
+            or env_info.get("workspace_root")
+            or workspace_root
+            or instance_data.get("workspace")
+            or "/app"
+        )
 
         instance_id = instance_data["instance_id"]
         instruction = instance_data["instruction"]
@@ -172,7 +180,7 @@ class TerminalBenchReactCondition:
         sampler_cm.__enter__()
         try:
           for step_idx in range(self.max_steps):
-            prompt = self._compose_prompt(instruction, history)
+            prompt = self._compose_prompt(instruction, history, self._task_workspace)
             step_start_ns = time.time_ns()
             text, pt, ct, err = call_llm(
                 self.model_config, prompt, seed=seed,
@@ -327,8 +335,19 @@ class TerminalBenchReactCondition:
 
     # ------------------------------------------------------------------
 
-    def _compose_prompt(self, instruction: str, history: List[Tuple[str, str]]) -> str:
-        parts = [_SYSTEM_PROMPT, "", "Task:", instruction.strip(), ""]
+    def _compose_prompt(
+        self,
+        instruction: str,
+        history: List[Tuple[str, str]],
+        task_workspace: str,
+    ) -> str:
+        parts = [
+            _SYSTEM_PROMPT.format(workspace=task_workspace),
+            "",
+            "Task:",
+            instruction.strip(),
+            "",
+        ]
         if history:
             parts.append("Conversation so far:")
             for role, content in history:
@@ -383,12 +402,13 @@ class TerminalBenchReactCondition:
         wrapped = self._BG_SAFE_WRAPPER % cmd
         if self._container_engine == "singularity":
             argv = [
-                "singularity", "exec", f"instance://{target}",
+                "singularity", "exec", "--pwd", self._task_workspace,
+                f"instance://{target}",
                 "bash", "-lc", wrapped,
             ]
         else:
             argv = [
-                "docker", "exec", "-i", target,
+                "docker", "exec", "-i", "-w", self._task_workspace, target,
                 "bash", "-lc", wrapped,
             ]
         try:

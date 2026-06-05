@@ -10,7 +10,13 @@ from typing import Dict, Optional, Type
 
 from agent_bench.benchmarks.conditions.agent_otel import otel_endpoint_for_container
 from agent_bench.benchmarks.swebench.app import _force_rmtree
-from agent_bench.benchmarks.terminal_bench.app import _seed_workspace_helpers
+from agent_bench.benchmarks.terminal_bench.app import (
+    _clear_reward_file,
+    _docker_image_workdir,
+    _require_tests_host_path,
+    _resolve_task_workspace,
+    _seed_workspace_helpers,
+)
 from agent_bench.deployments.containers import (
     Container,
     ContainerHandle,
@@ -26,9 +32,10 @@ class TerminalBenchAgentHarnessBase:
     """Two-container Terminal-Bench harness for bridge-based agent runtimes.
 
     Subclasses provide the runtime-specific state rendering and environment.
-    The task side is always Terminal-Bench's /app + /tests + /logs/verifier
-    layout; agent tools are routed into the task container via the runtime's
-    dispatcher.
+    The task side exposes the Terminal-Bench task/image workdir plus
+    /logs/verifier while the agent runs. /tests is copied into the task
+    container only during scoring; agent tools are routed into the task
+    container via the runtime's dispatcher.
     """
 
     harness_name = "agent"
@@ -37,7 +44,6 @@ class TerminalBenchAgentHarnessBase:
     dispatcher_cls: Type
     state_dir_in_agent = "/opt/agent-bench/state"
     workspace_in_agent = "/app"
-    task_workspace = "/app"
     default_verifier_timeout_seconds = 900
 
     def __init__(
@@ -95,9 +101,8 @@ class TerminalBenchAgentHarnessBase:
             )
 
         docker_image = instance_data["docker_image"]
-        tests_host = Path(instance_data["tests_host_path"])
-        if not tests_host.is_dir():
-            raise FileNotFoundError(f"task tests dir missing: {tests_host}")
+        image_workdir = _docker_image_workdir(docker_image)
+        task_workspace = _resolve_task_workspace(instance_data, image_workdir)
 
         run_id = run_id or instance_id
         rid_short = run_id[:12]
@@ -116,10 +121,10 @@ class TerminalBenchAgentHarnessBase:
         logs_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            self.container.copy_from_image(docker_image, self.task_workspace, app_dir)
-        except Exception as exc:  # noqa: BLE001 - empty /app is common
+            self.container.copy_from_image(docker_image, task_workspace, app_dir)
+        except Exception as exc:  # noqa: BLE001 - empty workspace is common
             logger.debug("TB %s workspace prime skipped: %s", self.harness_name, exc)
-        _seed_workspace_helpers(app_dir, instance_data)
+        _seed_workspace_helpers(app_dir, instance_data, task_workspace)
 
         state_dir = self._build_state_dir(
             run_id=run_id,
@@ -127,6 +132,7 @@ class TerminalBenchAgentHarnessBase:
             app_dir=app_dir,
             logs_dir=logs_dir,
             instance_data=instance_data,
+            task_workspace=task_workspace,
         )
 
         self.container.create_network(net_name)
@@ -140,11 +146,10 @@ class TerminalBenchAgentHarnessBase:
                 "oc-eval.run_id": run_id,
             },
             mounts=(
-                Mount(host=app_dir, container=self.task_workspace, mode="rw"),
-                Mount(host=tests_host, container="/tests", mode="ro"),
+                Mount(host=app_dir, container=task_workspace, mode="rw"),
                 Mount(host=logs_dir, container="/logs/verifier", mode="rw"),
             ),
-            workdir=self.task_workspace,
+            workdir=task_workspace,
             env={"HOME": "/root"},
             entrypoint="sleep",
             command=("infinity",),
@@ -171,6 +176,7 @@ class TerminalBenchAgentHarnessBase:
             run_id=run_id,
             docker_image=docker_image,
             instance_data=instance_data,
+            task_workspace=task_workspace,
         )
         agent_env.update(bridge_env)
         agent_mounts = [
@@ -211,7 +217,7 @@ class TerminalBenchAgentHarnessBase:
             "task_container_name": task_name,
             "network_name": net_name,
             "workspace_root": self.workspace_in_agent,
-            "task_workspace_root": self.task_workspace,
+            "task_workspace_root": task_workspace,
             "workspace_host_path": str(app_dir),
             "host_logs_dir": str(logs_dir),
             "state_dir": str(state_dir),
@@ -303,6 +309,7 @@ class TerminalBenchAgentHarnessBase:
         *,
         timeout_seconds: int,
         stdin_text: Optional[str] = None,
+        workdir: Optional[str] = None,
     ) -> Dict:
         try:
             proc = self.exec_in_container(
@@ -310,6 +317,7 @@ class TerminalBenchAgentHarnessBase:
                 argv,
                 timeout_seconds=timeout_seconds,
                 stdin_text=stdin_text,
+                workdir=workdir,
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
@@ -326,6 +334,16 @@ class TerminalBenchAgentHarnessBase:
             "timed_out": False,
         }
 
+    def _copy_tests_into_task(self, task_name: str, tests_host: Path) -> None:
+        handle = self._handle(task_name)
+        self.container.exec(
+            handle,
+            ["rm", "-rf", "/tests"],
+            check=False,
+            timeout=60,
+        )
+        self.container.copy_into(handle, tests_host, "/tests")
+
     def run_tests(
         self,
         container_id: Optional[str],
@@ -341,16 +359,29 @@ class TerminalBenchAgentHarnessBase:
         run_id = run_id or instance_id
         task_name = self._task_container_name(run_id)
         host_logs_dir = self.workspace_base / run_id / "logs" / "verifier"
+        image_workdir = (
+            _docker_image_workdir(instance_data["docker_image"])
+            if instance_data and instance_data.get("docker_image")
+            else None
+        )
+        task_workspace = _resolve_task_workspace(instance_data, image_workdir)
         timeout = timeout_seconds or self.default_verifier_timeout_seconds
         if instance_data:
             timeout = int(instance_data.get("verifier_timeout_sec", timeout))
         verifier = (instance_data or {}).get("verifier_entrypoint", "/tests/test.sh")
+        tests_host = _require_tests_host_path(instance_data)
         logger.info(
-            "scoring TB %s task container %s (verifier=%s, timeout=%ds)",
-            self.harness_name, task_name, verifier, timeout,
+            "scoring TB %s task container %s (workdir=%s, verifier=%s, tests=%s, timeout=%ds)",
+            self.harness_name, task_name, task_workspace, verifier, tests_host, timeout,
         )
-        result = self._exec_result_dict(task_name, ["bash", verifier], timeout_seconds=timeout)
-        host_reward = host_logs_dir / "reward.txt"
+        self._copy_tests_into_task(task_name, tests_host)
+        host_reward = _clear_reward_file(host_logs_dir)
+        result = self._exec_result_dict(
+            task_name,
+            ["bash", verifier],
+            timeout_seconds=timeout,
+            workdir=task_workspace,
+        )
         try:
             reward_text = host_reward.read_text().strip()
         except FileNotFoundError:

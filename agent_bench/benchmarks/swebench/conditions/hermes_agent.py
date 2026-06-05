@@ -190,6 +190,7 @@ class HermesAgentCondition:
         patch_path.write_text(patch_text)
 
         self._collect_sessions(env_info, container_id, run_dir, workspace_root)
+        self._collect_bridge_data(env_info, container_id, run_dir, workspace_root)
 
         return {
             "step_trace_path": str(step_path),
@@ -216,17 +217,23 @@ class HermesAgentCondition:
                     check=False,
                 )
                 dest = run_dir / "sessions.jsonl"
-                proc = subprocess.run(
-                    ["docker", "cp", f"{container_id}:{workspace_root}/sessions.jsonl", str(dest)],
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
+                harness.container.copy_out(
+                    harness._handle(container_id),
+                    "/app/sessions.jsonl",
+                    dest
                 )
-                if proc.returncode != 0:
-                    logger.warning("Failed to copy sessions.jsonl from container: %s", proc.stderr)
 
         except Exception as e:
             logger.warning("exec_in_container failed: %s", e)
+    
+    def _collect_bridge_data(self, env_info: Dict, container_id: str, run_dir: Path, workspace_root: str) -> None:
+        harness = env_info.get("_harness")
+        if harness is not None and hasattr(harness, "container"):
+            harness.container.copy_out(
+                harness._handle(container_id),
+                "/root/.openclaw/logs/openclaw_exec_bridge.jsonl",
+                run_dir / "openclaw_exec_bridge.jsonl",
+            )
 
     def _collect_artifacts(
         self,
@@ -588,25 +595,3 @@ class HermesAgentCondition:
                 shutil.copytree(src, dst)
             except OSError:
                 pass
-
-
-class TerminalBenchHermesCondition(HermesAgentCondition):
-    """Hermes agent driving a Terminal-Bench task container."""
-
-    def _build_message(self, instance_data: Dict) -> str:
-        return (
-            "Carry out this terminal task in the current container. Install "
-            "any required packages, write the required files, and start any "
-            "required services so the verifier passes. Before declaring DONE, "
-            "run `bash /tests/test.sh && cat /logs/verifier/reward.txt`; only "
-            "finish once the reward is 1.\n\n"
-            f"Task:\n{instance_data['instruction']}"
-        )
-
-    def _collect_artifacts(
-        self,
-        env_info: Dict,
-        container_id: str,
-        workspace_root: str,
-    ) -> str:
-        return "# terminal_bench: no patch - agent state in container\n"
