@@ -48,18 +48,18 @@ python3 run.py --config experiments/ccds_vllm.toml --render-job > ccds_vllm.sh
 bash ccds_vllm.sh
 ```
 
-See [doc/quickstart.md](doc/quickstart.md) for prerequisites, provider/API
+See [docs/quickstart.md](docs/quickstart.md) for prerequisites, provider/API
 fallback, and output locations.
 
 ## Documentation
 
-- [doc/quickstart.md](doc/quickstart.md): shortest path to run OpenClaw-based examples.
-- [doc/deployments.md](doc/deployments.md): deployment adapter behavior and examples.
-- [doc/layout.md](doc/layout.md): repository layout and public surfaces.
-- [doc/execution.md](doc/execution.md): runtime operations, outputs, telemetry, and troubleshooting.
-- [doc/benchmarks.md](doc/benchmarks.md): adding a benchmark.
-- [doc/conditions.md](doc/conditions.md): adding a condition.
-- [doc/harnesses.md](doc/harnesses.md): adding an agent runtime.
+- [docs/quickstart.md](docs/quickstart.md): shortest path to run OpenClaw-based examples.
+- [docs/deployments.md](docs/deployments.md): deployment adapter behavior and examples.
+- [docs/layout.md](docs/layout.md): repository layout and public surfaces.
+- [docs/execution.md](docs/execution.md): runtime operations, outputs, telemetry, and troubleshooting.
+- [docs/benchmarks.md](docs/benchmarks.md): adding a benchmark.
+- [docs/conditions.md](docs/conditions.md): adding a condition.
+- [docs/harnesses.md](docs/harnesses.md): adding an agent runtime.
 
 ## Tests
 

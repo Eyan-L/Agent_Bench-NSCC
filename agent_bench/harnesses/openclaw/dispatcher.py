@@ -5,7 +5,7 @@ client (`bridge.py`) with a `Dispatcher`-conforming class that owns their
 per-run lifecycle (token, socket, server subprocess, agent-container
 injection, cleanup).
 
-See `doc/exec-bridge.md` for the underlying architecture.
+See `docs/exec-bridge.md` for the underlying architecture.
 """
 from __future__ import annotations
 

@@ -9,7 +9,7 @@ Agent_Bench/
 ├── profiles/          reusable benchmark, harness, model, serving, deployment profiles
 ├── data/              generated datasets, run artifacts, figures, and local caches
 ├── scripts/           small host utilities that are still invoked directly
-├── doc/               development and user documentation
+├── docs/              development and user documentation
 └── tests/             repository tests
 ```
 
