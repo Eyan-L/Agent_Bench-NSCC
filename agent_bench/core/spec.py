@@ -22,6 +22,7 @@ STAGE_NAMES = (
     "run_benchmark",
     "cleanup",
 )
+STAGE_CONFIG_KEYS = (*STAGE_NAMES, "rebuild_images")
 
 
 class ConfigError(ValueError):
@@ -312,11 +313,11 @@ def _parse_stages(value: Any) -> dict[str, bool]:
         return {}
     if not isinstance(value, dict):
         raise ConfigError("stages must be a table when present")
-    unknown = sorted(set(value) - set(STAGE_NAMES))
+    unknown = sorted(set(value) - set(STAGE_CONFIG_KEYS))
     if unknown:
         raise ConfigError(
             f"stages contains unknown stage(s): {', '.join(unknown)}; "
-            f"expected one of {', '.join(STAGE_NAMES)}"
+            f"expected one of {', '.join(STAGE_CONFIG_KEYS)}"
         )
     stages: dict[str, bool] = {}
     for key, item in value.items():

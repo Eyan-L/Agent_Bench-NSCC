@@ -1,0 +1,30 @@
+name = "terminal_bench_kv_store_sglang_pd_nixl"
+description = "Terminal-Bench kv-store-grpc with OpenClaw and SGLang NIXL PD disaggregation."
+output_dir = "/mnt/vdb/boxi/pd_experiments/terminal_bench_kv_store_sglang_pd_nixl"
+seeds = [42]
+
+[telemetry]
+spans_html = true
+
+[stages]
+cleanup = true
+
+[benchmark]
+name = "terminal_bench"
+profile = "profiles/benchmarks/terminal_bench/kv_store.json"
+
+[harness]
+name = "openclaw"
+profile = "profiles/harnesses/openclaw_terminal_bench.yaml"
+
+[model]
+profile = "profiles/models/qwen36_35b_a3b_fp8_local.json"
+
+[serving]
+profile = "profiles/serving/sglang/pd_nixl.yaml"
+
+[deployment]
+profile = "profiles/deployments/local_docker.toml"
+
+[limits]
+max_workers = 1

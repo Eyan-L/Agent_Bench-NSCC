@@ -71,7 +71,7 @@ def test_sglang_native_and_singularity_launch_plans() -> None:
         env={"SGLANG_CUDA_VISIBLE_DEVICES": "0,1", "SGLANG_TP": "2"},
     )
 
-    assert native.argv[:3] == ("python3", "-m", "sglang.launch_server")
+    assert native.argv[:3] == (sys.executable, "-m", "sglang.launch_server")
     assert "--tp" in native.argv
     assert native.argv[native.argv.index("--tp") + 1] == "2"
     assert native.env["SGLANG_KV_MEMTRACE"] == "0"
@@ -86,6 +86,63 @@ def test_sglang_native_and_singularity_launch_plans() -> None:
 
     assert singularity.argv[:4] == ("singularity", "exec", "--nv", "--containall")
     assert "/tmp/sglang.sif" in singularity.argv
+
+
+def test_sglang_pd_mooncake_launch_plan() -> None:
+    plan = _plan(
+        "profiles/models/qwen36_35b_a3b_fp8_local.json",
+        "profiles/serving/sglang/pd_mooncake.yaml",
+        backend="sglang",
+    )
+
+    assert plan.mode == "pd"
+    assert plan.endpoint == "http://127.0.0.1:8000/v1"
+    assert plan.readiness_url == "http://127.0.0.1:8000/v1/models"
+    assert plan.argv[1:3] == ("-m", "agent_bench.serving.sglang.pd_supervisor")
+    assert "--transfer-backend" in plan.argv
+    assert plan.argv[plan.argv.index("--transfer-backend") + 1] == "mooncake"
+    assert "--mooncake-custom-mem-pool" in plan.argv
+    assert plan.argv[plan.argv.index("--mooncake-custom-mem-pool") + 1] == "NVLINK"
+    assert "--prefill-cuda-visible-devices" in plan.argv
+    assert plan.argv[plan.argv.index("--prefill-cuda-visible-devices") + 1] == "0"
+    assert "--decode-cuda-visible-devices" in plan.argv
+    assert plan.argv[plan.argv.index("--decode-cuda-visible-devices") + 1] == "1"
+    assert "--warmup-count" in plan.argv
+    assert plan.argv[plan.argv.index("--warmup-count") + 1] == "1"
+    assert "--warmup-max-tokens" in plan.argv
+    assert plan.argv[plan.argv.index("--warmup-max-tokens") + 1] == "16"
+    assert "--startup-timeout" in plan.argv
+    assert plan.argv[plan.argv.index("--startup-timeout") + 1] == "1800"
+    assert "--server-flag=--enable-request-time-stats-logging" in plan.argv
+    assert "--server-flag=--page-size" in plan.argv
+    assert "--server-flag=1" in plan.argv
+    assert plan.env["SGLANG_MOONCAKE_CUSTOM_MEM_POOL"] == "NVLINK"
+    assert plan.env["FLASHINFER_WORKSPACE_BASE"] == "/mnt/vdb/boxi"
+    assert plan.metadata["transfer_backend"] == "mooncake"
+    assert plan.metadata["startup_timeout_seconds"] == "1800"
+    assert plan.metadata["readiness_timeout_seconds"] == "3600"
+    assert plan.metadata["warmup_count"] == "1"
+    assert plan.metadata["page_size"] == "1"
+    assert plan.metadata["requires_fresh_process"] == "1"
+    assert plan.metadata["managed_ports"] == "router=8000,prefill=30000,decode=30001,bootstrap=8998"
+
+
+def test_sglang_pd_nixl_launch_plan() -> None:
+    plan = _plan(
+        "profiles/models/qwen36_35b_a3b_fp8_local.json",
+        "profiles/serving/sglang/pd_nixl.yaml",
+        backend="sglang",
+    )
+
+    assert plan.mode == "pd"
+    assert plan.argv[plan.argv.index("--transfer-backend") + 1] == "nixl"
+    assert "--mooncake-custom-mem-pool" not in plan.argv
+    assert plan.env["SGLANG_DISAGGREGATION_NIXL_BACKEND"] == "UCX"
+    assert plan.env["SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS"] == "{}"
+    assert plan.env["UCX_TLS"] == "cuda_ipc,cuda_copy,sm,tcp,self"
+    assert plan.env["UCX_MEMTYPE_CACHE"] == "n"
+    assert plan.metadata["transfer_backend"] == "nixl"
+    assert plan.metadata["nixl_backend"] == "UCX"
 
 
 def test_serving_profile_mode_selects_sglang_docker() -> None:
@@ -115,7 +172,32 @@ def test_env_serving_mode_overrides_profile_mode() -> None:
     )
 
     assert plan.mode == "native"
-    assert plan.argv[:3] == ("python3", "-m", "sglang.launch_server")
+    assert plan.argv[:3] == (sys.executable, "-m", "sglang.launch_server")
+
+
+def test_sglang_native_python_can_be_overridden() -> None:
+    plan = _plan(
+        "profiles/models/qwen35_9b.json",
+        "profiles/serving/sglang/default.yaml",
+        backend="sglang",
+        mode="native",
+        env={"SGLANG_PYTHON": "/opt/sglang/bin/python"},
+    )
+
+    assert plan.argv[:3] == ("/opt/sglang/bin/python", "-m", "sglang.launch_server")
+    assert plan.metadata["python"] == "/opt/sglang/bin/python"
+
+
+def test_sglang_native_python_bin_is_prepended_to_path() -> None:
+    plan = _plan(
+        "profiles/models/qwen35_9b.json",
+        "profiles/serving/sglang/default.yaml",
+        backend="sglang",
+        mode="native",
+        env={"PATH": "/usr/bin", "SGLANG_PYTHON": "/opt/sglang/bin/python"},
+    )
+
+    assert plan.env["PATH"] == "/opt/sglang/bin:/usr/bin"
 
 
 def test_serving_profile_runtime_defaults_and_extra_args(tmp_path: Path) -> None:

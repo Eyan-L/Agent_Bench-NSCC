@@ -1,0 +1,22 @@
+# SGLang single-engine baseline profile for comparison with PD disaggregation.
+serving:
+  config_id: sglang-no-pd
+  backend: sglang
+  preset: no_pd
+  endpoint:
+    scheme: http
+    bind_host: 0.0.0.0
+    client_host: 127.0.0.1
+    port: 8000
+    path: /v1
+  runtime:
+    gpu_mem_util: 0.85
+    hierarchical_cache: false
+    page_size: 1
+  scheduler:
+    max_num_seqs: 128
+    enable_prefix_caching: true
+  disaggregation:
+    flashinfer_workspace_base: /mnt/vdb/boxi
+  additional_flags:
+    enable_request_time_stats_logging: true

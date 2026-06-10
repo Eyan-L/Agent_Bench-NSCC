@@ -600,8 +600,13 @@ def _python_environment_label(env: Mapping[str, str]) -> str:
 
 
 def _prepare_images(ctx: ExecutionContext) -> None:
+    rebuild_requested = _rebuild_images_requested(ctx.resolved, ctx.env)
     if ctx.plan.pbs_spec is None:
+        if rebuild_requested:
+            _rebuild_local_harness_image(ctx)
         return
+    if rebuild_requested:
+        ctx.env["AB_AGENT_RUNTIME_REBUILD"] = "1"
     from agent_bench.deployments.pbs.stages import (
         image_preparation_commands,
         prepare_openclaw_plugin_cache,
@@ -620,6 +625,45 @@ def _prepare_images(ctx: ExecutionContext) -> None:
     run_stage_commands(commands, base_env=ctx.env)
 
 
+_LOCAL_HARNESS_IMAGE_BUILDERS = {
+    "openclaw": Path("agent_bench/harnesses/openclaw/docker/build.sh"),
+    "openhands": Path("agent_bench/harnesses/openhands/docker/build.sh"),
+    "hermes": Path("agent_bench/harnesses/hermes/docker/build.sh"),
+}
+
+
+def _rebuild_local_harness_image(ctx: ExecutionContext) -> None:
+    ctx.env["AB_AGENT_RUNTIME_REBUILD"] = "1"
+    harness = _harness_choice(ctx.resolved)
+    rel_script = _LOCAL_HARNESS_IMAGE_BUILDERS.get(harness)
+    if rel_script is None:
+        _note("prepare_images", f"no local image builder for harness {harness!r}")
+        return
+
+    repo_root = Path(ctx.env.get("AB_REPO_ROOT") or Path.cwd()).resolve()
+    script = repo_root / rel_script
+    if not script.is_file():
+        raise ConfigError(f"harness image build script not found: {script}")
+
+    image = ctx.env.get("AB_AGENT_RUNTIME_IMAGE", "<builder default>")
+    log_path = ctx.plan.log_dir / f"runtime-{harness}-build.log"
+    _note("prepare_images", f"building {harness} runtime image {image}; log -> {log_path}")
+    env = os.environ.copy()
+    env.update(ctx.env)
+    env["AB_REPO_ROOT"] = str(repo_root)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("ab", buffering=0) as log:
+        proc = subprocess.run(
+            ["bash", str(script)],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=env,
+            check=False,
+        )
+    if proc.returncode != 0:
+        raise ConfigError(f"{harness} runtime image rebuild failed with exit code {proc.returncode}; see {log_path}")
+
+
 def _start_serving(ctx: ExecutionContext, stack: ExitStack) -> None:
     plan = ctx.plan.serving_plan
     if plan is None:
@@ -630,9 +674,15 @@ def _start_serving(ctx: ExecutionContext, stack: ExitStack) -> None:
         if agent_provider:
             ctx.env.setdefault("AB_MODEL_PROVIDER", str(agent_provider))
             os.environ.setdefault("AB_MODEL_PROVIDER", str(agent_provider))
+    requires_fresh_process = plan.metadata.get("requires_fresh_process") == "1"
     if http_ready(plan.readiness_url, headers=plan.readiness_headers):
-        _note("start_serving", f"endpoint already ready: {plan.readiness_url}")
-        return
+        if not requires_fresh_process:
+            _note("start_serving", f"endpoint already ready: {plan.readiness_url}")
+            return
+        _note(
+            "start_serving",
+            f"endpoint already ready but fresh serving is required: {plan.readiness_url}",
+        )
 
     log_path = Path(plan.log_path or ctx.plan.log_dir / f"{plan.backend}.log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -669,11 +719,15 @@ def _start_serving(ctx: ExecutionContext, stack: ExitStack) -> None:
         if container_name:
             stack.callback(_remove_docker_container, container_name)
         try:
+            readiness_timeout = int(
+                ctx.env.get("SERVE_READY_TIMEOUT")
+                or plan.metadata.get("readiness_timeout_seconds", "600")
+            )
             wait_for_http_ready(
                 url=plan.readiness_url,
                 headers=plan.readiness_headers,
                 proc=readiness_proc,
-                timeout_seconds=int(ctx.env.get("SERVE_READY_TIMEOUT", "600")),
+                timeout_seconds=readiness_timeout,
                 log_path=log_path,
             )
         except ProcessError as exc:
@@ -908,7 +962,29 @@ def _default_stage_flags(resolved: ResolvedExperiment, env: Mapping[str, str]) -
     stages["start_otel"] = local_deployment and _harness_uses_otel(resolved)
     stages["start_serving"] = backend in {"vllm", "sglang", "litellm"} and local_deployment
     _apply_stage_overrides(stages, resolved, env)
+    if _rebuild_images_requested(resolved, env):
+        stages["prepare_images"] = True
     return stages
+
+
+def _harness_choice(resolved: ResolvedExperiment) -> str:
+    return str(
+        resolved.harness.get("harness")
+        or resolved.harness.get("name")
+        or resolved.spec.harness_name
+    )
+
+
+def _rebuild_images_requested(resolved: ResolvedExperiment, env: Mapping[str, str]) -> bool:
+    deployment_stages = resolved.deployment.get("stages") or {}
+    if not isinstance(deployment_stages, dict):
+        raise ConfigError("deployment.stages must be a table/object when present")
+    value = deployment_stages.get("rebuild_images", False)
+    if "rebuild_images" in resolved.spec.stages:
+        value = resolved.spec.stages["rebuild_images"]
+    if "AB_STAGE_REBUILD_IMAGES" in env:
+        value = _parse_bool(env["AB_STAGE_REBUILD_IMAGES"])
+    return bool(value)
 
 
 def _harness_uses_otel(resolved: ResolvedExperiment) -> bool:

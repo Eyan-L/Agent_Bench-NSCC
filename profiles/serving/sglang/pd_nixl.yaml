@@ -1,0 +1,53 @@
+# SGLang PD disaggregation profile using NIXL/UCX KV transfer.
+# The router exposes the OpenAI-compatible endpoint on :8000 while one GPU
+# runs prefill and one GPU runs decode.
+serving:
+  config_id: sglang-pd-nixl
+  backend: sglang
+  preset: pd_nixl
+  endpoint:
+    scheme: http
+    bind_host: 0.0.0.0
+    client_host: 127.0.0.1
+    port: 8000
+    path: /v1
+  runtime:
+    gpu_mem_util: 0.85
+    hierarchical_cache: false
+    page_size: 1
+  scheduler:
+    max_num_seqs: 128
+    enable_prefix_caching: true
+  disaggregation:
+    enabled: true
+    transfer_backend: nixl
+    flashinfer_workspace_base: /mnt/vdb/boxi
+    startup_timeout_seconds: 1800
+    readiness_timeout_seconds: 3600
+    nixl:
+      backend: UCX
+      backend_params: {}
+    env:
+      UCX_TLS: cuda_ipc,cuda_copy,sm,tcp,self
+      UCX_MEMTYPE_CACHE: "n"
+    prefill:
+      cuda_visible_devices: "0"
+      host: 0.0.0.0
+      port: 30000
+      bootstrap_port: 8998
+    decode:
+      cuda_visible_devices: "1"
+      host: 0.0.0.0
+      port: 30001
+      max_running_requests: 128
+    router:
+      host: 0.0.0.0
+      port: 8000
+    warmup:
+      enabled: true
+      count: 1
+      timeout_seconds: 240
+      max_tokens: 16
+      prompt: "Warm up the SGLang PD serving path. Reply with OK."
+  additional_flags:
+    enable_request_time_stats_logging: true

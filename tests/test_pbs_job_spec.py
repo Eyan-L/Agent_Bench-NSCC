@@ -58,6 +58,7 @@ def test_nscc_pbs_job_spec_embeds_serving_launch_plan() -> None:
     spec = build_pbs_job_spec(resolved, env={"AB_REPO_ROOT": str(ROOT), "USER": "alice"})
 
     assert tuple(spec.stages) == RUNTIME_STAGES
+    assert "rebuild_images" not in spec.stages
     assert all(spec.stages.values())
     assert spec.resources.gpus == 1
     assert spec.resources.select_value() == "select=1:ngpus=1"

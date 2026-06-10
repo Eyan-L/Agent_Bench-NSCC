@@ -239,7 +239,7 @@ def test_runner_maps_app_output_under_experiment_dir(monkeypatch):
 def test_openclaw_raw_response_log_synthesizes_per_request_model_usage(tmp_path):
     import json
 
-    from applications.conditions.openclaw_agent import OpenClawAgentCondition
+    from agent_bench.benchmarks.conditions.openclaw_agent import OpenClawAgentCondition
 
     run_dir = tmp_path / "run-1"
     raw_dir = run_dir / "conversation"
@@ -299,3 +299,119 @@ def test_openclaw_raw_response_log_synthesizes_per_request_model_usage(tmp_path)
     assert [span["attrs"]["openclaw.tokens.input"] for span in spans] == [10, 20]
     assert [span["attrs"]["openclaw.tokens.output"] for span in spans] == [5, 7]
     assert all(span["attrs"]["openclaw.channel"] == "synth.raw_response" for span in spans)
+
+
+def test_openclaw_cache_trace_synthesizes_per_request_model_usage(tmp_path):
+    import json
+
+    from agent_bench.benchmarks.conditions.openclaw_agent import OpenClawAgentCondition
+
+    run_dir = tmp_path / "run-1"
+    trace_dir = run_dir / "conversation"
+    trace_dir.mkdir(parents=True)
+    spans_path = run_dir / "spans.jsonl"
+    existing_tool_spans = [
+        {
+            "name": "agent.tool.call",
+            "start_unix_nano": 1780272001000000000,
+            "end_unix_nano": 1780272001500000000,
+            "attrs": {},
+        },
+        {
+            "name": "agent.tool.call",
+            "start_unix_nano": 1780272002600000000,
+            "end_unix_nano": 1780272002800000000,
+            "attrs": {},
+        },
+    ]
+    spans_path.write_text("".join(json.dumps(row) + "\n" for row in existing_tool_spans))
+    rows = [
+        {
+            "stage": "stream:context",
+            "ts": "2026-06-01T00:00:00.000Z",
+            "runId": "oc-run-1",
+            "sessionId": "sess-1",
+            "sessionKey": "agent:test:main",
+            "provider": "provider-a",
+            "modelId": "model-a",
+            "modelApi": "openai-completions",
+        },
+        {
+            "stage": "stream:context",
+            "ts": "2026-06-01T00:00:02.000Z",
+            "runId": "oc-run-1",
+            "sessionId": "sess-1",
+            "sessionKey": "agent:test:main",
+            "provider": "provider-a",
+            "modelId": "model-a",
+            "modelApi": "openai-completions",
+        },
+        {
+            "stage": "session:after",
+            "runId": "oc-run-1",
+            "sessionId": "sess-1",
+            "sessionKey": "agent:test:main",
+            "provider": "provider-a",
+            "modelId": "model-a",
+            "modelApi": "openai-completions",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "api": "openai-completions",
+                    "provider": "provider-a",
+                    "model": "model-a",
+                    "usage": {
+                        "input": 10,
+                        "output": 5,
+                        "cacheRead": 0,
+                        "cacheWrite": 0,
+                        "totalTokens": 15,
+                    },
+                    "stopReason": "toolUse",
+                    "timestamp": 1780272001000,
+                    "responseId": "resp-1",
+                },
+                {"role": "toolResult", "content": []},
+                {
+                    "role": "assistant",
+                    "api": "openai-completions",
+                    "provider": "provider-a",
+                    "model": "model-a",
+                    "usage": {
+                        "input": 4,
+                        "output": 7,
+                        "cacheRead": 20,
+                        "cacheWrite": 0,
+                        "totalTokens": 31,
+                    },
+                    "stopReason": "stop",
+                    "timestamp": 1780272002600,
+                    "responseId": "resp-2",
+                },
+            ],
+        },
+    ]
+    trace_path = trace_dir / "cache-trace.jsonl"
+    trace_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    count = OpenClawAgentCondition._maybe_synthesize_model_usage_spans_from_cache_trace(
+        spans_path, run_dir, "run-1"
+    )
+
+    spans = [
+        json.loads(line)
+        for line in spans_path.read_text().splitlines()
+        if json.loads(line).get("name") == "openclaw.model.usage"
+    ]
+    assert count == 2
+    assert len(spans) == 2
+    assert [span["attrs"]["openclaw.llm.request_index"] for span in spans] == [1, 2]
+    assert [span["duration_ms"] for span in spans] == [1000.0, 600.0]
+    assert [span["attrs"]["openclaw.latency.source"] for span in spans] == [
+        "next_tool_start",
+        "next_tool_start",
+    ]
+    assert [span["attrs"]["openclaw.tokens.input"] for span in spans] == [10, 4]
+    assert [span["attrs"]["openclaw.tokens.output"] for span in spans] == [5, 7]
+    assert [span["attrs"]["openclaw.tokens.cache_read"] for span in spans] == [0, 20]
+    assert all(span["attrs"]["openclaw.channel"] == "synth.cache_trace" for span in spans)

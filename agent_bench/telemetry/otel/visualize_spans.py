@@ -5,10 +5,11 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import math
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Tuple
 
 
 PALETTE = [
@@ -104,6 +105,43 @@ def _fmt_attrs(span: Dict[str, Any]) -> str:
     return html.escape(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def _pie_slice_path(cx: float, cy: float, radius: float, start_angle: float, end_angle: float) -> str:
+    start_x = cx + radius * math.cos(start_angle)
+    start_y = cy + radius * math.sin(start_angle)
+    end_x = cx + radius * math.cos(end_angle)
+    end_y = cy + radius * math.sin(end_angle)
+    large_arc = 1 if end_angle - start_angle > math.pi else 0
+    return (
+        f"M {cx:.2f} {cy:.2f} "
+        f"L {start_x:.2f} {start_y:.2f} "
+        f"A {radius:.2f} {radius:.2f} 0 {large_arc} 1 {end_x:.2f} {end_y:.2f} "
+        "Z"
+    )
+
+
+def _e2e_time_bucket(span: Dict[str, Any], prefer_runtime_tool_spans: bool) -> Tuple[str, bool, str]:
+    name = span["name"]
+    if name == "openclaw.tool.call":
+        return "Tool calls (runtime)", True, "Runtime tool execution from OpenClaw."
+    if name == "agent.tool.call":
+        if prefer_runtime_tool_spans:
+            return (
+                "Tool calls (agent trace)",
+                False,
+                "Excluded from E2E time because OpenClaw runtime tool spans are present.",
+            )
+        return "Tool calls (agent trace)", True, "Agent-side tool execution trace."
+    if name in {"openclaw.model.usage", "agent.model.usage"}:
+        return "LLM serving", True, "Model usage span."
+    if name.startswith("agent_bench."):
+        return "Harness/runtime", True, "Agent-Bench harness span."
+    if name.startswith("openclaw."):
+        return "OpenClaw runtime", True, "OpenClaw runtime span."
+    if name.startswith("agent."):
+        return "Agent trace", True, "Agent trace span."
+    return name, True, "Span included in E2E time."
+
+
 def render_html(spans: List[Dict[str, Any]], source: Path) -> str:
     if not spans:
         raise SystemExit(f"no valid spans found in {source}")
@@ -114,6 +152,12 @@ def render_html(spans: List[Dict[str, Any]], source: Path) -> str:
     lanes = _assign_lanes(spans)
     channels = sorted({span["channel"] for span in spans})
     colors = {ch: PALETTE[i % len(PALETTE)] for i, ch in enumerate(channels)}
+    prefer_runtime_tool_spans = any(span["name"] == "openclaw.tool.call" for span in spans)
+    for span in spans:
+        bucket, included, note = _e2e_time_bucket(span, prefer_runtime_tool_spans)
+        span["e2e_time_bucket"] = bucket
+        span["e2e_time_included"] = included
+        span["e2e_time_note"] = note
 
     left_pad = 290
     right_pad = 40
@@ -149,6 +193,9 @@ def render_html(spans: List[Dict[str, Any]], source: Path) -> str:
         details[detail_id] = {
             "line": span["line"],
             "name": span["name"],
+            "e2e_time_bucket": span.get("e2e_time_bucket"),
+            "e2e_time_included": span.get("e2e_time_included"),
+            "e2e_time_note": span.get("e2e_time_note"),
             "channel": span["channel"],
             "duration_ms": round(span["duration_ms"], 3),
             "start_iso": _iso(span["start"]),
@@ -193,7 +240,78 @@ def render_html(spans: List[Dict[str, Any]], source: Path) -> str:
         legend.append(f'<text class="legend" x="{x + 18}" y="55">{html.escape(ch)}</text>')
 
     counts = Counter(span["name"] for span in spans)
-    summary = ", ".join(f"{html.escape(k)}={v}" for k, v in sorted(counts.items()))
+    count_items = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    count_colors = {name: PALETTE[i % len(PALETTE)] for i, (name, _) in enumerate(count_items)}
+    pie_parts = []
+    legend_items = []
+    pie_cx = 90
+    pie_cy = 90
+    pie_radius = 78
+    pie_inner_radius = 38
+    cursor = -math.pi / 2
+    pie_total = sum(counts.values())
+    for name, count in count_items:
+        frac = count / pie_total
+        end_angle = cursor + frac * math.tau
+        color = count_colors[name]
+        label = f"{name}: {count} ({frac * 100:.1f}%)"
+        if count == pie_total:
+            pie_parts.append(
+                f'<circle cx="{pie_cx}" cy="{pie_cy}" r="{pie_radius}" fill="{color}">'
+                f"<title>{html.escape(label)}</title></circle>"
+            )
+        else:
+            pie_parts.append(
+                f'<path d="{_pie_slice_path(pie_cx, pie_cy, pie_radius, cursor, end_angle)}" '
+                f'fill="{color}"><title>{html.escape(label)}</title></path>'
+            )
+        cursor = end_angle
+        legend_items.append(
+            '<div class="count-item">'
+            f'<span class="count-swatch" style="background:{color}"></span>'
+            f'<span class="count-name">{html.escape(name)}</span>'
+            f'<span class="count-value">{count} ({frac * 100:.1f}%)</span>'
+            '</div>'
+        )
+    duration_totals: Dict[str, float] = {}
+    excluded_duration_totals: Dict[str, float] = {}
+    for span in spans:
+        bucket = span["e2e_time_bucket"]
+        included = span["e2e_time_included"]
+        target = duration_totals if included else excluded_duration_totals
+        target[bucket] = target.get(bucket, 0.0) + float(span["duration_ms"])
+    duration_items = sorted(duration_totals.items(), key=lambda item: (-item[1], item[0]))
+    duration_total_ms = max(sum(duration_totals.values()), 1e-9)
+    excluded_duration_items = sorted(
+        excluded_duration_totals.items(), key=lambda item: (-item[1], item[0])
+    )
+    time_items = []
+    for idx, (name, duration_ms) in enumerate(duration_items):
+        frac = duration_ms / duration_total_ms
+        color = count_colors.get(name) or PALETTE[idx % len(PALETTE)]
+        time_items.append(
+            '<div class="time-item">'
+            f'<div class="time-row"><span class="time-name">{html.escape(name)}</span>'
+            f'<span class="time-value">{duration_ms:.1f} ms ({frac * 100:.1f}%)</span></div>'
+            '<div class="time-track">'
+            f'<div class="time-bar" style="width:{max(frac * 100, 0.4):.3f}%; background:{color}"></div>'
+            '</div></div>'
+        )
+    excluded_time_items = []
+    for name, duration_ms in excluded_duration_items:
+        excluded_time_items.append(
+            '<div class="excluded-time-row">'
+            f'<span>{html.escape(name)}</span>'
+            f'<span>{duration_ms:.1f} ms excluded</span>'
+            '</div>'
+        )
+    excluded_note = (
+        '<div class="time-note">Trace-only spans excluded from E2E time: '
+        + ''.join(excluded_time_items)
+        + '</div>'
+        if excluded_time_items else
+        '<div class="time-note">No trace-only duplicate tool time excluded.</div>'
+    )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -202,9 +320,37 @@ def render_html(spans: List[Dict[str, Any]], source: Path) -> str:
 <title>Span Timeline</title>
 <style>
 body {{ margin: 0; font: 13px system-ui, -apple-system, Segoe UI, sans-serif; color: #111827; background: #f8fafc; }}
-header {{ padding: 18px 24px 10px; background: white; border-bottom: 1px solid #e5e7eb; }}
+header {{ padding: 18px 24px 14px; background: white; border-bottom: 1px solid #e5e7eb; }}
 h1 {{ margin: 0 0 6px; font-size: 20px; }}
 .meta {{ color: #4b5563; line-height: 1.45; }}
+.stats-section {{ padding: 16px 24px 0; }}
+.stats-panel {{ display: grid; grid-template-columns: minmax(520px, 1.2fr) minmax(360px, 0.8fr); gap: 24px; align-items: center; max-width: 1320px; background: white; border: 1px solid #e5e7eb; padding: 18px; }}
+.count-panel {{ display: grid; grid-template-columns: 196px 1fr; gap: 20px; align-items: center; min-width: 0; }}
+.count-chart {{ width: 180px; height: 180px; overflow: visible; }}
+.count-chart path, .count-chart circle {{ stroke: #fff; stroke-width: 2; }}
+.count-title, .time-title {{ font-weight: 700; margin-bottom: 10px; color: #111827; }}
+.count-list {{ display: grid; grid-template-columns: 1fr 1fr; gap: 7px 14px; max-height: 176px; overflow: auto; padding-right: 4px; }}
+.count-item {{ display: grid; grid-template-columns: 12px minmax(120px, 1fr) auto; gap: 8px; align-items: center; color: #374151; min-width: 0; }}
+.count-swatch {{ width: 11px; height: 11px; border-radius: 2px; }}
+.count-name {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.count-value {{ color: #4b5563; white-space: nowrap; font-variant-numeric: tabular-nums; }}
+.time-panel {{ min-width: 0; }}
+.time-list {{ display: grid; gap: 8px; max-height: 146px; overflow: auto; padding-right: 4px; }}
+.time-item {{ min-width: 0; }}
+.time-row {{ display: flex; justify-content: space-between; gap: 12px; color: #374151; margin-bottom: 3px; }}
+.time-name {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.time-value {{ color: #4b5563; white-space: nowrap; font-variant-numeric: tabular-nums; }}
+.time-track {{ height: 7px; background: #e5e7eb; border-radius: 999px; overflow: hidden; }}
+.time-bar {{ height: 100%; border-radius: 999px; }}
+.time-note {{ margin-top: 10px; padding-top: 9px; border-top: 1px solid #e5e7eb; color: #6b7280; font-size: 12px; line-height: 1.45; }}
+.excluded-time-row {{ display: flex; justify-content: space-between; gap: 12px; margin-top: 4px; font-variant-numeric: tabular-nums; }}
+@media (max-width: 1040px) {{
+  .stats-panel {{ grid-template-columns: 1fr; }}
+}}
+@media (max-width: 720px) {{
+  .count-panel {{ grid-template-columns: 1fr; }}
+  .count-list {{ grid-template-columns: 1fr; }}
+}}
 .wrap {{ padding: 16px 24px 28px; overflow-x: auto; }}
 svg {{ background: white; border: 1px solid #e5e7eb; }}
 .label {{ fill: #374151; font-size: 12px; }}
@@ -229,9 +375,29 @@ svg {{ background: white; border: 1px solid #e5e7eb; }}
 <header>
 <h1>Span Timeline</h1>
 <div class="meta">Source: {html.escape(str(source))}<br>
-Spans: {len(spans)} | Window: {_iso(min_start)} to {_iso(max_end)} | Duration: {total_ms:.3f} ms<br>
-Counts: {summary}</div>
+Spans: {len(spans)} | Window: {_iso(min_start)} to {_iso(max_end)} | Duration: {total_ms:.3f} ms</div>
 </header>
+<section class="stats-section" aria-label="Span statistics">
+  <div class="stats-panel">
+    <div class="count-panel" aria-label="Span count breakdown">
+      <svg class="count-chart" viewBox="0 0 180 180" role="img" aria-label="Span counts pie chart">
+        {''.join(pie_parts)}
+        <circle cx="{pie_cx}" cy="{pie_cy}" r="{pie_inner_radius}" fill="white"></circle>
+        <text x="{pie_cx}" y="86" text-anchor="middle" font-size="24" font-weight="700" fill="#111827">{len(spans)}</text>
+        <text x="{pie_cx}" y="106" text-anchor="middle" font-size="12" fill="#4b5563">spans</text>
+      </svg>
+      <div>
+        <div class="count-title">Counts</div>
+        <div class="count-list">{''.join(legend_items)}</div>
+      </div>
+    </div>
+    <div class="time-panel" aria-label="Span time breakdown">
+      <div class="time-title">Time (E2E, Deduped)</div>
+      <div class="time-list">{''.join(time_items)}</div>
+      {excluded_note}
+    </div>
+  </div>
+</section>
 <div class="wrap">
 <svg width="{width}" height="{height}" role="img" aria-label="Span timeline">
 <text x="24" y="28" font-size="14" font-weight="600">Channels</text>
@@ -270,7 +436,7 @@ function showSpan(node) {{
   const id = node.getAttribute('data-span-id');
   const detail = SPAN_DETAILS[id];
   if (!detail) return;
-  document.querySelectorAll('.span.selected').forEach(function (item) {{
+  document.querySelectorAll('.span-hit.selected').forEach(function (item) {{
     item.classList.remove('selected');
   }});
   node.classList.add('selected');

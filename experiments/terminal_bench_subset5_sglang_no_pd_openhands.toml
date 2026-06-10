@@ -1,0 +1,31 @@
+name = "terminal_bench_subset5_sglang_no_pd_openhands"
+description = "Terminal-Bench subset5 with OpenHands and single-engine SGLang serving."
+output_dir = "/mnt/vdb/boxi/pd_experiments/terminal_bench_subset5_sglang_no_pd_openhands"
+seeds = [42]
+
+[telemetry]
+spans_html = true
+
+[stages]
+rebuild_images = true
+cleanup = true
+
+[benchmark]
+name = "terminal_bench"
+profile = "profiles/benchmarks/terminal_bench/subset5_easy_medium.json"
+
+[harness]
+name = "openhands"
+profile = "profiles/harnesses/openhands_terminal_bench.yaml"
+
+[model]
+profile = "profiles/models/qwen36_35b_a3b_fp8_local.json"
+
+[serving]
+profile = "profiles/serving/sglang/no_pd.yaml"
+
+[deployment]
+profile = "profiles/deployments/local_docker.toml"
+
+[limits]
+max_workers = 1

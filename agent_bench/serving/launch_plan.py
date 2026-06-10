@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import sys
 import stat
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
@@ -136,6 +137,13 @@ def build_launch_environment(
             raise LaunchPlanError(f"upstream API key env {source} is empty")
         env["LITELLM_UPSTREAM_API_KEY"] = upstream_key
     return env
+
+
+def _prepend_path_entry(path: str, current: str | None) -> str:
+    entries = [entry for entry in (current or "").split(os.pathsep) if entry]
+    if path in entries:
+        entries.remove(path)
+    return os.pathsep.join([path, *entries])
 
 
 def prepare_launch_artifacts(
@@ -332,6 +340,16 @@ def _build_sglang_plan(
 ) -> ServingLaunchPlan:
     if mode not in {"native", "docker", "singularity"}:
         raise LaunchPlanError(f"unsupported SGLang launch mode: {mode}")
+    disaggregation = serving.disaggregation or {}
+    pd_enabled = _env_bool(
+        env,
+        "SGLANG_PD_ENABLED",
+        "AB_SERVING_PD_ENABLED",
+        default=bool(disaggregation.get("enabled", False)),
+    )
+    if pd_enabled and mode != "native":
+        raise LaunchPlanError("SGLang PD disaggregation currently supports native launch mode only")
+
     port = _env_int(env, "SGLANG_PORT", "AB_SERVING_PORT", default=serving.port)
     bind_host = _env_str(env, "SGLANG_HOST", "AB_SERVING_BIND_HOST", default=serving.bind_host)
     client_host = _env_str(env, "AB_SERVING_CLIENT_HOST", default=serving.client_host)
@@ -358,13 +376,19 @@ def _build_sglang_plan(
         "AB_MODEL_CONTEXT_WINDOW",
         default=str(model.context_window) if model.context_window else None,
     )
-    page_size = _env_str(env, "SGLANG_PAGE_SIZE", default="64")
+    page_size_default = str(serving.page_size) if serving.page_size is not None else "64"
+    page_size = _env_str(env, "SGLANG_PAGE_SIZE", default=page_size_default)
     hierarchical_cache_default = serving.enable_hierarchical_cache if serving.enable_hierarchical_cache is not None else False
     hierarchical_cache = _env_bool(env, "SGLANG_ENABLE_HIERARCHICAL_CACHE", default=hierarchical_cache_default)
     hicache_size_default = serving.hicache_size if serving.hicache_size is not None else 60
     hicache_size = _env_str(env, "SGLANG_HICACHE_SIZE", default=str(hicache_size_default))
     tool_parser = _env_optional(env, "SGLANG_TOOL_CALL_PARSER", "AB_MODEL_TOOL_CALL_PARSER", default=model.tool_call_parser or "qwen")
     reasoning_parser = _env_optional(env, "SGLANG_REASONING_PARSER", "AB_MODEL_REASONING_PARSER", default=model.reasoning_parser)
+    flashinfer_workspace_base = _env_optional(
+        env,
+        "FLASHINFER_WORKSPACE_BASE",
+        default=str(disaggregation.get("flashinfer_workspace_base") or "") or None,
+    )
 
     server_flags = [
         "--model-path",
@@ -394,32 +418,76 @@ def _build_sglang_plan(
     server_flags.extend(_extra_args(serving.extra_args))
     server_flags.extend(shlex.split(env.get("SGLANG_EXTRA_ARGS", "")))
 
-    launch_env = {
-        "CUDA_VISIBLE_DEVICES": cuda_devices,
+    config_id = _env_str(env, "AB_SERVING_CONFIG_ID", default=serving.config_id)
+    base_launch_env = {
         "AB_SERVING_BASE_URL": endpoint,
         "OPENAI_BASE_URL": endpoint,
         "AB_SERVING_BACKEND": "sglang",
-        "AB_SERVING_CONFIG_ID": _env_str(env, "AB_SERVING_CONFIG_ID", default=serving.config_id),
+        "AB_SERVING_CONFIG_ID": config_id,
         "SGLANG_ENABLE_HIERARCHICAL_CACHE": "1" if hierarchical_cache else "0",
         "SGLANG_HICACHE_SIZE": hicache_size,
         "SGLANG_KV_MEMTRACE": "0",
         "SGLANG_KV_MEMTRACE_STRICT": "0",
     }
-    if mode == "singularity":
-        launch_env["SINGULARITYENV_CUDA_VISIBLE_DEVICES"] = cuda_devices
+    if flashinfer_workspace_base:
+        base_launch_env["FLASHINFER_WORKSPACE_BASE"] = flashinfer_workspace_base
     pid_file = env.get("SGLANG_PID_FILE")
     if pid_file:
-        launch_env["SGLANG_PID_FILE"] = pid_file
+        base_launch_env["SGLANG_PID_FILE"] = pid_file
+
     metadata = {
         "tensor_parallel_size": str(tp),
         "cuda_visible_devices": cuda_devices,
         "enable_hierarchical_cache": "1" if hierarchical_cache else "0",
         "hicache_size": hicache_size,
+        "page_size": page_size,
         "mode": mode,
     }
 
+    if pd_enabled:
+        python_bin = _env_str(env, "SGLANG_PYTHON", "AB_SERVING_PYTHON", default=sys.executable)
+        python_dir = str(Path(python_bin).expanduser().parent)
+        argv, pd_env, pd_metadata = _build_sglang_pd_supervisor(
+            python_bin=python_bin,
+            model_name=model_name,
+            bind_host=bind_host,
+            router_port=port,
+            server_flags=_without_option_pairs(server_flags, {"--model-path", "--host", "--port"}),
+            serving=serving,
+            env=env,
+            disaggregation=disaggregation,
+        )
+        launch_env = {**base_launch_env, **pd_env}
+        if python_dir and python_dir != ".":
+            launch_env["PATH"] = _prepend_path_entry(python_dir, env.get("PATH") or os.environ.get("PATH"))
+        metadata.update(pd_metadata)
+        metadata["python"] = python_bin
+        return ServingLaunchPlan(
+            backend="sglang",
+            mode="pd",
+            argv=tuple(argv),
+            env=launch_env,
+            endpoint=endpoint,
+            readiness_url=endpoint.rstrip("/") + "/models",
+            readiness_headers={},
+            log_path=log_path,
+            pid_name="sglang-pd",
+            config_id=config_id,
+            model_name=model_name,
+            metadata=metadata,
+        )
+
+    launch_env = {"CUDA_VISIBLE_DEVICES": cuda_devices, **base_launch_env}
+    if mode == "singularity":
+        launch_env["SINGULARITYENV_CUDA_VISIBLE_DEVICES"] = cuda_devices
+
     if mode == "native":
-        argv = ("python3", "-m", "sglang.launch_server", *server_flags)
+        python_bin = _env_str(env, "SGLANG_PYTHON", "AB_SERVING_PYTHON", default=sys.executable)
+        python_dir = str(Path(python_bin).expanduser().parent)
+        if python_dir and python_dir != ".":
+            launch_env["PATH"] = _prepend_path_entry(python_dir, env.get("PATH") or os.environ.get("PATH"))
+        argv = (python_bin, "-m", "sglang.launch_server", *server_flags)
+        metadata["python"] = python_bin
     elif mode == "docker":
         image = _docker_image_ref(
             _env_str(
@@ -465,11 +533,247 @@ def _build_sglang_plan(
         readiness_headers={},
         log_path=log_path,
         pid_name="sglang",
-        config_id=launch_env["AB_SERVING_CONFIG_ID"],
+        config_id=config_id,
         model_name=model_name,
         metadata=metadata,
     )
 
+
+def _build_sglang_pd_supervisor(
+    *,
+    python_bin: str,
+    model_name: str,
+    bind_host: str,
+    router_port: int,
+    server_flags: Sequence[str],
+    serving: ServingConfig,
+    env: Mapping[str, str],
+    disaggregation: Mapping[str, Any],
+) -> tuple[tuple[str, ...], dict[str, str], dict[str, str]]:
+    prefill_cfg = _mapping(disaggregation.get("prefill"))
+    decode_cfg = _mapping(disaggregation.get("decode"))
+    router_cfg = _mapping(disaggregation.get("router"))
+    warmup_cfg = _mapping(disaggregation.get("warmup"))
+
+    visible_devices = [
+        item.strip()
+        for item in _env_str(
+            env,
+            "SGLANG_CUDA_VISIBLE_DEVICES",
+            "AB_SERVING_CUDA_VISIBLE_DEVICES",
+            "CUDA_VISIBLE_DEVICES",
+            default="0,1",
+        ).split(",")
+        if item.strip()
+    ]
+    prefill_devices = _env_str(
+        env,
+        "SGLANG_PREFILL_CUDA_VISIBLE_DEVICES",
+        default=str(prefill_cfg.get("cuda_visible_devices") or (visible_devices[0] if visible_devices else "0")),
+    )
+    decode_devices = _env_str(
+        env,
+        "SGLANG_DECODE_CUDA_VISIBLE_DEVICES",
+        default=str(decode_cfg.get("cuda_visible_devices") or (visible_devices[1] if len(visible_devices) > 1 else "1")),
+    )
+    prefill_host = _env_str(env, "SGLANG_PREFILL_HOST", default=str(prefill_cfg.get("host") or bind_host))
+    decode_host = _env_str(env, "SGLANG_DECODE_HOST", default=str(decode_cfg.get("host") or bind_host))
+    router_host = _env_str(env, "SGLANG_ROUTER_HOST", default=str(router_cfg.get("host") or bind_host))
+    prefill_port = _env_int(env, "SGLANG_PREFILL_PORT", default=int(prefill_cfg.get("port", 30000)))
+    decode_port = _env_int(env, "SGLANG_DECODE_PORT", default=int(decode_cfg.get("port", 30001)))
+    bootstrap_port = _env_int(
+        env,
+        "SGLANG_DISAGGREGATION_BOOTSTRAP_PORT",
+        default=int(prefill_cfg.get("bootstrap_port", 8998)),
+    )
+    max_running_requests = _env_int(
+        env,
+        "SGLANG_DECODE_MAX_RUNNING_REQUESTS",
+        default=int(decode_cfg.get("max_running_requests", serving.max_num_seqs)),
+    )
+    transfer_backend = _env_str(
+        env,
+        "SGLANG_DISAGGREGATION_TRANSFER_BACKEND",
+        default=str(disaggregation.get("transfer_backend") or "mooncake"),
+    )
+    nixl_cfg = _mapping(disaggregation.get("nixl"))
+    nixl_backend = _env_optional(
+        env,
+        "SGLANG_DISAGGREGATION_NIXL_BACKEND",
+        default=str(nixl_cfg.get("backend") or disaggregation.get("nixl_backend") or "") or None,
+    )
+    nixl_backend_params_value = nixl_cfg.get(
+        "backend_params",
+        disaggregation.get("nixl_backend_params"),
+    )
+    if isinstance(nixl_backend_params_value, Mapping):
+        nixl_backend_params_default = json.dumps(
+            {str(key): str(value) for key, value in nixl_backend_params_value.items()},
+            sort_keys=True,
+        )
+    elif nixl_backend_params_value is None:
+        nixl_backend_params_default = None
+    else:
+        nixl_backend_params_default = str(nixl_backend_params_value)
+    nixl_backend_params = _env_optional(
+        env,
+        "SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS",
+        default=nixl_backend_params_default,
+    )
+    custom_mem_pool = _env_optional(
+        env,
+        "SGLANG_MOONCAKE_CUSTOM_MEM_POOL",
+        default=str(disaggregation.get("custom_mem_pool") or "") or None,
+    )
+    flashinfer_workspace_base = _env_optional(
+        env,
+        "FLASHINFER_WORKSPACE_BASE",
+        default=str(disaggregation.get("flashinfer_workspace_base") or "") or None,
+    )
+    warmup_enabled = _env_bool(
+        env,
+        "SGLANG_PD_WARMUP_ENABLED",
+        default=bool(warmup_cfg.get("enabled", False)),
+    )
+    warmup_count = _env_int(
+        env,
+        "SGLANG_PD_WARMUP_COUNT",
+        default=int(warmup_cfg.get("count", 1 if warmup_enabled else 0)),
+    )
+    warmup_timeout = _env_int(
+        env,
+        "SGLANG_PD_WARMUP_TIMEOUT",
+        default=int(warmup_cfg.get("timeout_seconds", 180)),
+    )
+    warmup_max_tokens = _env_int(
+        env,
+        "SGLANG_PD_WARMUP_MAX_TOKENS",
+        default=int(warmup_cfg.get("max_tokens", 16)),
+    )
+    warmup_prompt = _env_str(
+        env,
+        "SGLANG_PD_WARMUP_PROMPT",
+        default=str(warmup_cfg.get("prompt") or "Warm up the serving engine. Reply with OK."),
+    )
+    startup_timeout = _env_int(
+        env,
+        "SGLANG_PD_STARTUP_TIMEOUT",
+        default=int(disaggregation.get("startup_timeout_seconds", 600)),
+    )
+    readiness_timeout = _env_int(
+        env,
+        "SGLANG_PD_READINESS_TIMEOUT",
+        "SERVE_READY_TIMEOUT",
+        default=int(disaggregation.get("readiness_timeout_seconds", 600)),
+    )
+
+    argv = [
+        python_bin,
+        "-m",
+        "agent_bench.serving.sglang.pd_supervisor",
+        "--model-path",
+        model_name,
+        "--router-host",
+        router_host,
+        "--router-port",
+        str(router_port),
+        "--prefill-host",
+        prefill_host,
+        "--prefill-port",
+        str(prefill_port),
+        "--prefill-cuda-visible-devices",
+        prefill_devices,
+        "--decode-host",
+        decode_host,
+        "--decode-port",
+        str(decode_port),
+        "--decode-cuda-visible-devices",
+        decode_devices,
+        "--transfer-backend",
+        transfer_backend,
+        "--bootstrap-port",
+        str(bootstrap_port),
+        "--decode-max-running-requests",
+        str(max_running_requests),
+        "--startup-timeout",
+        str(startup_timeout),
+    ]
+    if custom_mem_pool:
+        argv.extend(["--mooncake-custom-mem-pool", custom_mem_pool])
+    if warmup_enabled and warmup_count > 0:
+        argv.extend(
+            [
+                "--warmup-count",
+                str(warmup_count),
+                "--warmup-timeout",
+                str(warmup_timeout),
+                "--warmup-max-tokens",
+                str(warmup_max_tokens),
+                "--warmup-prompt",
+                warmup_prompt,
+            ]
+        )
+    for flag in server_flags:
+        argv.append(f"--server-flag={flag}")
+
+    pd_env: dict[str, str] = {}
+    if custom_mem_pool:
+        pd_env["SGLANG_MOONCAKE_CUSTOM_MEM_POOL"] = custom_mem_pool
+    if nixl_backend:
+        pd_env["SGLANG_DISAGGREGATION_NIXL_BACKEND"] = nixl_backend
+    if nixl_backend_params:
+        pd_env["SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS"] = nixl_backend_params
+    if flashinfer_workspace_base:
+        pd_env["FLASHINFER_WORKSPACE_BASE"] = flashinfer_workspace_base
+    for key, value in _mapping(disaggregation.get("env")).items():
+        if value is not None:
+            pd_env[str(key)] = str(value)
+
+    metadata = {
+        "mode": "pd",
+        "transfer_backend": transfer_backend,
+        "prefill_cuda_visible_devices": prefill_devices,
+        "decode_cuda_visible_devices": decode_devices,
+        "prefill_port": str(prefill_port),
+        "decode_port": str(decode_port),
+        "router_port": str(router_port),
+        "bootstrap_port": str(bootstrap_port),
+        "managed_ports": (
+            f"router={router_port},prefill={prefill_port},"
+            f"decode={decode_port},bootstrap={bootstrap_port}"
+        ),
+        "requires_fresh_process": "1",
+        "startup_timeout_seconds": str(startup_timeout),
+        "readiness_timeout_seconds": str(readiness_timeout),
+        "warmup_count": str(warmup_count if warmup_enabled else 0),
+    }
+    if custom_mem_pool:
+        metadata["mooncake_custom_mem_pool"] = custom_mem_pool
+    if nixl_backend:
+        metadata["nixl_backend"] = nixl_backend
+    if nixl_backend_params:
+        metadata["nixl_backend_params"] = nixl_backend_params
+    if flashinfer_workspace_base:
+        metadata["flashinfer_workspace_base"] = flashinfer_workspace_base
+    return tuple(argv), pd_env, metadata
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _without_option_pairs(flags: Sequence[str], option_names: set[str]) -> list[str]:
+    out: list[str] = []
+    skip_next = False
+    for item in flags:
+        if skip_next:
+            skip_next = False
+            continue
+        if item in option_names:
+            skip_next = True
+            continue
+        out.append(item)
+    return out
 
 def _build_litellm_plan(
     model: ModelConfig,

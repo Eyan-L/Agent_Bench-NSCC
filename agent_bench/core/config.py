@@ -57,6 +57,7 @@ class ServingConfig:
     cuda_visible_devices: Optional[str]
     enable_hierarchical_cache: Optional[bool]
     hicache_size: Optional[int]
+    page_size: Optional[int]
     max_num_seqs: int
     enable_prefix_caching: bool
     preset: str = "default"
@@ -69,6 +70,7 @@ class ServingConfig:
     provider_model: Optional[str] = None
     proxy_api_key: Optional[str] = None
     proxy_agent_provider: Optional[str] = None
+    disaggregation: Dict[str, Any] = field(default_factory=dict)
     additional_flags: Dict[str, Any] = field(default_factory=dict)
     extra_args: List[str] = field(default_factory=list)
 
@@ -85,6 +87,7 @@ class ServingConfig:
             "cuda_visible_devices": self.cuda_visible_devices,
             "enable_hierarchical_cache": self.enable_hierarchical_cache,
             "hicache_size": self.hicache_size,
+            "page_size": self.page_size,
             "preset": self.preset,
             "serving_mode": self.serving_mode,
             "max_num_seqs": self.max_num_seqs,
@@ -97,6 +100,7 @@ class ServingConfig:
             "provider_model": self.provider_model,
             "proxy_api_key": self.proxy_api_key,
             "proxy_agent_provider": self.proxy_agent_provider,
+            "disaggregation": self.disaggregation,
             "additional_flags": self.additional_flags,
             "extra_args": self.extra_args,
         }
@@ -413,6 +417,7 @@ def load_serving_config(serving_path: Path) -> ServingConfig:
     runtime = serving_data.get("runtime") or {}
     scheduler = serving_data.get("scheduler") or {}
     proxy = serving_data.get("proxy") or {}
+    disaggregation = serving_data.get("disaggregation") or {}
     provider = _active_provider(serving_data)
     backend = serving_data["backend"]
     if backend in {"provider", "api"}:
@@ -437,6 +442,7 @@ def load_serving_config(serving_path: Path) -> ServingConfig:
         cuda_visible_devices=_optional_str(runtime.get("cuda_visible_devices")),
         enable_hierarchical_cache=_optional_bool(runtime.get("enable_hierarchical_cache")),
         hicache_size=_optional_int(runtime.get("hicache_size")),
+        page_size=_optional_int(runtime.get("page_size")),
         preset=serving_data.get("preset", "default"),
         serving_mode=_optional_serving_mode(serving_data, runtime, backend),
         max_num_seqs=int(scheduler.get("max_num_seqs", 128)),
@@ -452,6 +458,7 @@ def load_serving_config(serving_path: Path) -> ServingConfig:
             if backend == "litellm" else None
         ),
         proxy_agent_provider=proxy.get("agent_provider"),
+        disaggregation=disaggregation if isinstance(disaggregation, dict) else {},
         additional_flags=serving_data.get("additional_flags", {}),
         extra_args=_extra_args_value(serving_data.get("extra_args", runtime.get("extra_args", []))),
     )

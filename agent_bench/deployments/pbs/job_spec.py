@@ -199,6 +199,11 @@ def _resolve_stages(resolved: ResolvedExperiment, env: Mapping[str, str]) -> dic
         raise ConfigError("deployment.stages must be a table/object when present")
     experiment_stages = resolved.spec.stages
     stages = {stage: True for stage in RUNTIME_STAGES}
+    rebuild_images = bool(deployment_stages.get("rebuild_images", False))
+    if "rebuild_images" in experiment_stages:
+        rebuild_images = experiment_stages["rebuild_images"]
+    if "AB_STAGE_REBUILD_IMAGES" in env:
+        rebuild_images = _parse_bool(env["AB_STAGE_REBUILD_IMAGES"])
     if resolved.serving.get("backend") not in {"vllm", "sglang", "litellm"}:
         stages["start_serving"] = False
     for stage in RUNTIME_STAGES:
@@ -209,6 +214,8 @@ def _resolve_stages(resolved: ResolvedExperiment, env: Mapping[str, str]) -> dic
         new_key = f"AB_STAGE_{stage.upper()}"
         if new_key in env:
             stages[stage] = _parse_bool(env[new_key])
+    if rebuild_images:
+        stages["prepare_images"] = True
     return stages
 
 

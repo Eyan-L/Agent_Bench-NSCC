@@ -244,6 +244,18 @@ def test_experiment_stage_override_enables_prepare_images(tmp_path: Path) -> Non
     assert plan.stage_enabled("prepare_images") is True
 
 
+def test_experiment_stage_override_enables_rebuild_images(tmp_path: Path) -> None:
+    config = _write_client_only_experiment(tmp_path, stage_lines=["[stages]", "rebuild_images = true"])
+
+    resolved = load_resolved_experiment(config, root=ROOT)
+    plan = build_execution_plan(resolved, env={"AB_REPO_ROOT": str(ROOT)})
+
+    assert resolved.spec.stages == {"rebuild_images": True}
+    assert tuple(stage.name for stage in plan.stages) == STAGE_ORDER
+    assert "rebuild_images" not in STAGE_ORDER
+    assert plan.stage_enabled("prepare_images") is True
+
+
 def test_env_stage_override_wins_over_experiment_stage_override(tmp_path: Path) -> None:
     config = _write_client_only_experiment(tmp_path, stage_lines=["[stages]", "start_otel = false"])
 
@@ -350,6 +362,43 @@ def test_local_otel_stage_runs_docker_scripts(tmp_path: Path, monkeypatch) -> No
     assert calls[0][1]["AB_TELEMETRY_DATA_DIR"] == str(tmp_path / "run/logs/otel")
     assert calls[0][1]["AB_TELEMETRY_TRACE_FILE"] == str(tmp_path / "run/logs/otel/otel-traces.jsonl")
     assert calls[0][1]["AB_TELEMETRY_NAME"].startswith("agent-bench-otel-")
+
+
+def test_rebuild_images_option_runs_local_harness_builder(tmp_path: Path, monkeypatch) -> None:
+    config = _write_client_only_experiment(tmp_path, stage_lines=["[stages]", "rebuild_images = true"])
+    resolved = load_resolved_experiment(config, root=ROOT)
+    env = {
+        "AB_REPO_ROOT": str(ROOT),
+        "AB_RUN_DIR": str(tmp_path / "run"),
+        "AB_LOG_DIR": str(tmp_path / "run/logs"),
+        "AB_AGENT_RUNTIME_IMAGE": "agent-bench/openclaw:test",
+    }
+    plan = execution.build_execution_plan(resolved, env=env)
+    plan.log_dir.mkdir(parents=True, exist_ok=True)
+    ctx = execution.ExecutionContext(
+        resolved=resolved,
+        plan=plan,
+        retry_errors=True,
+        max_workers=1,
+        env=env,
+    )
+    build_script = tmp_path / "build.sh"
+    build_script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    monkeypatch.setitem(execution._LOCAL_HARNESS_IMAGE_BUILDERS, "openclaw", build_script)
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((list(argv), dict(kwargs["env"])))
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(execution.subprocess, "run", fake_run)
+
+    execution._prepare_images(ctx)
+
+    assert calls[0][0] == ["bash", str(build_script)]
+    assert calls[0][1]["AB_AGENT_RUNTIME_IMAGE"] == "agent-bench/openclaw:test"
+    assert env["AB_AGENT_RUNTIME_REBUILD"] == "1"
+    assert (plan.log_dir / "runtime-openclaw-build.log").exists()
 
 
 def test_prepare_environment_preserves_explicit_benchmark_data_root(tmp_path: Path, monkeypatch) -> None:

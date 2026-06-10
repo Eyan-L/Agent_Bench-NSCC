@@ -242,9 +242,6 @@ class OpenClawAgentCondition:
         # that records one row per OpenAI-compatible LLM HTTP request.
         self._archive_session_artifacts(container_id, run_dir, run_dir.name)
 
-        # 3d. Prefer per-request model usage spans from the raw response log.
-        # The older agentMeta.usage fallback is run-level aggregate data, so it
-        # is intentionally used only when the per-request log is unavailable.
         if spans_path is None:
             existing_spans_path = run_dir / "spans.jsonl"
             if existing_spans_path.exists():
@@ -254,23 +251,31 @@ class OpenClawAgentCondition:
                 spans_path.touch()
                 logger.info("  created %s for synthesized spans", spans_path.name)
 
+        # 3d. If the OC tool-call patches didn't fire (most builds), backfill
+        # `openclaw.tool.call` spans from the archived session trajectory so
+        # downstream analysis sees per-tool spans regardless.
+        if spans_path is not None:
+            self._maybe_synthesize_tool_call_spans(spans_path, run_dir, run_dir.name)
+
+        # 3e. Prefer per-request model usage spans from the raw response log.
+        # The older agentMeta.usage fallback is run-level aggregate data, so it
+        # is intentionally used only when the per-request log is unavailable.
         if spans_path is not None:
             raw_usage_spans = self._maybe_synthesize_model_usage_spans_from_raw_log(
                 spans_path, run_dir, run_dir.name,
             )
+            cache_usage_spans = 0
             if raw_usage_spans == 0:
+                cache_usage_spans = self._maybe_synthesize_model_usage_spans_from_cache_trace(
+                    spans_path, run_dir, run_dir.name,
+                )
+            if raw_usage_spans == 0 and cache_usage_spans == 0:
                 self._maybe_synthesize_model_usage_span(
                     spans_path, payload,
                     run_id=run_dir.name,
                     start_ns=step_start_ns,
                     end_ns=step_end_ns,
                 )
-
-        # 3e. If the OC tool-call patches didn't fire (most builds), backfill
-        # `openclaw.tool.call` spans from the archived session trajectory so
-        # downstream analysis sees per-tool spans regardless.
-        if spans_path is not None:
-            self._maybe_synthesize_tool_call_spans(spans_path, run_dir, run_dir.name)
 
         # 4. Collect benchmark-specific artifacts (patch for SWE-bench; nothing
         #    for TB). Always write candidate.patch — driver gates on its
@@ -649,6 +654,7 @@ class OpenClawAgentCondition:
         conversation_dir = run_dir / "conversation"
         return (
             (conversation_dir / "llm-raw-responses.jsonl").is_file()
+            or (conversation_dir / "cache-trace.jsonl").is_file()
             or (conversation_dir / "sessions").is_dir()
         )
 
@@ -892,6 +898,187 @@ class OpenClawAgentCondition:
             return 0
 
         logger.info("  synthesized %d per-request model.usage span(s)", len(spans_out))
+        return len(spans_out)
+
+    @staticmethod
+    def _maybe_synthesize_model_usage_spans_from_cache_trace(
+        spans_path: Path,
+        run_dir: Path,
+        run_id: str,
+    ) -> int:
+        """Backfill one ``openclaw.model.usage`` span per assistant response.
+
+        Some OpenClaw builds do not emit ``llm-raw-responses.jsonl`` but do
+        archive ``conversation/cache-trace.jsonl``. Its final ``session:after``
+        snapshot contains every assistant message with per-response usage. This
+        is less precise than the raw HTTP log, but still preserves one usage
+        span per LLM serving call instead of collapsing the whole run into one
+        aggregate span.
+        """
+        trace_path = run_dir / "conversation" / "cache-trace.jsonl"
+        if not trace_path.is_file():
+            return 0
+
+        try:
+            existing = [json.loads(l) for l in open(spans_path) if l.strip()]
+        except (OSError, json.JSONDecodeError):
+            existing = []
+        if any(
+            s.get("name") == "openclaw.model.usage"
+            and (s.get("attrs") or {}).get("openclaw.channel") == "synth.cache_trace"
+            for s in existing
+        ):
+            return 0
+
+        from datetime import datetime, timezone
+
+        def _parse_time_ns(value) -> int:
+            if isinstance(value, (int, float)):
+                f = float(value)
+                if f > 1e15:
+                    return int(f)
+                if f > 1e12:
+                    return int(f * 1e6)
+                return int(f * 1e9)
+            if isinstance(value, str):
+                try:
+                    return int(datetime.fromisoformat(
+                        value.replace("Z", "+00:00")
+                    ).timestamp() * 1e9)
+                except ValueError:
+                    return 0
+            return 0
+
+        def _as_int(value) -> int:
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        try:
+            rows = [
+                json.loads(l)
+                for l in trace_path.read_text(errors="replace").splitlines()
+                if l.strip()
+            ]
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("cache trace model usage read failed: %s", e)
+            return 0
+
+        final_snapshot = None
+        context_rows: List[Dict] = []
+        for row in rows:
+            if row.get("stage") == "stream:context":
+                context_rows.append(row)
+            if row.get("stage") == "session:after":
+                final_snapshot = row
+        if final_snapshot is None:
+            return 0
+
+        assistant_messages = [
+            m for m in final_snapshot.get("messages", []) or []
+            if isinstance(m, dict) and m.get("role") == "assistant" and m.get("usage")
+        ]
+        if not assistant_messages:
+            return 0
+
+        tool_start_ns = sorted(
+            int(s.get("start_unix_nano") or 0)
+            for s in existing
+            if s.get("name") in ("agent.tool.call", "openclaw.tool.call")
+            and int(s.get("start_unix_nano") or 0) > 0
+        )
+        session_after_ns = _parse_time_ns(final_snapshot.get("ts"))
+        spans_out: List[Dict] = []
+        for idx, message in enumerate(assistant_messages, start=1):
+            usage = message.get("usage") or {}
+            context = context_rows[idx - 1] if idx <= len(context_rows) else {}
+            start_ns = _parse_time_ns(context.get("ts"))
+            end_ns = 0
+            latency_source = "unknown"
+            if start_ns:
+                for candidate_ns in tool_start_ns:
+                    if candidate_ns > start_ns:
+                        end_ns = candidate_ns
+                        latency_source = "next_tool_start"
+                        break
+            if not end_ns and start_ns and session_after_ns and session_after_ns > start_ns:
+                end_ns = session_after_ns
+                latency_source = "session_after"
+            if not end_ns:
+                end_ns = _parse_time_ns(message.get("timestamp"))
+                latency_source = "message_timestamp"
+            if not start_ns and end_ns:
+                start_ns = end_ns
+            if start_ns and not end_ns:
+                end_ns = start_ns
+            if start_ns and end_ns and end_ns < start_ns:
+                start_ns = end_ns
+            duration_ms = (end_ns - start_ns) / 1e6 if start_ns and end_ns else 0
+
+            input_tokens = _as_int(usage.get("input"))
+            output_tokens = _as_int(usage.get("output"))
+            cache_read_tokens = _as_int(usage.get("cacheRead"))
+            cache_write_tokens = _as_int(usage.get("cacheWrite"))
+            total_tokens = _as_int(usage.get("totalTokens") or usage.get("total"))
+            if total_tokens == 0:
+                total_tokens = input_tokens + output_tokens + cache_read_tokens + cache_write_tokens
+
+            attrs = {
+                "openclaw.channel": "synth.cache_trace",
+                "openclaw.span.source": "cache_trace",
+                "openclaw.provider": (
+                    message.get("provider") or final_snapshot.get("provider") or "unknown"
+                ),
+                "openclaw.model": (
+                    message.get("model") or final_snapshot.get("modelId") or "unknown"
+                ),
+                "openclaw.api": (
+                    message.get("api") or final_snapshot.get("modelApi") or "unknown"
+                ),
+                "openclaw.sessionKey": final_snapshot.get("sessionKey") or "",
+                "openclaw.sessionId": final_snapshot.get("sessionId") or "",
+                "openclaw.runId": final_snapshot.get("runId") or run_id,
+                "openclaw.llm.request_index": idx,
+                "openclaw.llm.response_id": message.get("responseId") or "",
+                "openclaw.llm.stop_reason": message.get("stopReason") or "",
+                "openclaw.latency.source": latency_source,
+                "openclaw.tokens.input": input_tokens,
+                "openclaw.tokens.output": output_tokens,
+                "openclaw.tokens.cache_read": cache_read_tokens,
+                "openclaw.tokens.cache_write": cache_write_tokens,
+                "openclaw.tokens.total": total_tokens,
+            }
+            spans_out.append({
+                "name": "openclaw.model.usage",
+                "start_unix_nano": start_ns,
+                "end_unix_nano": end_ns,
+                "start_iso": (
+                    datetime.fromtimestamp(start_ns / 1e9, tz=timezone.utc).isoformat()
+                    if start_ns else None
+                ),
+                "end_iso": (
+                    datetime.fromtimestamp(end_ns / 1e9, tz=timezone.utc).isoformat()
+                    if end_ns else None
+                ),
+                "duration_ms": duration_ms,
+                "attrs": attrs,
+                "resource": {
+                    "oc.run_id": run_id,
+                    "service.name": "agent-bench-openclaw",
+                },
+                "synthesized": True,
+            })
+
+        try:
+            with open(spans_path, "a") as fh:
+                for s in spans_out:
+                    fh.write(json.dumps(s, ensure_ascii=False) + "\n")
+        except OSError as e:
+            logger.warning("cache trace model usage span write failed: %s", e)
+            return 0
+
+        logger.info("  synthesized %d cache-trace model.usage span(s)", len(spans_out))
         return len(spans_out)
 
     # ------------------------------------------------------------------
