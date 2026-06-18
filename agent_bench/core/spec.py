@@ -292,7 +292,7 @@ def _parse_limits(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ConfigError("limits must be a table when present")
 
-    allowed = {"max_workers"}
+    allowed = {"max_workers", "task_container_cpus"}
     unknown = sorted(set(value) - allowed)
     if unknown:
         raise ConfigError(
@@ -305,6 +305,11 @@ def _parse_limits(value: Any) -> dict[str, Any]:
         item = limits["max_workers"]
         if isinstance(item, bool) or not isinstance(item, int) or item < 1:
             raise ConfigError("limits.max_workers must be a positive integer")
+    if "task_container_cpus" in limits:
+        item = limits["task_container_cpus"]
+        if isinstance(item, bool) or not isinstance(item, (int, float)) or item <= 0:
+            raise ConfigError("limits.task_container_cpus must be a positive number")
+        limits["task_container_cpus"] = float(item)
     return limits
 
 

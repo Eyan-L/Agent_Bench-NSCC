@@ -22,6 +22,7 @@ from agent_bench.deployments.containers.base import (
     ContainerSpec,
     Mount,
 )
+from agent_bench.deployments.containers.limits import docker_cpus_args
 from agent_bench.telemetry.harness_spans import (
     preview_json,
     preview_text,
@@ -190,6 +191,7 @@ class DockerContainer(Container):
             cmd += ["--user", spec.user]
         if spec.gpu:
             cmd += ["--gpus", "all"]
+        cmd += docker_cpus_args(spec.cpus)
         for k, v in spec.labels.items():
             cmd += ["--label", f"{k}={v}" if v else k]
         for m in spec.mounts:

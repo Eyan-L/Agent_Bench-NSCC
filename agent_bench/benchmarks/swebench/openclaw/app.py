@@ -68,6 +68,7 @@ from agent_bench.deployments.containers import (
     ContainerSpec,
     Mount,
 )
+from agent_bench.deployments.containers.limits import configured_task_container_cpus
 from agent_bench.harnesses.openclaw.dispatcher import OpenClawRemoteDispatcher
 from agent_bench.core.config import endpoint_for_container, load_active_model_and_serving
 from agent_bench.core.profile_io import load_profile
@@ -155,6 +156,7 @@ class SWEBenchHarness:
             ) from e
         self.container.check_available()
         self.container.check_image(self.oc_image)
+        self.task_container_cpus = configured_task_container_cpus()
 
         self.workspace_base = Path(
             workspace_base
@@ -291,6 +293,7 @@ class SWEBenchHarness:
             env={"PATH": task_path, "HOME": "/root"},
             entrypoint="sleep",
             command=("infinity",),
+            cpus=self.task_container_cpus,
         )
         try:
             task_handle = self.container.start(task_spec)

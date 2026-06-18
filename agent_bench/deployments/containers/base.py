@@ -46,6 +46,7 @@ class ContainerSpec:
     labels: dict[str, str] = field(default_factory=dict)       # docker --label
     gpu: bool = False                             # docker --gpus / singularity --nv
     pull_timeout_s: float = 600.0
+    cpus: Optional[float] = None                  # docker --cpus (singularity: no-op)
 
 
 @dataclass

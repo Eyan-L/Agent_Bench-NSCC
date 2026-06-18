@@ -70,6 +70,10 @@ from agent_bench.benchmarks.swebench.app import (
 from agent_bench.harnesses.openclaw.dispatcher import OpenClawRemoteDispatcher
 from agent_bench.core.config import runtime_endpoint_for_container, load_active_model_and_serving
 from agent_bench.core.profile_io import load_profile
+from agent_bench.deployments.containers.limits import (
+    configured_task_container_cpus,
+    docker_cpus_args,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +263,7 @@ class TerminalBenchDockerHarness:
         # OC image is only required when the harness config asks for it; we
         # check lazily in prepare_environment so a pure tb_react run on a
         # machine without the OC image still works.
+        self.task_container_cpus = configured_task_container_cpus()
 
         self.workspace_base = Path(
             workspace_base
@@ -451,6 +456,7 @@ class TerminalBenchDockerHarness:
             "-v", f"{app_dir}:{task_workspace}:rw",
             "-v", f"{logs_dir}:/logs/verifier:rw",
             "-w", task_workspace,
+            *docker_cpus_args(self.task_container_cpus),
             "--entrypoint", "sleep",
             docker_image,
             "infinity",

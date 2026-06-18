@@ -24,6 +24,7 @@ from agent_bench.deployments.containers import (
     DockerContainer,
     Mount,
 )
+from agent_bench.deployments.containers.limits import configured_task_container_cpus
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ class TerminalBenchAgentHarnessBase:
         )
         self.container.check_available()
         self.container.check_image(self.runtime_image)
+        self.task_container_cpus = configured_task_container_cpus()
         self.workspace_base = Path(
             workspace_base
             or os.environ.get(
@@ -153,6 +155,7 @@ class TerminalBenchAgentHarnessBase:
             env={"HOME": "/root"},
             entrypoint="sleep",
             command=("infinity",),
+            cpus=self.task_container_cpus,
         )
         try:
             task_handle = self.container.start(task_spec)
