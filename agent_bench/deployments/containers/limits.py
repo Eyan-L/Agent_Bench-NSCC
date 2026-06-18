@@ -21,9 +21,9 @@ def configured_task_container_cpus(
         return None
     try:
         config = load_profile(Path(config_path))
+        limits = config.get("limits") if isinstance(config, dict) else None
     except Exception:
         return None
-    limits = config.get("limits")
     if not isinstance(limits, dict) or "task_container_cpus" not in limits:
         return None
     return _parse_cpus(limits["task_container_cpus"], "limits.task_container_cpus")
