@@ -19,7 +19,7 @@ class ModelConfig:
     name: str
     endpoint: str  # OpenAI-compatible base URL from the active serving config.
     temperature: float = 0.0
-    max_tokens: int = 8192
+    max_tokens: int = 32768
     context_window: int = 0
     provider: str = "custom"
     api_key: str = "EMPTY"
@@ -535,7 +535,7 @@ def load_model_config(model_path: Path, *, serving: Optional[ServingConfig] = No
         name=model_data["name"],
         endpoint=serving.endpoint if serving else model_data.get("endpoint", ""),
         temperature=float(model_data.get("temperature", 0.0)),
-        max_tokens=int(model_data.get("max_tokens", 8192)),
+        max_tokens=int(model_data.get("max_tokens", min(32768, int(model_data.get("context_window", 0))) if int(model_data.get("context_window", 0)) > 0 else 32768)),
         context_window=int(model_data.get("context_window", 0)),
         provider=provider,
         api_key=api_key,

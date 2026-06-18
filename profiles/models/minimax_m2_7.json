@@ -5,7 +5,7 @@
     "name": "MiniMax-M2.7",
     "provider": "minimax",
     "temperature": 0.0,
-    "max_tokens": 8192,
+    "max_tokens": 32768,
     "context_window": 262144,
     "litellm_model": "openai/MiniMax-M2.7"
   }

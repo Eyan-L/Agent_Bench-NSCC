@@ -497,7 +497,7 @@ def _write_openclaw_state_template(
             "name": model_name,
             "api": "openai-completions",
             "contextWindow": int(env.get("AB_MODEL_CONTEXT_WINDOW") or resolved.model.get("context_window") or 0),
-            "maxTokens": int(env.get("AB_MODEL_MAX_OUTPUT_TOKENS") or resolved.model.get("max_tokens") or 8192),
+            "maxTokens": int(env.get("AB_MODEL_MAX_OUTPUT_TOKENS") or resolved.model.get("max_tokens") or (min(32768, int(resolved.model.get("context_window"))) if resolved.model.get("context_window") and int(resolved.model.get("context_window")) > 0 else 32768)),
         }
     ]
     agents_defaults = oc_cfg.setdefault("agents", {}).setdefault("defaults", {})
