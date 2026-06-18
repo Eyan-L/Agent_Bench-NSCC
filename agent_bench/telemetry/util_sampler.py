@@ -155,64 +155,63 @@ def _read_docker_stats(container_name: str, port: int = 8088, timeout: float = 2
     except Exception:
         return None
 
-    if not data:
-        return None
-
-    # The response is usually a dict keyed by container path (e.g. "/docker/<id>")
-    info = next(iter(data.values())) if isinstance(data, dict) else data
-    stats = info.get("stats")
-    if not stats or len(stats) < 2:
-        return None
-
-    curr = stats[-1]
-    prev = stats[-2]
-
-    # CPU usage in nanoseconds
-    d_cpu = curr["cpu"]["usage"]["total"] - prev["cpu"]["usage"]["total"]
-
-    def _parse_ts(ts: str) -> float:
-        # Handle RFC3339 with various precision
-        ts = ts.replace("Z", "+00:00")
-        if "." in ts:
-            base, frac = ts.split(".")
-            # truncate/pad frac to 6 digits for %f, keeping only trailing offset
-            # (e.g. 2024-05-24T12:34:56.789123456Z -> 2024-05-24T12:34:56.789123+00:00)
-            frac_part, sep, offset = frac.partition("+")
-            if not sep:
-                frac_part, sep, offset = frac.partition("-")
-            frac_part = (frac_part[:6] + "000000")[:6]
-            ts = f"{base}.{frac_part}{sep}{offset}"
-        return datetime.fromisoformat(ts).timestamp()
-
     try:
+        if not data:
+            return None
+
+        # The response is usually a dict keyed by container path (e.g. "/docker/<id>")
+        info = next(iter(data.values())) if isinstance(data, dict) else data
+        stats = info.get("stats")
+        if not stats or len(stats) < 2:
+            return None
+
+        curr = stats[-1]
+        prev = stats[-2]
+
+        # CPU usage in nanoseconds
+        d_cpu = curr["cpu"]["usage"]["total"] - prev["cpu"]["usage"]["total"]
+
+        def _parse_ts(ts: str) -> float:
+            # Handle RFC3339 with various precision
+            ts = ts.replace("Z", "+00:00")
+            if "." in ts:
+                base, frac = ts.split(".")
+                # truncate/pad frac to 6 digits for %f, keeping only trailing offset
+                # (e.g. 2024-05-24T12:34:56.789123456Z -> 2024-05-24T12:34:56.789123+00:00)
+                frac_part, sep, offset = frac.partition("+")
+                if not sep:
+                    frac_part, sep, offset = frac.partition("-")
+                frac_part = (frac_part[:6] + "000000")[:6]
+                ts = f"{base}.{frac_part}{sep}{offset}"
+            return datetime.fromisoformat(ts).timestamp()
+
         d_time = _parse_ts(curr["timestamp"]) - _parse_ts(prev["timestamp"])
+        if d_time <= 0:
+            return None
+
+        # CPU % of total host (as reported by cadvisor stats which is cumulative across cores)
+        cpu_pct = round((d_cpu / (d_time * 1e9)) * 100.0, 2)
+
+        mem_used_bytes = curr["memory"]["usage"]
+        # memory limit is in the spec block
+        mem_total_bytes = info.get("spec", {}).get("memory", {}).get("limit", 0)
+        # 0 or very large numbers mean unlimited
+        is_unlimited = mem_total_bytes == 0 or mem_total_bytes > 2**60
+
+        mem_used_mb = mem_used_bytes // (1024 * 1024)
+        mem_total_mb = (mem_total_bytes // (1024 * 1024)) if not is_unlimited else None
+        mem_pct = round(100.0 * mem_used_bytes / mem_total_bytes, 2) if not is_unlimited and mem_total_bytes > 0 else None
+
+        return {
+            "name": container_name,
+            "pct": cpu_pct,
+            "mem_used_mb": mem_used_mb,
+            "mem_total_mb": mem_total_mb,
+            "mem_pct": mem_pct,
+            "n_proc": None,  # cadvisor v1.3 doesn't easily show PID count in stats block
+        }
     except Exception:
         return None
-
-    if d_time <= 0:
-        return None
-
-    # CPU % of total host (as reported by cadvisor stats which is cumulative across cores)
-    cpu_pct = round((d_cpu / (d_time * 1e9)) * 100.0, 2)
-
-    mem_used_bytes = curr["memory"]["usage"]
-    # memory limit is in the spec block
-    mem_total_bytes = info.get("spec", {}).get("memory", {}).get("limit", 0)
-    # 0 or very large numbers mean unlimited
-    is_unlimited = mem_total_bytes == 0 or mem_total_bytes > 2**60
-
-    mem_used_mb = mem_used_bytes // (1024 * 1024)
-    mem_total_mb = (mem_total_bytes // (1024 * 1024)) if not is_unlimited else None
-    mem_pct = round(100.0 * mem_used_bytes / mem_total_bytes, 2) if not is_unlimited and mem_total_bytes > 0 else None
-
-    return {
-        "name": container_name,
-        "pct": cpu_pct,
-        "mem_used_mb": mem_used_mb,
-        "mem_total_mb": mem_total_mb,
-        "mem_pct": mem_pct,
-        "n_proc": None,  # cadvisor v1.3 doesn't easily show PID count in stats block
-    }
 
 
 def _read_container_groups(container_groups: Dict[str, List[str]], port: int = 8088) -> Dict[str, Dict]:
@@ -228,12 +227,21 @@ def _read_container_groups(container_groups: Dict[str, List[str]], port: int = 8
         if not sampled:
             continue
         mem_used_mb = sum((stat.get("mem_used_mb") or 0) for stat in sampled)
-        mem_total_mb = sum((stat.get("mem_total_mb") or 0) for stat in sampled)
-        mem_pct = round(100.0 * mem_used_mb / mem_total_mb, 2) if mem_total_mb else None
+        has_unlimited_memory = any(stat.get("mem_total_mb") is None for stat in sampled)
+        mem_total_mb = (
+            None
+            if has_unlimited_memory
+            else sum((stat.get("mem_total_mb") or 0) for stat in sampled)
+        )
+        mem_pct = (
+            round(100.0 * mem_used_mb / mem_total_mb, 2)
+            if mem_total_mb is not None and mem_total_mb > 0
+            else None
+        )
         out[role] = {
             "pct": round(sum((stat.get("pct") or 0.0) for stat in sampled), 2),
             "mem_used_mb": mem_used_mb,
-            "mem_total_mb": mem_total_mb or None,
+            "mem_total_mb": mem_total_mb,
             "mem_pct": mem_pct,
             "n_proc": sum((stat.get("n_proc") or 0) for stat in sampled) or None,
             "containers": [stat["name"] for stat in sampled],
