@@ -3,6 +3,14 @@
 .env.local
 .env.*.local
 
+# Fan-out sweep holds site-specific accounts/projects/hosts — keep it local.
+# Commit experiments/fanout.example.toml instead.
+experiments/fanout.toml
+
+# Local-only cluster reference: real accounts/projects/hosts/keys per GPU node.
+scripts/serve_only/clusters.local.md
+*.local.md
+
 # DR-Bench vendor — reference reports (15 MB); re-fetched by `make dr-vendor`
 applications/deepresearch_bench/eval/vendor/data/test_data/
 

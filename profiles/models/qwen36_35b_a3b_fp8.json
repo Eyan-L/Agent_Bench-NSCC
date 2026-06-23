@@ -1,0 +1,17 @@
+{
+  "_doc": "Qwen3.6-35B-A3B-FP8 for decoupled-serving runs on scheduler-allocated GPU nodes (nscc PBS / ccds-ai Slurm). `name` is the served model id AND the weights path the vLLM server loads; it MUST be the cluster-absolute path to $HOME/scratch/models/Qwen3.6-35B-A3B-FP8 and identical on client + server. Because $HOME differs per cluster (per cluster/account), the serve_only wrappers (scripts/serve_only/run_ccds.sh, run_nscc.sh) resolve the remote $HOME at runtime: the server gets MODEL=<resolved path> and the client gets a name-patched copy of this template. The default name below is a concrete placeholder path. FP8, ~35B-A3B MoE: needs 2x40GB or 1x80GB; the wrappers size TP/CUDA_VISIBLE_DEVICES to the chosen cards.",
+  "model": {
+    "config_id": "qwen36_35b_a3b_fp8",
+    "name": "/path/to/scratch/models/Qwen3.6-35B-A3B-FP8",
+    "provider": "custom",
+    "api_key": "EMPTY",
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20,
+    "max_tokens": 8192,
+    "context_window": 81920,
+    "tool_call_parser": "qwen3_coder",
+    "reasoning_parser": "qwen3",
+    "enable_thinking": true
+  }
+}

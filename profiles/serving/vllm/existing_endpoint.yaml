@@ -1,0 +1,25 @@
+# Client-side serving profile for the DECOUPLED workflow: the vLLM server runs
+# elsewhere (a GPU node, served via profiles/serving/vllm/decoupled.yaml) and this
+# machine only talks to it over HTTP. backend=existing_endpoint makes the driver
+# skip launching any local server (agent_bench/core/execution.py start_serving
+# gate) and resolve the endpoint from AB_SERVING_BASE_URL / OPENAI_BASE_URL
+# (agent_bench/serving/common/endpoint.py).
+#
+# The endpoint below is the LOCAL (client-perspective) URL the agent talks to.
+#   - in-process conditions (e.g. tb_react): the loop runs in the host driver
+#     process and calls model_config.endpoint DIRECTLY, so it hits 127.0.0.1:8000
+#     — i.e. the SSH tunnel / direct route to the GPU host.
+#   - container-based conditions (OpenClaw): the harness rewrites localhost ->
+#     vllm-host (--add-host vllm-host:host-gateway) for the agent container, so a
+#     tunnel bound on the host's 0.0.0.0:8000 is reachable from the container.
+# Binding the tunnel on 0.0.0.0 (scripts/serve_only/tunnel.sh) covers both.
+# See scripts/serve_only/README.md.
+serving:
+  config_id: vllm-existing-endpoint
+  backend: existing_endpoint
+  endpoint:
+    scheme: http
+    bind_host: 0.0.0.0
+    client_host: 127.0.0.1
+    port: 8000
+    path: /v1

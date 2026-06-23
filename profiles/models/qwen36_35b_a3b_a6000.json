@@ -1,0 +1,17 @@
+{
+  "_doc": "A6000-host served Qwen3.6-35B-A3B for decoupled-serving runs. `name` is the model id the GPU host's vLLM server advertises at /v1/models (the weights path passed to serve_vllm.sh). The agent sends `name` as the request model, so it MUST equal the served id — use this same MODEL_CONFIG on both serve_vllm.sh and run_tb_client.sh. `enable_thinking` rides the harness extra_body (chat_template_kwargs) and needs an extra_body-forwarding harness image. The default name below is a concrete placeholder path.",
+  "model": {
+    "config_id": "qwen36_35b_a3b_a6000",
+    "name": "/path/to/scratch/models/Qwen3.6-35B-A3B",
+    "provider": "custom",
+    "api_key": "EMPTY",
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20,
+    "max_tokens": 8192,
+    "context_window": 81920,
+    "tool_call_parser": "qwen3_coder",
+    "reasoning_parser": "qwen3",
+    "enable_thinking": true
+  }
+}

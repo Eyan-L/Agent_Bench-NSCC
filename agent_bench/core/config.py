@@ -62,6 +62,8 @@ class ServingConfig:
     enable_prefix_caching: bool
     preset: str = "default"
     serving_mode: Optional[str] = None
+    block_size: Optional[int] = None
+    attention_backend: Optional[str] = None
     image: Optional[str] = None
     sif: Optional[str] = None
     provider_name: Optional[str] = None
@@ -90,6 +92,8 @@ class ServingConfig:
             "page_size": self.page_size,
             "preset": self.preset,
             "serving_mode": self.serving_mode,
+            "block_size": self.block_size,
+            "attention_backend": self.attention_backend,
             "max_num_seqs": self.max_num_seqs,
             "enable_prefix_caching": self.enable_prefix_caching,
             "image": self.image,
@@ -445,6 +449,8 @@ def load_serving_config(serving_path: Path) -> ServingConfig:
         page_size=_optional_int(runtime.get("page_size")),
         preset=serving_data.get("preset", "default"),
         serving_mode=_optional_serving_mode(serving_data, runtime, backend),
+        block_size=_optional_int(runtime.get("block_size")),
+        attention_backend=_optional_str(runtime.get("attention_backend")),
         max_num_seqs=int(scheduler.get("max_num_seqs", 128)),
         enable_prefix_caching=bool(scheduler.get("enable_prefix_caching", True)),
         image=serving_data.get("image"),
@@ -460,7 +466,18 @@ def load_serving_config(serving_path: Path) -> ServingConfig:
         proxy_agent_provider=proxy.get("agent_provider"),
         disaggregation=disaggregation if isinstance(disaggregation, dict) else {},
         additional_flags=serving_data.get("additional_flags", {}),
-        extra_args=_extra_args_value(serving_data.get("extra_args", runtime.get("extra_args", []))),
+        extra_args=_extra_args_value(
+            # `extra_flags` is an accepted alias for `extra_args` (the decoupled
+            # vLLM profile uses it). Prefer the canonical key, then the alias, at
+            # both the serving and runtime levels.
+            serving_data.get(
+                "extra_args",
+                serving_data.get(
+                    "extra_flags",
+                    runtime.get("extra_args", runtime.get("extra_flags", [])),
+                ),
+            )
+        ),
     )
 
 

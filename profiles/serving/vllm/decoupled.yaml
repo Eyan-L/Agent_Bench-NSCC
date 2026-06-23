@@ -1,0 +1,35 @@
+# vLLM server profile for the DECOUPLED / fan-out workflow. The vLLM server runs
+# on a GPU node (started by scripts/serve_only/serve_vllm.sh -> backend/vllm/serve.sh
+# from a local venv, see VLLM_VENV) and binds 0.0.0.0:$PORT; the agent + scoring
+# run on a separate CPU node and reach it over the network (direct route or SSH
+# tunnel — see scripts/serve_only/README.md). The client side uses
+# existing_endpoint.yaml to talk to this server.
+#
+# Tensor parallelism is selected at launch via VLLM_TP/TP; the model string +
+# tool parser come from profiles/models/*.json. FLASH_ATTN + block-size 16 are a
+# conservative, broadly-compatible engine config (FLASH_ATTN avoids flashinfer's
+# Hopper JIT toolchain requirement on H200 hosts); drop or override them via the
+# matching env vars if your engine prefers different defaults.
+serving:
+  config_id: vllm-decoupled
+  backend: vllm
+  preset: default
+  venv: /path/to/vllm/.venv   # site-specific; override via VLLM_VENV
+  endpoint:
+    scheme: http
+    bind_host: 0.0.0.0
+    client_host: 127.0.0.1
+    port: 8000
+    path: /v1
+  runtime:
+    gpu_mem_util: 0.90
+    block_size: 16
+    attention_backend: FLASH_ATTN
+  scheduler:
+    max_num_seqs: 128
+    enable_prefix_caching: true
+  extra_flags:
+    # PCIe GPUs (no NVLink) — custom all-reduce hangs/regresses; disable it. No-op
+    # at TP=1 (single card, no all-reduce) and safe on SXM/NVLink nodes too.
+    - "--disable-custom-all-reduce"
+  additional_flags: {}

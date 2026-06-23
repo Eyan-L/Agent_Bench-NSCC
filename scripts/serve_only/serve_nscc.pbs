@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# scripts/serve_only/serve_nscc.pbs — batch PBS job that serves vLLM on an
+# nscc GPU node for the decoupled workflow.
+# Submitted by scripts/serve_only/run_nscc.sh from ntu_cpu; that wrapper polls
+# qstat for this job, reads the exec node from the .node file written below, opens
+# a 2-hop tunnel, runs the TB client, and qdel's the job on exit.
+#
+# The select/walltime directives are defaults — run_nscc.sh overrides them with
+# `qsub -l` and passes MODEL / NSCC_VLLM_VENV / NGPUS / PORT via `qsub -v`.
+#PBS -N ab-serve
+# NB: no #PBS -P here — run_nscc.sh always passes `qsub -P $PROJECT` (your project
+# is site-specific; set it in .env / the sweep TOML). Add one to submit by hand.
+#PBS -l select=1:ngpus=2
+#PBS -l walltime=02:00:00
+#PBS -q normal
+#PBS -j oe
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$PWD}"
+mkdir -p logs/serve_only
+# Publish the exec node so the ntu_cpu wrapper can target the tunnel at it.
+hostname > "logs/serve_only/${PBS_JOBID}.node"
+# Publish the GPU type + size as "NAME TOTAL_MIB" (spaces in NAME squashed to
+# underscores) so the wrapper can record it in the placement manifest — the login
+# node can't always reach the exec node directly, so we report it from here.
+# nvidia-smi must be resolved explicitly: at job start no CUDA module is loaded yet
+# (that happens in serve_vllm.sh), so a bare `nvidia-smi` may be off PATH on some
+# hosts (e.g. hpcc's H200 nodes) and the probe came back empty -> gpu_name=unknown
+# in the ledger. The driver always installs nvidia-smi under /usr/bin, so fall back
+# there; on failure write the reason into the .gpu file so the wrapper/log shows why.
+GPU_FILE="logs/serve_only/${PBS_JOBID}.gpu"
+SMI="$(command -v nvidia-smi || true)"
+[[ -z "$SMI" && -x /usr/bin/nvidia-smi ]] && SMI=/usr/bin/nvidia-smi
+if [[ -z "$SMI" ]]; then
+    echo "nvidia-smi-not-found" > "$GPU_FILE"
+    echo "[serve_nscc] WARN: nvidia-smi not found on PATH or /usr/bin; gpu_name will be unknown" >&2
+else
+    SMI_OUT="$("$SMI" --query-gpu=name,memory.total --format=csv,noheader,nounits 2>&1)" || true
+    GPU_LINE="$(head -1 <<<"$SMI_OUT" | awk -F', *' 'NF>=2{gsub(/ /,"_",$1); print $1, $2}')"
+    if [[ -n "$GPU_LINE" ]]; then
+        echo "$GPU_LINE" > "$GPU_FILE"
+    else
+        echo "nvidia-smi-query-failed" > "$GPU_FILE"
+        echo "[serve_nscc] WARN: nvidia-smi query returned no GPU: $SMI_OUT" >&2
+    fi
+fi
+
+NGPUS="${NGPUS:-2}"
+# PBS cgroup-isolates the allocation: the job sees its cards as 0..NGPUS-1.
+CVD="$(seq -s, 0 $((NGPUS - 1)))"
+
+echo "[serve_nscc] job=$PBS_JOBID node=$(hostname) NGPUS=$NGPUS CUDA_VISIBLE_DEVICES=$CVD"
+echo "[serve_nscc] model=${MODEL:?set MODEL via qsub -v} vllm_venv=${NSCC_VLLM_VENV:?set NSCC_VLLM_VENV via qsub -v}"
+
+exec env \
+    CUDA_VISIBLE_DEVICES="$CVD" \
+    VLLM_VENV="$NSCC_VLLM_VENV" \
+    MODEL="$MODEL" \
+    MODEL_CONFIG="profiles/models/qwen36_35b_a3b_fp8.json" \
+    SERVING_CONFIG="profiles/serving/vllm/decoupled.yaml" \
+    TP="$NGPUS" \
+    PORT="${PORT:-8000}" \
+    LOG_DIR="logs/serve_only/p${PORT:-8000}" \
+    bash scripts/serve_only/serve_vllm.sh

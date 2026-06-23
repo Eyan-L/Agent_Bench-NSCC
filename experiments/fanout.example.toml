@@ -1,0 +1,100 @@
+# Fan-out sweep — split a benchmark across every GPU you can reach and run it in
+# parallel. Driven by orchestration/fanout/fanout.py (NOT the run.py/spec.py
+# pipeline): it expands arms x task-shards into cells and launches the
+# scripts/serve_only wrappers across the enabled targets.
+#
+# TEMPLATE — copy to experiments/fanout.toml (gitignored) and fill in the
+# site-specific values: <…> placeholders below are your PBS accounts/project
+# codes and the SSH alias of your bare-metal GPU host.
+#
+#   cp experiments/fanout.example.toml experiments/fanout.toml
+#   python -m orchestration.fanout.fanout experiments/fanout.toml --dry-run
+#   python -m orchestration.fanout.fanout experiments/fanout.toml
+#
+# Profiles are repo-relative.
+name           = "fanout"
+benchmark      = "profiles/benchmarks/terminal_bench/smoke1.json"   # `instances` get sharded
+harness        = "profiles/harnesses/tb_react_terminal_bench.yaml"
+model_template = "profiles/models/qwen36_35b_a3b_fp8.json"
+serving        = "profiles/serving/vllm/decoupled.yaml"
+
+# Arms are variant labels. One arm = a plain sharded fan-out. The benchmark's
+# instances are split into `shards` cells per arm.
+arms   = ["default"]
+shards = 1
+
+# --- A/B variants (optional) ----------------------------------------------- #
+# Add more arms and give each one an environment overlay; the orchestrator merges
+# [arm_env.<arm>] into that arm's cell environment (and sets ARM=<arm>) without
+# knowing what the vars mean. The harness on the GPU/client side reads them.
+# Example (uncomment to run a 2-arm A/B):
+#   arms   = ["a", "b"]
+#   shards = 5                       # 10 tasks / 5 shards = 2 tasks per cell
+# [arm_env.a]
+#   SOME_FEATURE_ENABLED = "1"
+# [arm_env.b]
+#   SOME_FEATURE_ENABLED = "0"
+
+# --- analysis hook (optional) ---------------------------------------------- #
+# Run a post-sweep analysis over the results. Resolved as "module:function" and
+# called as function(arm_runs=<dict arm -> [cell output records]>, out_dir=<str>).
+# Unset = no analysis (cells just land under data/fanout/<run>/cells/).
+# analysis = "my_pkg.my_analysis:run_comparison"
+
+# --- targets ---------------------------------------------------------------- #
+# Each enabled target becomes one or more concurrency "lanes". A cell occupies one
+# lane slot while its wrapper serves + runs + tears down.
+#
+# vllm_venv (optional, any target): the serving venv ON THE REMOTE GPU HOST — set
+# it when the model needs a venv other than the wrapper default ($HOME/vllm/.venv),
+# e.g. a custom vLLM build/fork. Forwarded to the host as VLLM_VENV (slurm/baremetal)
+# or NSCC_VLLM_VENV (pbs). The remote checkout must be on a matching branch.
+
+[targets.ccds]
+kind         = "slurm"          # run_ccds.sh; picks genuinely-free cards, scancel on exit
+enabled      = false
+max_parallel = 4
+# vllm_venv  = "/path/on/remote/vllm/.venv"
+
+[targets.nscc]
+kind                     = "pbs"        # run_nscc.sh; qsub per account, qdel on exit
+enabled                  = false
+accounts                 = ["<your-pbs-account>"] # --accounts overrides; "all" = every ~/.ssh/nscc_*
+ngpus                    = 2            # request what the node has (1x / 2x / 4x)
+max_parallel_per_account = 4
+# vllm_venv              = "/path/on/remote/vllm/.venv"
+
+[targets.gpu_host]
+kind            = "baremetal"   # run_baremetal.sh; remote_serve start/stop over SSH
+enabled         = false
+remote          = "<your-gpu-ssh-alias>"  # SSH alias or user@ip of the bare-metal host
+cuda_devices    = [0, 1, 2, 3]  # one lane per card (spread cells across all cards)
+servers_per_gpu = 1             # >1 packs several servers per card at ~1/N util
+gpu_mem_util    = 0.90
+# vllm_venv     = "/path/on/remote/vllm/.venv"
+
+[targets.hpcc_free]
+kind         = "pbs"        # run_nscc.sh (generic PBS); single-account host in ~/.ssh/config
+enabled      = false
+remote       = "hpcc"
+project      = "<your-pbs-project>"
+queue        = "gpu_free"   # short-walltime queue — keep cells short
+ncpus        = 4
+ngpus        = 1
+walltime     = "00:30:00"   # must stay <= the queue's cap
+max_parallel = 2            # concurrent qsub jobs; contention may requeue extras
+gpu_mem_util = 0.9
+client_host  = "localhost"  # some sites filter forwarded HTTP by Host header; if you
+                            # see 403 "Web Page Blocked" with Host: 127.0.0.1, set this
+                            # to localhost (tunnel still binds 0.0.0.0:$PORT).
+
+# --- limits ----------------------------------------------------------------- #
+[limits]
+time_budget_min       = 60      # wall-clock cap; running cells get torn down on overrun
+skip_pull             = true    # first cell pulls task images, the rest reuse
+max_attempts_per_cell = 3       # requeue a cell whose GPU was unavailable, up to N times
+# When servers_per_gpu>1, hold each next server on a card until the booting sibling
+# finishes GPU memory profiling — otherwise the 2nd profiles against the 1st's
+# reservation, gets negative KV cache, and crashes. Must exceed the model's
+# profile+KV-alloc time; only gates packed lanes.
+boot_stagger_sec      = 120

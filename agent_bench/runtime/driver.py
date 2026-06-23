@@ -732,6 +732,7 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
         pool.shutdown(wait=True)
 
     logger.info(f"Sweep complete: {completed} runs completed, {failed} errors")
+    return completed, failed
 
 
 def main():
@@ -766,7 +767,7 @@ def main():
     os.environ["AB_SERVING_CONFIG"] = str(args.serving_config.resolve())
     os.environ["AB_BENCHMARK_INSTANCE_DATA"] = str(args.benchmark_instance_data.resolve())
 
-    run_sweep(
+    completed, failed = run_sweep(
         benchmark_path=args.benchmark_config,
         harness_path=args.harness_config,
         model_path=args.model_config,
@@ -776,8 +777,18 @@ def main():
         retry_errors=not args.no_retry_errors,
         max_workers=args.max_workers,
     )
+    # A cell that completed ZERO runs while hitting errors produced nothing usable
+    # (every run threw before scoring — e.g. an infra failure like a docker-network
+    # collision; a real verifier FAIL counts as completed, so this never masks a
+    # legit task failure). Exit non-zero so the fan-out orchestrator requeues it
+    # instead of recording a silently-empty "done" cell.
+    if completed == 0 and failed > 0:
+        logger.error("no runs completed (all errored): %d error(s) — exiting non-zero "
+                     "so the fan-out requeues this cell.", failed)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
     _install_signal_handlers()
-    main()
+    sys.exit(main())

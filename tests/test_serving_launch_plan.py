@@ -244,6 +244,51 @@ def test_serving_profile_runtime_defaults_and_extra_args(tmp_path: Path) -> None
     assert plan.metadata["cuda_visible_devices"] == "0,1"
 
 
+def test_vllm_runtime_block_size_attention_backend_and_extra_flags(tmp_path: Path) -> None:
+    serving = tmp_path / "decoupled_like.yaml"
+    serving.write_text(
+        """serving:
+  config_id: vllm-decoupled
+  backend: vllm
+  preset: default
+  endpoint:
+    scheme: http
+    bind_host: 0.0.0.0
+    client_host: 127.0.0.1
+    port: 8000
+    path: /v1
+  runtime:
+    gpu_mem_util: 0.90
+    block_size: 16
+    attention_backend: FLASH_ATTN
+  scheduler:
+    max_num_seqs: 128
+    enable_prefix_caching: true
+  extra_flags:
+    - --disable-custom-all-reduce
+""",
+        encoding="utf-8",
+    )
+
+    plan = _plan("profiles/models/qwen35_9b.json", str(serving), backend="vllm", mode="native")
+
+    assert plan.argv[plan.argv.index("--block-size") + 1] == "16"
+    assert plan.argv[plan.argv.index("--attention-backend") + 1] == "FLASH_ATTN"
+    # `extra_flags` is honored as an alias for `extra_args`.
+    assert "--disable-custom-all-reduce" in plan.argv
+
+    # Env overrides win over the profile.
+    overridden = _plan(
+        "profiles/models/qwen35_9b.json",
+        str(serving),
+        backend="vllm",
+        mode="native",
+        env={"VLLM_BLOCK_SIZE": "32", "VLLM_ATTENTION_BACKEND": "FLASHINFER"},
+    )
+    assert overridden.argv[overridden.argv.index("--block-size") + 1] == "32"
+    assert overridden.argv[overridden.argv.index("--attention-backend") + 1] == "FLASHINFER"
+
+
 def test_sglang_uses_tp_env_instead_of_visible_gpu_count() -> None:
     plan = _plan(
         "profiles/models/qwen35_9b.json",

@@ -249,6 +249,27 @@ def _build_vllm_plan(
     if reasoning_parser:
         base_flags.extend(["--reasoning-parser", reasoning_parser])
 
+    # Optional engine knobs from the serving profile (runtime.block_size /
+    # runtime.attention_backend), overridable per host. A pinned block size and an
+    # explicit attention backend (e.g. FLASH_ATTN to dodge flashinfer's Hopper JIT
+    # toolchain on H200) are how the decoupled profile stays portable across GPUs.
+    block_size = _env_optional(
+        env,
+        "VLLM_BLOCK_SIZE",
+        "AB_SERVING_BLOCK_SIZE",
+        default=str(serving.block_size) if serving.block_size is not None else None,
+    )
+    if block_size:
+        base_flags.extend(["--block-size", str(block_size)])
+    attention_backend = _env_optional(
+        env,
+        "VLLM_ATTENTION_BACKEND",
+        "AB_SERVING_ATTENTION_BACKEND",
+        default=serving.attention_backend,
+    )
+    if attention_backend:
+        base_flags.extend(["--attention-backend", attention_backend])
+
     config_id, preset_flags = _vllm_preset_flags(
         preset=preset,
         config_id=_env_str(env, "AB_SERVING_CONFIG_ID", default=serving.config_id),

@@ -1,6 +1,7 @@
 """Shared Terminal-Bench harness scaffolding for non-OpenClaw agents."""
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shutil
@@ -27,6 +28,23 @@ from agent_bench.deployments.containers import (
 from agent_bench.deployments.containers.limits import configured_task_container_cpus
 
 logger = logging.getLogger(__name__)
+
+
+def _cell_scope() -> str:
+    """Short per-cell tag so concurrent fan-out cells on one docker host don't
+    collide on run_id-keyed resources.
+
+    The TB harness names its docker network/containers and its workspace/state
+    dirs from the driver's content-based run_id (compute_run_id: task + model +
+    serving + seed — NOT the arm). Under fan-out, every TB task container runs on
+    the one client docker daemon, so two cells that compute the SAME run_id for
+    the same task (e.g. the evict vs noevict arms, which share model+serving and
+    differ only in an env knob) would create/tear-down identically-named docker
+    networks and rmtree each other's workspace. The orchestrator gives each cell a
+    unique RUN_ID (e.g. 'evict_s2@a6000-gpu0#1'); hash it to a short, docker-safe
+    tag and weave it into those names. Empty when not under fan-out (back-compat)."""
+    raw = os.environ.get("AB_RUN_TAG") or os.environ.get("RUN_ID") or ""
+    return hashlib.sha1(raw.encode()).hexdigest()[:8] if raw else ""
 
 
 class TerminalBenchAgentHarnessBase:
@@ -67,15 +85,24 @@ class TerminalBenchAgentHarnessBase:
         self.container.check_available()
         self.container.check_image(self.runtime_image)
         self.task_container_cpus = configured_task_container_cpus()
-        self.workspace_base = Path(
+        _ws = Path(
             workspace_base
             or os.environ.get(
                 "AB_HARNESS_WORKSPACE_BASE",
                 os.path.expanduser("~/.cache/oc-eval/workspaces"),
             )
         )
+        _states = _ws.parent / "states"
+        # Per-cell scope: keep concurrent fan-out cells' run_id-keyed workspace /
+        # state dirs disjoint on a shared host (else one cell's run_root rmtree
+        # nukes another's). See _cell_scope.
+        _scope = _cell_scope()
+        if _scope:
+            _ws = _ws / _scope
+            _states = _states / _scope
+        self.workspace_base = _ws
         self.workspace_base.mkdir(parents=True, exist_ok=True)
-        self.state_base = self.workspace_base.parent / "states"
+        self.state_base = _states
         self.state_base.mkdir(parents=True, exist_ok=True)
         self._workspace_by_container: Dict[str, Path] = {}
 
@@ -107,9 +134,9 @@ class TerminalBenchAgentHarnessBase:
         task_workspace = _resolve_task_workspace(instance_data, image_workdir)
 
         run_id = run_id or instance_id
-        rid_short = run_id[:12]
-        net_name = f"{self.short_name}-tb-net-{rid_short}"
-        agent_name = f"{self.short_name}-tb-{rid_short}"
+        slug = self._resource_slug(run_id)
+        net_name = f"{self.short_name}-tb-net-{slug}"
+        agent_name = f"{self.short_name}-tb-{slug}"
         task_name = self._task_container_name(run_id)
 
         self._preflight_cleanup(net_name, agent_name, task_name)
@@ -246,8 +273,18 @@ class TerminalBenchAgentHarnessBase:
     def _condition_env_info(self, state_dir: Path) -> dict[str, str]:
         return {}
 
+    def _resource_slug(self, run_id: str) -> str:
+        """Docker-resource basename for this run: run_id[:12], suffixed with the
+        per-cell scope so concurrent fan-out cells running the same task (same
+        content-based run_id) get distinct network/container names. Deterministic
+        within a cell's process (scope comes from the env), so run_tests()
+        reconstructs the same task name it created in prepare_environment()."""
+        scope = _cell_scope()
+        base = run_id[:12]
+        return f"{base}-{scope}" if scope else base
+
     def _task_container_name(self, run_id: str) -> str:
-        return f"{self.short_name}-tb-task-{run_id[:12]}"
+        return f"{self.short_name}-tb-task-{self._resource_slug(run_id)}"
 
     def _preflight_cleanup(self, net: str, agent: str, task: Optional[str]) -> None:
         logger.info(
