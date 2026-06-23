@@ -85,5 +85,4 @@ Model, serving, and deployment profiles live under `profiles/` so users can add 
 - Shared dispatcher protocol lives in `agent_bench/runtime/exec_bridge`.
 - Harness-specific dispatchers live in `agent_bench/harnesses/<name>/dispatcher.py`.
 - Telemetry code lives in `agent_bench/telemetry`.
-- Analysis and reports live in `agent_bench/results`.
 - SWE-bench scoring services live under `agent_bench/benchmarks/swebench/scoring_server`.

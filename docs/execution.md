@@ -124,20 +124,6 @@ Engine telemetry is collected from serving metrics where available and written
 as JSONL. LiteLLM provider fallback still records agent-side steps, but it does
 not expose vLLM/SGLang scheduler metrics.
 
-## Analysis
-
-Aggregate and plotting code lives under `agent_bench/results/`.
-
-```bash
-python3 -m agent_bench.results.analysis.aggregate \
-  --runs-dir runs/<experiment> \
-  --out-dir data/analysis/<experiment>
-
-python3 agent_bench/results/analysis/plots/plot_all.py \
-  --runs-dir runs/<experiment> \
-  --out-dir data/figures/<experiment>
-```
-
 ## Troubleshooting
 
 | Symptom | First check |

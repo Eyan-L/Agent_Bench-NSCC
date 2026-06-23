@@ -21,8 +21,8 @@ conditions:
 - `agent_bench/benchmarks/<app>/conditions/` — conditions specific to that benchmark, or
   per-app subclasses of a shared base.
 
-Runtime dispatch, analysis, and trace code live in `agent_bench/runtime`,
-`agent_bench/results`, and `agent_bench/telemetry`.
+Runtime dispatch and trace/telemetry code live in `agent_bench/runtime` and
+`agent_bench/telemetry`.
 
 ## Adding a benchmark-specific condition (`agent_bench/benchmarks/<app>/conditions/<name>.py`)
 
@@ -103,7 +103,7 @@ collects a git diff.
 - **LLM call.** `agent_bench.benchmarks.conditions._llm_client.call_llm(...)` — handles
   the OpenAI-compat request shape and returns `(text, prompt_tokens, completion_tokens, error)`.
 - **Step trace.** One row per LLM call or tool exec in `steps.jsonl` so
-  `agent_bench/results/analysis/` can compute composition.
+  downstream analysis can compute composition.
 - **In-loop self-validation.** Surface a `verify` OpenClaw skill at
   `agent_bench/benchmarks/<app>/openclaw/skills/verify/SKILL.md` that tells the agent
   how to run the in-container test command (e.g. `python -m pytest` for

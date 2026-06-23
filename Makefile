@@ -123,7 +123,7 @@ _ensure_serve:
 	fi
 
 .PHONY: help serve serve-docker serve-stop serve-logs serve-status validate-configs \
-        eval stress analyze report test clean \
+        eval stress test clean \
         run_phase0 run_phase1 run_phase2 run_tb tb-tasks \
         run_dr_smoke1 run_dr_smoke run_dr_full dr-tasks \
         run_dr_smoke1_agent run_dr_smoke_agent run_dr_full_agent \
@@ -147,8 +147,6 @@ help:
 	@echo "  run_dr_smoke[_agent|_eval]   DeepResearch-Bench 3 tasks (same split)"
 	@echo "  run_dr_full[_agent|_eval]    DeepResearch-Bench full 100 tasks (same split)"
 	@echo "  stress      Run simulated stress workload (stress/loadgen-bin)"
-	@echo "  analyze     Aggregate results (agent_bench/results/analysis/aggregate.py)"
-	@echo "  report      Build report (agent_bench/results/report/generate.py)"
 	@echo "  test        Trace pipeline self-tests"
 	@echo "  otel-up-host    Start native otelcol-contrib (no docker)"
 	@echo "  otel-down-host  Stop the native collector"
@@ -412,12 +410,6 @@ scoring-server: _check_eval_inputs
 
 stress:
 	./stress/loadgen-bin $(STRESS_ARGS)
-
-analyze:
-	$(PYTHON) -m agent_bench.results.analysis.aggregate $(ANALYZE_ARGS)
-
-report:
-	$(PYTHON) -m agent_bench.results.report.generate $(REPORT_ARGS)
 
 test:
 	$(PYTHON) -m tests.trace.test_trace_pipeline

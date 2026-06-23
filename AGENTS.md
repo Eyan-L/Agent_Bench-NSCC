@@ -25,7 +25,7 @@ The current test suite uses plain Python assertions and pytest-compatible files 
 
 ## Commit & Pull Request Guidelines
 
-Git history uses concise Conventional Commits-style subjects such as `feat: ...`, `fix: ...`, `tests: ...`, `docs: ...`, and `refactor(swebench): ...`. Keep subjects specific and one line when possible. Pull requests should include the benchmark area touched, commands run, config files changed, and expected impact on outputs under `data/runs/` or `data/figures/`. Link related issues and include screenshots only for report or plot changes.
+Git history uses concise Conventional Commits-style subjects such as `feat: ...`, `fix: ...`, `tests: ...`, `docs: ...`, and `refactor(swebench): ...`. Keep subjects specific and one line when possible. Pull requests should include the benchmark area touched, commands run, config files changed, and expected impact on outputs under `data/runs/`. Link related issues when relevant.
 
 ## Security & Configuration Tips
 
