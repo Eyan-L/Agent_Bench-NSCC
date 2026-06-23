@@ -1,0 +1,27 @@
+name = "swebench_pro_subset10_openclaw_sglang"
+description = "SWE-bench Pro subset10 run with OpenClaw and SGLang serving."
+output_dir = "runs/swebench_pro_subset10_openclaw_sglang"
+seeds = [42]
+
+[telemetry]
+spans_html = true
+
+[benchmark]
+name = "swebench_pro"
+profile = "profiles/benchmarks/swebench_pro/subset10.json"
+
+[harness]
+name = "openclaw"
+profile = "profiles/harnesses/openclaw_swebench_pro.yaml"
+
+[model]
+profile = "profiles/models/qwen36_35b_a3b_local.json"
+
+[serving]
+profile = "profiles/serving/sglang/default.yaml"
+
+[deployment]
+profile = "profiles/deployments/local_docker.toml"
+
+[limits]
+max_workers = 2

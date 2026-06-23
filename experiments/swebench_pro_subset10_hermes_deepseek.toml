@@ -1,0 +1,27 @@
+name = "swebench_pro_subset10_hermes"
+description = "SWE-bench Pro subset10 run with Hermes."
+output_dir = "runs/swebench_pro_subset10_hermes_dpsk"
+seeds = [42]
+
+[telemetry]
+spans_html = true
+
+[benchmark]
+name = "swebench_pro"
+profile = "profiles/benchmarks/swebench_pro/subset10.json"
+
+[harness]
+name = "hermes"
+profile = "profiles/harnesses/hermes_swebench_pro.yaml"
+
+[model]
+profile = "profiles/models/deepseek_v4_flash.json"
+
+[serving]
+profile = "profiles/serving/litellm/deepseek_v4_flash.yaml"
+
+[deployment]
+profile = "profiles/deployments/client_only.toml"
+
+[limits]
+max_workers = 2

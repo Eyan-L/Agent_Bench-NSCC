@@ -39,6 +39,7 @@ from typing import Dict, Optional
 
 from agent_bench.benchmarks.swebench.app import _force_rmtree, _oc_sandbox_name
 from agent_bench.benchmarks.swebench.scoring import score_via_scoring_server, score_via_singularity
+from agent_bench.benchmarks.swebench.workspace import resolve_harness_workspace_base
 from agent_bench.deployments.containers import (
     Container,
     ContainerHandle,
@@ -64,6 +65,15 @@ class SWEBenchHermesHarness:
     """Per-run harness for Hermes Agent x SWE-bench."""
 
     backend_id = "container-agnostic"
+    agent_id = "swebench"
+    task_workspace = _TASK_WORKSPACE
+    default_harness_config = "profiles/harnesses/hermes_swebench.yaml"
+    requires_swebench_package = True
+    task_path = (
+        "/opt/miniconda3/envs/testbed/bin:"
+        "/opt/miniconda3/bin:"
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    )
 
     _HERMES_SCAFFOLD_FILES = (
         "AGENTS.md SOUL.md IDENTITY.md USER.md TOOLS.md HEARTBEAT.md "
@@ -82,24 +92,19 @@ class SWEBenchHermesHarness:
         self.container = container or DockerContainer()
         self.hm_image = hm_image or self._default_hm_image()
 
-        try:
-            import swebench  # noqa: F401
-        except ImportError as e:
-            raise RuntimeError(
-                "swebench python package not importable; "
-                "install in the driver env: pip install swebench"
-            ) from e
+        if self.requires_swebench_package:
+            try:
+                import swebench  # noqa: F401
+            except ImportError as e:
+                raise RuntimeError(
+                    "swebench python package not importable; "
+                    "install in the driver env: pip install swebench"
+                ) from e
 
         self.container.check_available()
         self.container.check_image(self.hm_image)
 
-        self.workspace_base = Path(
-            workspace_base
-            or os.environ.get(
-                "AB_HARNESS_WORKSPACE_BASE",
-                os.path.expanduser("~/.cache/oc-eval/workspaces"),
-            )
-        )
+        self.workspace_base = resolve_harness_workspace_base(workspace_base)
         self.workspace_base.mkdir(parents=True, exist_ok=True)
         self.state_base = self.workspace_base.parent / "states"
         self.state_base.mkdir(parents=True, exist_ok=True)
@@ -132,11 +137,12 @@ class SWEBenchHermesHarness:
         run_id: Optional[str] = None,
         instance_data: Optional[Dict] = None,
     ) -> Dict:
-        if "UNUSED" in container_image:
-            container_image = (
-                f"swebench/sweb.eval.x86_64.{instance_id.lower()}:latest"
-                .replace("__", "_1776_")
-            )
+        workspace_root = self.task_workspace
+        container_image = self._resolve_container_image_for_instance(
+            instance_id=instance_id,
+            container_image=container_image,
+            instance_data=instance_data,
+        )
         task_image = self._resolve_task_image(container_image)
 
         run_id = run_id or instance_id
@@ -144,7 +150,7 @@ class SWEBenchHermesHarness:
         net_name = f"hm-eval-net-{rid_short}"
         hm_name = f"hm-{rid_short}"
         sandbox_prefix = f"oc-sbx-{rid_short}-"
-        scope_key = "agent:swebench"
+        scope_key = f"agent:{self.agent_id}"
         task_container_name = _oc_sandbox_name(sandbox_prefix, scope_key)
 
         self._preflight_cleanup(net_name, hm_name, task_container_name)
@@ -168,11 +174,6 @@ class SWEBenchHermesHarness:
 
         self.container.create_network(net_name)
 
-        task_path = (
-            "/opt/miniconda3/envs/testbed/bin:"
-            "/opt/miniconda3/bin:"
-            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-        )
         task_spec = ContainerSpec(
             name=task_container_name,
             image=task_image,
@@ -182,9 +183,9 @@ class SWEBenchHermesHarness:
                 "hermes.sandbox": "1",
                 "oc-eval.run_id": run_id,
             },
-            mounts=(Mount(host=ws_host, container=_TASK_WORKSPACE, mode="rw"),),
-            workdir=_TASK_WORKSPACE,
-            env={"PATH": task_path, "HOME": "/root"},
+            mounts=(Mount(host=ws_host, container=self.task_workspace, mode="rw"),),
+            workdir=self.task_workspace,
+            env=self._task_env(),
             entrypoint="sleep",
             command=("infinity",),
         )
@@ -233,7 +234,7 @@ class SWEBenchHermesHarness:
             # Hermes still thinks its terminal backend is docker; our patch
             # intercepts the docker exec path and routes through the bridge.
             "TERMINAL_ENV": "docker",
-            "TERMINAL_CWD": _TASK_WORKSPACE,
+            "TERMINAL_CWD": self.task_workspace,
             "TERMINAL_DOCKER_IMAGE": container_image,
             **otel_env(
                 service_name="agent-bench-hermes",
@@ -277,7 +278,7 @@ class SWEBenchHermesHarness:
             "task_container_name": task_container_name,
             "network_name": net_name,
             "workspace_root": _WORKSPACE_IN_HERMES,
-            "task_workspace_root": _TASK_WORKSPACE,
+            "task_workspace_root": self.task_workspace,
             "workspace_host_path": str(ws_host),
             "state_dir": str(state_dir),
             "config_path_in_container": f"{_STATE_DIR_IN_HERMES}/config.yaml",
@@ -290,7 +291,7 @@ class SWEBenchHermesHarness:
         repo_root = os.environ.get("AB_REPO_ROOT", os.getcwd())
         harness_path = os.environ.get(
             "AB_HARNESS_CONFIG",
-            os.path.join(repo_root, "profiles/harnesses/hermes_swebench.yaml"),
+            os.path.join(repo_root, self.default_harness_config),
         )
         if not os.path.isfile(harness_path):
             raise FileNotFoundError(
@@ -326,7 +327,7 @@ class SWEBenchHermesHarness:
             "CONTEXT_LENGTH": str(model_cfg.context_window),
             "MAX_TURNS": str((hm_cfg.get("run") or {}).get("max_turns") or 90),
             "TERMINAL_TIMEOUT": str((hm_cfg.get("run") or {}).get("terminal_timeout") or 180),
-            "TERMINAL_CWD": _TASK_WORKSPACE,
+            "TERMINAL_CWD": self.task_workspace,
             "SANDBOX_IMAGE": sandbox_image,
             **otel_config_values(
                 service_name="agent-bench-hermes",
@@ -339,6 +340,26 @@ class SWEBenchHermesHarness:
         rendered = string.Template(template_path.read_text()).safe_substitute(values)
         (state_dir / "config.yaml").write_text(rendered)
         return state_dir
+
+    def _resolve_container_image_for_instance(
+        self,
+        *,
+        instance_id: str,
+        container_image: str,
+        instance_data: Optional[Dict] = None,
+    ) -> str:
+        if "UNUSED" in container_image:
+            return (
+                f"swebench/sweb.eval.x86_64.{instance_id.lower()}:latest"
+                .replace("__", "_1776_")
+            )
+        return container_image
+
+    def _task_env(self) -> Dict[str, str]:
+        env = {"HOME": "/root"}
+        if self.task_path:
+            env["PATH"] = self.task_path
+        return env
 
     def _resolve_task_image(self, container_image: str) -> str:
         if self.container.backend_id == "docker":
@@ -355,11 +376,20 @@ class SWEBenchHermesHarness:
         return str(Path(sif_dir) / f"{instance_id}.sif")
 
     def _prime_workspace(self, task_image: str, ws_host: Path) -> None:
-        self.container.copy_from_image(task_image, _TASK_WORKSPACE, ws_host)
+        self.container.copy_from_image(task_image, self.task_workspace, ws_host)
 
     def _runtime_base_url(self, configured: Optional[str]) -> str:
         raw = os.environ.get("OPENAI_BASE_URL") or configured or "http://localhost:8000/v1"
         return endpoint_for_container(raw, self.container.host_address)
+
+    def _handle(self, container_id: Optional[str]) -> Optional[ContainerHandle]:
+        if container_id is None or self.container is None:
+            return None
+        return ContainerHandle(
+            id=container_id,
+            name=container_id,
+            backend=self.container.backend_id,
+        )
 
     def _exec(
         self,

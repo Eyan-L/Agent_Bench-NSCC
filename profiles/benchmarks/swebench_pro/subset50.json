@@ -1,0 +1,301 @@
+{
+  "_doc": "SWE-bench Pro public 50-task subset selected by deterministic repo-stratified largest-remainder sampling from the public test split. Subsets are nested so subset5 is contained in subset10, subset20, and subset50.",
+  "sweep_name": "swebench_pro_subset50",
+  "plan_version": "v1.0",
+  "application": "swebench_pro",
+  "dataset": "ScaleAI/SWE-bench_Pro",
+  "split": "test",
+  "instances": [
+    "instance_ansible__ansible-3db08adbb1cc6aa9941be5e0fc810132c6e1fa4b-vba6da65a0f3baefda7a058ebbd0a8dcafb8512f5",
+    "instance_ansible__ansible-489156378c8e97374a75a544c7c9c2c0dd8146d1-v390e508d27db7a51eece36bb6d9698b63a5b638a",
+    "instance_ansible__ansible-83fb24b923064d3576d473747ebbe62e4535c9e3-vba6da65a0f3baefda7a058ebbd0a8dcafb8512f5",
+    "instance_ansible__ansible-a02e22e902a69aeb465f16bf03f7f5a91b2cb828-vba6da65a0f3baefda7a058ebbd0a8dcafb8512f5",
+    "instance_ansible__ansible-d72025be751c894673ba85caa063d835a0ad3a8c-v390e508d27db7a51eece36bb6d9698b63a5b638a",
+    "instance_ansible__ansible-d9f1866249756efc264b00ff7497e92c11a9885f-v0f01c69f1e2528b935359cfe578530722bca2c59",
+    "instance_ansible__ansible-e0c91af45fa9af575d10fd3e724ebc59d2b2d6ac-v30a923fb5c164d6cd18280c02422f75e611e8fb2",
+    "instance_element-hq__element-web-6961c256035bed0b7640a6e5907652c806968478-vnan",
+    "instance_element-hq__element-web-e15ef9f3de36df7f318c083e485f44e1de8aad17",
+    "instance_element-hq__element-web-ec0f940ef0e8e3b61078f145f34dc40d1938e6c5-vnan",
+    "instance_element-hq__element-web-f14374a51c153f64f313243f2df6ea4971db4e15",
+    "instance_flipt-io__flipt-381b90f718435c4694380b5fcd0d5cf8e3b5a25a",
+    "instance_flipt-io__flipt-507170da0f7f4da330f6732bffdf11c4df7fc192",
+    "instance_flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9",
+    "instance_flipt-io__flipt-72d06db14d58692bfb4d07b1aa745a37b35956f3",
+    "instance_flipt-io__flipt-a42d38a1bb1df267c53d9d4a706cf34825ae3da9",
+    "instance_flipt-io__flipt-f808b4dd6e36b9dc8b011eb26b196f4e2cc64c41",
+    "instance_future-architect__vuls-2c84be80b65d022c262956cd26fc79d8bb2f7010",
+    "instance_future-architect__vuls-d18e7a751d07260d75ce3ba0cd67c4a6aebfd967",
+    "instance_future-architect__vuls-e4728e388120b311c4ed469e4f942e0347a2689b-v264a82e2f4818e30f5a25e4da53b27ba119f62b5",
+    "instance_future-architect__vuls-f0b3a8b1db98eb1bd32685f1c36c41a99c3452ed",
+    "instance_gravitational__teleport-4e1c39639edf1ab494dd7562844c8b277b5cfa18-vee9b09fb20c43af7e520f57e9239bbcf46b7113d",
+    "instance_gravitational__teleport-82185f232ae8974258397e121b3bc2ed0c3729ed-v626ec2a48416b10a88641359a169d99e935ff037",
+    "instance_gravitational__teleport-ba6c4a135412c4296dd5551bd94042f0dc024504-v626ec2a48416b10a88641359a169d99e935ff037",
+    "instance_gravitational__teleport-e6681abe6a7113cfd2da507f05581b7bdf398540-v626ec2a48416b10a88641359a169d99e935ff037",
+    "instance_gravitational__teleport-eda668c30d9d3b56d9c69197b120b01013611186",
+    "instance_internetarchive__openlibrary-11838fad1028672eb975c79d8984f03348500173-v0f5aece3601a5b4419f7ccec1dbda2071be28ee4",
+    "instance_internetarchive__openlibrary-3f580a5f244c299d936d73d9e327ba873b6401d9-v0f5aece3601a5b4419f7ccec1dbda2071be28ee4",
+    "instance_internetarchive__openlibrary-431442c92887a3aece3f8aa771dd029738a80eb1-v76304ecdb3a5954fcf13feb710e8c40fcf24b73c",
+    "instance_internetarchive__openlibrary-4a5d2a7d24c9e4c11d3069220c0685b736d5ecde-v13642507b4fc1f8d234172bf8129942da2c2ca26",
+    "instance_internetarchive__openlibrary-d40ec88713dc95ea791b252f92d2f7b75e107440-v13642507b4fc1f8d234172bf8129942da2c2ca26",
+    "instance_internetarchive__openlibrary-d8162c226a9d576f094dc1830c4c1ffd0be2dd17-v76304ecdb3a5954fcf13feb710e8c40fcf24b73c",
+    "instance_navidrome__navidrome-0488fb92cb02a82924fb1181bf1642f2e87096db",
+    "instance_navidrome__navidrome-0a650de357babdcc8ce910fe37fee84acf4ed2fe",
+    "instance_navidrome__navidrome-23bebe4e06124becf1000e88472ae71a6ca7de4c",
+    "instance_navidrome__navidrome-6b3b4d83ffcf273b01985709c8bc5df12bbb8286",
+    "instance_NodeBB__NodeBB-2657804c1fb6b84dc76ad3b18ecf061aaab5f29f-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+    "instance_NodeBB__NodeBB-397835a05a8e2897324e566b41c5e616e172b4af-v89631a1cdb318276acb48860c5d78077211397c6",
+    "instance_NodeBB__NodeBB-8168c6c40707478f71b8af60300830fe554c778c-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+    "instance_protonmail__webclients-0200ce0fc1d4dbd35178c10d440a284c82ecc858",
+    "instance_protonmail__webclients-1917e37f5d9941a3459ce4b0177e201e2d94a622",
+    "instance_protonmail__webclients-428cd033fede5fd6ae9dbc7ab634e010b10e4209",
+    "instance_protonmail__webclients-708ed4a299711f0fa79a907cc5847cfd39c0fc71",
+    "instance_protonmail__webclients-8142704f447df6e108d53cab25451c8a94976b92",
+    "instance_qutebrowser__qutebrowser-473a15f7908f2bb6d670b0e908ab34a28d8cf7e2-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d",
+    "instance_qutebrowser__qutebrowser-66cfa15c372fa9e613ea5a82d3b03e4609399fb6-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d",
+    "instance_qutebrowser__qutebrowser-a25e8a09873838ca9efefd36ea8a45170bbeb95c-vc2f56a753b62a190ddb23cd330c257b9cf560d12",
+    "instance_qutebrowser__qutebrowser-e57b6e0eeeb656eb2c84d6547d5a0a7333ecee85-v2ef375ac784985212b1805e1d0431dc8f1b3c171",
+    "instance_qutebrowser__qutebrowser-ff1c025ad3210506fc76e1f604d8c8c27637d88e-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d",
+    "instance_tutao__tutanota-fbdb72a2bd39b05131ff905780d9d4a2a074de26-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf"
+  ],
+  "repo_mapping": {
+    "instance_ansible__ansible-3db08adbb1cc6aa9941be5e0fc810132c6e1fa4b-vba6da65a0f3baefda7a058ebbd0a8dcafb8512f5": {
+      "repo_id": "ansible/ansible",
+      "base_commit": "709484969c8a4ffd74b839a673431a8c5caa6457"
+    },
+    "instance_ansible__ansible-489156378c8e97374a75a544c7c9c2c0dd8146d1-v390e508d27db7a51eece36bb6d9698b63a5b638a": {
+      "repo_id": "ansible/ansible",
+      "base_commit": "5ee81338fcf7adbc1a8eda26dd8105a07825cb08"
+    },
+    "instance_ansible__ansible-83fb24b923064d3576d473747ebbe62e4535c9e3-vba6da65a0f3baefda7a058ebbd0a8dcafb8512f5": {
+      "repo_id": "ansible/ansible",
+      "base_commit": "0044091a055dd9cd448f7639a65b7e8cc3dacbf1"
+    },
+    "instance_ansible__ansible-a02e22e902a69aeb465f16bf03f7f5a91b2cb828-vba6da65a0f3baefda7a058ebbd0a8dcafb8512f5": {
+      "repo_id": "ansible/ansible",
+      "base_commit": "813c25eed1e4832a8ae363455a2f40bb3de33c7f"
+    },
+    "instance_ansible__ansible-d72025be751c894673ba85caa063d835a0ad3a8c-v390e508d27db7a51eece36bb6d9698b63a5b638a": {
+      "repo_id": "ansible/ansible",
+      "base_commit": "ea164fdde79a3e624c28f90c74f57f06360d2333"
+    },
+    "instance_ansible__ansible-d9f1866249756efc264b00ff7497e92c11a9885f-v0f01c69f1e2528b935359cfe578530722bca2c59": {
+      "repo_id": "ansible/ansible",
+      "base_commit": "59ca05b70994b07a9507f61a0871146a4991b262"
+    },
+    "instance_ansible__ansible-e0c91af45fa9af575d10fd3e724ebc59d2b2d6ac-v30a923fb5c164d6cd18280c02422f75e611e8fb2": {
+      "repo_id": "ansible/ansible",
+      "base_commit": "5d15af3a9563271615fa1d0f5a99a175bfe41a9f"
+    },
+    "instance_element-hq__element-web-6961c256035bed0b7640a6e5907652c806968478-vnan": {
+      "repo_id": "element-hq/element-web",
+      "base_commit": "29c193210fc5297f0839f02eddea36aa63977516"
+    },
+    "instance_element-hq__element-web-e15ef9f3de36df7f318c083e485f44e1de8aad17": {
+      "repo_id": "element-hq/element-web",
+      "base_commit": "1a0dbbf1925d5112ddb844ed9ca3fbc49bbb85e8"
+    },
+    "instance_element-hq__element-web-ec0f940ef0e8e3b61078f145f34dc40d1938e6c5-vnan": {
+      "repo_id": "element-hq/element-web",
+      "base_commit": "1b39dbdb53f8374094a767c02ad81c46043f3116"
+    },
+    "instance_element-hq__element-web-f14374a51c153f64f313243f2df6ea4971db4e15": {
+      "repo_id": "element-hq/element-web",
+      "base_commit": "8c13a0f8d48441eccdd69e41e76251478bdeab8c"
+    },
+    "instance_flipt-io__flipt-381b90f718435c4694380b5fcd0d5cf8e3b5a25a": {
+      "repo_id": "flipt-io/flipt",
+      "base_commit": "0ed96dc5d33768c4b145d68d52e80e7bce3790d0"
+    },
+    "instance_flipt-io__flipt-507170da0f7f4da330f6732bffdf11c4df7fc192": {
+      "repo_id": "flipt-io/flipt",
+      "base_commit": "5c6de423ccaad9eda072d951c4fc34e779308e95"
+    },
+    "instance_flipt-io__flipt-518ec324b66a07fdd95464a5e9ca5fe7681ad8f9": {
+      "repo_id": "flipt-io/flipt",
+      "base_commit": "0018c5df774444117b107dfe3fe503d4c7126d73"
+    },
+    "instance_flipt-io__flipt-72d06db14d58692bfb4d07b1aa745a37b35956f3": {
+      "repo_id": "flipt-io/flipt",
+      "base_commit": "b6edc5e46af598a3c187d917ad42b2d013e4dfee"
+    },
+    "instance_flipt-io__flipt-a42d38a1bb1df267c53d9d4a706cf34825ae3da9": {
+      "repo_id": "flipt-io/flipt",
+      "base_commit": "ee02b164f6728d3227c42671028c67a4afd36918"
+    },
+    "instance_flipt-io__flipt-f808b4dd6e36b9dc8b011eb26b196f4e2cc64c41": {
+      "repo_id": "flipt-io/flipt",
+      "base_commit": "d26eba77ddd985eb621c79642b55b607cf125941"
+    },
+    "instance_future-architect__vuls-2c84be80b65d022c262956cd26fc79d8bb2f7010": {
+      "repo_id": "future-architect/vuls",
+      "base_commit": "4c598bb9726d68b6fdef264b26fc700591b303f6"
+    },
+    "instance_future-architect__vuls-d18e7a751d07260d75ce3ba0cd67c4a6aebfd967": {
+      "repo_id": "future-architect/vuls",
+      "base_commit": "8d5ea98e50cf616847f4e5a2df300395d1f719e9"
+    },
+    "instance_future-architect__vuls-e4728e388120b311c4ed469e4f942e0347a2689b-v264a82e2f4818e30f5a25e4da53b27ba119f62b5": {
+      "repo_id": "future-architect/vuls",
+      "base_commit": "61c39637f2f3809e1b5dad05f0c57c799dce1587"
+    },
+    "instance_future-architect__vuls-f0b3a8b1db98eb1bd32685f1c36c41a99c3452ed": {
+      "repo_id": "future-architect/vuls",
+      "base_commit": "0b9ec05181360e3fdb4a314152927f6f3ccb746d"
+    },
+    "instance_gravitational__teleport-4e1c39639edf1ab494dd7562844c8b277b5cfa18-vee9b09fb20c43af7e520f57e9239bbcf46b7113d": {
+      "repo_id": "gravitational/teleport",
+      "base_commit": "07e2ca13e4b4836f93d8e2c3ed727b3d5e3cd73f"
+    },
+    "instance_gravitational__teleport-82185f232ae8974258397e121b3bc2ed0c3729ed-v626ec2a48416b10a88641359a169d99e935ff037": {
+      "repo_id": "gravitational/teleport",
+      "base_commit": "ad00c6c789bdac9b04403889d7ed426242205d64"
+    },
+    "instance_gravitational__teleport-ba6c4a135412c4296dd5551bd94042f0dc024504-v626ec2a48416b10a88641359a169d99e935ff037": {
+      "repo_id": "gravitational/teleport",
+      "base_commit": "396812cebff3ebfd075bbed04acefc65e787a537"
+    },
+    "instance_gravitational__teleport-e6681abe6a7113cfd2da507f05581b7bdf398540-v626ec2a48416b10a88641359a169d99e935ff037": {
+      "repo_id": "gravitational/teleport",
+      "base_commit": "be52cd325af38f53fa6b6f869bc10b88160e06e2"
+    },
+    "instance_gravitational__teleport-eda668c30d9d3b56d9c69197b120b01013611186": {
+      "repo_id": "gravitational/teleport",
+      "base_commit": "4f6f52f86d65f506d1884a9f56bcd919a8744734"
+    },
+    "instance_internetarchive__openlibrary-11838fad1028672eb975c79d8984f03348500173-v0f5aece3601a5b4419f7ccec1dbda2071be28ee4": {
+      "repo_id": "internetarchive/openlibrary",
+      "base_commit": "4ff15b75531e51f365d72241efe9675b6982bdcc"
+    },
+    "instance_internetarchive__openlibrary-3f580a5f244c299d936d73d9e327ba873b6401d9-v0f5aece3601a5b4419f7ccec1dbda2071be28ee4": {
+      "repo_id": "internetarchive/openlibrary",
+      "base_commit": "46d7d325e6ed4b4de998d69c0e89893274ad5d60"
+    },
+    "instance_internetarchive__openlibrary-431442c92887a3aece3f8aa771dd029738a80eb1-v76304ecdb3a5954fcf13feb710e8c40fcf24b73c": {
+      "repo_id": "internetarchive/openlibrary",
+      "base_commit": "188a76779dbd2368d73313ad15cae639c295eb21"
+    },
+    "instance_internetarchive__openlibrary-4a5d2a7d24c9e4c11d3069220c0685b736d5ecde-v13642507b4fc1f8d234172bf8129942da2c2ca26": {
+      "repo_id": "internetarchive/openlibrary",
+      "base_commit": "90475fb6c168e8317e22bd5fbe057d98e570a715"
+    },
+    "instance_internetarchive__openlibrary-d40ec88713dc95ea791b252f92d2f7b75e107440-v13642507b4fc1f8d234172bf8129942da2c2ca26": {
+      "repo_id": "internetarchive/openlibrary",
+      "base_commit": "cbfef314d45fe04e8bf7ebb239f1699606378634"
+    },
+    "instance_internetarchive__openlibrary-d8162c226a9d576f094dc1830c4c1ffd0be2dd17-v76304ecdb3a5954fcf13feb710e8c40fcf24b73c": {
+      "repo_id": "internetarchive/openlibrary",
+      "base_commit": "5de7de19211e71b29b2f2ba3b1dff2fe065d660f"
+    },
+    "instance_navidrome__navidrome-0488fb92cb02a82924fb1181bf1642f2e87096db": {
+      "repo_id": "navidrome/navidrome",
+      "base_commit": "61903facdf5d56277bf57c7aa83bce7fb35b597a"
+    },
+    "instance_navidrome__navidrome-0a650de357babdcc8ce910fe37fee84acf4ed2fe": {
+      "repo_id": "navidrome/navidrome",
+      "base_commit": "9c3b4561652a15846993d477003e111f0df0c585"
+    },
+    "instance_navidrome__navidrome-23bebe4e06124becf1000e88472ae71a6ca7de4c": {
+      "repo_id": "navidrome/navidrome",
+      "base_commit": "8808eadddaa517ab58ce33a70d08f37b0ffdef0e"
+    },
+    "instance_navidrome__navidrome-6b3b4d83ffcf273b01985709c8bc5df12bbb8286": {
+      "repo_id": "navidrome/navidrome",
+      "base_commit": "3853c3318f67b41a9e4cb768618315ff77846fdb"
+    },
+    "instance_NodeBB__NodeBB-2657804c1fb6b84dc76ad3b18ecf061aaab5f29f-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e": {
+      "repo_id": "NodeBB/NodeBB",
+      "base_commit": "3ecbb624d892b9fce078304cf89c0fe94f8ab3be"
+    },
+    "instance_NodeBB__NodeBB-397835a05a8e2897324e566b41c5e616e172b4af-v89631a1cdb318276acb48860c5d78077211397c6": {
+      "repo_id": "NodeBB/NodeBB",
+      "base_commit": "7f48edc02aa68c547d96ad7d6432ff8c1e359742"
+    },
+    "instance_NodeBB__NodeBB-8168c6c40707478f71b8af60300830fe554c778c-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e": {
+      "repo_id": "NodeBB/NodeBB",
+      "base_commit": "ab5e2a416324ec56cea44b79067ba798f8394de1"
+    },
+    "instance_protonmail__webclients-0200ce0fc1d4dbd35178c10d440a284c82ecc858": {
+      "repo_id": "protonmail/webclients",
+      "base_commit": "373580e2fc209cdf010f5f14d08bed546adb8a92"
+    },
+    "instance_protonmail__webclients-1917e37f5d9941a3459ce4b0177e201e2d94a622": {
+      "repo_id": "protonmail/webclients",
+      "base_commit": "78e30c07b399db1aac8608275fe101e9d349534f"
+    },
+    "instance_protonmail__webclients-428cd033fede5fd6ae9dbc7ab634e010b10e4209": {
+      "repo_id": "protonmail/webclients",
+      "base_commit": "29aaad40bdc4c440960cf493116399bd96863a0e"
+    },
+    "instance_protonmail__webclients-708ed4a299711f0fa79a907cc5847cfd39c0fc71": {
+      "repo_id": "protonmail/webclients",
+      "base_commit": "3f9771dd682247118e66e9e27bc6ef677ef5214d"
+    },
+    "instance_protonmail__webclients-8142704f447df6e108d53cab25451c8a94976b92": {
+      "repo_id": "protonmail/webclients",
+      "base_commit": "b63f2ef3157bdfb8b3ff46d9097f9e65b00a4c3a"
+    },
+    "instance_qutebrowser__qutebrowser-473a15f7908f2bb6d670b0e908ab34a28d8cf7e2-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d": {
+      "repo_id": "qutebrowser/qutebrowser",
+      "base_commit": "8e08f046aeffb38445cc659050f7a083b4a9649c"
+    },
+    "instance_qutebrowser__qutebrowser-66cfa15c372fa9e613ea5a82d3b03e4609399fb6-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d": {
+      "repo_id": "qutebrowser/qutebrowser",
+      "base_commit": "6d0b7cb12b206f400f8b44041a86c1a93cd78c7f"
+    },
+    "instance_qutebrowser__qutebrowser-a25e8a09873838ca9efefd36ea8a45170bbeb95c-vc2f56a753b62a190ddb23cd330c257b9cf560d12": {
+      "repo_id": "qutebrowser/qutebrowser",
+      "base_commit": "83bef2ad4bdc10113bb9e5ed12c32d92bc1247af"
+    },
+    "instance_qutebrowser__qutebrowser-e57b6e0eeeb656eb2c84d6547d5a0a7333ecee85-v2ef375ac784985212b1805e1d0431dc8f1b3c171": {
+      "repo_id": "qutebrowser/qutebrowser",
+      "base_commit": "5a7f64ea219f3f008a4b61546ae18820e6780d8e"
+    },
+    "instance_qutebrowser__qutebrowser-ff1c025ad3210506fc76e1f604d8c8c27637d88e-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d": {
+      "repo_id": "qutebrowser/qutebrowser",
+      "base_commit": "e545faaf7b18d451c082f697675f0ab0e7599ed1"
+    },
+    "instance_tutao__tutanota-fbdb72a2bd39b05131ff905780d9d4a2a074de26-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf": {
+      "repo_id": "tutao/tutanota",
+      "base_commit": "1919cee2f58945936f8cfabf32ac8bee670b75ed"
+    }
+  },
+  "dockerhub_username": "jefzda",
+  "container_image": "swebench_pro/UNUSED:latest",
+  "wall_clock_budget_seconds": 1800,
+  "output_dir": "swebench_pro_subset50",
+  "seeds": [
+    42
+  ],
+  "repo_distribution": {
+    "NodeBB/NodeBB": 44,
+    "ansible/ansible": 96,
+    "element-hq/element-web": 56,
+    "flipt-io/flipt": 85,
+    "future-architect/vuls": 62,
+    "gravitational/teleport": 76,
+    "internetarchive/openlibrary": 91,
+    "navidrome/navidrome": 57,
+    "protonmail/webclients": 65,
+    "qutebrowser/qutebrowser": 79,
+    "tutao/tutanota": 20
+  },
+  "selection": {
+    "method": "repo-stratified deterministic largest-remainder allocation",
+    "seed": 42,
+    "source_dataset_rows": 731,
+    "repo_counts": {
+      "NodeBB/NodeBB": 3,
+      "ansible/ansible": 7,
+      "element-hq/element-web": 4,
+      "flipt-io/flipt": 6,
+      "future-architect/vuls": 4,
+      "gravitational/teleport": 5,
+      "internetarchive/openlibrary": 6,
+      "navidrome/navidrome": 4,
+      "protonmail/webclients": 5,
+      "qutebrowser/qutebrowser": 5,
+      "tutao/tutanota": 1
+    },
+    "nested_in": null
+  }
+}

@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import base64
 import base64
+import importlib
 import inspect
 import json
 import logging
@@ -73,6 +74,105 @@ def _accepts_kwarg(callable_obj: Any, name: str) -> bool:
         name in sig.parameters
         or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
     )
+
+
+def _patch_laminar_observe_compat(sink: Any) -> bool:
+    """Allow OpenHands SDK to call older lmnr.observe implementations.
+
+    OpenHands SDK 1.21 passes ``rollout_entrypoint`` from its lazy Laminar
+    wrapper into ``lmnr.observe``. Some resolved ``lmnr`` releases do not accept
+    that keyword, so patch the actual lazy import target before conversation
+    execution starts.
+    """
+    try:
+        lmnr_mod = importlib.import_module("lmnr")
+    except Exception as exc:
+        _emit(
+            sink,
+            "laminar_observe_compat",
+            patched=False,
+            target="lmnr.observe",
+            reason=f"import_failed:{type(exc).__name__}",
+        )
+        return False
+
+    observe = getattr(lmnr_mod, "observe", None)
+    if not callable(observe):
+        _emit(
+            sink,
+            "laminar_observe_compat",
+            patched=False,
+            target="lmnr.observe",
+            reason="missing_callable",
+        )
+        return False
+
+    if getattr(observe, "_agent_bench_rollout_entrypoint_compat", False):
+        _emit(
+            sink,
+            "laminar_observe_compat",
+            patched=False,
+            target="lmnr.observe",
+            reason="already_patched",
+        )
+        return False
+
+    try:
+        sig = inspect.signature(observe)
+    except (TypeError, ValueError):
+        _emit(
+            sink,
+            "laminar_observe_compat",
+            patched=False,
+            target="lmnr.observe",
+            reason="signature_unavailable",
+        )
+        return False
+
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+        _emit(
+            sink,
+            "laminar_observe_compat",
+            patched=False,
+            target="lmnr.observe",
+            reason="already_accepts_kwargs",
+        )
+        return False
+
+    allowed = {
+        name
+        for name, param in sig.parameters.items()
+        if param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    }
+    if "rollout_entrypoint" in allowed:
+        _emit(
+            sink,
+            "laminar_observe_compat",
+            patched=False,
+            target="lmnr.observe",
+            reason="already_supported",
+        )
+        return False
+
+    dropped = sorted({"rollout_entrypoint"} - allowed)
+
+    def compat_observe(*args, **kwargs):
+        filtered = {key: value for key, value in kwargs.items() if key in allowed}
+        return observe(*args, **filtered)
+
+    setattr(compat_observe, "_agent_bench_rollout_entrypoint_compat", True)
+    setattr(lmnr_mod, "observe", compat_observe)
+    _emit(
+        sink,
+        "laminar_observe_compat",
+        patched=True,
+        target="lmnr.observe",
+        dropped_kwargs=dropped,
+    )
+    return True
 
 
 # ----------------------------------------------------------------------
@@ -1625,6 +1725,8 @@ def main(argv: Optional[list] = None) -> int:
         sink.close()
         return 3
 
+    _patch_laminar_observe_compat(sink)
+
     LLM = sdk["LLM"]
     Conversation = sdk["Conversation"]
     LocalWorkspace = sdk["LocalWorkspace"]
@@ -1751,10 +1853,12 @@ def main(argv: Optional[list] = None) -> int:
         return 5
 
     start = time.time()
+    run_error = None
     try:
         conv.send_message(args.task)
         conv.run()
     except Exception as e:
+        run_error = f"{type(e).__name__}: {e}"
         _emit_error(sink, "run", f"{e}", traceback=traceback.format_exc())
     elapsed = time.time() - start
 
@@ -1768,13 +1872,14 @@ def main(argv: Optional[list] = None) -> int:
     _emit(sink, "summary",
           elapsed_seconds=elapsed,
           metrics=metrics,
-          stopped_reason=str(getattr(getattr(conv, "state", None), "agent_state", None)))
+          stopped_reason=str(getattr(getattr(conv, "state", None), "agent_state", None)),
+          run_error=run_error)
     try:
         conv.close()
     except Exception:
         pass
     sink.close()
-    return 0
+    return 7 if run_error else 0
 
 
 if __name__ == "__main__":

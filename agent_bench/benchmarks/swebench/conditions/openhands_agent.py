@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shlex
 import shutil
 import subprocess
@@ -41,6 +42,17 @@ from agent_bench.benchmarks.conditions.util_sampler import UtilSampler
 from agent_bench.deployments.containers.base import Container, ContainerHandle
 
 logger = logging.getLogger(__name__)
+
+
+_FATAL_DRIVER_ERROR_KINDS = {
+    "config_load",
+    "sdk_import",
+    "llm_init",
+    "agent_init",
+    "conversation_init",
+    "bridge_wrap",
+    "run",
+}
 
 
 def _build_message(issue_text: str) -> str:
@@ -184,6 +196,11 @@ class OpenHandsAgentCondition:
         logger.info("  sliced OpenHands OTel -> %s", spans_path.name)
 
         prompt_tokens, completion_tokens = self._aggregate_tokens(events)
+        driver_error = self._fatal_driver_error_event(events)
+        process_rc = rc
+        if rc == 0 and driver_error is not None:
+            rc = 7
+        error_type = self._error_type_for_driver_result(rc, driver_error)
 
         # 3. Single coarse LLM_INFER row (mirrors openclaw_agent).
         step = {
@@ -202,12 +219,17 @@ class OpenHandsAgentCondition:
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "exit_code": rc,
-            "error_type": None if rc == 0 else f"openhands_exit_{rc}",
+            "process_exit_code": process_rc,
+            "error_type": error_type,
             "repo_id": instance_data.get("repo"),
             "instance_id": instance_id,
             "config_id": "openhands_agent",
             "model_name": self.model_config.name,
-            "response_preview": stdout_tail[-500:] if stdout_tail else None,
+            "response_preview": (
+                (driver_error.get("message") or "")[:500]
+                if driver_error is not None
+                else (stdout_tail[-500:] if stdout_tail else None)
+            ),
             # Provenance for cross-harness comparison.
             "harness": "openhands",
             "agent_server_location": "openhands_harness_container",
@@ -229,7 +251,11 @@ class OpenHandsAgentCondition:
 
         # 4. Benchmark-specific artifact: SWE-bench writes a git patch;
         # Terminal-Bench records a marker because work lives in the task container.
-        patch_text = self._collect_artifacts(env_info, container_id, workspace_root)
+        patch_text = (
+            ""
+            if error_type
+            else self._collect_artifacts(env_info, container_id, workspace_root)
+        )
         patch_path = run_dir / "candidate.patch"
         patch_path.write_text(patch_text)
 
@@ -302,6 +328,26 @@ class OpenHandsAgentCondition:
                 if isinstance(m, dict):
                     return m
         return {}
+
+    @staticmethod
+    def _fatal_driver_error_event(events: List[Dict]) -> Optional[Dict]:
+        for evt in events:
+            if not isinstance(evt, dict):
+                continue
+            if evt.get("driver_event") != "error":
+                continue
+            if evt.get("kind") in _FATAL_DRIVER_ERROR_KINDS:
+                return evt
+        return None
+
+    @staticmethod
+    def _error_type_for_driver_result(rc: int, driver_error: Optional[Dict]) -> Optional[str]:
+        if driver_error is not None:
+            kind = driver_error.get("kind") or "error"
+            return f"openhands_driver_{kind}"
+        if rc != 0:
+            return f"openhands_exit_{rc}"
+        return None
 
     @classmethod
     def _aggregate_tokens(cls, events: List[Dict]) -> Tuple[int, int]:

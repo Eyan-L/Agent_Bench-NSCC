@@ -14,6 +14,7 @@ import os
 import secrets
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -77,19 +78,22 @@ class OpenClawRemoteDispatcher(Dispatcher):
         token_file.write_text(token)
         token_file.chmod(0o600)
 
-        socket_path = state_dir / "exec-bridge.sock"
+        socket_name = "exec-bridge.sock"
+        token_name = "exec-bridge.token"
+        socket_path = state_dir / socket_name
         log_path = state_dir / "exec-bridge.log"
 
         proc = subprocess.Popen(
             [
-                "python3", str(self.server_script),
-                "--socket", str(socket_path),
-                "--token-file", str(token_file),
+                sys.executable, str(self.server_script),
+                "--socket", socket_name,
+                "--token-file", token_name,
                 "--backend", backend,
                 "--target", target,
             ],
             stdout=log_path.open("ab"),
             stderr=subprocess.STDOUT,
+            cwd=str(state_dir),
         )
 
         deadline = time.time() + self._STARTUP_TIMEOUT_SECONDS

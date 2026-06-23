@@ -55,6 +55,7 @@ from agent_bench.benchmarks.swebench.app import (
     _slugify_session_key,
 )
 from agent_bench.benchmarks.swebench.scoring import score_via_scoring_server, score_via_singularity
+from agent_bench.benchmarks.swebench.workspace import resolve_harness_workspace_base
 from agent_bench.deployments.containers import (
     Container,
     ContainerHandle,
@@ -88,6 +89,15 @@ class SWEBenchOpenHandsHarness:
     """
 
     backend_id = "container-agnostic"
+    agent_id = "swebench"
+    task_workspace = "/testbed"
+    default_harness_config = "profiles/harnesses/openhands_swebench.yaml"
+    requires_swebench_package = True
+    task_path = (
+        "/opt/miniconda3/envs/testbed/bin:"
+        "/opt/miniconda3/bin:"
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    )
 
     _OPENHANDS_SCAFFOLD_FILES = ".openhands_instructions .openhands.json"
     _OPENHANDS_SCAFFOLD_DIRS = ".openhands"
@@ -103,24 +113,19 @@ class SWEBenchOpenHandsHarness:
         self.container = container or DockerContainer()
         self.oh_image = oh_image or self._default_oh_image()
 
-        try:
-            import swebench  # noqa: F401
-        except ImportError as e:
-            raise RuntimeError(
-                "swebench python package not importable; "
-                "install in the driver env: pip install swebench"
-            ) from e
+        if self.requires_swebench_package:
+            try:
+                import swebench  # noqa: F401
+            except ImportError as e:
+                raise RuntimeError(
+                    "swebench python package not importable; "
+                    "install in the driver env: pip install swebench"
+                ) from e
 
         self.container.check_available()
         self.container.check_image(self.oh_image)
 
-        self.workspace_base = Path(
-            workspace_base
-            or os.environ.get(
-                "AB_HARNESS_WORKSPACE_BASE",
-                os.path.expanduser("~/.cache/oc-eval/workspaces"),
-            )
-        )
+        self.workspace_base = resolve_harness_workspace_base(workspace_base)
         self.workspace_base.mkdir(parents=True, exist_ok=True)
         self.state_base = self.workspace_base.parent / "states"
         self.state_base.mkdir(parents=True, exist_ok=True)
@@ -157,11 +162,12 @@ class SWEBenchOpenHandsHarness:
         run_id: Optional[str] = None,
         instance_data: Optional[Dict] = None,
     ) -> Dict:
-        if "UNUSED" in container_image:
-            container_image = (
-                f"swebench/sweb.eval.x86_64.{instance_id.lower()}:latest"
-                .replace("__", "_1776_")
-            )
+        workspace_root = self.task_workspace
+        container_image = self._resolve_container_image_for_instance(
+            instance_id=instance_id,
+            container_image=container_image,
+            instance_data=instance_data,
+        )
         task_image = self._resolve_task_image(container_image)
 
         run_id = run_id or instance_id
@@ -169,7 +175,7 @@ class SWEBenchOpenHandsHarness:
         net_name = f"oh-eval-net-{rid_short}"
         oh_name = f"oh-{rid_short}"
         sandbox_prefix = f"oc-sbx-{rid_short}-"
-        scope_key = "agent:swebench"
+        scope_key = f"agent:{self.agent_id}"
         task_container_name = _oc_sandbox_name(sandbox_prefix, scope_key)
 
         self._preflight_cleanup(net_name, oh_name, task_container_name)
@@ -196,11 +202,6 @@ class SWEBenchOpenHandsHarness:
         # 4. Task (sandbox) container. The agent's tool calls land here via
         #    the bridge. SWE-bench images put the test env under
         #    /opt/miniconda3/envs/testbed — same PATH trick as OC variant.
-        task_path = (
-            "/opt/miniconda3/envs/testbed/bin:"
-            "/opt/miniconda3/bin:"
-            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-        )
         task_spec = ContainerSpec(
             name=task_container_name,
             image=task_image,
@@ -210,9 +211,9 @@ class SWEBenchOpenHandsHarness:
                 "openhands.sandbox": "1",
                 "oc-eval.run_id": run_id,
             },
-            mounts=(Mount(host=ws_host, container="/testbed", mode="rw"),),
-            workdir="/testbed",
-            env={"PATH": task_path, "HOME": "/root"},
+            mounts=(Mount(host=ws_host, container=self.task_workspace, mode="rw"),),
+            workdir=self.task_workspace,
+            env=self._task_env(),
             entrypoint="sleep",
             command=("infinity",),
         )
@@ -254,7 +255,7 @@ class SWEBenchOpenHandsHarness:
             "AB_RUN_ID": run_id,
             "OPENHANDS_RUN_ID": run_id,
             "OPENHANDS_EXEC_BRIDGE_AGENT_WORKSPACE": _WORKSPACE_IN_OH,
-            "OPENHANDS_EXEC_BRIDGE_TASK_WORKSPACE": "/testbed",
+            "OPENHANDS_EXEC_BRIDGE_TASK_WORKSPACE": self.task_workspace,
             **otel_env(
                 service_name="agent-bench-openhands",
                 run_id=run_id,
@@ -303,11 +304,32 @@ class SWEBenchOpenHandsHarness:
             "events_path_in_container": f"{_STATE_DIR_IN_OH}/events.jsonl",
             "events_path_on_host": str(state_dir / "events.jsonl"),
             "sandbox_image": container_image,
+            "task_workspace_root": self.task_workspace,
             "agent_env": oh_env,
             **dispatcher.env_info(),
         }
 
     # ------------------------------------------------------------------
+
+    def _resolve_container_image_for_instance(
+        self,
+        *,
+        instance_id: str,
+        container_image: str,
+        instance_data: Optional[Dict] = None,
+    ) -> str:
+        if "UNUSED" in container_image:
+            return (
+                f"swebench/sweb.eval.x86_64.{instance_id.lower()}:latest"
+                .replace("__", "_1776_")
+            )
+        return container_image
+
+    def _task_env(self) -> Dict[str, str]:
+        env = {"HOME": "/root"}
+        if self.task_path:
+            env["PATH"] = self.task_path
+        return env
 
     def _resolve_task_image(self, container_image: str) -> str:
         if self.container.backend_id == "docker":
@@ -326,7 +348,7 @@ class SWEBenchOpenHandsHarness:
     def _prime_workspace(self, task_image: str, ws_host: Path) -> None:
         """Same recipe as SWEBenchHarness._prime_workspace_from_image, but
         local to avoid the cross-class private-method dependency."""
-        self.container.copy_from_image(task_image, "/testbed", ws_host)
+        self.container.copy_from_image(task_image, self.task_workspace, ws_host)
 
     def _runtime_base_url(self, configured: Optional[str]) -> str:
         raw = os.environ.get("OPENAI_BASE_URL") or configured or "http://localhost:8000/v1"
@@ -352,7 +374,7 @@ class SWEBenchOpenHandsHarness:
         # Driver sets AB_HARNESS_CONFIG to the resolved harness config path.
         harness_path = os.environ.get(
             "AB_HARNESS_CONFIG",
-            os.path.join(repo_root, "profiles/harnesses/openhands_swebench.yaml"),
+            os.path.join(repo_root, self.default_harness_config),
         )
         if not os.path.isfile(harness_path):
             raise FileNotFoundError(

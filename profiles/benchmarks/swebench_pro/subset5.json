@@ -1,0 +1,70 @@
+{
+  "_doc": "SWE-bench Pro public 5-task subset selected by deterministic repo-stratified largest-remainder sampling from the public test split. Subsets are nested so subset5 is contained in subset10, subset20, and subset50.",
+  "sweep_name": "swebench_pro_subset5",
+  "plan_version": "v1.0",
+  "application": "swebench_pro",
+  "dataset": "ScaleAI/SWE-bench_Pro",
+  "split": "test",
+  "instances": [
+    "instance_ansible__ansible-3db08adbb1cc6aa9941be5e0fc810132c6e1fa4b-vba6da65a0f3baefda7a058ebbd0a8dcafb8512f5",
+    "instance_flipt-io__flipt-507170da0f7f4da330f6732bffdf11c4df7fc192",
+    "instance_gravitational__teleport-82185f232ae8974258397e121b3bc2ed0c3729ed-v626ec2a48416b10a88641359a169d99e935ff037",
+    "instance_internetarchive__openlibrary-d8162c226a9d576f094dc1830c4c1ffd0be2dd17-v76304ecdb3a5954fcf13feb710e8c40fcf24b73c",
+    "instance_qutebrowser__qutebrowser-a25e8a09873838ca9efefd36ea8a45170bbeb95c-vc2f56a753b62a190ddb23cd330c257b9cf560d12"
+  ],
+  "repo_mapping": {
+    "instance_ansible__ansible-3db08adbb1cc6aa9941be5e0fc810132c6e1fa4b-vba6da65a0f3baefda7a058ebbd0a8dcafb8512f5": {
+      "repo_id": "ansible/ansible",
+      "base_commit": "709484969c8a4ffd74b839a673431a8c5caa6457"
+    },
+    "instance_flipt-io__flipt-507170da0f7f4da330f6732bffdf11c4df7fc192": {
+      "repo_id": "flipt-io/flipt",
+      "base_commit": "5c6de423ccaad9eda072d951c4fc34e779308e95"
+    },
+    "instance_gravitational__teleport-82185f232ae8974258397e121b3bc2ed0c3729ed-v626ec2a48416b10a88641359a169d99e935ff037": {
+      "repo_id": "gravitational/teleport",
+      "base_commit": "ad00c6c789bdac9b04403889d7ed426242205d64"
+    },
+    "instance_internetarchive__openlibrary-d8162c226a9d576f094dc1830c4c1ffd0be2dd17-v76304ecdb3a5954fcf13feb710e8c40fcf24b73c": {
+      "repo_id": "internetarchive/openlibrary",
+      "base_commit": "5de7de19211e71b29b2f2ba3b1dff2fe065d660f"
+    },
+    "instance_qutebrowser__qutebrowser-a25e8a09873838ca9efefd36ea8a45170bbeb95c-vc2f56a753b62a190ddb23cd330c257b9cf560d12": {
+      "repo_id": "qutebrowser/qutebrowser",
+      "base_commit": "83bef2ad4bdc10113bb9e5ed12c32d92bc1247af"
+    }
+  },
+  "dockerhub_username": "jefzda",
+  "container_image": "swebench_pro/UNUSED:latest",
+  "wall_clock_budget_seconds": 1800,
+  "output_dir": "swebench_pro_subset5",
+  "seeds": [
+    42
+  ],
+  "repo_distribution": {
+    "NodeBB/NodeBB": 44,
+    "ansible/ansible": 96,
+    "element-hq/element-web": 56,
+    "flipt-io/flipt": 85,
+    "future-architect/vuls": 62,
+    "gravitational/teleport": 76,
+    "internetarchive/openlibrary": 91,
+    "navidrome/navidrome": 57,
+    "protonmail/webclients": 65,
+    "qutebrowser/qutebrowser": 79,
+    "tutao/tutanota": 20
+  },
+  "selection": {
+    "method": "repo-stratified deterministic largest-remainder allocation",
+    "seed": 42,
+    "source_dataset_rows": 731,
+    "repo_counts": {
+      "ansible/ansible": 1,
+      "flipt-io/flipt": 1,
+      "gravitational/teleport": 1,
+      "internetarchive/openlibrary": 1,
+      "qutebrowser/qutebrowser": 1
+    },
+    "nested_in": "subset10"
+  }
+}

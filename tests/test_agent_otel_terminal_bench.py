@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 from agent_bench.benchmarks.conditions.agent_otel import (
     otel_endpoint_for_container,
@@ -31,6 +31,7 @@ from agent_bench.harnesses.openhands.driver import (
     _BridgeToolExecutor,
     EventSink,
     _LLMTelemetryProxy,
+    _patch_laminar_observe_compat,
     _action_to_bridge_call,
     _file_editor_action_payload,
     _instrument_llm_for_telemetry,
@@ -240,6 +241,139 @@ def test_openhands_driver_proxy_emits_per_call_model_usage(tmp_path):
     assert row["output_tokens"] == 8
     assert row["cache_read_tokens"] == 5
     assert row["total_tokens"] == 21
+
+
+def test_openhands_driver_patches_laminar_observe_rollout_entrypoint(monkeypatch, tmp_path):
+    calls = []
+    lmnr_mod = ModuleType("lmnr")
+
+    def legacy_observe(*, name=None):
+        calls.append({"name": name})
+        return "wrapped"
+
+    lmnr_mod.observe = legacy_observe
+
+    def fake_import_module(name):
+        if name == "lmnr":
+            return lmnr_mod
+        raise AssertionError(name)
+
+    monkeypatch.setattr(openhands_driver.importlib, "import_module", fake_import_module)
+
+    events_path = tmp_path / "events.jsonl"
+    sink = EventSink(events_path)
+
+    assert _patch_laminar_observe_compat(sink) is True
+    assert lmnr_mod.observe(
+        name="conversation.run",
+        rollout_entrypoint="ignored",
+    ) == "wrapped"
+    sink.close()
+
+    rows = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert rows[0]["driver_event"] == "laminar_observe_compat"
+    assert rows[0]["patched"] is True
+    assert rows[0]["target"] == "lmnr.observe"
+    assert rows[0]["dropped_kwargs"] == ["rollout_entrypoint"]
+    assert calls == [{"name": "conversation.run"}]
+
+
+def test_openhands_driver_main_returns_nonzero_on_run_exception(monkeypatch, tmp_path):
+    class FakeLLM:
+        def __init__(self, **_kwargs):
+            pass
+
+    class FakeConversation:
+        def __init__(self, **_kwargs):
+            self.state = SimpleNamespace(events=[], agent_state="failed")
+            self.conversation_stats = None
+            self.closed = False
+
+        def send_message(self, _task):
+            raise TypeError("boom")
+
+        def run(self):
+            raise AssertionError("run should not be called")
+
+        def close(self):
+            self.closed = True
+
+    class FakeWorkspace:
+        def __init__(self, **_kwargs):
+            pass
+
+    monkeypatch.setattr(
+        openhands_driver,
+        "_import_sdk",
+        lambda: {
+            "LLM": FakeLLM,
+            "Conversation": FakeConversation,
+            "LocalWorkspace": FakeWorkspace,
+            "get_default_agent": lambda **_kwargs: SimpleNamespace(tools=[]),
+            "get_default_tools": lambda **_kwargs: [],
+        },
+    )
+    monkeypatch.setattr(
+        openhands_driver,
+        "_patch_laminar_observe_compat",
+        lambda sink: False,
+    )
+    monkeypatch.setattr(openhands_driver, "_BRIDGE_BIN", "")
+    monkeypatch.setattr(openhands_driver, "_BRIDGE_SOCKET", "")
+    monkeypatch.setattr(openhands_driver, "_BRIDGE_TOKEN", "")
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '''
+[llm]
+model = "model-a"
+base_url = "http://example.invalid/v1"
+api_key = "EMPTY"
+temperature = 0
+
+[agent]
+name = "CodeActAgent"
+
+[run]
+workspace = "/workspace"
+max_iterations = 1
+
+[telemetry.otel]
+enabled = false
+'''
+    )
+    events_path = tmp_path / "events.jsonl"
+
+    rc = openhands_driver.main([
+        "--config", str(config_path),
+        "--task", "fix it",
+        "--events", str(events_path),
+        "--workspace", str(tmp_path),
+    ])
+
+    rows = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert rc == 7
+    assert any(
+        row.get("driver_event") == "error"
+        and row.get("kind") == "run"
+        and row.get("message") == "boom"
+        for row in rows
+    )
+    summary = rows[-1]
+    assert summary["driver_event"] == "summary"
+    assert summary["run_error"] == "TypeError: boom"
+
+
+def test_openhands_condition_marks_driver_run_error_fatal():
+    events = [{"driver_event": "error", "kind": "run", "message": "boom"}]
+
+    event = OpenHandsAgentCondition._fatal_driver_error_event(events)
+
+    assert event == events[0]
+    assert (
+        OpenHandsAgentCondition._error_type_for_driver_result(0, event)
+        == "openhands_driver_run"
+    )
 
 
 def test_openhands_driver_instruments_llm_without_replacing_instance(tmp_path):

@@ -69,6 +69,7 @@ from agent_bench.deployments.containers import (
     Mount,
 )
 from agent_bench.deployments.containers.limits import configured_task_container_cpus
+from agent_bench.benchmarks.swebench.workspace import resolve_harness_workspace_base
 from agent_bench.harnesses.openclaw.dispatcher import OpenClawRemoteDispatcher
 from agent_bench.core.config import endpoint_for_container, load_active_model_and_serving
 from agent_bench.core.profile_io import load_profile
@@ -118,6 +119,17 @@ class SWEBenchHarness:
     """
 
     backend_id = "container-agnostic"
+    agent_id = "swebench"
+    task_workspace = "/testbed"
+    default_harness_config = "profiles/harnesses/openclaw_swebench.yaml"
+    app_agents_rel = "agent_bench/benchmarks/swebench/openclaw/agents"
+    app_skills_rel = "agent_bench/benchmarks/swebench/openclaw/skills"
+    requires_swebench_package = True
+    task_path = (
+        "/opt/miniconda3/envs/testbed/bin:"
+        "/opt/miniconda3/bin:"
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    )
 
     # OpenClaw 2026.4+ logs `[gateway] listening on ws://...` at readiness;
     # earlier versions said `[gateway] ... ready`.
@@ -147,22 +159,19 @@ class SWEBenchHarness:
         )
 
         # Pre-flight: swebench python pkg + container runtime + OC image.
-        try:
-            import swebench  # noqa: F401
-        except ImportError as e:
-            raise RuntimeError(
-                "swebench python package not importable; "
-                "install in the driver env: pip install swebench"
-            ) from e
+        if self.requires_swebench_package:
+            try:
+                import swebench  # noqa: F401
+            except ImportError as e:
+                raise RuntimeError(
+                    "swebench python package not importable; "
+                    "install in the driver env: pip install swebench"
+                ) from e
         self.container.check_available()
         self.container.check_image(self.oc_image)
         self.task_container_cpus = configured_task_container_cpus()
 
-        self.workspace_base = Path(
-            workspace_base
-            or os.environ.get("AB_HARNESS_WORKSPACE_BASE",
-                              os.path.expanduser("~/.cache/oc-eval/workspaces"))
-        )
+        self.workspace_base = resolve_harness_workspace_base(workspace_base)
         self.workspace_base.mkdir(parents=True, exist_ok=True)
         # Per-run state dir (mounted ro into the openclaw container at
         # /root/.openclaw/) lives next to workspaces.
@@ -183,16 +192,17 @@ class SWEBenchHarness:
         run_id: Optional[str] = None,
         instance_data: Optional[Dict] = None,
     ) -> Dict:
+        workspace_root = self.task_workspace
         # Resolve the per-instance SWE-bench image when the sweep config uses
         # the `UNUSED` placeholder (multi-instance sweeps can't pin a single
         # image at sweep level). Mirrors swebench.harness TestSpec.instance_image_key
         # for remote images: `{namespace}/sweb.eval.{arch}.{instance_id_lower}:{tag}`
         # with `__` -> `_1776_` (docker tag-name encoding).
-        if "UNUSED" in container_image:
-            container_image = (
-                f"swebench/sweb.eval.x86_64.{instance_id.lower()}:latest"
-                .replace("__", "_1776_")
-            )
+        container_image = self._resolve_container_image_for_instance(
+            instance_id=instance_id,
+            container_image=container_image,
+            instance_data=instance_data,
+        )
 
         # The task container image. docker: the resolved docker tag.
         # singularity: an absolute path to the per-instance .sif. The harness
@@ -213,7 +223,7 @@ class SWEBenchHarness:
         # Per-run containerPrefix guarantees the name is unique per run, so
         # a leaked container from a prior run can never be reused by mistake.
         sandbox_scope = "agent"
-        sandbox_agent_id = "swebench"
+        sandbox_agent_id = self.agent_id
         scope_key = f"agent:{sandbox_agent_id}"
         sandbox_prefix = f"oc-sbx-{rid_short}-"
         task_container_name = _oc_sandbox_name(sandbox_prefix, scope_key)
@@ -245,7 +255,7 @@ class SWEBenchHarness:
             run_id=run_id,
             workspace_root=workspace_root,
             sandbox_image=container_image,
-            sandbox_binds=[f"{ws_host}:/testbed:rw"],
+            sandbox_binds=[f"{ws_host}:{self.task_workspace}:rw"],
             container_prefix=sandbox_prefix,
             scope=sandbox_scope,
         )
@@ -273,11 +283,6 @@ class SWEBenchHarness:
         # the agent would burn its budget on `pip install`. Pre-pending the
         # testbed env's bin to PATH (no `conda activate` needed) makes
         # `python` / `pip` resolve to the pre-built env directly.
-        task_path = (
-            "/opt/miniconda3/envs/testbed/bin:"
-            "/opt/miniconda3/bin:"
-            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-        )
         task_spec = ContainerSpec(
             name=task_container_name,
             image=task_image,
@@ -288,9 +293,9 @@ class SWEBenchHarness:
                 "openclaw.sessionKey": scope_key,
                 "oc-eval.run_id": run_id,
             },
-            mounts=(Mount(host=ws_host, container="/testbed", mode="rw"),),
-            workdir="/testbed",
-            env={"PATH": task_path, "HOME": "/root"},
+            mounts=(Mount(host=ws_host, container=self.task_workspace, mode="rw"),),
+            workdir=self.task_workspace,
+            env=self._task_env(),
             entrypoint="sleep",
             command=("infinity",),
             cpus=self.task_container_cpus,
@@ -335,10 +340,10 @@ class SWEBenchHarness:
             # under agents/<id>/. Per-run state_dir (rebuilt by
             # _build_state_dir on every prepare_environment).
             Mount(host=state_dir, container="/root/.openclaw", mode="rw"),
-            # Workspace bind for git/diff convenience inside oc; task
-            # container sees the same dir at /testbed via OC sandbox binds.
-            Mount(host=ws_host, container="/testbed", mode="rw"),
         ]
+        runtime_workspace_mount = self._openclaw_runtime_workspace_mount(ws_host)
+        if runtime_workspace_mount is not None:
+            oc_mounts.append(runtime_workspace_mount)
         # docker.sock — only useful in docker mode where OC's docker plugin
         # may still try to ping the daemon at init. Singularity has nothing
         # to mount here.
@@ -440,7 +445,7 @@ class SWEBenchHarness:
             extra_hosts={"vllm-host": "host-gateway"},  # docker only
             user="0",                                   # docker only
             mounts=tuple(oc_mounts),
-            workdir="/testbed",
+            workdir=self._openclaw_runtime_workdir(),
             env=oc_env,
             entrypoint="/usr/local/bin/openclaw",
             command=("gateway", "--allow-unconfigured"),
@@ -523,7 +528,7 @@ class SWEBenchHarness:
             "task_container_id": task_container_id,
             "task_container_name": task_container_name,
             "network_name": net_name,
-            "workspace_root": "/testbed",
+            "workspace_root": self.task_workspace,
             "workspace_host_path": str(ws_host),
             "state_dir": str(state_dir),
             "gateway_port": gateway_port,
@@ -536,6 +541,40 @@ class SWEBenchHarness:
     # ------------------------------------------------------------------
     # Container image resolution
     # ------------------------------------------------------------------
+
+    def _resolve_container_image_for_instance(
+        self,
+        *,
+        instance_id: str,
+        container_image: str,
+        instance_data: Optional[Dict] = None,
+    ) -> str:
+        if "UNUSED" in container_image:
+            return (
+                f"swebench/sweb.eval.x86_64.{instance_id.lower()}:latest"
+                .replace("__", "_1776_")
+            )
+        return container_image
+
+    def _task_env(self) -> Dict[str, str]:
+        env = {"HOME": "/root"}
+        if self.task_path:
+            env["PATH"] = self.task_path
+        return env
+
+    def _openclaw_runtime_workspace_mount(self, ws_host: Path) -> Optional[Mount]:
+        # Do not bind over /app in the OpenClaw runtime container. The runtime
+        # image ships /usr/local/bin/openclaw -> /app/openclaw.mjs; masking
+        # /app makes the gateway entrypoint disappear. The task container still
+        # receives the workspace at self.task_workspace via sandbox_binds.
+        if self.task_workspace == "/app":
+            return None
+        return Mount(host=ws_host, container=self.task_workspace, mode="rw")
+
+    def _openclaw_runtime_workdir(self) -> str:
+        if self.task_workspace == "/app":
+            return "/root"
+        return self.task_workspace
 
     def _resolve_task_image(self, container_image: str) -> str:
         """Translate a docker tag like `swebench/sweb.eval.x86_64.<id>:latest`
@@ -587,7 +626,7 @@ class SWEBenchHarness:
         state_dir = self.state_base / run_id
         if state_dir.exists():
             _force_rmtree(state_dir)
-        os.makedirs(state_dir / "agents/swebench", exist_ok=True)
+        os.makedirs(state_dir / "agents" / self.agent_id, exist_ok=True)
 
         override = os.environ.get("AB_HARNESS_STATE_TEMPLATE")
         if override:
@@ -603,7 +642,7 @@ class SWEBenchHarness:
             # from the separate model/serving axes.
             harness_path = os.environ.get(
                 "AB_HARNESS_CONFIG",
-                os.path.join(repo_root, "profiles/harnesses/openclaw_swebench.yaml"),
+                os.path.join(repo_root, self.default_harness_config),
             )
             if not os.path.isfile(harness_path):
                 raise FileNotFoundError(
@@ -634,8 +673,8 @@ class SWEBenchHarness:
             with open(state_dir / "openclaw.json", "w") as fh:
                 json.dump(oc_cfg, fh, indent=2)
 
-            app_agents = os.path.join(repo_root, "agent_bench/benchmarks/swebench/openclaw/agents")
-            app_skills = os.path.join(repo_root, "agent_bench/benchmarks/swebench/openclaw/skills")
+            app_agents = os.path.join(repo_root, self.app_agents_rel)
+            app_skills = os.path.join(repo_root, self.app_skills_rel)
             if not os.path.isdir(app_agents):
                 raise FileNotFoundError(
                     f"per-app agents dir not found at {app_agents}"
@@ -643,7 +682,7 @@ class SWEBenchHarness:
             for f in os.listdir(app_agents):
                 src = os.path.join(app_agents, f)
                 if os.path.isfile(src):
-                    shutil.copyfile(src, state_dir / "agents/swebench" / f)
+                    shutil.copyfile(src, state_dir / "agents" / self.agent_id / f)
             if os.path.isdir(app_skills):
                 shutil.copytree(app_skills, state_dir / "skills")
 
@@ -738,7 +777,7 @@ class SWEBenchHarness:
     def _prime_workspace_from_image(self, task_image: str, ws_host: Path) -> None:
         """Copy /testbed out of the task image into ws_host, so the
         bind-mount overlay isn't empty when the real task container starts."""
-        self.container.copy_from_image(task_image, "/testbed", ws_host)
+        self.container.copy_from_image(task_image, self.task_workspace, ws_host)
 
     # ------------------------------------------------------------------
     # Gateway readiness

@@ -1,0 +1,27 @@
+name = "swebench_pro_smoke_hermes"
+description = "SWE-bench Pro smoke run with Hermes."
+output_dir = "runs/swebench_pro_smoke_hermes"
+seeds = [42]
+
+[telemetry]
+spans_html = true
+
+[benchmark]
+name = "swebench_pro"
+profile = "profiles/benchmarks/swebench_pro/smoke1.json"
+
+[harness]
+name = "hermes"
+profile = "profiles/harnesses/hermes_swebench_pro.yaml"
+
+[model]
+profile = "profiles/models/qwen36_35b_a3b_local.json"
+
+[serving]
+profile = "profiles/serving/vllm/default.yaml"
+
+[deployment]
+profile = "profiles/deployments/local_docker.toml"
+
+[limits]
+max_workers = 1

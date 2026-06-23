@@ -4,6 +4,7 @@ from contextlib import ExitStack
 from datetime import datetime
 import importlib
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import re
@@ -37,6 +38,7 @@ _SWEBENCH_PYTHON_DEPENDENCIES = (
     ("swebench.harness.test_spec.test_spec", "swebench"),
     ("swebench.harness.grading", "swebench"),
 )
+_SWEBENCH_PRO_PYTHON_DEPENDENCIES = (("datasets", "datasets"),)
 _LITELLM_PYTHON_DEPENDENCIES = (("litellm", "litellm"),)
 
 _STAGE_DESCRIPTIONS = {
@@ -313,6 +315,21 @@ def materialize_benchmark_data(
         _set_instance_data_env(target_env, out)
         return out
 
+    if resolved.spec.benchmark_name == "swebench_pro":
+        from agent_bench.benchmarks.swebench_pro.loader import (
+            default_materialized_path,
+            materialize_profile_dataset,
+            resolve_profile_instance_data,
+        )
+
+        profile_path = resolve_profile_instance_data(resolved)
+        out = profile_path
+        if out is None:
+            out = pbs_spec.run_dir / "swebench_pro_instances.json" if pbs_spec else default_materialized_path(resolved)
+            out = materialize_profile_dataset(resolved, out)
+        _set_instance_data_env(target_env, out)
+        return out
+
     if resolved.spec.benchmark_name == "terminal_bench":
         out = pbs_spec.run_dir / "terminal_bench_tasks.json" if pbs_spec else Path("data/terminal_bench/tasks.json")
         from agent_bench.benchmarks.terminal_bench import loader
@@ -425,7 +442,7 @@ def _prepare_otel_environment(ctx: ExecutionContext) -> None:
 
 
 def _prepare_swebench_runtime_root(ctx: ExecutionContext) -> None:
-    if ctx.resolved.spec.benchmark_name != "swebench":
+    if ctx.resolved.spec.benchmark_name not in {"swebench", "swebench_pro"}:
         return
 
     root = _optional_path_from_raw_or_env(
@@ -499,6 +516,8 @@ def _python_dependency_modules_for_context(ctx: ExecutionContext) -> tuple[tuple
     dependencies: list[tuple[str, str]] = []
     if ctx.resolved.spec.benchmark_name == "swebench":
         dependencies.extend(_SWEBENCH_PYTHON_DEPENDENCIES)
+    elif ctx.resolved.spec.benchmark_name == "swebench_pro":
+        dependencies.extend(_SWEBENCH_PRO_PYTHON_DEPENDENCIES)
     if _needs_litellm_cli(ctx):
         dependencies.extend(_LITELLM_PYTHON_DEPENDENCIES)
     return tuple(dependencies)
@@ -674,9 +693,12 @@ def _start_serving(ctx: ExecutionContext, stack: ExitStack) -> None:
         if agent_provider:
             ctx.env.setdefault("AB_MODEL_PROVIDER", str(agent_provider))
             os.environ.setdefault("AB_MODEL_PROVIDER", str(agent_provider))
+    log_path = Path(plan.log_path or ctx.plan.log_dir / f"{plan.backend}.log")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     requires_fresh_process = plan.metadata.get("requires_fresh_process") == "1"
     if http_ready(plan.readiness_url, headers=plan.readiness_headers):
         if not requires_fresh_process:
+            _record_existing_serving_attachment(ctx, plan, log_path)
             _note("start_serving", f"endpoint already ready: {plan.readiness_url}")
             return
         _note(
@@ -684,8 +706,6 @@ def _start_serving(ctx: ExecutionContext, stack: ExitStack) -> None:
             f"endpoint already ready but fresh serving is required: {plan.readiness_url}",
         )
 
-    log_path = Path(plan.log_path or ctx.plan.log_dir / f"{plan.backend}.log")
-    log_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         launch_env = build_launch_environment(plan, base_env=ctx.env)
         launch_env.setdefault("AB_REPO_ROOT", str(Path.cwd()))
@@ -732,6 +752,91 @@ def _start_serving(ctx: ExecutionContext, stack: ExitStack) -> None:
             )
         except ProcessError as exc:
             raise ConfigError(str(exc)) from exc
+
+
+def _record_existing_serving_attachment(
+    ctx: ExecutionContext,
+    plan: ServingLaunchPlan,
+    log_path: Path,
+) -> None:
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    container_name = _docker_container_name_for_cleanup(plan)
+    lines = [
+        "",
+        f"[agent-bench] {timestamp} attached to an already-ready serving endpoint.",
+        f"[agent-bench] backend={plan.backend} mode={plan.mode} readiness_url={plan.readiness_url}",
+        f"[agent-bench] config_id={plan.config_id} model={plan.model_name}",
+        f"[agent-bench] run_dir={ctx.plan.run_dir}",
+    ]
+    if container_name:
+        lines.append(f"[agent-bench] expected_container={container_name}")
+    with log_path.open("a", encoding="utf-8") as log:
+        log.write("\n".join(lines))
+        log.write("\n")
+    if container_name:
+        _append_docker_log_snapshot(log_path, container_name)
+
+
+def _append_docker_log_snapshot(log_path: Path, container_name: str) -> None:
+    if shutil.which("docker") is None:
+        with log_path.open("a", encoding="utf-8") as log:
+            log.write("[agent-bench] docker is not on PATH; skipped attached container log snapshot.\n")
+        return
+
+    tail_lines = _positive_int_from_env("AB_SERVING_ATTACH_LOG_TAIL", default=200)
+    exists = subprocess.run(
+        ["docker", "inspect", container_name],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=False,
+    )
+    if exists.returncode != 0:
+        with log_path.open("a", encoding="utf-8") as log:
+            log.write(
+                f"[agent-bench] expected docker container {container_name!r} was not found; "
+                "attached endpoint appears externally managed, so no container log snapshot was captured.\n"
+            )
+        return
+
+    try:
+        proc = subprocess.run(
+            ["docker", "logs", "--tail", str(tail_lines), container_name],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except Exception as exc:
+        with log_path.open("a", encoding="utf-8") as log:
+            log.write(f"[agent-bench] failed to snapshot docker logs for {container_name}: {exc}\n")
+        return
+
+    with log_path.open("a", encoding="utf-8") as log:
+        log.write(
+            f"[agent-bench] docker logs snapshot for {container_name} "
+            f"(tail={tail_lines}, rc={proc.returncode})\n"
+        )
+        if proc.stdout:
+            log.write(proc.stdout)
+            if not proc.stdout.endswith("\n"):
+                log.write("\n")
+        if proc.stderr:
+            log.write("[agent-bench] docker logs stderr:\n")
+            log.write(proc.stderr)
+            if not proc.stderr.endswith("\n"):
+                log.write("\n")
+
+
+def _positive_int_from_env(name: str, *, default: int) -> int:
+    value = os.environ.get(name)
+    if not value:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
 
 
 def _docker_container_name_for_cleanup(plan: ServingLaunchPlan) -> str | None:
@@ -901,6 +1006,69 @@ def _run_benchmark(ctx: ExecutionContext) -> None:
         retry_errors=ctx.retry_errors,
         max_workers=ctx.max_workers,
     )
+    _write_run_summary_log(ctx)
+
+
+def _write_run_summary_log(ctx: ExecutionContext) -> Path:
+    run_dir = ctx.plan.run_dir
+    log_path = ctx.plan.log_dir / "run.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f"Agent_Bench run summary: {run_dir}", ""]
+
+    lines.append("Global logs:")
+    for path in sorted(ctx.plan.log_dir.rglob("*")):
+        if path.is_file() and path != log_path:
+            rel = path.relative_to(run_dir)
+            lines.append(f"  {rel}: present")
+    lines.append("")
+
+    lines.append("Per-instance artifacts:")
+    manifest_paths = sorted((run_dir / "runs").glob("*/*/manifest.json"))
+    if not manifest_paths:
+        lines.append("  no manifest.json files found")
+    for manifest_path in manifest_paths:
+        instance_dir = manifest_path.parent
+        manifest = _read_json_file(manifest_path)
+        verdict_path = instance_dir / "verdict.json"
+        verdict = _read_json_file(verdict_path) if verdict_path.exists() else {}
+        status = str(verdict.get("status") or manifest.get("status") or "UNKNOWN")
+        run_id = str(manifest.get("run_id") or instance_dir.name)
+        instance_id = str(manifest.get("instance_id") or "")
+        lines.append(f"- {run_id} {status} {instance_id}")
+        error = verdict.get("error_message") or manifest.get("error_message")
+        if error:
+            label = "error" if status == "ERROR" else "failure_reason"
+            lines.append(f"  {label}: {str(error).replace(chr(10), ' ')[:500]}")
+        for name in (
+            "openclaw_stdout.log",
+            "openclaw_stderr.log",
+            "openclaw_exec_bridge.jsonl",
+            "steps.jsonl",
+            "candidate.patch",
+            "verdict.json",
+            "spans.jsonl",
+            "spans_timeline.html",
+        ):
+            artifact = instance_dir / name
+            if artifact.exists():
+                lines.append(f"  {name}: {artifact.stat().st_size} bytes")
+        if (instance_dir / "conversation").is_dir():
+            lines.append("  conversation/: present")
+        scoring_dirs = sorted((instance_dir / "swebench_pro_scoring").glob("*"))
+        if scoring_dirs:
+            lines.append("  swebench_pro_scoring/: present")
+        lines.append("")
+
+    log_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return log_path
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _build_serving_plan_if_needed(

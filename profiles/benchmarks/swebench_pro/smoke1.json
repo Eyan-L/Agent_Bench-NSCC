@@ -1,0 +1,24 @@
+{
+  "_doc": "SWE-bench Pro smoke profile. Instance selected from the public ScaleAI/SWE-bench_Pro test split.",
+  "sweep_name": "swebench_pro_smoke1",
+  "plan_version": "v1.0",
+  "application": "swebench_pro",
+  "dataset": "ScaleAI/SWE-bench_Pro",
+  "split": "test",
+  "instances": [
+    "instance_NodeBB__NodeBB-04998908ba6721d64eba79ae3b65a351dcfbc5b5-vnan"
+  ],
+  "repo_mapping": {
+    "instance_NodeBB__NodeBB-04998908ba6721d64eba79ae3b65a351dcfbc5b5-vnan": {
+      "repo_id": "NodeBB/NodeBB",
+      "base_commit": "1e137b07052bc3ea0da44ed201702c94055b8ad2"
+    }
+  },
+  "dockerhub_username": "jefzda",
+  "container_image": "swebench_pro/UNUSED:latest",
+  "wall_clock_budget_seconds": 1800,
+  "output_dir": "swebench_pro_smoke1",
+  "seeds": [
+    42
+  ]
+}

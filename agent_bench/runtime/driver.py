@@ -273,6 +273,10 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 from agent_bench.benchmarks.request_bench.conditions.openclaw_agent import (
                     RequestBenchOpenClawCondition as _Cls,
                 )
+            elif benchmark == "swebench_pro":
+                from agent_bench.benchmarks.swebench_pro.conditions.openclaw_agent import (
+                    SWEBenchProOpenClawCondition as _Cls,
+                )
             else:
                 from agent_bench.benchmarks.swebench.conditions.openclaw_agent import (
                     SWEBenchOpenClawCondition as _Cls,
@@ -299,6 +303,10 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 from agent_bench.benchmarks.terminal_bench.conditions.openhands_agent import (
                     TerminalBenchOpenHandsCondition as _Cls,
                 )
+            elif benchmark == "swebench_pro":
+                from agent_bench.benchmarks.swebench_pro.conditions.openhands_agent import (
+                    SWEBenchProOpenHandsCondition as _Cls,
+                )
             else:
                 from agent_bench.benchmarks.swebench.conditions.openhands_agent import (
                     OpenHandsAgentCondition as _Cls,
@@ -324,6 +332,10 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             elif benchmark == "request_bench":
                 from agent_bench.benchmarks.request_bench.conditions.hermes_agent import (
                     RequestBenchHermesCondition as _Cls,
+                )
+            elif benchmark == "swebench_pro":
+                from agent_bench.benchmarks.swebench_pro.conditions.hermes_agent import (
+                    SWEBenchProHermesCondition as _Cls,
                 )
             else:
                 from agent_bench.benchmarks.swebench.conditions.hermes_agent import (
@@ -488,7 +500,9 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
     # Load instance data
     import json
     with open(instance_data_path) as f:
-        instances = {inst["instance_id"]: inst for inst in json.load(f)}
+        instance_rows = json.load(f)
+    instance_rows = _attach_swebench_pro_runtime_resources(instance_rows)
+    instances = {inst["instance_id"]: inst for inst in instance_rows}
 
     # Initialize harness. AB_DEPLOYMENT_CONTAINER_BACKEND selects the SWE-bench backend:
     #   docker      (default) — SWEBenchHarness;     openclaw container + task container
@@ -497,7 +511,7 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
     #                            instances). Same isolation model in singularity-land.
     # Terminal-Bench / DR-Bench instances are auto-routed to their respective
     # harnesses regardless of HARNESS_BACKEND (per-instance dispatch in _one below).
-    _NON_SWE_BENCHMARKS = ("terminal_bench", "deepresearch_bench", "longbench", "request_bench")
+    _NON_SWE_BENCHMARKS = ("terminal_bench", "deepresearch_bench", "longbench", "request_bench", "swebench_pro")
     needs_swe = any(
         inst.get("benchmark", "swebench") not in _NON_SWE_BENCHMARKS
         for inst in instances.values()
@@ -513,6 +527,9 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
     )
     needs_rb = any(
         inst.get("benchmark") == "request_bench" for inst in instances.values()
+    )
+    needs_sp = any(
+        inst.get("benchmark") == "swebench_pro" for inst in instances.values()
     )
 
     # Peek at the harness config to learn which agent runtime this sweep
@@ -572,6 +589,36 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
             )
     else:
         logger.info("Sweep has no SWE-bench instances; skipping SWE-bench harness build.")
+
+    sp_harness = None
+    if needs_sp:
+        sp_backend = os.environ.get("AB_DEPLOYMENT_CONTAINER_BACKEND", "docker").lower()
+        if sp_backend != "docker":
+            raise ValueError(
+                "swebench_pro currently supports AB_DEPLOYMENT_CONTAINER_BACKEND=docker only; "
+                "PBS/Singularity support is deferred."
+            )
+        sp_root = benchmark_data_root or Path(os.environ.get("AB_BENCHMARK_DATA_ROOT") or os.getcwd())
+        if harness_choice == "openhands":
+            from agent_bench.benchmarks.swebench_pro.openhands.app import (
+                SWEBenchProOpenHandsHarness as sp_cls,
+            )
+            sp_harness = sp_cls(sp_root, container=DockerContainer())
+        elif harness_choice == "hermes":
+            from agent_bench.benchmarks.swebench_pro.hermes.app import (
+                SWEBenchProHermesHarness as sp_cls,
+            )
+            sp_harness = sp_cls(sp_root, container=DockerContainer())
+        elif harness_choice == "openclaw":
+            from agent_bench.benchmarks.swebench_pro.openclaw.app import (
+                SWEBenchProHarness as sp_cls,
+            )
+            sp_harness = sp_cls(sp_root, container=DockerContainer())
+        else:
+            raise ValueError(
+                f"swebench_pro supports harness=openclaw|openhands|hermes (got {harness_choice!r})."
+            )
+        logger.info("Constructed %s for SWE-bench Pro.", type(sp_harness).__name__)
 
     # Lazy-build the Request-Bench harness only if any instance is Request-Bench.
     rb_harness = None
@@ -697,6 +744,8 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
                 h = lb_harness
             elif bm == "request_bench":
                 h = rb_harness
+            elif bm == "swebench_pro":
+                h = sp_harness
             else:
                 h = harness
             if h is None:
@@ -733,6 +782,27 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
 
     logger.info(f"Sweep complete: {completed} runs completed, {failed} errors")
     return completed, failed
+
+
+def _attach_swebench_pro_runtime_resources(instance_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    pro_rows = [
+        dict(inst)
+        for inst in instance_rows
+        if isinstance(inst, dict) and inst.get("benchmark") == "swebench_pro"
+    ]
+    if not pro_rows:
+        return instance_rows
+
+    from agent_bench.benchmarks.swebench_pro.loader import attach_official_resources
+
+    attached = {
+        row["instance_id"]: row
+        for row in attach_official_resources(pro_rows)
+    }
+    return [
+        attached.get(inst.get("instance_id"), inst) if isinstance(inst, dict) else inst
+        for inst in instance_rows
+    ]
 
 
 def main():

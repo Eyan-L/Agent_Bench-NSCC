@@ -1,0 +1,33 @@
+# Qwen via Alibaba Cloud Model Studio (DashScope) INTERNATIONAL API, fronted by a local LiteLLM OpenAI-compatible proxy. Mirrors litellm/minimax_global.json.
+# Set QWEN_API_KEY in the environment; agents only receive the local proxy key (sk-agent-bench-local), never the upstream DashScope key.
+# NOTE: the LiteLLM proxy launcher is only wired for PBS/cluster (there is no backend/litellm/serve.sh on this local host); to run locally you must start a litellm proxy yourself, or use config/serving/cloud/qwen_dashscope.json for a direct (no-proxy) connection."
+serving:
+  config_id: litellm-deepseek-dashscope
+  backend: litellm
+  preset: deepseek-dashscope
+  endpoint:
+    scheme: http
+    bind_host: 0.0.0.0
+    client_host: 127.0.0.1
+    port: 8000
+    path: /v1
+  proxy:
+    api_key: sk-agent-bench-local
+    num_workers: 4
+    agent_provider: custom
+  provider:
+    active: deepseek
+    providers:
+      deepseek:
+        name: deepseek
+        api: openai-compatible
+        base_url: https://api.deepseek.com
+        api_key_env: DEEPSEEK_API_KEY
+        model: deepseek/deepseek-v4-flash
+  runtime: {}
+  scheduler:
+    max_num_seqs: 128
+    enable_prefix_caching: false
+  sif: /scratch/users/ntu/$USER/sif_images/litellm_main_stable.sif
+  image: docker://docker.litellm.ai/berriai/litellm:main-stable
+  additional_flags: {}

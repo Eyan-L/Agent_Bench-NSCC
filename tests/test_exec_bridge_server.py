@@ -67,6 +67,25 @@ def test_exec_bridge_server_stays_alive_after_socket_bind(tmp_path: Path) -> Non
             proc.wait(timeout=5)
 
 
+def test_openclaw_dispatcher_uses_relative_socket_for_long_state_dir(tmp_path: Path) -> None:
+    from agent_bench.harnesses.openclaw.dispatcher import OpenClawRemoteDispatcher
+
+    state_dir = tmp_path / ("a" * 70) / ("b" * 70)
+    state_dir.mkdir(parents=True)
+    assert len(str(state_dir / "exec-bridge.sock")) > 108
+
+    dispatcher = OpenClawRemoteDispatcher()
+    try:
+        dispatcher.start(
+            state_dir=state_dir,
+            backend="docker",
+            target="missing-container-for-startup-test",
+        )
+        assert (state_dir / "exec-bridge.sock").exists()
+    finally:
+        dispatcher.stop()
+
+
 def _read_output(proc: subprocess.Popen[str]) -> str:
     if proc.poll() is None:
         return "process is still running"
