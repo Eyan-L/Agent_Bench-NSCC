@@ -1,12 +1,24 @@
 --- node_modules/@mariozechner/pi-ai/dist/providers/openai-completions.js
 +++ node_modules/@mariozechner/pi-ai/dist/providers/openai-completions.js
-@@ -78,10 +78,120 @@
+@@ -78,10 +78,132 @@
              if (nextParams !== undefined) {
                  params = nextParams;
              }
 -            const { data: openaiStream, response } = await client.chat.completions
 +            /* AB_HARNESS_OPENCLAW_PATCH_RAW_RESPONSE_LOG_BEGIN */
 +            const __ocReqStartMs = Date.now();
++            /* AB_HARNESS_OPENCLAW_PATCH_REQUEST_INCLUDE_USAGE_BEGIN
++               Ask the server for token usage on the streamed response (vLLM/OpenAI
++               only emit the final usage chunk when stream_options.include_usage is
++               set). Without it completion_tokens is null and every model.usage span
++               records 0 output tokens. The aggregator below already captures
++               c.usage when present. */
++            if (params && params.stream) {
++                params = Object.assign({}, params, {
++                    stream_options: Object.assign({}, params.stream_options, { include_usage: true }),
++                });
++            }
++            /* AB_HARNESS_OPENCLAW_PATCH_REQUEST_INCLUDE_USAGE_END */
 +            /* AB_HARNESS_OPENCLAW_PATCH_RAW_RESPONSE_LOG_END */
 +            const { data: __openaiStreamOriginal, response } = await client.chat.completions
                  .create(params, { signal: options?.signal })
