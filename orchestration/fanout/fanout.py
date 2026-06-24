@@ -143,26 +143,63 @@ class Lane:
     last_stagger_log: float = 0.0
 
 
+def _nscc_pass_file(user: str) -> str:
+    """Per-account password file (nscc disabled key auth — only passwords)."""
+    return os.path.expanduser(f"~/.ssh/nscc_{user}.pass")
+
+
 def discover_nscc_accounts() -> list[str]:
-    """Account = the suffix of each ~/.ssh/nscc_<user> private key."""
-    keys = sorted(glob.glob(os.path.expanduser("~/.ssh/nscc_*")))
-    return [Path(k).name[len("nscc_"):] for k in keys if not k.endswith(".pub")]
+    """Account = the suffix of each ~/.ssh/nscc_<user> credential — a password
+    file (nscc_<user>.pass; nscc now requires password auth) or a legacy private
+    key (nscc_<user>)."""
+    users: set[str] = set()
+    for p in glob.glob(os.path.expanduser("~/.ssh/nscc_*")):
+        name = Path(p).name[len("nscc_"):]
+        if name.endswith(".pub"):
+            continue
+        users.add(name[:-len(".pass")] if name.endswith(".pass") else name)
+    return sorted(users)
+
+
+# Shared ControlMaster socket dir + persistence. One master per account
+# (ControlPath %C hashes host+user, so it's stable across the generated config
+# and nscc_login.sh): the password authenticates ONCE and every later qstat/
+# qdel/tunnel connection multiplexes over it. ControlPersist must outlast the
+# longest idle gap on an account (and ideally the whole sweep) so a no-sshpass,
+# pre-opened master stays up — keep it well above limits.time_budget_min.
+SSH_CM_DIR = Path.home() / ".ssh" / "cm"
+SSH_CM_PERSIST = "4h"
 
 
 def gen_ssh_config(accounts: list[str], hostname: str, out_path: Path) -> Path:
     """Write a scoped ssh config (one Host nscc-<user> block per account) so the
     wrappers reach nscc under any account via `ssh -F <this>` without touching
-    ~/.ssh/config."""
+    ~/.ssh/config. Each block multiplexes over a shared ControlMaster socket;
+    accounts with a password file (nscc_<user>.pass) authenticate by password
+    (sshpass / a pre-opened master), legacy key accounts keep IdentityFile."""
+    SSH_CM_DIR.mkdir(parents=True, exist_ok=True)
     blocks = []
     for user in accounts:
         key = os.path.expanduser(f"~/.ssh/nscc_{user}")
-        blocks.append(
-            f"Host nscc-{user}\n"
-            f"    HostName {hostname}\n"
-            f"    User {user}\n"
-            f"    IdentityFile {key}\n"
-            f"    BatchMode yes\n"
-        )
+        lines = [
+            f"Host nscc-{user}",
+            f"    HostName {hostname}",
+            f"    User {user}",
+            "    ControlMaster auto",
+            f'    ControlPath "{SSH_CM_DIR}/%C"',
+            f"    ControlPersist {SSH_CM_PERSIST}",
+        ]
+        if os.path.exists(_nscc_pass_file(user)):
+            # nscc disabled key auth: go straight to password. No IdentityFile /
+            # BatchMode — both suppress the password prompt sshpass needs.
+            lines += [
+                "    PreferredAuthentications password",
+                "    PubkeyAuthentication no",
+                "    NumberOfPasswordPrompts 1",
+            ]
+        else:
+            lines += [f'    IdentityFile "{key}"', "    BatchMode yes"]
+        blocks.append("\n".join(lines) + "\n")
     out_path.write_text("\n".join(blocks))
     return out_path
 
@@ -184,7 +221,7 @@ def build_lanes(sweep: dict, args, run_dir: Path) -> tuple[list[Lane], str | Non
             # non-atomic free-GPU probe and double-book one node's cards. The shared
             # claims file (flock'd in run_ccds.sh) keeps their picks disjoint.
             slurm_env = {"CCDS_CLAIMS": str(run_dir / f"{tname}.claims")}
-            # Per-target serving venv (e.g. the eviction fork) — run_ccds.sh reads
+            # Per-target serving venv (e.g. the vllm fork) — run_ccds.sh reads
             # VLLM_VENV; without it the wrapper defaults to $HOME/vllm/.venv.
             if tcfg.get("vllm_venv"):
                 slurm_env["VLLM_VENV"] = str(tcfg["vllm_venv"])
@@ -204,7 +241,7 @@ def build_lanes(sweep: dict, args, run_dir: Path) -> tuple[list[Lane], str | Non
             for ekey, opt in (("PROJECT", "project"), ("QUEUE", "queue"),
                               ("NCPUS", "ncpus"), ("WALLTIME", "walltime"),
                               ("CLIENT_HOST", "client_host"),
-                              # per-target serving venv (e.g. eviction fork);
+                              # per-target serving venv (e.g. vllm fork);
                               # run_nscc.sh reads NSCC_VLLM_VENV.
                               ("NSCC_VLLM_VENV", "vllm_venv")):
                 if tcfg.get(opt) is not None:
@@ -239,8 +276,13 @@ def build_lanes(sweep: dict, args, run_dir: Path) -> tuple[list[Lane], str | Non
                         "SSH_CONFIG": str(cfg_path),
                         "NGPUS": str(tcfg.get("ngpus", 2)),
                         **({"PROJECT": str(tcfg["project"])} if tcfg.get("project") else {}),
-                        # per-target serving venv (e.g. eviction fork); run_nscc.sh reads it.
+                        # per-target serving venv (e.g. vllm fork); run_nscc.sh reads it.
                         **({"NSCC_VLLM_VENV": str(tcfg["vllm_venv"])} if tcfg.get("vllm_venv") else {}),
+                        # nscc disabled key auth: point the wrappers (so_ssh, tunnel.sh) at
+                        # this account's password file so sshpass can feed it. Absent =
+                        # legacy key / a pre-opened ControlMaster (nscc_login.sh).
+                        **({"SO_SSH_PASS_FILE": _nscc_pass_file(user)}
+                           if os.path.exists(_nscc_pass_file(user)) else {}),
                     },
                 ))
         elif kind == "baremetal":

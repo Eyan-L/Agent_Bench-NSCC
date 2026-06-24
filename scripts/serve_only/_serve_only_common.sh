@@ -32,22 +32,73 @@ _so_load_env() {
 }
 _so_load_env
 
+# "Password mode": a per-account password file is configured (SO_SSH_PASS_FILE,
+# set by the orchestrator to ~/.ssh/nscc_<user>.pass). nscc disabled SSH key auth
+# — only passwords are accepted — so we either feed the password via sshpass or
+# reuse a ControlMaster socket pre-opened by nscc_login.sh. Unset/absent file =
+# the default key/agent behaviour (hpcc and other key hosts are untouched).
+so_pass_mode() { [[ -n "${SO_SSH_PASS_FILE:-}" && -f "${SO_SSH_PASS_FILE:-}" ]]; }
+
 # Run ssh, transparently injecting `-F $SSH_CONFIG` when the caller set it. This
 # is how the fan-out orchestrator drives nscc under multiple accounts WITHOUT
 # touching ~/.ssh/config: it generates a scoped config (one `Host nscc-<user>`
-# block per ~/.ssh/nscc_<user> key) and exports SSH_CONFIG=<that file>. Every
-# `ssh "$REMOTE" …` in the wrappers goes through here, so the same REMOTE alias
-# resolves under whichever account the scoped config defines. Unset SSH_CONFIG =
-# plain ssh (the default single-account / ~/.ssh/config behaviour). Pass-through
-# of all args means `-G`, `-o …`, `-N -L …` forms all keep working.
+# block per account) and exports SSH_CONFIG=<that file>. Every `ssh "$REMOTE" …`
+# in the wrappers goes through here, so the same REMOTE alias resolves under
+# whichever account the scoped config defines. Unset SSH_CONFIG = plain ssh (the
+# default single-account / ~/.ssh/config behaviour). Pass-through of all args
+# means `-G`, `-o …`, `-N -L …` forms all keep working.
+#
+# Password mode (nscc key auth disabled): the generated config carries
+# `ControlMaster auto` + a shared ControlPath, so the password authenticates ONCE
+# per account and every later call (qstat poll, qdel, tunnel) multiplexes over
+# that master with no re-auth — which also collapses the per-cell connection
+# count that used to trip the login node's MaxStartups. The first connection is
+# authenticated by sshpass (if installed) reading SO_SSH_PASS_FILE; without
+# sshpass it reuses a master pre-opened by nscc_login.sh. stdin is /dev/null in
+# the wrappers, so a missing password never hangs — ssh fails fast instead.
 so_ssh() {
-    ssh ${SSH_CONFIG:+-F "$SSH_CONFIG"} "$@"
+    local pre=() auth=()
+    if so_pass_mode && command -v sshpass >/dev/null 2>&1; then
+        pre=(sshpass -f "$SO_SSH_PASS_FILE")
+        auth=(-o PreferredAuthentications=password -o PubkeyAuthentication=no \
+              -o NumberOfPasswordPrompts=1)
+    fi
+    "${pre[@]}" ssh ${SSH_CONFIG:+-F "$SSH_CONFIG"} "${auth[@]}" "$@"
+}
+
+# Retry a command on transient failure with exponential backoff + jitter.
+# Built for SSH-to-login-node calls (e.g. the qsub submission) that get reset
+# pre-auth — "kex_exchange_identification: Connection reset by peer" — when many
+# fan-out cells dogpile one login node's sshd at once (MaxStartups / fail2ban).
+# Such a reset never runs the remote command (ssh exits 255 before auth), so a
+# retry can't double-submit. Echoes the command's stdout; returns the last
+# attempt's exit code. Tunable via env: SO_SSH_RETRIES (default 5),
+# SO_SSH_BACKOFF_BASE (seconds, default 3).
+so_retry() {
+    local attempts="${SO_SSH_RETRIES:-5}"
+    local base="${SO_SSH_BACKOFF_BASE:-3}"
+    local n=1 out rc delay
+    while :; do
+        out="$("$@")"; rc=$?
+        (( rc == 0 )) && { printf '%s' "$out"; return 0; }
+        (( n >= attempts )) && { printf '%s' "$out"; return "$rc"; }
+        # exponential backoff (base, 2x, 4x, ...) plus jitter, to spread the
+        # retried connections out instead of dogpiling the login node again.
+        delay=$(( base * 2 ** (n - 1) + RANDOM % base ))
+        echo "${TAG:-[serve_only]} ssh attempt $n/$attempts failed (rc=$rc); retry in ${delay}s ..." >&2
+        sleep "$delay"
+        n=$(( n + 1 ))
+    done
 }
 
 # Resolve $HOME on a remote SSH host (login node). Echoes the absolute path.
 so_remote_home() {
-    local remote="$1"
-    so_ssh -o BatchMode=yes "$remote" 'printf %s "$HOME"' 2>/dev/null
+    local remote="$1" bm=(-o BatchMode=yes)
+    # BatchMode=yes disables password auth, which would block sshpass / a fresh
+    # master in password mode; drop it there (NumberOfPasswordPrompts=1 still
+    # keeps a missing password from hanging).
+    so_pass_mode && bm=()
+    so_ssh "${bm[@]}" "$remote" 'printf %s "$HOME"' 2>/dev/null
 }
 
 # Append one JSON record to $ALLOC_MANIFEST (the fan-out placement ledger), if

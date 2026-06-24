@@ -8,8 +8,10 @@
 # job's .node file -> tunnel.sh (ntu_cpu -> nscc login -> compute:8000) ->
 # run_tb_client.sh -> trap: kill tunnel + qdel.
 #
-# Prerequisite: ntu_cpu must be able to `ssh nscc` (a Host entry + your SSH key).
-# See scripts/serve_only/README.md.
+# Prerequisite: ntu_cpu must be able to `ssh nscc`. nscc disabled SSH key auth, so
+# this is password-based — either drop the password in ~/.ssh/nscc_<user>.pass
+# (+ install sshpass) or pre-open a ControlMaster with nscc_login.sh. so_ssh
+# auto-detects both (SO_SSH_PASS_FILE). See scripts/serve_only/README.md.
 #
 # Env (override K=V on the command line):
 #   REMOTE           SSH alias of the nscc LOGIN node. Default: nscc
@@ -107,7 +109,10 @@ echo "$TAG qsub serve_nscc.pbs (project=$PROJECT queue=${QUEUE:-<default>} $SELE
 # it; unset = whole-card default). Appended to qsub -v only when set; serve_vllm.sh
 # picks it up from the job environment.
 GPU_UTIL_KV="${GPU_MEM_UTIL:+,GPU_MEM_UTIL=$GPU_MEM_UTIL}"
-JOBID="$(so_ssh "$REMOTE" "cd '$REMOTE_KIT_ROOT' && qsub \
+# Retry the submission: when many cells fan out to one login node at once, its
+# sshd resets the extra connections pre-auth (Connection reset by peer) and qsub
+# never runs — so_retry backs off and re-dials instead of failing the cell.
+JOBID="$(so_retry so_ssh "$REMOTE" "cd '$REMOTE_KIT_ROOT' && qsub \
     -P '$PROJECT' $QUEUE_ARG \
     -l $SELECT -l walltime=$WALLTIME \
     -v NGPUS=$NGPUS,NSCC_VLLM_VENV=$NSCC_VLLM_VENV,MODEL=$MODEL_NAME,PORT=$PORT$GPU_UTIL_KV \

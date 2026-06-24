@@ -34,12 +34,19 @@
 #   SSH_CONFIG    Optional scoped ssh config (`ssh -F`). The fan-out orchestrator
 #                 sets this to drive nscc under a specific account; unset = plain
 #                 ssh / ~/.ssh/config.
+#   SO_SSH_PASS_FILE  Optional per-account password file (nscc disabled key auth).
+#                 When set and sshpass is installed, the forward authenticates via
+#                 sshpass; otherwise it reuses a pre-opened ControlMaster socket.
 #
 # Usage:
 #   bash scripts/serve_only/tunnel.sh            # foreground, Ctrl-C to stop
 #   REMOTE=<gpu-host> bash scripts/serve_only/tunnel.sh
 #   REMOTE=ccds-ai FORWARD_HOST=node05 bash scripts/serve_only/tunnel.sh   # 2-hop
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/serve_only/_serve_only_common.sh
+source "$SCRIPT_DIR/_serve_only_common.sh"
 
 REMOTE="${REMOTE:-}"   # REQUIRED — SSH alias or user@ip (see .env.example)
 FORWARD_HOST="${FORWARD_HOST:-127.0.0.1}"
@@ -49,6 +56,16 @@ BIND_ADDR="${BIND_ADDR:-0.0.0.0}"
 # `ssh -F <scoped config>` when the orchestrator set SSH_CONFIG (multi-account
 # nscc); empty otherwise. As an array so the unset case adds no empty arg.
 SSH_F=(); [[ -n "${SSH_CONFIG:-}" ]] && SSH_F=(-F "$SSH_CONFIG")
+# Password mode (nscc key auth disabled): drive the forward through sshpass so it
+# can establish the master when one isn't already up. With no sshpass it falls
+# back to a master pre-opened by nscc_login.sh (the -F config multiplexes over
+# it). Empty arrays in the default key path add no args.
+SSHPASS_PRE=(); AUTH_OPTS=()
+if so_pass_mode && command -v sshpass >/dev/null 2>&1; then
+    SSHPASS_PRE=(sshpass -f "$SO_SSH_PASS_FILE")
+    AUTH_OPTS=(-o PreferredAuthentications=password -o PubkeyAuthentication=no \
+               -o NumberOfPasswordPrompts=1)
+fi
 
 if ! ssh "${SSH_F[@]}" -G "$REMOTE" >/dev/null 2>&1; then
     echo "[tunnel] ERROR: '$REMOTE' is not resolvable by ssh." >&2
@@ -62,7 +79,7 @@ echo "[tunnel] keep this running; test from another shell: curl http://127.0.0.1
 # -N: no remote command. ServerAlive*: drop dead tunnels so a restart is clean.
 # FORWARD_HOST is resolved on REMOTE: 127.0.0.1 = the SSH host itself; a compute
 # node hostname = a 2-hop forward (ntu_cpu -> login REMOTE -> compute:REMOTE_PORT).
-exec ssh "${SSH_F[@]}" -N \
+exec "${SSHPASS_PRE[@]}" ssh "${SSH_F[@]}" "${AUTH_OPTS[@]}" -N \
     -o ExitOnForwardFailure=yes \
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \

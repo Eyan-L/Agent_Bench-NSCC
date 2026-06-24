@@ -175,15 +175,23 @@ polls `qstat` until the job is `R`, reads the exec node from the job's
 exit. Default `NGPUS=2` (40 GB A100 → 2×40 GB); set `NGPUS=1` on an 80 GB/H100
 node. PBS cgroup-isolates the allocation, so the job uses `CUDA_VISIBLE_DEVICES=0..N-1`.
 
-**PBS prerequisites (CPU node):** copy your SSH key to `~/.ssh/` and add a `Host`
-entry for the login node:
+**PBS prerequisites (CPU node):** add a `Host` entry for the login node. nscc now
+**requires password auth** (keys disabled), so prefer connection multiplexing so
+you only type the password once:
 ```
 Host nscc
     HostName <login-host>
     User <your-account>
-    IdentityFile ~/.ssh/<your-key>
+    PreferredAuthentications password
+    PubkeyAuthentication no
+    ControlMaster auto
+    ControlPath ~/.ssh/cm/%C
+    ControlPersist 4h
 ```
-Try a direct `ssh nscc hostname` first; add a `ProxyJump` only if that fails. Also
+(`mkdir -p ~/.ssh/cm`. For a key host instead, use `IdentityFile ~/.ssh/<your-key>`.)
+Try a direct `ssh nscc hostname` first; add a `ProxyJump` only if that fails. For
+the multi-account fan-out the orchestrator generates this block per account — see
+**Multiple PBS accounts** for the password handling. Also
 ensure the vLLM venv exists on the login/compute side (`NSCC_VLLM_VENV`, default
 `~/vllm/.venv`) and the weights are staged at `~/scratch/models/Qwen3.6-35B-A3B-FP8`.
 
@@ -313,11 +321,32 @@ fraction of the card's TOTAL memory, and vLLM needs that budget to cover weights
 
 ### Multiple PBS accounts
 
-Keys live at `~/.ssh/nscc_<user>` (the user is the suffix). The orchestrator
-generates a **scoped ssh config** (one `Host nscc-<user>` block per selected key)
-under the run dir and drives `qsub` per account via `ssh -F` — your `~/.ssh/config`
-is never touched. Default is the `accounts` list in the TOML;
-`--accounts all` fans across every discovered key, `--accounts a,b` picks a subset.
+Credentials live at `~/.ssh/nscc_<user>` (the user is the suffix). The
+orchestrator generates a **scoped ssh config** (one `Host nscc-<user>` block per
+selected account) under the run dir and drives `qsub` per account via `ssh -F` —
+your `~/.ssh/config` is never touched. Default is the `accounts` list in the TOML;
+`--accounts all` fans across every discovered account, `--accounts a,b` picks a
+subset. An account is "discovered" from either a password file
+(`~/.ssh/nscc_<user>.pass`) or a legacy private key (`~/.ssh/nscc_<user>`).
+
+**nscc now requires password auth (keys disabled).** Every generated block sets
+`ControlMaster auto` + a shared `ControlPath`, so the password authenticates
+**once per account** and every later connection (qstat poll, qdel, the tunnel)
+multiplexes over that one master socket — no re-auth, and far fewer login-node
+connections (which also dodges the MaxStartups "Connection reset" dogpile). Two
+ways to supply the password, auto-detected at runtime:
+
+- **sshpass (hands-off):** put each password in `~/.ssh/nscc_<user>.pass`
+  (`chmod 600`) and `sudo apt-get install sshpass`. The wrappers feed it via
+  `sshpass -f`; the single fan-out command then runs unattended.
+- **Pre-opened master (no plaintext, no package):** before launching, run
+  `bash scripts/serve_only/nscc_login.sh` and type each password once. It opens a
+  persistent `ControlMaster` per account (same `ControlPath` the orchestrator
+  uses); the fan-out reuses them with zero re-auth. `ACTION=check`/`stop` inspect
+  or tear the masters down. The masters persist `4h` after last use.
+
+Legacy key accounts (a `~/.ssh/nscc_<user>` key, no `.pass`) keep `IdentityFile`
++ `BatchMode` and are unaffected.
 
 ### Where everything lands
 
