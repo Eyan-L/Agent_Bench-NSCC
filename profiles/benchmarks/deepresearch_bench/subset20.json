@@ -1,0 +1,116 @@
+{
+  "_doc": "DeepResearch-Bench subset20 used for context-window sweeps: the first 20 upstream tasks (dr_001..dr_020). Loader: agent_bench/benchmarks/deepresearch_bench/loader.py materializes instance_data from the vendored query.jsonl.",
+  "sweep_name": "dr_subset20",
+  "plan_version": "v1.0",
+  "application": "deepresearch_bench",
+  "instances": [
+    "dr_001",
+    "dr_002",
+    "dr_003",
+    "dr_004",
+    "dr_005",
+    "dr_006",
+    "dr_007",
+    "dr_008",
+    "dr_009",
+    "dr_010",
+    "dr_011",
+    "dr_012",
+    "dr_013",
+    "dr_014",
+    "dr_015",
+    "dr_016",
+    "dr_017",
+    "dr_018",
+    "dr_019",
+    "dr_020"
+  ],
+  "repo_mapping": {
+    "dr_001": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_002": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_003": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_004": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_005": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_006": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_007": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_008": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_009": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_010": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_011": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_012": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_013": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_014": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_015": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_016": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_017": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_018": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_019": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    },
+    "dr_020": {
+      "repo_id": "deepresearch_bench",
+      "base_commit": "dr-bench-v1"
+    }
+  },
+  "container_image": "hongrui0/dr-sandbox:1.0",
+  "wall_clock_budget_seconds": 3600,
+  "output_dir": "dr_subset20",
+  "seeds": [
+    42
+  ]
+}

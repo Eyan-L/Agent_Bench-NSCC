@@ -113,6 +113,33 @@ class OpenClawAgentCondition:
 
     # ------------------------------------------------------------------
 
+    def _resolve_agent_timeout_seconds(self, instance_data: Dict) -> int:
+        default_timeout = int(self.agent_config.max_time_seconds)
+        raw_timeout = instance_data.get("agent_timeout_sec")
+        if raw_timeout is None:
+            return default_timeout
+        try:
+            timeout = int(raw_timeout)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Ignoring invalid agent_timeout_sec=%r for %s; using default %ds",
+                raw_timeout,
+                instance_data.get("instance_id", "<unknown>"),
+                default_timeout,
+            )
+            return default_timeout
+        if timeout <= 0:
+            logger.warning(
+                "Ignoring non-positive agent_timeout_sec=%r for %s; using default %ds",
+                raw_timeout,
+                instance_data.get("instance_id", "<unknown>"),
+                default_timeout,
+            )
+            return default_timeout
+        return timeout
+
+    # ------------------------------------------------------------------
+
     def run(
         self,
         instance_data: Dict,
@@ -165,7 +192,7 @@ class OpenClawAgentCondition:
                 workspace_root=workspace_root,
                 session_id=run_dir.name,
                 message=message,
-                timeout_seconds=self.agent_config.max_time_seconds,
+                timeout_seconds=self._resolve_agent_timeout_seconds(instance_data),
             )
             step_end_ns = time.time_ns()
 
@@ -303,6 +330,8 @@ class OpenClawAgentCondition:
             "total_prompt_tokens": prompt_tokens,
             "total_completion_tokens": completion_tokens,
             "telemetry_path": str(spans_path) if spans_path else None,
+            "exit_code": getattr(self, "_last_exit_code", 0),
+            "error_message": err or None,
         }
 
     # ------------------------------------------------------------------
@@ -554,11 +583,13 @@ class OpenClawAgentCondition:
                 "check <state_dir>/logs/agent.live.stderr for what it was doing.",
                 elapsed, subprocess_timeout,
             )
+            self._last_exit_code = -1
             return None, "openclaw agent wall-clock timeout (subprocess)"
 
         elapsed = time.time() - dispatch_t0
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
+        self._last_exit_code = proc.returncode
         logger.info(
             "  openclaw agent returned: rc=%s elapsed=%.1fs "
             "stdout=%d bytes stderr=%d bytes",

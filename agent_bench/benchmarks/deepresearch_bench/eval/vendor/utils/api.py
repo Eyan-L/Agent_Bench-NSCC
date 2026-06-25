@@ -173,7 +173,11 @@ class AIClient:
         stage: Optional[str] = None,
     ) -> Union[str, Tuple[str, str]]:
         model_to_use = model or self.model
-        stage_cfg = _resolve_stage(stage)
+        stage_cfg = (
+            {}
+            if os.environ.get("LLM_DISABLE_REASONING_EFFORT") == "1"
+            else _resolve_stage(stage)
+        )
 
         payload = {
             "model": model_to_use,
@@ -183,7 +187,7 @@ class AIClient:
         # reasoning_effort is an OpenAI-family parameter (gpt-5.x reasoning
         # models). DeepSeek's OpenAI-compat surface rejects it, so gate by
         # agent_bench.serving. See vendor/PATCHES.md.
-        if LLM_BACKEND in ("openrouter", "openai"):
+        if LLM_BACKEND in ("openrouter", "openai") and "reasoning_effort" in stage_cfg:
             payload["reasoning_effort"] = stage_cfg["reasoning_effort"]
 
         try:

@@ -48,7 +48,6 @@ def _telemetry_bool(value: Any) -> Optional[bool]:
             return False
     return None
 
-
 def _spans_html_enabled_from_config() -> bool:
     """Read spans HTML generation from experiment/profile config.
 
@@ -383,8 +382,16 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         # TB and DR-Bench have no git-patch artifact — the agent's work lives
         # inside the task container (TB: services + files; DR: /workspace/report.md).
         skip_patch_gate = benchmark_kind in ("terminal_bench", "deepresearch_bench", "longbench", "request_bench")
+        agent_exit_code = result.get("exit_code", 0)
 
-        if skip_patch_gate or (patch_path.exists() and patch_path.stat().st_size > 0):
+        if agent_exit_code not in (0, None):
+            verdict = {
+                "status": "ERROR",
+                "error_message": result.get("error_message")
+                or f"agent exited with code {agent_exit_code}",
+                "agent_exit_code": agent_exit_code,
+            }
+        elif skip_patch_gate or (patch_path.exists() and patch_path.stat().st_size > 0):
             verdict = harness.run_tests(
                 container_id=container_id,
                 instance_id=run_config.instance_id,

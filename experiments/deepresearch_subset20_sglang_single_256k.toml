@@ -1,0 +1,30 @@
+name = "deepresearch_subset20_sglang_single_256k"
+description = "DeepResearch-Bench subset20 on OpenClaw with Brave search, Qwen3.6-35B research profile, SGLang single-engine serving, and 256K harness context."
+output_dir = "runs/deepresearch_subset20_sglang_single_256k"
+seeds = [42]
+
+[telemetry]
+spans_html = true
+
+[stages]
+cleanup = true
+
+[benchmark]
+name = "deepresearch_bench"
+profile = "profiles/benchmarks/deepresearch_bench/subset20.json"
+
+[harness]
+name = "openclaw"
+profile = "profiles/harnesses/openclaw_deepresearch_bench_brave.yaml"
+
+[model]
+profile = "profiles/models/qwen36_35b_a3b_local_research.json"
+
+[serving]
+profile = "profiles/serving/sglang/native_single.yaml"
+
+[deployment]
+profile = "profiles/deployments/local_docker.toml"
+
+[limits]
+max_workers = 2

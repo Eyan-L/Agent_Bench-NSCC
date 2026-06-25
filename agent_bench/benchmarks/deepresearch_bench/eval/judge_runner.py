@@ -78,11 +78,27 @@ class JudgeResult:
 # ---------------------------------------------------------------------------
 
 def _prepare_env() -> Dict[str, str]:
-    """Build the subprocess env: forces deepseek backend + aliases JINA key."""
+    """Build the subprocess env and alias the Jina key.
+
+    Defaults to DeepSeek for backwards compatibility, but allows local
+    OpenAI-compatible serving by setting LLM_BACKEND=openai.
+    """
     env = os.environ.copy()
-    if "DEEPSEEK_API_KEY" not in env:
-        raise RuntimeError("DEEPSEEK_API_KEY must be set in host env")
-    env["LLM_BACKEND"] = "deepseek"
+    backend = env.get("LLM_BACKEND", "deepseek").lower()
+    if backend == "deepseek":
+        if "DEEPSEEK_API_KEY" not in env:
+            raise RuntimeError("DEEPSEEK_API_KEY must be set in host env")
+        env["LLM_BACKEND"] = "deepseek"
+    elif backend == "openai":
+        if "OPENAI_API_KEY" not in env:
+            raise RuntimeError("OPENAI_API_KEY must be set in host env")
+        env["LLM_BACKEND"] = "openai"
+    elif backend == "openrouter":
+        if "OPENROUTER_API_KEY" not in env:
+            raise RuntimeError("OPENROUTER_API_KEY must be set in host env")
+        env["LLM_BACKEND"] = "openrouter"
+    else:
+        raise RuntimeError(f"unsupported LLM_BACKEND for judge: {backend!r}")
     # vendor's WebScrapingJinaTool reads JINA_API_KEY; user's env uses
     # JINA_READER_API. Map without mutating the user's shell.
     if "JINA_READER_API" in env and "JINA_API_KEY" not in env:

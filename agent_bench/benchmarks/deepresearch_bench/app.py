@@ -56,6 +56,7 @@ from agent_bench.benchmarks.conditions.gateway_helpers import (
     pick_free_gateway_port as _pick_free_gateway_port,
     release_gateway_port as _release_gateway_port,
 )
+from agent_bench.benchmarks.conditions.openclaw_config import openclaw_model_entry
 from agent_bench.benchmarks.swebench.app import (
     DEFAULT_OPENCLAW_RUNTIME_IMAGE,
     _force_rmtree,
@@ -519,13 +520,9 @@ class DeepResearchHarness:
             agent_model_p = providers.setdefault("agent_model", {})
             agent_model_p["api"] = _OPENAI_CHAT_COMPLETIONS_API
             agent_model_p.setdefault("apiKey", model_cfg.api_key or "sk-dummy")
-            agent_model_p["models"] = [{
-                "id": model_cfg.name,
-                "name": model_cfg.name,
-                "api": _OPENAI_CHAT_COMPLETIONS_API,
-                "contextWindow": model_cfg.context_window,
-                "maxTokens": model_cfg.max_tokens,
-            }]
+            agent_model_p["models"] = [
+                openclaw_model_entry(model_cfg, harness_cfg, api=_OPENAI_CHAT_COMPLETIONS_API)
+            ]
             agents_d = oc_cfg.setdefault("agents", {}).setdefault("defaults", {})
             agents_d.setdefault("model", {})["primary"] = f"agent_model/{model_cfg.name}"
             with open(state_dir / "openclaw.json", "w") as fh:

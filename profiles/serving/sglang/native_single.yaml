@@ -1,0 +1,27 @@
+# Native single-engine SGLang serving for local GPU experiments.
+serving:
+  config_id: sglang-native-single
+  backend: sglang
+  preset: single
+  serving_mode: native
+  endpoint:
+    scheme: http
+    bind_host: 0.0.0.0
+    client_host: 127.0.0.1
+    port: 8000
+    path: /v1
+  runtime:
+    tensor_parallel_size: 1
+    cuda_visible_devices: "0"
+    gpu_mem_util: 0.85
+    enable_hierarchical_cache: false
+    page_size: 1
+  scheduler:
+    max_num_seqs: 128
+    enable_prefix_caching: true
+  disaggregation:
+    enabled: false
+    flashinfer_workspace_base: /mnt/vdb/chengzhi/flashinfer_workspace
+  additional_flags:
+    enable_request_time_stats_logging: true
+  extra_args: []
