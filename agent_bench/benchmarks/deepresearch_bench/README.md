@@ -9,7 +9,7 @@ The agent reads the research question from `/workspace/PROMPT.md`, searches
 the web, and writes a long-form markdown report with inline citations to
 `/workspace/report.md`. After the agent says `DONE`, the harness collects
 the report and runs the vendored RACE + FACT evaluation pipelines against
-it on the host (DeepSeek-V4 as judge).
+it on the host using an OpenAI-compatible judge backend.
 
 ## Layout
 
@@ -37,7 +37,11 @@ agent_bench/benchmarks/deepresearch_bench/
 |-------------------|------------------------------------------------------|
 | `BRAVE_API_KEY`   | OC native `web_search` tool (passed to OC container) |
 | `JINA_READER_API` | FACT pipeline citation scraping (aliased to `JINA_API_KEY`) |
-| `DEEPSEEK_API_KEY` | RACE + FACT judge model (DeepSeek-V4-Pro)           |
+| `OPENAI_API_KEY`  | RACE + FACT judge model; optional for local OpenAI-compatible endpoints |
+| `OPENAI_BASE_URL` | Optional OpenAI-compatible judge endpoint override  |
+
+If `LLM_BACKEND=openai` and `OPENAI_API_KEY` is unset, the judge uses `EMPTY`
+as a dummy key and lets the endpoint validate the request.
 
 vLLM endpoint at `http://localhost:8000/v1` for the agent model (mirrors
 TB / SWE-bench convention).
@@ -102,8 +106,9 @@ Per task, the harness writes to
   decides "does this URL support the cited claim" → citation accuracy +
   effective-citations count.
 
-Both pipelines live verbatim under `eval/vendor/`; the
-only in-tree edit is the `deepseek` backend added to `utils/api.py`
+Both pipelines live under `eval/vendor/`; the
+in-tree edits add OpenAI-compatible backend selection, including optional
+DeepSeek support via `LLM_BACKEND=deepseek`
 (see [vendor/PATCHES.md](vendor/PATCHES.md)).
 
 ## Architecture
@@ -111,7 +116,7 @@ only in-tree edit is the `deepseek` backend added to `utils/api.py`
 Two-container model identical to Terminal-Bench:
 
 ```
-host  ── vLLM (agent) / DeepSeek (judge) / Brave / Jina
+host  ── vLLM (agent) / OpenAI-compatible judge / Brave / Jina
                                   ▲
                                   │
     ┌────────────────────────────────────┐

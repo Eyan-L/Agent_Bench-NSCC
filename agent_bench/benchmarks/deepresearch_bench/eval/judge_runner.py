@@ -1,7 +1,8 @@
 """Host-side RACE + FACT runner for one DR-Bench instance.
 
-Shells out to the vendored ``deepresearch_bench`` scripts, which we patched
-to accept ``LLM_BACKEND=deepseek``. See ``vendor/PATCHES.md``.
+Shells out to the vendored ``deepresearch_bench`` scripts. The default judge
+backend is OpenAI-compatible serving; DeepSeek remains available via
+``LLM_BACKEND=deepseek``. See ``vendor/PATCHES.md``.
 
 Per-instance contract — one ``run()`` call evaluates one ``(id, prompt,
 article)`` tuple and writes ``score.json`` to ``output_dir``. Crashes on
@@ -18,13 +19,16 @@ shared ``raw_data/`` / ``cleaned_data/`` directories.
 
 Required env (resolved by ``run()``):
 
-    DEEPSEEK_API_KEY    LLM judge backend (RACE + FACT)
+    OPENAI_API_KEY      LLM judge backend (RACE + FACT); optional for local
+                        OpenAI-compatible endpoints that do not require auth
     JINA_READER_API     Jina Reader for FACT citation scraping
                         (aliased internally to JINA_API_KEY)
 
 Optional:
-    RACE_MODEL          override the deepseek-chat default
-    FACT_MODEL          override the deepseek-chat default
+    OPENAI_BASE_URL     OpenAI-compatible API endpoint
+    RACE_MODEL          override the OpenAI backend default
+    FACT_MODEL          override the OpenAI backend default
+    LLM_BACKEND         ``openai`` (default), ``deepseek``, or ``openrouter``
     AB_BENCHMARK_JUDGE_WORKERS   max RACE thread workers (default 4)
 """
 from __future__ import annotations
@@ -80,18 +84,19 @@ class JudgeResult:
 def _prepare_env() -> Dict[str, str]:
     """Build the subprocess env and alias the Jina key.
 
-    Defaults to DeepSeek for backwards compatibility, but allows local
-    OpenAI-compatible serving by setting LLM_BACKEND=openai.
+    Defaults to OpenAI-compatible serving. Set LLM_BACKEND=deepseek to use
+    DeepSeek explicitly. For OpenAI-compatible local endpoints, pass a dummy
+    key when OPENAI_API_KEY is absent and let the endpoint validate the request.
     """
     env = os.environ.copy()
-    backend = env.get("LLM_BACKEND", "deepseek").lower()
+    backend = env.get("LLM_BACKEND", "openai").lower()
     if backend == "deepseek":
         if "DEEPSEEK_API_KEY" not in env:
             raise RuntimeError("DEEPSEEK_API_KEY must be set in host env")
         env["LLM_BACKEND"] = "deepseek"
     elif backend == "openai":
-        if "OPENAI_API_KEY" not in env:
-            raise RuntimeError("OPENAI_API_KEY must be set in host env")
+        if not env.get("OPENAI_API_KEY"):
+            env["OPENAI_API_KEY"] = "EMPTY"
         env["LLM_BACKEND"] = "openai"
     elif backend == "openrouter":
         if "OPENROUTER_API_KEY" not in env:
@@ -186,9 +191,9 @@ def _run_fact(
     """Walk the 5-stage FACT pipeline for a single instance.
 
     `workers` controls cross-instance parallelism; per-instance we hard-cap
-    `validate` at 1 to avoid blowing DeepSeek-V4-Pro rate limits with
-    concurrent reasoning-model calls. With workers>=2, validate.py retries
-    3x and then sets validate_error, which stat.py silently skips
+    `validate` at 1 to avoid blowing judge-backend rate limits with concurrent
+    reasoning-model calls. With workers>=2, validate.py retries 3x and then
+    sets validate_error, which stat.py silently skips
     (`continue`) → total_citations=0 even though scrape returned good
     content. Verified manually on dr_001's report: workers=1 yields 33
     citations with 79% supported; workers=4 yielded 0.
@@ -200,8 +205,8 @@ def _run_fact(
     validated = output_subdir / "validated.jsonl"
     result_txt = output_subdir / "fact_result.txt"
 
-    # Per-instance, validate makes ~5-10 long-context DeepSeek calls; >1
-    # worker reliably trips rate limits. Other stages tolerate workers>1.
+    # Per-instance, validate makes ~5-10 long-context judge calls; >1 worker
+    # can trip rate limits. Other stages tolerate workers>1.
     validate_workers = int(os.environ.get("DRB_VALIDATE_WORKERS", "1"))
 
     stages = [

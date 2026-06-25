@@ -15,11 +15,11 @@ container model + exec-bridge dispatcher. The only DR-specific pieces:
     container so OC's native ``web_search`` + ``web_fetch`` tools work.
     No new patch / no new bridge backend — see plan doc Q1 / Path A.
   - ``run_tests`` collects ``/workspace/report.md`` from the sandbox and
-    shells out to the vendored RACE + FACT judge (DeepSeek-V4, host-side).
+    shells out to the vendored RACE + FACT judge (host-side).
 
 Architecture (docker mode):
 
-    host  ── vLLM @ localhost:8000 / DeepSeek API (judge) / Brave / Jina
+    host  ── vLLM @ localhost:8000 / OpenAI-compatible judge / Brave / Jina
                                   ▲
                                   │
     ┌─────────────────────────────────────┐
@@ -47,11 +47,16 @@ import os
 import re
 import secrets
 import shutil
+import string
 import subprocess
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from agent_bench.benchmarks.conditions.agent_otel import (
+    otel_config_values,
+    otel_env,
+)
 from agent_bench.benchmarks.conditions.gateway_helpers import (
     pick_free_gateway_port as _pick_free_gateway_port,
     release_gateway_port as _release_gateway_port,
@@ -63,6 +68,7 @@ from agent_bench.benchmarks.swebench.app import (
     _oc_sandbox_name,
 )
 from agent_bench.harnesses.openclaw.dispatcher import OpenClawRemoteDispatcher
+from agent_bench.harnesses.hermes.dispatcher import HermesDispatcher
 from agent_bench.core.config import runtime_endpoint_for_container, load_active_model_and_serving
 from agent_bench.core.profile_io import load_profile
 
@@ -72,6 +78,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_SANDBOX_IMAGE = os.environ.get(
     "AB_BENCHMARK_SANDBOX_IMAGE", "hongrui0/dr-sandbox:1.0",
 )
+DEFAULT_HERMES_RUNTIME_IMAGE = os.environ.get(
+    "AB_AGENT_RUNTIME_IMAGE", "agent-bench/hermes:v2026.5.16",
+)
+_STATE_DIR_IN_HERMES = "/opt/data"
 _OPENAI_CHAT_COMPLETIONS_API = "openai-completions"
 
 # Env vars whose values must reach the OC container so OC's native web
@@ -689,8 +699,8 @@ class DeepResearchHarness:
         **_kw,
     ) -> Dict:
         """Collect the agent's report and run RACE + FACT against it."""
-        # Import lazily — judge_runner pulls in vendor/utils/api.py which
-        # only resolves cleanly when DEEPSEEK_API_KEY etc are set.
+        # Import lazily — judge_runner pulls in vendor/utils/api.py, which
+        # resolves the judge backend from environment variables.
         from agent_bench.benchmarks.deepresearch_bench.eval import judge_runner
 
         run_id = run_id or instance_id
@@ -875,6 +885,377 @@ class DeepResearchHarness:
                            capture_output=True, check=False)
         subprocess.run(["docker", "network", "rm", net],
                        capture_output=True, check=False)
+
+
+class DeepResearchHermesHarness(DeepResearchHarness):
+    """Hermes runtime container plus DeepResearch sandbox."""
+
+    def __init__(
+        self,
+        benchmark_data_root: Optional[Path] = None,
+        hm_image: Optional[str] = None,
+        workspace_base: Optional[Path] = None,
+    ):
+        super().__init__(
+            benchmark_data_root=benchmark_data_root,
+            oc_image=DEFAULT_OPENCLAW_RUNTIME_IMAGE,
+            workspace_base=workspace_base,
+        )
+        self.hm_image = hm_image or DEFAULT_HERMES_RUNTIME_IMAGE
+
+    def prepare_environment(
+        self,
+        instance_id: str,
+        repo_id: str,
+        base_commit: str,
+        container_image: Optional[str] = None,
+        workspace_root: Optional[str] = None,
+        run_id: Optional[str] = None,
+        instance_data: Optional[Dict] = None,
+    ) -> Dict:
+        if instance_data is None:
+            raise RuntimeError(
+                "DeepResearchHermesHarness.prepare_environment requires instance_data"
+            )
+        if instance_data.get("benchmark") != "deepresearch_bench":
+            raise RuntimeError(
+                "DeepResearchHermesHarness only handles benchmark=deepresearch_bench "
+                f"(got {instance_data.get('benchmark')!r})"
+            )
+
+        docker_image = (
+            container_image
+            or instance_data.get("docker_image")
+            or DEFAULT_SANDBOX_IMAGE
+        )
+        run_id = run_id or instance_id
+        rid_short = run_id[:12]
+        net_name = f"hm-dr-net-{rid_short}"
+        hm_name = f"hm-dr-{rid_short}"
+
+        sandbox_agent_id = "deep_researcher"
+        scope_key = f"agent:{sandbox_agent_id}"
+        sandbox_prefix = f"oc-sbx-{rid_short}-"
+        task_container_name = _oc_sandbox_name(sandbox_prefix, scope_key)
+
+        for image, pull in ((self.hm_image, False), (docker_image, True)):
+            r = subprocess.run(
+                ["docker", "image", "inspect", image],
+                capture_output=True, text=True,
+            )
+            if r.returncode == 0:
+                continue
+            if not pull:
+                raise RuntimeError(
+                    f"hermes image not found: {image}\n"
+                    "Build it first: bash agent_bench/harnesses/hermes/docker/build.sh"
+                )
+            logger.info("  sandbox image %s not local, pulling...", image)
+            r = subprocess.run(
+                ["docker", "pull", image],
+                capture_output=True, text=True, timeout=600,
+            )
+            if r.returncode != 0:
+                raise RuntimeError(
+                    f"sandbox image pull failed: {image}\n{r.stderr.strip()}"
+                )
+
+        run_root = self.workspace_base / run_id
+        if run_root.exists():
+            _force_rmtree(run_root, ignore_errors=True)
+        ws_host = run_root / "workspace"
+        ws_host.mkdir(parents=True, exist_ok=True)
+        self._seed_workspace(ws_host, instance_data)
+
+        state_dir = self._build_hermes_state_dir(
+            run_id=run_id,
+            sandbox_image=docker_image,
+        )
+        dispatcher: Optional[HermesDispatcher] = None
+
+        def rollback() -> None:
+            if dispatcher is not None:
+                try:
+                    dispatcher.stop()
+                except Exception:
+                    pass
+            self._best_effort_cleanup(net_name, hm_name, task_container_name)
+
+        try:
+            r = subprocess.run(
+                ["docker", "network", "create", net_name],
+                capture_output=True, text=True,
+            )
+            if r.returncode != 0 and "already exists" not in (r.stderr or ""):
+                raise RuntimeError(f"docker network create failed: {r.stderr.strip()}")
+
+            sandbox_env_args: List[str] = []
+            for key in _OPENCLAW_PASSTHROUGH_ENV_KEYS:
+                value = os.environ.get(key)
+                if value:
+                    sandbox_env_args.extend(["-e", f"{key}={value}"])
+                else:
+                    logger.warning(
+                        "  %s not set in host env; DeepResearch Hermes agent "
+                        "will not have the Brave API key in its sandbox",
+                        key,
+                    )
+
+            r = subprocess.run(
+                [
+                    "docker", "run", "-d",
+                    "--name", task_container_name,
+                    "--network", net_name,
+                    "--user", "0",
+                    "--label", "hermes.sandbox=1",
+                    "--label", f"openclaw.sessionKey={scope_key}",
+                    "--label", f"oc-eval.run_id={run_id}",
+                    "-v", f"{ws_host}:/workspace:rw",
+                    "-w", "/workspace",
+                    *sandbox_env_args,
+                    "--entrypoint", "sleep",
+                    docker_image,
+                    "infinity",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            if r.returncode != 0:
+                raise RuntimeError(f"deepresearch sandbox start failed: {r.stderr.strip()}")
+            task_container_id = r.stdout.strip()
+
+            dispatcher = HermesDispatcher()
+            dispatcher.start(state_dir=state_dir, backend="docker", target=task_container_name)
+
+            model_cfg, _serving_cfg = load_active_model_and_serving()
+            model_name = os.environ.get("HERMES_MODEL") or model_cfg.name
+            provider = os.environ.get("HERMES_INFERENCE_PROVIDER") or model_cfg.provider
+            base_url = runtime_endpoint_for_container(model_cfg.endpoint, "vllm-host")
+            api_key = os.environ.get("OPENAI_API_KEY") or model_cfg.api_key or "EMPTY"
+
+            bridge_mounts, bridge_env = dispatcher.agent_mounts_and_env()
+            bridge_args: List[str] = []
+            for mount in bridge_mounts:
+                bridge_args += ["-v", f"{mount.host}:{mount.container}:{mount.mode}"]
+
+            hm_env = {
+                "HERMES_HOME": _STATE_DIR_IN_HERMES,
+                "AB_RUN_ID": run_id,
+                "HERMES_RUN_ID": run_id,
+                "HERMES_INFERENCE_MODEL": model_name,
+                "HERMES_INFERENCE_PROVIDER": provider,
+                "AB_AGENT_RUNTIME_EVENTS_FILE": f"{_STATE_DIR_IN_HERMES}/events.jsonl",
+                "HERMES_AGENT_BENCH_EVENTS": f"{_STATE_DIR_IN_HERMES}/events.jsonl",
+                "OPENAI_API_KEY": api_key,
+                "OPENAI_BASE_URL": base_url,
+                "MINIMAX_API_KEY": api_key,
+                "MINIMAX_BASE_URL": base_url,
+                "TERMINAL_ENV": "docker",
+                "TERMINAL_CWD": "/workspace",
+                "TERMINAL_DOCKER_IMAGE": docker_image,
+                **bridge_env,
+                **otel_env(
+                    service_name="agent-bench-hermes",
+                    run_id=run_id,
+                    endpoint=self._hermes_otel_endpoint(),
+                    extra_attrs={"hm.run_id": run_id, "dr.instance_id": instance_id},
+                ),
+            }
+            for key in _OPENCLAW_PASSTHROUGH_ENV_KEYS:
+                value = os.environ.get(key)
+                if value:
+                    hm_env[key] = value
+
+            env_args: List[str] = []
+            for key, value in hm_env.items():
+                env_args += ["-e", f"{key}={value}"]
+
+            r = subprocess.run(
+                [
+                    "docker", "run", "-d",
+                    "--name", hm_name,
+                    "--network", net_name,
+                    "--add-host", "vllm-host:host-gateway",
+                    "--user", "0",
+                    "-v", f"{state_dir}:{_STATE_DIR_IN_HERMES}:rw",
+                    "-v", f"{ws_host}:/workspace:rw",
+                    *bridge_args,
+                    *env_args,
+                    "-w", "/workspace",
+                    self.hm_image,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            if r.returncode != 0:
+                raise RuntimeError(f"hermes container start failed: {r.stderr.strip()}")
+            hm_container_id = r.stdout.strip()
+
+            return {
+                "container_id": hm_container_id,
+                "container_name": hm_name,
+                "hm_container_id": hm_container_id,
+                "task_container_id": task_container_id,
+                "task_container_name": task_container_name,
+                "network_name": net_name,
+                "workspace_root": "/workspace",
+                "workspace_host_path": str(ws_host),
+                "sandbox_image": docker_image,
+                "state_dir": str(state_dir),
+                "agent_env": hm_env,
+                "dr_prompt": instance_data["prompt"],
+                "dr_language": instance_data.get("language", "en"),
+                "dr_report_file": instance_data.get("report_file", "/workspace/report.md"),
+                "container_engine": "docker",
+                "instance_name": task_container_name,
+                **dispatcher.env_info(),
+            }
+        except Exception:
+            rollback()
+            raise
+
+    def _build_hermes_state_dir(self, *, run_id: str, sandbox_image: str) -> Path:
+        state_dir = self.state_base / run_id
+        if state_dir.exists():
+            _force_rmtree(state_dir, ignore_errors=True)
+        state_dir.mkdir(parents=True)
+
+        harness_cfg = {}
+        harness_path = os.environ.get("AB_HARNESS_CONFIG")
+        if harness_path and os.path.isfile(harness_path):
+            harness_cfg = load_profile(harness_path)
+        hm_cfg = harness_cfg.get("hermes") or {}
+        model_cfg, _serving_cfg = load_active_model_and_serving()
+        template_path = (
+            Path(os.environ.get("AB_REPO_ROOT", os.getcwd()))
+            / "agent_bench" / "harnesses" / "hermes" / "state" / "config.yaml.template"
+        )
+        values = {
+            "AB_MODEL_NAME": os.environ.get("AB_MODEL_NAME") or model_cfg.name,
+            "PROVIDER": os.environ.get("HERMES_INFERENCE_PROVIDER") or model_cfg.provider,
+            "BASE_URL": runtime_endpoint_for_container(model_cfg.endpoint, "vllm-host"),
+            "API_KEY": os.environ.get("OPENAI_API_KEY") or model_cfg.api_key or "EMPTY",
+            "TEMPERATURE": str(model_cfg.temperature),
+            "AB_MODEL_MAX_OUTPUT_TOKENS": str(model_cfg.max_tokens),
+            "CONTEXT_LENGTH": str(model_cfg.context_window),
+            "MAX_TURNS": str((hm_cfg.get("run") or {}).get("max_turns") or 120),
+            "TERMINAL_TIMEOUT": str((hm_cfg.get("run") or {}).get("terminal_timeout") or 300),
+            "TERMINAL_CWD": "/workspace",
+            "SANDBOX_IMAGE": sandbox_image,
+            **otel_config_values(
+                service_name="agent-bench-hermes",
+                run_id=run_id,
+                endpoint=self._hermes_otel_endpoint(),
+                extra_attrs={"hm.run_id": run_id},
+                enabled=((harness_cfg.get("telemetry") or {}).get("otel") or {}).get("enabled", True) is not False,
+            ),
+        }
+        if not template_path.is_file():
+            raise FileNotFoundError(f"Hermes config template not found at {template_path}")
+        rendered = string.Template(template_path.read_text(encoding="utf-8")).safe_substitute(values)
+        (state_dir / "config.yaml").write_text(rendered, encoding="utf-8")
+        return state_dir
+
+    @staticmethod
+    def _hermes_otel_endpoint() -> str:
+        return (
+            os.environ.get("AB_TELEMETRY_CONTAINER_ENDPOINT")
+            or os.environ.get("OC_OTEL_ENDPOINT")
+            or "http://vllm-host:4318"
+        )
+
+    def exec_in_container(
+        self,
+        container_id: str,
+        argv: List[str],
+        *,
+        timeout: Optional[int] = None,
+        env: Optional[Dict[str, str]] = None,
+        workdir: Optional[str] = None,
+        check: bool = False,
+    ) -> subprocess.CompletedProcess:
+        cmd = ["docker", "exec"]
+        if workdir:
+            cmd += ["-w", workdir]
+        for key, value in (env or {}).items():
+            cmd += ["-e", f"{key}={value}"]
+        cmd += [container_id, *argv]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if check and proc.returncode != 0:
+            raise subprocess.CalledProcessError(
+                proc.returncode, cmd, output=proc.stdout, stderr=proc.stderr
+            )
+        return proc
+
+    def collect_report(
+        self,
+        task_container_name: str,
+        report_file: str = "/workspace/report.md",
+    ) -> str:
+        r = subprocess.run(
+            ["docker", "exec", task_container_name, "cat", report_file],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"could not read {report_file} from {task_container_name}: "
+                f"rc={r.returncode}, stderr={(r.stderr or '')[-500:]}"
+            )
+        return r.stdout
+
+    def cleanup(
+        self,
+        container_id: Optional[str] = None,
+        hm_container_id: Optional[str] = None,
+        task_container_id: Optional[str] = None,
+        task_container_name: Optional[str] = None,
+        container_name: Optional[str] = None,
+        network_name: Optional[str] = None,
+        workspace_host_path: Optional[str] = None,
+        state_dir: Optional[str] = None,
+        bridge_pid: Optional[int] = None,
+        bridge_socket: Optional[str] = None,
+        **_extra,
+    ) -> None:
+        HermesDispatcher.stop_external(pid=bridge_pid, socket_path=bridge_socket)
+        uid = os.getuid()
+        gid = os.getgid()
+        for cid in {hm_container_id, container_id}:
+            if not cid:
+                continue
+            subprocess.run(
+                ["docker", "exec", cid, "chown", "-R", f"{uid}:{gid}", _STATE_DIR_IN_HERMES],
+                capture_output=True, check=False, timeout=30,
+            )
+        targets = [
+            t for t in (
+                hm_container_id,
+                container_id,
+                task_container_id,
+                task_container_name,
+                container_name,
+            )
+            if t
+        ]
+        for cid in dict.fromkeys(targets):
+            subprocess.run(["docker", "rm", "-f", "-v", cid], capture_output=True, check=False)
+        if network_name:
+            r = subprocess.run(
+                ["docker", "ps", "-aq", "--filter", f"network={network_name}"],
+                capture_output=True, text=True,
+            )
+            for cid in (r.stdout or "").split():
+                subprocess.run(["docker", "rm", "-f", "-v", cid], capture_output=True, check=False)
+            subprocess.run(["docker", "network", "rm", network_name], capture_output=True, check=False)
+        keep = os.environ.get("AB_HARNESS_KEEP_WORKSPACE", "0") == "1"
+        if not keep and workspace_host_path and os.path.isdir(workspace_host_path):
+            _force_rmtree(Path(workspace_host_path).parent, ignore_errors=True)
+        if not keep and state_dir and os.path.isdir(state_dir):
+            _force_rmtree(Path(state_dir), ignore_errors=True)
 
 
 # ----------------------------------------------------------------------

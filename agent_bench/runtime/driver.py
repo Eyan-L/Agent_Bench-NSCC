@@ -328,6 +328,10 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 from agent_bench.benchmarks.terminal_bench.conditions.hermes_agent import (
                     TerminalBenchHermesCondition as _Cls,
                 )
+            elif benchmark == "deepresearch_bench":
+                from agent_bench.benchmarks.deepresearch_bench.conditions.hermes_agent import (
+                    DeepResearchHermesCondition as _Cls,
+                )
             elif benchmark == "request_bench":
                 from agent_bench.benchmarks.request_bench.conditions.hermes_agent import (
                     RequestBenchHermesCondition as _Cls,
@@ -653,21 +657,32 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
     # and host-side LLM-as-judge scoring (RACE + FACT via DeepSeek-V4).
     dr_harness = None
     if needs_dr:
-        from agent_bench.benchmarks.deepresearch_bench.app import DeepResearchHarness
         dr_backend = os.environ.get("AB_DEPLOYMENT_CONTAINER_BACKEND", "docker").lower()
         if dr_backend != "docker":
             raise ValueError(
                 f"deepresearch_bench only supports AB_DEPLOYMENT_CONTAINER_BACKEND=docker "
                 f"(got {dr_backend!r}); singularity backend not implemented."
             )
+        if harness_choice == "hermes":
+            from agent_bench.benchmarks.deepresearch_bench.app import (
+                DeepResearchHermesHarness as dr_cls,
+            )
+        elif harness_choice == "openclaw":
+            from agent_bench.benchmarks.deepresearch_bench.app import (
+                DeepResearchHarness as dr_cls,
+            )
+        else:
+            raise ValueError(
+                f"deepresearch_bench supports harness=openclaw|hermes (got {harness_choice!r})."
+            )
         if harness is not None:
             logger.info(
                 "Sweep contains deepresearch_bench instances; constructing "
-                "DeepResearchHarness alongside %s.", type(harness).__name__,
+                "%s alongside %s.", dr_cls.__name__, type(harness).__name__,
             )
         else:
-            logger.info("Constructing DeepResearchHarness.")
-        dr_harness = DeepResearchHarness(benchmark_data_root)
+            logger.info("Constructing %s.", dr_cls.__name__)
+        dr_harness = dr_cls(benchmark_data_root)
 
     # Lazy-build the LongBench harness only if any instance is LongBench.
     # Same two-container model as DR; per-subtask instance loops examples over

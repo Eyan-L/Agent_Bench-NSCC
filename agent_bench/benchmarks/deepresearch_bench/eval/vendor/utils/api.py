@@ -14,7 +14,7 @@ Backend selection via env `LLM_BACKEND`:
     FACT_MODEL           (default: openai/gpt-5.4-mini)
 
   openai:
-    OPENAI_API_KEY (required)
+    OPENAI_API_KEY      (optional; defaults to EMPTY for local endpoints)
     OPENAI_BASE_URL      (default: https://api.openai.com/v1)
     RACE_MODEL           (default: gpt-5.5)
     FACT_MODEL           (default: gpt-5.4-mini)
@@ -77,6 +77,8 @@ _BASE_URL_ENV = {
 _BASE_URL = os.environ.get(_BASE_URL_ENV, _BACKEND["base_url"])
 _KEY_ENV = _BACKEND["key_env"]
 API_KEY = os.environ.get(_KEY_ENV, "")
+if LLM_BACKEND == "openai" and not API_KEY:
+    API_KEY = "EMPTY"
 
 # Public module-level model identifiers — kept under the same names as the
 # original Gemini-era code so downstream imports don't break.

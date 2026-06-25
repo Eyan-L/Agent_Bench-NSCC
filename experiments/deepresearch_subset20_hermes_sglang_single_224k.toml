@@ -1,0 +1,30 @@
+name = "deepresearch_subset20_hermes_sglang_single_224k"
+description = "DeepResearch-Bench subset20 on Hermes with Brave search, Qwen3.6-35B-A3B-FP8 no-thinking profile, SGLang single-engine serving, and 224K model/harness context."
+output_dir = "/mnt/vdb/chengzhi/agent_bench_runs/deepresearch_subset20_hermes_sglang_single_224k"
+seeds = [42]
+
+[telemetry]
+spans_html = true
+
+[stages]
+cleanup = true
+
+[benchmark]
+name = "deepresearch_bench"
+profile = "profiles/benchmarks/deepresearch_bench/subset20.json"
+
+[harness]
+name = "hermes"
+profile = "profiles/harnesses/hermes_deepresearch_bench_brave.yaml"
+
+[model]
+profile = "profiles/models/qwen36_35b_a3b_fp8_local_no_thinking_224k.json"
+
+[serving]
+profile = "profiles/serving/sglang/native_single.yaml"
+
+[deployment]
+profile = "profiles/deployments/local_docker.toml"
+
+[limits]
+max_workers = 2

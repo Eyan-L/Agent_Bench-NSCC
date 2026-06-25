@@ -14,8 +14,8 @@ task container. Your assignment is on disk at `/workspace/PROMPT.md`.
 ## How to finish
 
 When `/workspace/report.md` is written and you're satisfied with it, reply
-with a single line: `DONE`. The host-side evaluator (RACE + FACT, DeepSeek-V4)
-takes it from there.
+with a single line: `DONE`. The host-side evaluator (RACE + FACT) takes it
+from there.
 
 ## Path rules (strict)
 
