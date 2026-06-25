@@ -225,6 +225,10 @@ def build_lanes(sweep: dict, args, run_dir: Path) -> tuple[list[Lane], str | Non
             # VLLM_VENV; without it the wrapper defaults to $HOME/vllm/.venv.
             if tcfg.get("vllm_venv"):
                 slurm_env["VLLM_VENV"] = str(tcfg["vllm_venv"])
+            # Slurm calls it --time; run_ccds.sh reads SRUN_TIME (default 02:00:00).
+            # Accept the same `walltime` key the PBS targets use so the TOML is uniform.
+            if tcfg.get("walltime"):
+                slurm_env["SRUN_TIME"] = str(tcfg["walltime"]).strip()
             lanes.append(Lane(
                 name=tname, kind=kind,
                 capacity=int(tcfg.get("max_parallel", 1)),
@@ -276,6 +280,8 @@ def build_lanes(sweep: dict, args, run_dir: Path) -> tuple[list[Lane], str | Non
                         "SSH_CONFIG": str(cfg_path),
                         "NGPUS": str(tcfg.get("ngpus", 2)),
                         **({"PROJECT": str(tcfg["project"])} if tcfg.get("project") else {}),
+                        # PBS walltime; run_nscc.sh reads WALLTIME (default 02:00:00).
+                        **({"WALLTIME": str(tcfg["walltime"]).strip()} if tcfg.get("walltime") else {}),
                         # per-target serving venv (e.g. vllm fork); run_nscc.sh reads it.
                         **({"NSCC_VLLM_VENV": str(tcfg["vllm_venv"])} if tcfg.get("vllm_venv") else {}),
                         # nscc disabled key auth: point the wrappers (so_ssh, tunnel.sh) at
