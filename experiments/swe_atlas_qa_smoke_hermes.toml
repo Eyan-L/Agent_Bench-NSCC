@@ -1,0 +1,27 @@
+name = "swe_atlas_qa_smoke_hermes"
+description = "SWE-Atlas QA smoke run with Hermes."
+output_dir = "runs/swe_atlas_qa_smoke_hermes"
+seeds = [42]
+
+[telemetry]
+spans_html = true
+
+[benchmark]
+name = "swe_atlas_qa"
+profile = "profiles/benchmarks/swe_atlas_qa/smoke.json"
+
+[harness]
+name = "hermes"
+profile = "profiles/harnesses/hermes_swe_atlas_qa.yaml"
+
+[model]
+profile = "profiles/models/qwen36_35b_a3b_local.json"
+
+[serving]
+profile = "profiles/serving/vllm/existing_endpoint.yaml"
+
+[deployment]
+profile = "profiles/deployments/local_docker.toml"
+
+[limits]
+max_workers = 1

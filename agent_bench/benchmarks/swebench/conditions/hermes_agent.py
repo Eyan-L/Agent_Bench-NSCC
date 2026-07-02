@@ -240,9 +240,10 @@ class HermesAgentCondition:
                     check=False,
                 )
                 dest = run_dir / "sessions.jsonl"
+                src_path = f"{workspace_root.rstrip('/')}/sessions.jsonl"
                 harness.container.copy_out(
                     harness._handle(container_id),
-                    "/app/sessions.jsonl",
+                    src_path,
                     dest
                 )
 

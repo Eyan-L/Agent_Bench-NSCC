@@ -370,6 +370,21 @@ def materialize_benchmark_data(
         _set_instance_data_env(target_env, out)
         return out
 
+    if resolved.spec.benchmark_name == "swe_atlas_qa":
+        from agent_bench.benchmarks.swe_atlas_qa.loader import (
+            default_materialized_path,
+            materialize_profile_dataset,
+            resolve_profile_instance_data,
+        )
+
+        profile_path = resolve_profile_instance_data(resolved)
+        out = profile_path
+        if out is None:
+            out = pbs_spec.run_dir / "swe_atlas_qa_instances.json" if pbs_spec else default_materialized_path(resolved)
+            out = materialize_profile_dataset(resolved, out)
+        _set_instance_data_env(target_env, out)
+        return out
+
     raise ConfigError(f"unsupported benchmark for instance_data resolution: {resolved.spec.benchmark_name}")
 
 

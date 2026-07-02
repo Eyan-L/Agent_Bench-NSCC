@@ -276,6 +276,10 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 from agent_bench.benchmarks.swebench_pro.conditions.openclaw_agent import (
                     SWEBenchProOpenClawCondition as _Cls,
                 )
+            elif benchmark == "swe_atlas_qa":
+                from agent_bench.benchmarks.swe_atlas_qa.conditions.openclaw_agent import (
+                    SWEAtlasQAOpenClawCondition as _Cls,
+                )
             else:
                 from agent_bench.benchmarks.swebench.conditions.openclaw_agent import (
                     SWEBenchOpenClawCondition as _Cls,
@@ -340,6 +344,10 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 from agent_bench.benchmarks.swebench_pro.conditions.hermes_agent import (
                     SWEBenchProHermesCondition as _Cls,
                 )
+            elif benchmark == "swe_atlas_qa":
+                from agent_bench.benchmarks.swe_atlas_qa.conditions.hermes_agent import (
+                    SWEAtlasQAHermesCondition as _Cls,
+                )
             else:
                 from agent_bench.benchmarks.swebench.conditions.hermes_agent import (
                     HermesAgentCondition as _Cls,
@@ -385,7 +393,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         benchmark_kind = instance_data.get("benchmark", "swebench")
         # TB and DR-Bench have no git-patch artifact — the agent's work lives
         # inside the task container (TB: services + files; DR: /workspace/report.md).
-        skip_patch_gate = benchmark_kind in ("terminal_bench", "deepresearch_bench", "longbench", "request_bench")
+        skip_patch_gate = benchmark_kind in ("terminal_bench", "deepresearch_bench", "longbench", "request_bench", "swe_atlas_qa")
         agent_exit_code = result.get("exit_code", 0)
 
         if agent_exit_code not in (0, None):
@@ -522,7 +530,7 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
     #                            instances). Same isolation model in singularity-land.
     # Terminal-Bench / DR-Bench instances are auto-routed to their respective
     # harnesses regardless of HARNESS_BACKEND (per-instance dispatch in _one below).
-    _NON_SWE_BENCHMARKS = ("terminal_bench", "deepresearch_bench", "longbench", "request_bench", "swebench_pro")
+    _NON_SWE_BENCHMARKS = ("terminal_bench", "deepresearch_bench", "longbench", "request_bench", "swebench_pro", "swe_atlas_qa")
     needs_swe = any(
         inst.get("benchmark", "swebench") not in _NON_SWE_BENCHMARKS
         for inst in instances.values()
@@ -541,6 +549,9 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
     )
     needs_sp = any(
         inst.get("benchmark") == "swebench_pro" for inst in instances.values()
+    )
+    needs_sa = any(
+        inst.get("benchmark") == "swe_atlas_qa" for inst in instances.values()
     )
 
     # Peek at the harness config to learn which agent runtime this sweep
@@ -698,6 +709,30 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
         logger.info("Constructing LongBenchHarness.")
         lb_harness = LongBenchHarness(benchmark_data_root)
 
+    # Lazy-build the SWE-Atlas-QA harness only if any instance is SWE-Atlas-QA.
+    sa_harness = None
+    if needs_sa:
+        sa_backend = os.environ.get("AB_DEPLOYMENT_CONTAINER_BACKEND", "docker").lower()
+        if sa_backend != "docker":
+            raise ValueError(
+                f"swe_atlas_qa only supports AB_DEPLOYMENT_CONTAINER_BACKEND=docker (got {sa_backend!r})."
+            )
+        if harness_choice == "openclaw":
+            from agent_bench.benchmarks.swe_atlas_qa.openclaw.app import (
+                SWEAtlasQAHarness as sa_cls,
+            )
+        elif harness_choice == "hermes":
+            from agent_bench.benchmarks.swe_atlas_qa.hermes.app import (
+                SWEAtlasQAHermesHarness as sa_cls,
+            )
+        else:
+            raise ValueError(
+                f"swe_atlas_qa supports harness=openclaw|hermes (got {harness_choice!r})."
+            )
+        from agent_bench.deployments.containers.docker import DockerContainer
+        logger.info("Constructing SWEAtlasQA harness (%s).", harness_choice)
+        sa_harness = sa_cls(benchmark_data_root, container=DockerContainer())
+
     # Lazy-build the TB harness only if any instance in this sweep is TB.
     # Harness choice now applies to Terminal-Bench too:
     #   openclaw  -> TerminalBenchDockerHarness / TerminalBenchSingularityHarness
@@ -768,6 +803,8 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
                 h = rb_harness
             elif bm == "swebench_pro":
                 h = sp_harness
+            elif bm == "swe_atlas_qa":
+                h = sa_harness
             else:
                 h = harness
             if h is None:

@@ -1,0 +1,21 @@
+{
+  "_doc": "SWE-Atlas QA smoke profile.",
+  "sweep_name": "swe_atlas_qa_smoke",
+  "plan_version": "v1.0",
+  "application": "swe_atlas_qa",
+  "instances": [
+    "6905333b74f22949d97ba9e3"
+  ],
+  "repo_mapping": {
+    "6905333b74f22949d97ba9e3": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    }
+  },
+  "container_image": "ghcr.io/scaleapi/swe-atlas:swe_atlas_QnA_kovidgoyal_kitty_1.0",
+  "wall_clock_budget_seconds": 1800,
+  "output_dir": "swe_atlas_qa_smoke",
+  "seeds": [
+    42
+  ]
+}

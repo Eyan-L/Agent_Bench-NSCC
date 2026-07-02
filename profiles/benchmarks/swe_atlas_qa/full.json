@@ -1,0 +1,636 @@
+{
+  "_doc": "SWE-Atlas QA full profile.",
+  "sweep_name": "swe_atlas_qa_full",
+  "plan_version": "v1.0",
+  "application": "swe_atlas_qa",
+  "instances": [
+    "6905333b74f22949d97ba9e3",
+    "6905333b74f22949d97ba9aa",
+    "6905333b74f22949d97ba99d",
+    "6905333b74f22949d97ba9c8",
+    "6905333b74f22949d97ba9f5",
+    "6905333b74f22949d97baa1b",
+    "6905333b74f22949d97ba9fd",
+    "6905333b74f22949d97ba9fb",
+    "6905333b74f22949d97baa09",
+    "6905333b74f22949d97ba9c2",
+    "6905333b74f22949d97baa27",
+    "6905333b74f22949d97ba9e1",
+    "6905333b74f22949d97ba9ab",
+    "6905333b74f22949d97ba9fa",
+    "6905333b74f22949d97ba9eb",
+    "6905333b74f22949d97ba9d0",
+    "6905333b74f22949d97ba9f2",
+    "6905333b74f22949d97baa19",
+    "6905333b74f22949d97baa12",
+    "6905333b74f22949d97baa06",
+    "6905333b74f22949d97baa14",
+    "6905333b74f22949d97baa23",
+    "6905333b74f22949d97ba9db",
+    "6905333b74f22949d97ba9b6",
+    "6905333b74f22949d97ba9de",
+    "6905333b74f22949d97ba9e4",
+    "6905333b74f22949d97ba9d1",
+    "6905333b74f22949d97ba9a3",
+    "6905333b74f22949d97ba9d2",
+    "6905333b74f22949d97ba9cf",
+    "6905333b74f22949d97ba9b1",
+    "6905333b74f22949d97baa22",
+    "6905333b74f22949d97baa0c",
+    "6905333b74f22949d97ba9ae",
+    "6905333b74f22949d97baa1f",
+    "6905333b74f22949d97ba9ff",
+    "6905333b74f22949d97ba9a9",
+    "6905333b74f22949d97ba9f7",
+    "6905333b74f22949d97ba99a",
+    "6905333b74f22949d97baa17",
+    "6905333b74f22949d97ba9cc",
+    "6905333b74f22949d97ba9c6",
+    "6905333b74f22949d97ba9d6",
+    "6905333b74f22949d97ba9a5",
+    "6905333b74f22949d97ba9f0",
+    "6905333b74f22949d97baa0d",
+    "6905333b74f22949d97baa11",
+    "6905333b74f22949d97ba9dd",
+    "6905333b74f22949d97baa25",
+    "6905333b74f22949d97ba9c4",
+    "6905333b74f22949d97ba9be",
+    "6905333b74f22949d97ba9e9",
+    "6905333b74f22949d97ba9a4",
+    "6905333b74f22949d97ba9dc",
+    "6905333b74f22949d97ba9b3",
+    "6905333b74f22949d97baa2c",
+    "6905333b74f22949d97ba9d9",
+    "6905333b74f22949d97baa24",
+    "6905333b74f22949d97baa0f",
+    "6905333b74f22949d97ba9bf",
+    "6905333b74f22949d97ba9a7",
+    "6905333b74f22949d97baa1a",
+    "6905333b74f22949d97ba9d8",
+    "6905333b74f22949d97baa15",
+    "6905333b74f22949d97baa0b",
+    "6905333b74f22949d97ba9d5",
+    "6905333b74f22949d97ba9cd",
+    "6905333b74f22949d97ba9a2",
+    "6905333b74f22949d97baa01",
+    "6905333b74f22949d97baa16",
+    "6905333b74f22949d97ba9ca",
+    "6905333b74f22949d97ba999",
+    "6905333b74f22949d97ba9c3",
+    "6905333b74f22949d97baa04",
+    "6905333b74f22949d97ba9ad",
+    "6905333b74f22949d97ba9bd",
+    "6905333b74f22949d97ba9cb",
+    "6905333b74f22949d97baa1c",
+    "6905333b74f22949d97ba9ac",
+    "6905333b74f22949d97baa26",
+    "6905333b74f22949d97ba9fc",
+    "6905333b74f22949d97ba9bc",
+    "6905333b74f22949d97ba9d4",
+    "6905333b74f22949d97ba99b",
+    "6905333b74f22949d97baa20",
+    "6905333b74f22949d97ba9d7",
+    "6905333b74f22949d97baa28",
+    "6905333b74f22949d97baa1e",
+    "6905333b74f22949d97ba9ce",
+    "6905333b74f22949d97ba9f9",
+    "6905333b74f22949d97ba9ee",
+    "6905333b74f22949d97ba9c5",
+    "6905333b74f22949d97baa02",
+    "6905333b74f22949d97ba9a6",
+    "6905333b74f22949d97baa2d",
+    "6905333b74f22949d97ba998",
+    "6905333b74f22949d97ba9c1",
+    "6905333b74f22949d97ba9ba",
+    "6905333b74f22949d97ba99f",
+    "6905333b74f22949d97ba9b5",
+    "6905333b74f22949d97baa21",
+    "6905333b74f22949d97ba9b7",
+    "6905333b74f22949d97ba9af",
+    "6905333b74f22949d97ba9d3",
+    "6905333b74f22949d97baa10",
+    "6905333b74f22949d97ba9e8",
+    "6905333b74f22949d97ba9f8",
+    "6905333b74f22949d97ba9e5",
+    "6905333b74f22949d97baa2b",
+    "6905333b74f22949d97baa07",
+    "6905333b74f22949d97ba9bb",
+    "6905333b74f22949d97ba9f4",
+    "6905333b74f22949d97baa2a",
+    "6905333b74f22949d97ba9f1",
+    "6905333b74f22949d97baa05",
+    "6905333b74f22949d97ba9c9",
+    "6905333b74f22949d97baa1d",
+    "6905333b74f22949d97ba9c0",
+    "6905333b74f22949d97ba9b2",
+    "6905333b74f22949d97baa03",
+    "6905333b74f22949d97ba9a8",
+    "6905333b74f22949d97ba9b8",
+    "6905333b74f22949d97ba9e0",
+    "6905333b74f22949d97ba9e7"
+  ],
+  "repo_mapping": {
+    "6905333b74f22949d97ba9e3": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97ba9aa": {
+      "repo_id": "https://github.com/simple-login/app",
+      "base_commit": "2cd6ee777f8c2d3531559588bcfb18627ffb5d2c"
+    },
+    "6905333b74f22949d97ba99d": {
+      "repo_id": "https://github.com/Automattic/wp-calypso",
+      "base_commit": "be7e5cc641622d153040491fd5625c6cb83e12eb"
+    },
+    "6905333b74f22949d97ba9c8": {
+      "repo_id": "https://github.com/trufflesecurity/trufflehog",
+      "base_commit": "e42153d44a5e5c37c1bd0c70e074781e9edcb760"
+    },
+    "6905333b74f22949d97ba9f5": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97baa1b": {
+      "repo_id": "https://github.com/minio/minio",
+      "base_commit": "c07e5b49d477b0774f23db3b290745aef8c01bd2"
+    },
+    "6905333b74f22949d97ba9fd": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97ba9fb": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97baa09": {
+      "repo_id": "https://github.com/trufflesecurity/trufflehog",
+      "base_commit": "e42153d44a5e5c37c1bd0c70e074781e9edcb760"
+    },
+    "6905333b74f22949d97ba9c2": {
+      "repo_id": "https://github.com/secdev/scapy",
+      "base_commit": "0925ada485406684174d6f068dbd85c4154657b3"
+    },
+    "6905333b74f22949d97baa27": {
+      "repo_id": "https://github.com/drakkan/sftpgo",
+      "base_commit": "44634210287cb192f2a53147eafb84a33a96826b"
+    },
+    "6905333b74f22949d97ba9e1": {
+      "repo_id": "https://github.com/trufflesecurity/trufflehog",
+      "base_commit": "e42153d44a5e5c37c1bd0c70e074781e9edcb760"
+    },
+    "6905333b74f22949d97ba9ab": {
+      "repo_id": "https://github.com/simple-login/app",
+      "base_commit": "2cd6ee777f8c2d3531559588bcfb18627ffb5d2c"
+    },
+    "6905333b74f22949d97ba9fa": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97ba9eb": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97ba9d0": {
+      "repo_id": "https://github.com/paperless-ngx/paperless-ngx",
+      "base_commit": "542221a38dff06361e07976452f9aea24d210542"
+    },
+    "6905333b74f22949d97ba9f2": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97baa19": {
+      "repo_id": "https://github.com/trufflesecurity/trufflehog",
+      "base_commit": "e42153d44a5e5c37c1bd0c70e074781e9edcb760"
+    },
+    "6905333b74f22949d97baa12": {
+      "repo_id": "https://github.com/foxcpp/maddy",
+      "base_commit": "26452dd8dd787dc455278b0fdd296f4a5432c768"
+    },
+    "6905333b74f22949d97baa06": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97baa14": {
+      "repo_id": "https://github.com/foxcpp/maddy",
+      "base_commit": "26452dd8dd787dc455278b0fdd296f4a5432c768"
+    },
+    "6905333b74f22949d97baa23": {
+      "repo_id": "https://github.com/grafana/k6",
+      "base_commit": "ddc3b0b1d23c128e34e2792fc9075f9126e32375"
+    },
+    "6905333b74f22949d97ba9db": {
+      "repo_id": "https://github.com/paperless-ngx/paperless-ngx",
+      "base_commit": "542221a38dff06361e07976452f9aea24d210542"
+    },
+    "6905333b74f22949d97ba9b6": {
+      "repo_id": "https://github.com/grafana/grafana",
+      "base_commit": "4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff"
+    },
+    "6905333b74f22949d97ba9de": {
+      "repo_id": "https://github.com/paperless-ngx/paperless-ngx",
+      "base_commit": "542221a38dff06361e07976452f9aea24d210542"
+    },
+    "6905333b74f22949d97ba9e4": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97ba9d1": {
+      "repo_id": "https://github.com/paperless-ngx/paperless-ngx",
+      "base_commit": "542221a38dff06361e07976452f9aea24d210542"
+    },
+    "6905333b74f22949d97ba9a3": {
+      "repo_id": "https://github.com/Automattic/wp-calypso",
+      "base_commit": "be7e5cc641622d153040491fd5625c6cb83e12eb"
+    },
+    "6905333b74f22949d97ba9d2": {
+      "repo_id": "https://github.com/paperless-ngx/paperless-ngx",
+      "base_commit": "542221a38dff06361e07976452f9aea24d210542"
+    },
+    "6905333b74f22949d97ba9cf": {
+      "repo_id": "https://github.com/secdev/scapy",
+      "base_commit": "0925ada485406684174d6f068dbd85c4154657b3"
+    },
+    "6905333b74f22949d97ba9b1": {
+      "repo_id": "https://github.com/grafana/grafana",
+      "base_commit": "4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff"
+    },
+    "6905333b74f22949d97baa22": {
+      "repo_id": "https://github.com/grafana/k6",
+      "base_commit": "ddc3b0b1d23c128e34e2792fc9075f9126e32375"
+    },
+    "6905333b74f22949d97baa0c": {
+      "repo_id": "https://github.com/trufflesecurity/trufflehog",
+      "base_commit": "e42153d44a5e5c37c1bd0c70e074781e9edcb760"
+    },
+    "6905333b74f22949d97ba9ae": {
+      "repo_id": "https://github.com/simple-login/app",
+      "base_commit": "2cd6ee777f8c2d3531559588bcfb18627ffb5d2c"
+    },
+    "6905333b74f22949d97baa1f": {
+      "repo_id": "https://github.com/grafana/k6",
+      "base_commit": "ddc3b0b1d23c128e34e2792fc9075f9126e32375"
+    },
+    "6905333b74f22949d97ba9ff": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97ba9a9": {
+      "repo_id": "https://github.com/simple-login/app",
+      "base_commit": "2cd6ee777f8c2d3531559588bcfb18627ffb5d2c"
+    },
+    "6905333b74f22949d97ba9f7": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97ba99a": {
+      "repo_id": "https://github.com/Automattic/wp-calypso",
+      "base_commit": "be7e5cc641622d153040491fd5625c6cb83e12eb"
+    },
+    "6905333b74f22949d97baa17": {
+      "repo_id": "https://github.com/foxcpp/maddy",
+      "base_commit": "26452dd8dd787dc455278b0fdd296f4a5432c768"
+    },
+    "6905333b74f22949d97ba9cc": {
+      "repo_id": "https://github.com/secdev/scapy",
+      "base_commit": "0925ada485406684174d6f068dbd85c4154657b3"
+    },
+    "6905333b74f22949d97ba9c6": {
+      "repo_id": "https://github.com/secdev/scapy",
+      "base_commit": "0925ada485406684174d6f068dbd85c4154657b3"
+    },
+    "6905333b74f22949d97ba9d6": {
+      "repo_id": "https://github.com/paperless-ngx/paperless-ngx",
+      "base_commit": "542221a38dff06361e07976452f9aea24d210542"
+    },
+    "6905333b74f22949d97ba9a5": {
+      "repo_id": "https://github.com/simple-login/app",
+      "base_commit": "2cd6ee777f8c2d3531559588bcfb18627ffb5d2c"
+    },
+    "6905333b74f22949d97ba9f0": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97baa0d": {
+      "repo_id": "https://github.com/trufflesecurity/trufflehog",
+      "base_commit": "e42153d44a5e5c37c1bd0c70e074781e9edcb760"
+    },
+    "6905333b74f22949d97baa11": {
+      "repo_id": "https://github.com/foxcpp/maddy",
+      "base_commit": "26452dd8dd787dc455278b0fdd296f4a5432c768"
+    },
+    "6905333b74f22949d97ba9dd": {
+      "repo_id": "https://github.com/paperless-ngx/paperless-ngx",
+      "base_commit": "542221a38dff06361e07976452f9aea24d210542"
+    },
+    "6905333b74f22949d97baa25": {
+      "repo_id": "https://github.com/grafana/k6",
+      "base_commit": "ddc3b0b1d23c128e34e2792fc9075f9126e32375"
+    },
+    "6905333b74f22949d97ba9c4": {
+      "repo_id": "https://github.com/secdev/scapy",
+      "base_commit": "0925ada485406684174d6f068dbd85c4154657b3"
+    },
+    "6905333b74f22949d97ba9be": {
+      "repo_id": "https://github.com/foxcpp/maddy",
+      "base_commit": "26452dd8dd787dc455278b0fdd296f4a5432c768"
+    },
+    "6905333b74f22949d97ba9e9": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97ba9a4": {
+      "repo_id": "https://github.com/simple-login/app",
+      "base_commit": "2cd6ee777f8c2d3531559588bcfb18627ffb5d2c"
+    },
+    "6905333b74f22949d97ba9dc": {
+      "repo_id": "https://github.com/paperless-ngx/paperless-ngx",
+      "base_commit": "542221a38dff06361e07976452f9aea24d210542"
+    },
+    "6905333b74f22949d97ba9b3": {
+      "repo_id": "https://github.com/grafana/grafana",
+      "base_commit": "4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff"
+    },
+    "6905333b74f22949d97baa2c": {
+      "repo_id": "https://github.com/drakkan/sftpgo",
+      "base_commit": "44634210287cb192f2a53147eafb84a33a96826b"
+    },
+    "6905333b74f22949d97ba9d9": {
+      "repo_id": "https://github.com/paperless-ngx/paperless-ngx",
+      "base_commit": "542221a38dff06361e07976452f9aea24d210542"
+    },
+    "6905333b74f22949d97baa24": {
+      "repo_id": "https://github.com/grafana/k6",
+      "base_commit": "ddc3b0b1d23c128e34e2792fc9075f9126e32375"
+    },
+    "6905333b74f22949d97baa0f": {
+      "repo_id": "https://github.com/trufflesecurity/trufflehog",
+      "base_commit": "e42153d44a5e5c37c1bd0c70e074781e9edcb760"
+    },
+    "6905333b74f22949d97ba9bf": {
+      "repo_id": "https://github.com/secdev/scapy",
+      "base_commit": "0925ada485406684174d6f068dbd85c4154657b3"
+    },
+    "6905333b74f22949d97ba9a7": {
+      "repo_id": "https://github.com/simple-login/app",
+      "base_commit": "2cd6ee777f8c2d3531559588bcfb18627ffb5d2c"
+    },
+    "6905333b74f22949d97baa1a": {
+      "repo_id": "https://github.com/minio/minio",
+      "base_commit": "c07e5b49d477b0774f23db3b290745aef8c01bd2"
+    },
+    "6905333b74f22949d97ba9d8": {
+      "repo_id": "https://github.com/paperless-ngx/paperless-ngx",
+      "base_commit": "542221a38dff06361e07976452f9aea24d210542"
+    },
+    "6905333b74f22949d97baa15": {
+      "repo_id": "https://github.com/foxcpp/maddy",
+      "base_commit": "26452dd8dd787dc455278b0fdd296f4a5432c768"
+    },
+    "6905333b74f22949d97baa0b": {
+      "repo_id": "https://github.com/trufflesecurity/trufflehog",
+      "base_commit": "e42153d44a5e5c37c1bd0c70e074781e9edcb760"
+    },
+    "6905333b74f22949d97ba9d5": {
+      "repo_id": "https://github.com/paperless-ngx/paperless-ngx",
+      "base_commit": "542221a38dff06361e07976452f9aea24d210542"
+    },
+    "6905333b74f22949d97ba9cd": {
+      "repo_id": "https://github.com/secdev/scapy",
+      "base_commit": "0925ada485406684174d6f068dbd85c4154657b3"
+    },
+    "6905333b74f22949d97ba9a2": {
+      "repo_id": "https://github.com/Automattic/wp-calypso",
+      "base_commit": "be7e5cc641622d153040491fd5625c6cb83e12eb"
+    },
+    "6905333b74f22949d97baa01": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97baa16": {
+      "repo_id": "https://github.com/foxcpp/maddy",
+      "base_commit": "26452dd8dd787dc455278b0fdd296f4a5432c768"
+    },
+    "6905333b74f22949d97ba9ca": {
+      "repo_id": "https://github.com/secdev/scapy",
+      "base_commit": "0925ada485406684174d6f068dbd85c4154657b3"
+    },
+    "6905333b74f22949d97ba999": {
+      "repo_id": "https://github.com/Automattic/wp-calypso",
+      "base_commit": "be7e5cc641622d153040491fd5625c6cb83e12eb"
+    },
+    "6905333b74f22949d97ba9c3": {
+      "repo_id": "https://github.com/secdev/scapy",
+      "base_commit": "0925ada485406684174d6f068dbd85c4154657b3"
+    },
+    "6905333b74f22949d97baa04": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97ba9ad": {
+      "repo_id": "https://github.com/simple-login/app",
+      "base_commit": "2cd6ee777f8c2d3531559588bcfb18627ffb5d2c"
+    },
+    "6905333b74f22949d97ba9bd": {
+      "repo_id": "https://github.com/secdev/scapy",
+      "base_commit": "0925ada485406684174d6f068dbd85c4154657b3"
+    },
+    "6905333b74f22949d97ba9cb": {
+      "repo_id": "https://github.com/foxcpp/maddy",
+      "base_commit": "26452dd8dd787dc455278b0fdd296f4a5432c768"
+    },
+    "6905333b74f22949d97baa1c": {
+      "repo_id": "https://github.com/minio/minio",
+      "base_commit": "c07e5b49d477b0774f23db3b290745aef8c01bd2"
+    },
+    "6905333b74f22949d97ba9ac": {
+      "repo_id": "https://github.com/simple-login/app",
+      "base_commit": "2cd6ee777f8c2d3531559588bcfb18627ffb5d2c"
+    },
+    "6905333b74f22949d97baa26": {
+      "repo_id": "https://github.com/grafana/k6",
+      "base_commit": "ddc3b0b1d23c128e34e2792fc9075f9126e32375"
+    },
+    "6905333b74f22949d97ba9fc": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97ba9bc": {
+      "repo_id": "https://github.com/grafana/grafana",
+      "base_commit": "4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff"
+    },
+    "6905333b74f22949d97ba9d4": {
+      "repo_id": "https://github.com/paperless-ngx/paperless-ngx",
+      "base_commit": "542221a38dff06361e07976452f9aea24d210542"
+    },
+    "6905333b74f22949d97ba99b": {
+      "repo_id": "https://github.com/Automattic/wp-calypso",
+      "base_commit": "be7e5cc641622d153040491fd5625c6cb83e12eb"
+    },
+    "6905333b74f22949d97baa20": {
+      "repo_id": "https://github.com/grafana/k6",
+      "base_commit": "ddc3b0b1d23c128e34e2792fc9075f9126e32375"
+    },
+    "6905333b74f22949d97ba9d7": {
+      "repo_id": "https://github.com/paperless-ngx/paperless-ngx",
+      "base_commit": "542221a38dff06361e07976452f9aea24d210542"
+    },
+    "6905333b74f22949d97baa28": {
+      "repo_id": "https://github.com/drakkan/sftpgo",
+      "base_commit": "44634210287cb192f2a53147eafb84a33a96826b"
+    },
+    "6905333b74f22949d97baa1e": {
+      "repo_id": "https://github.com/minio/minio",
+      "base_commit": "c07e5b49d477b0774f23db3b290745aef8c01bd2"
+    },
+    "6905333b74f22949d97ba9ce": {
+      "repo_id": "https://github.com/secdev/scapy",
+      "base_commit": "0925ada485406684174d6f068dbd85c4154657b3"
+    },
+    "6905333b74f22949d97ba9f9": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97ba9ee": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97ba9c5": {
+      "repo_id": "https://github.com/secdev/scapy",
+      "base_commit": "0925ada485406684174d6f068dbd85c4154657b3"
+    },
+    "6905333b74f22949d97baa02": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97ba9a6": {
+      "repo_id": "https://github.com/simple-login/app",
+      "base_commit": "2cd6ee777f8c2d3531559588bcfb18627ffb5d2c"
+    },
+    "6905333b74f22949d97baa2d": {
+      "repo_id": "https://github.com/drakkan/sftpgo",
+      "base_commit": "44634210287cb192f2a53147eafb84a33a96826b"
+    },
+    "6905333b74f22949d97ba998": {
+      "repo_id": "https://github.com/Automattic/wp-calypso",
+      "base_commit": "be7e5cc641622d153040491fd5625c6cb83e12eb"
+    },
+    "6905333b74f22949d97ba9c1": {
+      "repo_id": "https://github.com/secdev/scapy",
+      "base_commit": "0925ada485406684174d6f068dbd85c4154657b3"
+    },
+    "6905333b74f22949d97ba9ba": {
+      "repo_id": "https://github.com/grafana/grafana",
+      "base_commit": "4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff"
+    },
+    "6905333b74f22949d97ba99f": {
+      "repo_id": "https://github.com/Automattic/wp-calypso",
+      "base_commit": "be7e5cc641622d153040491fd5625c6cb83e12eb"
+    },
+    "6905333b74f22949d97ba9b5": {
+      "repo_id": "https://github.com/grafana/grafana",
+      "base_commit": "4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff"
+    },
+    "6905333b74f22949d97baa21": {
+      "repo_id": "https://github.com/foxcpp/maddy",
+      "base_commit": "26452dd8dd787dc455278b0fdd296f4a5432c768"
+    },
+    "6905333b74f22949d97ba9b7": {
+      "repo_id": "https://github.com/grafana/grafana",
+      "base_commit": "4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff"
+    },
+    "6905333b74f22949d97ba9af": {
+      "repo_id": "https://github.com/simple-login/app",
+      "base_commit": "2cd6ee777f8c2d3531559588bcfb18627ffb5d2c"
+    },
+    "6905333b74f22949d97ba9d3": {
+      "repo_id": "https://github.com/paperless-ngx/paperless-ngx",
+      "base_commit": "542221a38dff06361e07976452f9aea24d210542"
+    },
+    "6905333b74f22949d97baa10": {
+      "repo_id": "https://github.com/foxcpp/maddy",
+      "base_commit": "26452dd8dd787dc455278b0fdd296f4a5432c768"
+    },
+    "6905333b74f22949d97ba9e8": {
+      "repo_id": "https://github.com/simple-login/app",
+      "base_commit": "2cd6ee777f8c2d3531559588bcfb18627ffb5d2c"
+    },
+    "6905333b74f22949d97ba9f8": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97ba9e5": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97baa2b": {
+      "repo_id": "https://github.com/drakkan/sftpgo",
+      "base_commit": "44634210287cb192f2a53147eafb84a33a96826b"
+    },
+    "6905333b74f22949d97baa07": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97ba9bb": {
+      "repo_id": "https://github.com/drakkan/sftpgo",
+      "base_commit": "44634210287cb192f2a53147eafb84a33a96826b"
+    },
+    "6905333b74f22949d97ba9f4": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97baa2a": {
+      "repo_id": "https://github.com/drakkan/sftpgo",
+      "base_commit": "44634210287cb192f2a53147eafb84a33a96826b"
+    },
+    "6905333b74f22949d97ba9f1": {
+      "repo_id": "https://github.com/minio/minio",
+      "base_commit": "c07e5b49d477b0774f23db3b290745aef8c01bd2"
+    },
+    "6905333b74f22949d97baa05": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97ba9c9": {
+      "repo_id": "https://github.com/secdev/scapy",
+      "base_commit": "0925ada485406684174d6f068dbd85c4154657b3"
+    },
+    "6905333b74f22949d97baa1d": {
+      "repo_id": "https://github.com/simple-login/app",
+      "base_commit": "2cd6ee777f8c2d3531559588bcfb18627ffb5d2c"
+    },
+    "6905333b74f22949d97ba9c0": {
+      "repo_id": "https://github.com/minio/minio",
+      "base_commit": "c07e5b49d477b0774f23db3b290745aef8c01bd2"
+    },
+    "6905333b74f22949d97ba9b2": {
+      "repo_id": "https://github.com/simple-login/app",
+      "base_commit": "2cd6ee777f8c2d3531559588bcfb18627ffb5d2c"
+    },
+    "6905333b74f22949d97baa03": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    },
+    "6905333b74f22949d97ba9a8": {
+      "repo_id": "https://github.com/simple-login/app",
+      "base_commit": "2cd6ee777f8c2d3531559588bcfb18627ffb5d2c"
+    },
+    "6905333b74f22949d97ba9b8": {
+      "repo_id": "https://github.com/grafana/grafana",
+      "base_commit": "4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff"
+    },
+    "6905333b74f22949d97ba9e0": {
+      "repo_id": "https://github.com/paperless-ngx/paperless-ngx",
+      "base_commit": "542221a38dff06361e07976452f9aea24d210542"
+    },
+    "6905333b74f22949d97ba9e7": {
+      "repo_id": "https://github.com/kovidgoyal/kitty",
+      "base_commit": "815df1e210e0a9ab4622f5c7f2d6891d7dbeddf1"
+    }
+  },
+  "container_image": "ghcr.io/scaleapi/swe-atlas:swe_atlas_QnA_kovidgoyal_kitty_1.0",
+  "wall_clock_budget_seconds": 1800,
+  "output_dir": "swe_atlas_qa_full",
+  "seeds": [
+    42
+  ]
+}
