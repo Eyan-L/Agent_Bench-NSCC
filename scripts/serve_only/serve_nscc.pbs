@@ -56,8 +56,8 @@ exec env \
     CUDA_VISIBLE_DEVICES="$CVD" \
     VLLM_VENV="$NSCC_VLLM_VENV" \
     MODEL="$MODEL" \
-    MODEL_CONFIG="profiles/models/qwen36_35b_a3b_fp8.json" \
-    SERVING_CONFIG="profiles/serving/vllm/decoupled.yaml" \
+    MODEL_CONFIG="${MODEL_CONFIG:-profiles/models/qwen36_35b_a3b_fp8.json}" \
+    SERVING_CONFIG="${SERVING_CONFIG:-profiles/serving/vllm/decoupled.yaml}" \
     TP="$NGPUS" \
     PORT="${PORT:-8000}" \
     LOG_DIR="logs/serve_only/p${PORT:-8000}" \

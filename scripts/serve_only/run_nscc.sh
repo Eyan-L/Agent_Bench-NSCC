@@ -65,6 +65,9 @@ NCPUS="${NCPUS:-}"
 CLUSTER="${REMOTE%%-*}"
 TAG="[$CLUSTER]"
 MODEL_TEMPLATE="${MODEL_TEMPLATE:-profiles/models/qwen36_35b_a3b_fp8.json}"
+# Serve-side profile forwarded to serve_nscc.pbs -> serve_vllm.sh (the orchestrator
+# sets it from the sweep's `serving`).
+SERVING_CONFIG="${SERVING_CONFIG:-profiles/serving/vllm/decoupled.yaml}"
 # Default to an auto-allocated free local port so multiple runs can fan out in
 # parallel (the tunnel binds 0.0.0.0:$PORT — a fixed 8000 collides). The same
 # number is the served port on the compute node, so it's unique end-to-end.
@@ -87,7 +90,9 @@ REMOTE_KIT_ROOT="$(so_ssh "$REMOTE" "cd ${REMOTE_KIT_ROOT} 2>/dev/null && pwd")"
 RUN_ID="${RUN_ID:-ab-nscc-$(date +%s)-$$}"
 
 REMOTE_HOME="$(so_remote_home "$REMOTE")"; [[ -n "$REMOTE_HOME" ]] || die "could not resolve \$HOME on $REMOTE."
-MODEL_NAME="${MODEL_NAME:-$REMOTE_HOME/scratch/models/Qwen3.6-35B-A3B-FP8}"
+# Served id + weights path. Default: $REMOTE_HOME/scratch/models/<template's model
+# name basename>
+MODEL_NAME="${MODEL_NAME:-$REMOTE_HOME/scratch/models/$(so_template_model_basename "$KIT_ROOT/$MODEL_TEMPLATE")}"
 NSCC_VLLM_VENV="${NSCC_VLLM_VENV:-$REMOTE_HOME/vllm/.venv}"
 
 # --- write the client model-config (name must match the served id) --------
@@ -115,7 +120,7 @@ GPU_UTIL_KV="${GPU_MEM_UTIL:+,GPU_MEM_UTIL=$GPU_MEM_UTIL}"
 JOBID="$(so_retry so_ssh "$REMOTE" "cd '$REMOTE_KIT_ROOT' && qsub \
     -P '$PROJECT' $QUEUE_ARG \
     -l $SELECT -l walltime=$WALLTIME \
-    -v NGPUS=$NGPUS,NSCC_VLLM_VENV=$NSCC_VLLM_VENV,MODEL=$MODEL_NAME,PORT=$PORT$GPU_UTIL_KV \
+    -v NGPUS=$NGPUS,NSCC_VLLM_VENV=$NSCC_VLLM_VENV,MODEL=$MODEL_NAME,MODEL_CONFIG=$MODEL_TEMPLATE,SERVING_CONFIG=$SERVING_CONFIG,PORT=$PORT$GPU_UTIL_KV \
     scripts/serve_only/serve_nscc.pbs")" || die "qsub failed."
 JOBID="$(echo "$JOBID" | tr -d '[:space:]')"
 [[ -n "$JOBID" ]] || die "qsub returned no job id."
@@ -168,7 +173,7 @@ echo "$TAG gpu=$GPU_NAME (${GPU_MEM_MIB:-?}MiB)"
 so_write_alloc "run_id=$RUN_ID" "cluster=$CLUSTER" "account=$(so_ssh "$REMOTE" 'printf %s "$USER"' 2>/dev/null)" \
     "node=$NODE" "gpu_name=$GPU_NAME" "gpu_mem_mib=${GPU_MEM_MIB:-}" "gpus=$NGPUS" \
     "gpu_mem_util=${GPU_MEM_UTIL:-}" "port=$PORT" "jobid=$JOBID" "model=$MODEL_NAME" \
-    "serving=profiles/serving/vllm/decoupled.yaml" "arm=$ARM" "status=serving"
+    "serving=$SERVING_CONFIG" "arm=$ARM" "status=serving"
 
 # --- 2-hop tunnel + client ------------------------------------------------
 echo "$TAG tunnel: ntu_cpu -> $REMOTE -> $NODE:$PORT"

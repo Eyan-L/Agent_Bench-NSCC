@@ -150,6 +150,20 @@ print(s.getsockname()[1])
 s.close()'
 }
 
+# Echo the model-dir basename from a template's model.name (e.g.
+# "/path/to/scratch/models/gemma-4-31B-it" -> "gemma-4-31B-it").
+# The wrappers prefix this with "<remote $HOME>/scratch/models/" to build the
+# cluster-absolute MODEL_NAME, so the served weights follow MODEL_TEMPLATE instead
+# of a hardcoded per-wrapper default. Used only when MODEL_NAME isn't set explicitly.
+so_template_model_basename() {
+    python3 - "$1" <<'PY'
+import json, os, sys
+with open(sys.argv[1]) as f:
+    cfg = json.load(f)
+print(os.path.basename(cfg["model"]["name"].rstrip("/")))
+PY
+}
+
 # Write a client model-config: copy $template, set model.name=$name -> $dst.
 # Used locally on ntu_cpu so run_tb_client.sh requests the same id the server
 # advertises. Written ATOMICALLY (temp file + os.replace) so parallel runs can
