@@ -14,6 +14,10 @@ class _FakeContainer:
 
     def __init__(self) -> None:
         self.specs = []
+        self.stop_calls = []
+        self.created_networks = []
+        self.removed_networks = []
+        self.exec_calls = []
 
     def check_available(self) -> None:
         pass
@@ -22,10 +26,10 @@ class _FakeContainer:
         assert Path(image).is_file()
 
     def create_network(self, name: str) -> None:
-        pass
+        self.created_networks.append(name)
 
     def remove_network(self, name: str) -> None:
-        pass
+        self.removed_networks.append(name)
 
     def copy_from_image(self, image: str, src: str, dst: Path, **_kw) -> None:
         (dst / "starter.txt").write_text("starter")
@@ -39,18 +43,20 @@ class _FakeContainer:
     def wait_log_pattern(self, *_args, **_kw) -> None:
         pass
 
-    def exec(self, *_args, **_kw):
+    def exec(self, *args, **kwargs):
+        self.exec_calls.append((args, kwargs))
         return subprocess.CompletedProcess([], 0, "", "")
 
-    def stop(self, *_args, **_kw) -> None:
-        pass
+    def stop(self, handle, **_kw) -> None:
+        self.stop_calls.append(handle)
 
 
 class _FakeDispatcher:
     pid = 42
+    last_start_kwargs = None
 
-    def start(self, **_kw) -> None:
-        pass
+    def start(self, **kwargs) -> None:
+        type(self).last_start_kwargs = kwargs
 
     def stop(self) -> None:
         pass
@@ -67,6 +73,7 @@ class _FakeDispatcher:
 
 
 def test_terminal_bench_openclaw_singularity_returns_runtime_handle(tmp_path, monkeypatch):
+    _FakeDispatcher.last_start_kwargs = None
     runtime_sif = tmp_path / "openclaw.sif"
     runtime_sif.touch()
     task_dir = tmp_path / "tasks"
@@ -107,7 +114,45 @@ def test_terminal_bench_openclaw_singularity_returns_runtime_handle(tmp_path, mo
     assert container.specs[1].env["HOME"] == "/root"
     assert container.specs[1].env["OPENCLAW_BYPASS_ENSURE_SANDBOX"] == "1"
     assert container.specs[1].env["OPENCLAW_DISABLE_BONJOUR"] == "1"
+
+    # NSCC runtime hardening.
+    assert tb_app.TerminalBenchOpenClawHarness._GATEWAY_READY_TIMEOUT_SECONDS == 600
+    assert container.specs[1].env["OPENCLAW_PLUGIN_STAGE_DIR"] == (
+        "/tmp/oc-plugin-deps/run-1"
+    )
+    assert container.specs[1].env["NPM_CONFIG_FETCH_RETRIES"] == "1"
+    assert container.specs[1].env["NPM_CONFIG_FETCH_TIMEOUT"] == "15000"
+    assert container.specs[1].env["NODE_OPTIONS"] == "--dns-result-order=ipv4first"
+
+    # Task/runtime separation and solve-time verifier isolation.
     assert all(m.container != "/tests" for m in container.specs[0].mounts)
+    assert container.specs[0].labels["openclaw.sessionKey"].startswith("agent:")
+
+    # Exec bridge must target the Terminal-Bench task instance.
+    assert _FakeDispatcher.last_start_kwargs is not None
+    assert _FakeDispatcher.last_start_kwargs["backend"] == "singularity"
+    assert (
+        _FakeDispatcher.last_start_kwargs["target"]
+        == env_info["task_container_name"]
+    )
+
+    # Retry preflight must attempt cleanup of deterministic stale instances.
+    stopped_names = [h.name for h in container.stop_calls]
+    assert "oc-run-1" in stopped_names
+    assert env_info["task_container_name"] in stopped_names
+    assert "oc-eval-net-run-1" in container.removed_networks
+    assert "oc-eval-net-run-1" in container.created_networks
+
+    # Gateway and CLI use separate node-local plugin staging directories.
+    gateway_env_writes = [
+        args[1]
+        for args, _kwargs in container.exec_calls
+        if len(args) >= 2 and isinstance(args[1], list)
+    ]
+    assert any(
+        "/tmp/oc-plugin-deps/run-1-cli" in str(argv)
+        for argv in gateway_env_writes
+    )
 
 
 def test_driver_routes_terminal_bench_openclaw_to_generic_harness():

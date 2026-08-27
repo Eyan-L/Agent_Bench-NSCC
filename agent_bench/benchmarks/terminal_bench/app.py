@@ -49,6 +49,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -77,6 +78,14 @@ from agent_bench.deployments.containers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Serialize only the OpenClaw gateway warmup window. This mirrors the
+# proven SWE-bench NSCC path: plugin installation is serialized, while
+# agent execution remains concurrent after the gateway becomes ready.
+_OPENCLAW_WARMUP_SEM = threading.BoundedSemaphore(
+    int(os.environ.get("AB_HARNESS_WARMUP_CONCURRENCY", "1"))
+)
 
 
 # ----------------------------------------------------------------------
@@ -1076,6 +1085,7 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
     """
 
     backend_id = "container-agnostic"
+    _GATEWAY_READY_TIMEOUT_SECONDS = 600
 
     def __init__(
         self,
@@ -1179,13 +1189,31 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
         if not instance_data or instance_data.get("benchmark") != "terminal_bench":
             raise RuntimeError("TerminalBenchOpenClawHarness requires terminal_bench instance_data")
         docker_image = instance_data["docker_image"]
-        task_workspace = _resolve_task_workspace(instance_data)
+        if self.container.backend_id == "docker":
+            image_workdir = _docker_image_workdir(docker_image)
+            task_workspace = _resolve_task_workspace(instance_data, image_workdir)
+        else:
+            task_workspace = _resolve_task_workspace(instance_data)
         task_image = self._resolve_task_image(docker_image)
         run_id = run_id or instance_id
         rid_short = run_id[:12]
         net_name = f"oc-eval-net-{rid_short}"
         oc_name = f"oc-{rid_short}"
+        agent_id = (
+            TerminalBenchDockerHarness._agent_id_from_harness_cfg()
+            or "terminal_bench"
+        )
+        scope_key = f"agent:{agent_id}"
         task_name = self._task_container_name(run_id)
+
+        # run_id is deterministic, so an interrupted prior run may have left
+        # instances with exactly these names behind. Clean those stale
+        # resources before retrying.
+        self._best_effort_stop(
+            ContainerHandle(oc_name, oc_name, self.container.backend_id),
+            ContainerHandle(task_name, task_name, self.container.backend_id),
+        )
+        self.container.remove_network(net_name)
         self.container.create_network(net_name)
 
         run_root = self.workspace_base / run_id
@@ -1215,7 +1243,11 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
         try:
             task_handle = self.container.start(ContainerSpec(
                 name=task_name, image=task_image, network=net_name, user="0",
-                labels={"openclaw.sandbox": "1", "oc-eval.run_id": run_id},
+                labels={
+                    "openclaw.sandbox": "1",
+                    "openclaw.sessionKey": scope_key,
+                    "oc-eval.run_id": run_id,
+                },
                 mounts=(Mount(app_dir, task_workspace), Mount(logs_dir, "/logs/verifier")),
                 env={"HOME": "/root"}, workdir=task_workspace,
                 entrypoint="sleep", command=("infinity",), cpus=self.task_container_cpus,
@@ -1225,10 +1257,6 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
             gateway_port = _pick_free_gateway_port()
             gateway_token = secrets.token_hex(24)
             bridge_mounts, bridge_env = dispatcher.agent_mounts_and_env()
-            gateway_stage = state_dir / ".gateway-plugin-stage"
-            cli_stage = state_dir / ".cli-plugin-stage"
-            gateway_stage.mkdir(exist_ok=True)
-            cli_stage.mkdir(exist_ok=True)
             mounts = [Mount(state_dir, "/root/.openclaw"), *bridge_mounts]
             workspace_mount = self._runtime_workspace_mount(app_dir, task_workspace)
             if workspace_mount:
@@ -1246,31 +1274,62 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
                 "OPENCLAW_RAW_RESPONSE_LOG": "/root/.openclaw/logs/llm-raw-responses.jsonl",
                 "OTEL_RESOURCE_ATTRIBUTES": f"oc.run_id={run_id}",
                 "OPENCLAW_DISABLE_BONJOUR": "1",
-                "OPENCLAW_BYPASS_ENSURE_SANDBOX": "1",
-                "NPM_CONFIG_REGISTRY": os.environ.get("AB_NPM_REGISTRY", "https://registry.npmmirror.com"),
-                "npm_config_registry": os.environ.get("AB_NPM_REGISTRY", "https://registry.npmmirror.com"),
-                "OPENCLAW_PLUGIN_STAGE_DIR": "/root/.openclaw/.gateway-plugin-stage",
+                "NPM_CONFIG_REGISTRY": os.environ.get(
+                    "AB_NPM_REGISTRY", "https://registry.npmmirror.com"
+                ),
+                "npm_config_registry": os.environ.get(
+                    "AB_NPM_REGISTRY", "https://registry.npmmirror.com"
+                ),
+                "NPM_CONFIG_FETCH_RETRIES": "1",
+                "NPM_CONFIG_FETCH_TIMEOUT": "15000",
+                "NODE_OPTIONS": "--dns-result-order=ipv4first",
                 **bridge_env,
             }
-            if self.container.backend_id == "docker":
+            if self.container.backend_id == "singularity":
+                runtime_env["OPENCLAW_BYPASS_ENSURE_SANDBOX"] = "1"
+                runtime_env["OPENCLAW_PLUGIN_STAGE_DIR"] = (
+                    f"/tmp/oc-plugin-deps/{run_id}"
+                )
+            else:
                 runtime_env["DOCKER_API_VERSION"] = "1.44"
-            oc_handle = self.container.start(ContainerSpec(
+            oc_spec = ContainerSpec(
                 name=oc_name, image=self.oc_image, network=net_name, user="0",
                 mounts=tuple(mounts), env=runtime_env, workdir="/root",
                 extra_hosts={"vllm-host": "host-gateway"},
                 entrypoint="/usr/local/bin/openclaw",
                 command=("gateway", "--allow-unconfigured"),
-            ))
-            self.container.wait_log_pattern(
-                oc_handle, self._GATEWAY_READY_RE, self._GATEWAY_READY_TIMEOUT_SECONDS
+            )
+            logger.info(
+                "  [warmup] waiting for gateway-warmup slot (run=%s)", run_id
+            )
+            with _OPENCLAW_WARMUP_SEM:
+                logger.info(
+                    "  [warmup] slot acquired; starting gateway (run=%s)",
+                    run_id,
+                )
+                oc_handle = self.container.start(oc_spec)
+                self.container.wait_log_pattern(
+                    oc_handle,
+                    self._GATEWAY_READY_RE,
+                    self._GATEWAY_READY_TIMEOUT_SECONDS,
+                )
+            logger.info(
+                "  [warmup] gateway ready; slot released (run=%s)", run_id
             )
             gateway_url = f"ws://127.0.0.1:{gateway_port}"
+            cli_stage_export = ""
+            if self.container.backend_id == "singularity":
+                cli_stage_export = (
+                    "export OPENCLAW_PLUGIN_STAGE_DIR="
+                    f"/tmp/oc-plugin-deps/{run_id}-cli\n"
+                )
             self.container.exec(oc_handle, ["bash", "-c", (
                 "cat > /tmp/oc_gateway_env <<'EOF'\n"
                 f"export OPENCLAW_GATEWAY_URL={gateway_url}\n"
                 f"export OPENCLAW_GATEWAY_TOKEN={gateway_token}\n"
                 f"export OPENCLAW_RUN_ID={run_id}\n"
-                "export OPENCLAW_PLUGIN_STAGE_DIR=/root/.openclaw/.cli-plugin-stage\nEOF"
+                f"{cli_stage_export}"
+                "EOF"
             )])
             return {
                 "container_id": oc_handle.id,
