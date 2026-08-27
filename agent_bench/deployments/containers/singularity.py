@@ -323,14 +323,48 @@ class SingularityContainer(Container):
         return r
 
     def copy_into(self, h: ContainerHandle, src: Path, dst: str) -> None:
-        """Stream src into the instance via stdin → `cat > dst`.
+        """Copy a file or directory into a running instance.
 
-        Avoids assuming the destination path lives on a bound host dir.
-        For binary safety we pipe raw bytes and use base64 inside the
-        container to round-trip.
+        Directories use a tar stream so callers can inject Terminal-Bench's
+        private ``/tests`` tree only at scoring time. Files keep the existing
+        base64 path, which avoids assuming the destination is host-bound.
         """
+        src = Path(src)
+        if src.is_dir():
+            producer = subprocess.Popen(
+                ["tar", "-C", str(src), "-cf", "-", "."],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            consumer = subprocess.Popen(
+                ["singularity", "exec", f"instance://{h.name}",
+                 "sh", "-c", f"mkdir -p '{dst}' && tar -C '{dst}' -xf -"],
+                stdin=producer.stdout, stderr=subprocess.PIPE,
+                env=_subprocess_env(),
+            )
+            if producer.stdout is not None:
+                producer.stdout.close()
+            try:
+                consumer_err = consumer.communicate(timeout=300)[1]
+                producer_err = producer.communicate(timeout=10)[1]
+            except subprocess.TimeoutExpired:
+                consumer.kill()
+                producer.kill()
+                raise RuntimeError(f"copy_into timed out copying directory {src} to {dst}")
+            if producer.returncode != 0:
+                raise RuntimeError(
+                    f"copy_into: host tar failed for {src}: "
+                    f"{(producer_err or b'').decode(errors='replace')[-500:]}"
+                )
+            if consumer.returncode != 0:
+                raise RuntimeError(
+                    f"copy_into: in-instance tar failed for {dst}: "
+                    f"{(consumer_err or b'').decode(errors='replace')[-500:]}"
+                )
+            return
+        if not src.is_file():
+            raise FileNotFoundError(f"copy_into source does not exist: {src}")
         import base64
-        data = Path(src).read_bytes()
+        data = src.read_bytes()
         b64 = base64.b64encode(data).decode("ascii")
         # `printf %s` survives shells that mangle echo (dash, ash).
         # Write to dst.tmp then mv to dst — atomic-ish overwrite.

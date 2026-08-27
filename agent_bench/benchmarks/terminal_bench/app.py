@@ -1,21 +1,16 @@
-"""Terminal-Bench harnesses (docker + singularity).
+"""Terminal-Bench harnesses (Docker + Singularity).
 
 Two backends, same surface as ``agent_bench/benchmarks/swebench/app.py``:
 
-  - ``TerminalBenchDockerHarness``       — default; mirrors ``SWEBenchHarness``.
-                                           Two containers (OC + task) on a per-run
-                                           docker network, connected via the
-                                           exec-bridge so an OpenClaw agent's
-                                           sandbox tool execs land in the task
-                                           container. Selected when
-                                           ``AB_DEPLOYMENT_CONTAINER_BACKEND=docker`` (the
-                                           default for ``run_tb``).
-  - ``TerminalBenchSingularityHarness``  — HPC fallback. One singularity
-                                           instance of the task .sif. No OC
-                                           container; only the ``tb_react``
-                                           condition drives it.
+  - ``TerminalBenchOpenClawHarness``     — container-agnostic OpenClaw path.
+                                           It starts the OC runtime and task
+                                           runtime through an injected Container,
+                                           with the exec bridge targeting task.
+  - ``TerminalBenchDockerHarness`` and ``TerminalBenchSingularityHarness``
+                                           — legacy task-only paths retained for
+                                           the ``tb_react`` fallback.
 
-Architecture (docker mode):
+OpenClaw architecture (Docker or Singularity):
 
     host  ──── only vLLM runs here ──── http://localhost:8000/v1
                                   ▲
@@ -73,6 +68,12 @@ from agent_bench.core.profile_io import load_profile
 from agent_bench.deployments.containers.limits import (
     configured_task_container_cpus,
     docker_cpus_args,
+)
+from agent_bench.deployments.containers import (
+    Container,
+    ContainerHandle,
+    ContainerSpec,
+    Mount,
 )
 
 logger = logging.getLogger(__name__)
@@ -1059,6 +1060,299 @@ class TerminalBenchDockerHarness:
                            capture_output=True, check=False)
         subprocess.run(["docker", "network", "rm", net],
                        capture_output=True, check=False)
+
+
+# ----------------------------------------------------------------------
+# Container-agnostic OpenClaw harness
+# ----------------------------------------------------------------------
+
+
+class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
+    """OpenClaw Terminal-Bench lifecycle implemented through ``Container``.
+
+    The legacy Docker harness remains the compatibility path for ``tb_react``.
+    This class owns both the task runtime and the OpenClaw runtime, so its
+    ``container_id`` is always the OpenClaw handle that conditions must invoke.
+    """
+
+    backend_id = "container-agnostic"
+
+    def __init__(
+        self,
+        benchmark_data_root: Optional[Path] = None,
+        *,
+        container: Container,
+        oc_image: Optional[str] = None,
+        workspace_base: Optional[Path] = None,
+    ) -> None:
+        self.benchmark_data_root = Path(benchmark_data_root) if benchmark_data_root else None
+        self.container = container
+        if self.container.backend_id == "singularity":
+            self.oc_image = os.environ.get("AB_AGENT_RUNTIME_SIF", "")
+            if not self.oc_image:
+                raise RuntimeError(
+                    "AB_AGENT_RUNTIME_SIF is required for Terminal-Bench "
+                    "OpenClaw runs with the singularity backend."
+                )
+        else:
+            self.oc_image = oc_image or DEFAULT_OPENCLAW_RUNTIME_IMAGE
+        self.container.check_available()
+        self.container.check_image(self.oc_image)
+        self.task_container_cpus = configured_task_container_cpus()
+        self.workspace_base = Path(
+            workspace_base
+            or os.environ.get("AB_HARNESS_WORKSPACE_BASE", "~/.cache/oc-eval/workspaces")
+        ).expanduser()
+        self.workspace_base.mkdir(parents=True, exist_ok=True)
+        self.state_base = self.workspace_base.parent / "states"
+        self.state_base.mkdir(parents=True, exist_ok=True)
+
+    def _resolve_task_image(self, docker_image: str) -> str:
+        if self.container.backend_id == "docker":
+            return docker_image
+        sif_dir = os.environ.get("AB_DEPLOYMENT_TASK_IMAGE_DIR")
+        if not sif_dir:
+            raise RuntimeError(
+                "AB_DEPLOYMENT_TASK_IMAGE_DIR is required for Terminal-Bench "
+                "with the singularity backend."
+            )
+        sif_name = docker_image.replace("/", "__").replace(":", "__") + ".sif"
+        sif_path = Path(sif_dir) / sif_name
+        if not sif_path.is_file():
+            raise FileNotFoundError(
+                f"prepared Terminal-Bench task SIF missing: {sif_path}; "
+                "PBS prepare_images must create it before the run."
+            )
+        return str(sif_path)
+
+    def _build_state_dir(self, **kwargs) -> Path:  # type: ignore[override]
+        state_dir = super()._build_state_dir(**kwargs)
+        # The inherited TB renderer predates the runtime abstraction and uses
+        # Docker's synthetic hostname. Rewrite only the runtime-specific URLs.
+        cfg_path = state_dir / "openclaw.json"
+        cfg = json.loads(cfg_path.read_text())
+        model_cfg, _serving_cfg = load_active_model_and_serving(
+            repo_root=os.environ.get("AB_REPO_ROOT", os.getcwd())
+        )
+        endpoint = os.environ.get("AB_SERVING_BASE_URL") or os.environ.get(
+            "OPENAI_BASE_URL"
+        ) or model_cfg.endpoint
+        cfg.setdefault("models", {}).setdefault("providers", {}).setdefault(
+            "agent_model", {}
+        )["baseUrl"] = runtime_endpoint_for_container(
+            endpoint, self.container.host_address
+        )
+        otel = (cfg.get("diagnostics") or {}).get("otel") or {}
+        if otel.get("enabled"):
+            cfg["diagnostics"]["otel"]["endpoint"] = os.environ.get(
+                "AB_TELEMETRY_ENDPOINT",
+                f"http://{self.container.host_address}:4318",
+            )
+        cfg_path.write_text(json.dumps(cfg, indent=2))
+        return state_dir
+
+    @staticmethod
+    def _task_container_name(run_id: str) -> str:
+        agent_id = TerminalBenchDockerHarness._agent_id_from_harness_cfg() or "terminal_bench"
+        return _oc_sandbox_name(f"oc-sbx-{run_id[:12]}-", f"agent:{agent_id}")
+
+    def _runtime_workspace_mount(self, app_dir: Path, task_workspace: str) -> Optional[Mount]:
+        # The OC image's /app contains the openclaw launcher; never mask it.
+        if task_workspace == "/app":
+            return None
+        return Mount(app_dir, task_workspace, "rw")
+
+    def _best_effort_stop(self, *handles: Optional[ContainerHandle]) -> None:
+        for handle in handles:
+            if handle is None:
+                continue
+            try:
+                self.container.stop(handle)
+            except Exception:
+                pass
+
+    def prepare_environment(
+        self, instance_id: str, repo_id: str, base_commit: str,
+        container_image: Optional[str] = None, workspace_root: Optional[str] = None,
+        run_id: Optional[str] = None, instance_data: Optional[Dict] = None,
+    ) -> Dict:
+        if not instance_data or instance_data.get("benchmark") != "terminal_bench":
+            raise RuntimeError("TerminalBenchOpenClawHarness requires terminal_bench instance_data")
+        docker_image = instance_data["docker_image"]
+        task_workspace = _resolve_task_workspace(instance_data)
+        task_image = self._resolve_task_image(docker_image)
+        run_id = run_id or instance_id
+        rid_short = run_id[:12]
+        net_name = f"oc-eval-net-{rid_short}"
+        oc_name = f"oc-{rid_short}"
+        task_name = self._task_container_name(run_id)
+        self.container.create_network(net_name)
+
+        run_root = self.workspace_base / run_id
+        if run_root.exists():
+            _force_rmtree(run_root, ignore_errors=True)
+        app_dir = run_root / "app"
+        logs_dir = run_root / "logs" / "verifier"
+        app_dir.mkdir(parents=True)
+        logs_dir.mkdir(parents=True)
+        try:
+            self.container.copy_from_image(task_image, task_workspace, app_dir)
+        except Exception as exc:
+            logger.warning("TB workspace prime skipped: %s", exc)
+        _seed_workspace_helpers(app_dir, instance_data, task_workspace)
+
+        state_dir = self._build_state_dir(
+            run_id=run_id,
+            workspace_root=task_workspace,
+            sandbox_image=docker_image,
+            sandbox_binds=[f"{app_dir}:{task_workspace}:rw", f"{logs_dir}:/logs/verifier:rw"],
+            container_prefix=f"oc-sbx-{rid_short}-",
+        )
+        task_handle: Optional[ContainerHandle] = None
+        oc_handle: Optional[ContainerHandle] = None
+        dispatcher: Optional[OpenClawRemoteDispatcher] = None
+        gateway_port: Optional[int] = None
+        try:
+            task_handle = self.container.start(ContainerSpec(
+                name=task_name, image=task_image, network=net_name, user="0",
+                labels={"openclaw.sandbox": "1", "oc-eval.run_id": run_id},
+                mounts=(Mount(app_dir, task_workspace), Mount(logs_dir, "/logs/verifier")),
+                env={"HOME": "/root"}, workdir=task_workspace,
+                entrypoint="sleep", command=("infinity",), cpus=self.task_container_cpus,
+            ))
+            dispatcher = OpenClawRemoteDispatcher()
+            dispatcher.start(state_dir=state_dir, backend=self.container.backend_id, target=task_name)
+            gateway_port = _pick_free_gateway_port()
+            gateway_token = secrets.token_hex(24)
+            bridge_mounts, bridge_env = dispatcher.agent_mounts_and_env()
+            gateway_stage = state_dir / ".gateway-plugin-stage"
+            cli_stage = state_dir / ".cli-plugin-stage"
+            gateway_stage.mkdir(exist_ok=True)
+            cli_stage.mkdir(exist_ok=True)
+            mounts = [Mount(state_dir, "/root/.openclaw"), *bridge_mounts]
+            workspace_mount = self._runtime_workspace_mount(app_dir, task_workspace)
+            if workspace_mount:
+                mounts.append(workspace_mount)
+            if self.container.backend_id == "docker":
+                mounts.append(Mount(Path("/var/run/docker.sock"), "/var/run/docker.sock"))
+            runtime_env = {
+                "HOME": "/root",
+                "OPENCLAW_GATEWAY_PORT": str(gateway_port),
+                "OPENCLAW_GATEWAY_TOKEN": gateway_token,
+                "OPENCLAW_GATEWAY_OTEL_ENDPOINT": os.environ.get(
+                    "AB_TELEMETRY_ENDPOINT", f"http://{self.container.host_address}:4318"
+                ),
+                "OPENCLAW_RUN_ID": run_id,
+                "OPENCLAW_RAW_RESPONSE_LOG": "/root/.openclaw/logs/llm-raw-responses.jsonl",
+                "OTEL_RESOURCE_ATTRIBUTES": f"oc.run_id={run_id}",
+                "OPENCLAW_DISABLE_BONJOUR": "1",
+                "OPENCLAW_BYPASS_ENSURE_SANDBOX": "1",
+                "NPM_CONFIG_REGISTRY": os.environ.get("AB_NPM_REGISTRY", "https://registry.npmmirror.com"),
+                "npm_config_registry": os.environ.get("AB_NPM_REGISTRY", "https://registry.npmmirror.com"),
+                "OPENCLAW_PLUGIN_STAGE_DIR": "/root/.openclaw/.gateway-plugin-stage",
+                **bridge_env,
+            }
+            if self.container.backend_id == "docker":
+                runtime_env["DOCKER_API_VERSION"] = "1.44"
+            oc_handle = self.container.start(ContainerSpec(
+                name=oc_name, image=self.oc_image, network=net_name, user="0",
+                mounts=tuple(mounts), env=runtime_env, workdir="/root",
+                extra_hosts={"vllm-host": "host-gateway"},
+                entrypoint="/usr/local/bin/openclaw",
+                command=("gateway", "--allow-unconfigured"),
+            ))
+            self.container.wait_log_pattern(
+                oc_handle, self._GATEWAY_READY_RE, self._GATEWAY_READY_TIMEOUT_SECONDS
+            )
+            gateway_url = f"ws://127.0.0.1:{gateway_port}"
+            self.container.exec(oc_handle, ["bash", "-c", (
+                "cat > /tmp/oc_gateway_env <<'EOF'\n"
+                f"export OPENCLAW_GATEWAY_URL={gateway_url}\n"
+                f"export OPENCLAW_GATEWAY_TOKEN={gateway_token}\n"
+                f"export OPENCLAW_RUN_ID={run_id}\n"
+                "export OPENCLAW_PLUGIN_STAGE_DIR=/root/.openclaw/.cli-plugin-stage\nEOF"
+            )])
+            return {
+                "container_id": oc_handle.id,
+                "container_name": oc_handle.name,
+                "oc_container_id": oc_handle.id,
+                "task_container_id": task_handle.id,
+                "task_container_name": task_handle.name,
+                "backend": self.container.backend_id,
+                "network_name": net_name,
+                "workspace_root": task_workspace,
+                "task_workspace_root": task_workspace,
+                "workspace_host_path": str(app_dir),
+                "host_logs_dir": str(logs_dir),
+                "state_dir": str(state_dir),
+                "gateway_port": gateway_port,
+                "gateway_token": gateway_token,
+                "gateway_url": gateway_url,
+                "sandbox_image": docker_image,
+                "tb_instruction": instance_data["instruction"],
+                "tb_verifier_entrypoint": instance_data.get("verifier_entrypoint", "/tests/test.sh"),
+                "tb_reward_file": instance_data.get("reward_file", "/logs/verifier/reward.txt"),
+                **dispatcher.env_info(),
+            }
+        except BaseException:
+            if gateway_port is not None:
+                _release_gateway_port(gateway_port)
+            if dispatcher:
+                dispatcher.stop()
+            self._best_effort_stop(oc_handle, task_handle)
+            self.container.remove_network(net_name)
+            raise
+
+    def run_tests(self, container_id: Optional[str], instance_id: str, workspace_root: str,
+                  timeout_seconds: int, patch: Optional[str] = None, run_id: Optional[str] = None,
+                  instance_data: Optional[Dict] = None, **_kw) -> Dict:
+        run_id = run_id or instance_id
+        task_name = self._task_container_name(run_id)
+        task = ContainerHandle(task_name, task_name, self.container.backend_id)
+        task_workspace = _resolve_task_workspace(instance_data)
+        timeout = int((instance_data or {}).get(
+            "verifier_timeout_sec", timeout_seconds or self._DEFAULT_VERIFIER_TIMEOUT_SECONDS
+        ))
+        tests_host = _require_tests_host_path(instance_data)
+        self.container.exec(task, ["rm", "-rf", "/tests"], timeout=60)
+        self.container.copy_into(task, tests_host, "/tests")
+        host_logs = self.workspace_base / run_id / "logs" / "verifier"
+        reward = _clear_reward_file(host_logs)
+        try:
+            result = self.container.exec(
+                task, ["bash", (instance_data or {}).get("verifier_entrypoint", "/tests/test.sh")],
+                check=False, timeout=timeout, workdir=task_workspace,
+            )
+            timed_out = False
+        except subprocess.TimeoutExpired as exc:
+            result = subprocess.CompletedProcess([], -1, exc.stdout or "", exc.stderr or "")
+            timed_out = True
+        reward_text = reward.read_text().strip() if reward.exists() else ""
+        status = "PASS" if reward_text == "1" else "FAIL" if reward_text == "0" else "TIMEOUT" if timed_out else "ERROR"
+        return {"status": status, "test_pass_rate": float(status == "PASS"), "passed": int(status == "PASS"),
+                "failed": int(status != "PASS"), "verifier_rc": result.returncode,
+                "verifier_stdout_tail": (result.stdout or "")[-2000:],
+                "verifier_stderr_tail": (result.stderr or "")[-2000:], "reward_raw": reward_text or None,
+                "reward_path": str(reward), "evaluation_dir": str(host_logs),
+                "error_message": None if status == "PASS" else f"verifier exit {result.returncode}, reward={reward_text!r}"}
+
+    def cleanup(self, container_id: Optional[str] = None, oc_container_id: Optional[str] = None,
+                task_container_id: Optional[str] = None, task_container_name: Optional[str] = None,
+                network_name: Optional[str] = None, gateway_port: Optional[int] = None,
+                workspace_host_path: Optional[str] = None, state_dir: Optional[str] = None,
+                bridge_pid: Optional[int] = None, bridge_socket: Optional[str] = None, **_kw) -> None:
+        if gateway_port is not None:
+            _release_gateway_port(gateway_port)
+        OpenClawRemoteDispatcher.stop_external(pid=bridge_pid, socket_path=bridge_socket)
+        for ident in dict.fromkeys(x for x in (oc_container_id, container_id, task_container_id, task_container_name) if x):
+            self._best_effort_stop(ContainerHandle(ident, ident, self.container.backend_id))
+        if network_name:
+            self.container.remove_network(network_name)
+        if os.environ.get("AB_HARNESS_KEEP_WORKSPACE", "0") != "1":
+            if workspace_host_path:
+                _force_rmtree(Path(workspace_host_path).parent, ignore_errors=True)
+            if state_dir:
+                _force_rmtree(Path(state_dir), ignore_errors=True)
 
 
 # ----------------------------------------------------------------------

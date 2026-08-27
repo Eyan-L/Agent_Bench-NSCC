@@ -746,13 +746,27 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
 
     # Lazy-build the TB harness only if any instance in this sweep is TB.
     # Harness choice now applies to Terminal-Bench too:
-    #   openclaw  -> TerminalBenchDockerHarness / TerminalBenchSingularityHarness
+    #   openclaw  -> TerminalBenchOpenClawHarness (Docker or Singularity)
     #   openhands -> TerminalBenchOpenHandsHarness (docker)
     #   hermes    -> TerminalBenchHermesHarness (docker)
     tb_harness = None
     if needs_tb:
         tb_backend = os.environ.get("AB_DEPLOYMENT_CONTAINER_BACKEND", "docker").lower()
-        if harness_choice == "openhands":
+        if harness_choice == "openclaw":
+            from agent_bench.benchmarks.terminal_bench.app import (
+                TerminalBenchOpenClawHarness as tb_cls,
+            )
+            if tb_backend == "docker":
+                tb_container = DockerContainer()
+            elif tb_backend == "singularity":
+                tb_container = SingularityContainer()
+            else:
+                raise ValueError(
+                    f"Unknown AB_DEPLOYMENT_CONTAINER_BACKEND={tb_backend!r} for terminal_bench; "
+                    "expected docker|singularity."
+                )
+            tb_harness = tb_cls(benchmark_data_root, container=tb_container)
+        elif harness_choice == "openhands":
             if tb_backend != "docker":
                 raise ValueError(
                     "terminal_bench + openhands currently requires "
