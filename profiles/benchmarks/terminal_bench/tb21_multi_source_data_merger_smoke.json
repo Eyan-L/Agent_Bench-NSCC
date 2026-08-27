@@ -1,0 +1,29 @@
+{
+  "_doc": "Terminal-Bench 2.1 smoke workload pinned to the upstream commit listed below. The three independent input sources make this a useful first natural fan-out probe without altering the standard Terminal-Bench agent policy.",
+  "sweep_name": "terminal_bench_2_1_multi_source_data_merger_smoke",
+  "plan_version": "tb21-7131e4375048",
+  "application": "terminal_bench",
+  "source_dataset": "harbor-framework/terminal-bench-2-1",
+  "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+  "source_dataset_task_count": 89,
+  "tasks_root": "/scratch/users/ntu/n2602695/datasets/terminal-bench-2-1-7131e4375048/tasks",
+  "instances": [
+    "multi-source-data-merger"
+  ],
+  "repo_mapping": {
+    "multi-source-data-merger": {
+      "repo_id": "terminal-bench/multi-source-data-merger",
+      "base_commit": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 900,
+  "output_dir": "tb21_multi_source_data_merger_smoke",
+  "seeds": [
+    42
+  ],
+  "selection": {
+    "method": "single-task natural fan-out smoke",
+    "rationale": "input schemas can be inspected independently while the parent remains responsible for the final merge and conflict policy"
+  }
+}

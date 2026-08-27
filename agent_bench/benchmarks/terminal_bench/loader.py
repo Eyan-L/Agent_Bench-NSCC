@@ -36,18 +36,20 @@ except ImportError:  # pragma: no cover
     import tomli as tomllib  # type: ignore
 
 
-def _tasks_root() -> Path:
+def _tasks_root(tasks_root: str | Path | None = None) -> Path:
     """Vendored TB task tree at `agent_bench/benchmarks/terminal_bench/tasks/`.
-    Override via AB_BENCHMARK_TASKS_ROOT."""
+    Override via an explicit root or AB_BENCHMARK_TASKS_ROOT."""
+    if tasks_root is not None:
+        return Path(tasks_root)
     env = os.environ.get("AB_BENCHMARK_TASKS_ROOT")
     if env:
         return Path(env)
     return Path(__file__).resolve().parent / "tasks"
 
 
-def list_task_ids() -> List[str]:
+def list_task_ids(tasks_root: str | Path | None = None) -> List[str]:
     """Every immediate subdir of tasks/ that has both instruction.md + task.toml."""
-    root = _tasks_root()
+    root = _tasks_root(tasks_root)
     if not root.is_dir():
         return []
     out: List[str] = []
@@ -134,9 +136,9 @@ def _task_workspace(task_dir: Path, env: Dict) -> Tuple[str, str]:
     return "/app", "default"
 
 
-def load_task(task_id: str) -> Dict:
+def load_task(task_id: str, tasks_root: str | Path | None = None) -> Dict:
     """Build the instance_data dict for a single TB task."""
-    task_dir = _tasks_root() / task_id
+    task_dir = _tasks_root(tasks_root) / task_id
     if not task_dir.is_dir():
         raise FileNotFoundError(f"TB task dir not found: {task_dir}")
 
@@ -183,12 +185,16 @@ def load_task(task_id: str) -> Dict:
     }
 
 
-def materialize_dataset(task_ids: List[str], out_path: Path) -> None:
+def materialize_dataset(
+    task_ids: List[str],
+    out_path: Path,
+    tasks_root: str | Path | None = None,
+) -> None:
     """Write a JSON file with one entry per task — same shape as SWE-bench's
     verified.json, so the existing driver loader at
     agent_bench/runtime/driver.py:217 picks it up unchanged."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    rows = [load_task(t) for t in task_ids]
+    rows = [load_task(t, tasks_root=tasks_root) for t in task_ids]
     with out_path.open("w") as fh:
         json.dump(rows, fh, indent=2)
 

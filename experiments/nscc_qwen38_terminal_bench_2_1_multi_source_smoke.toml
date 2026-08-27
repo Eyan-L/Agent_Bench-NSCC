@@ -1,0 +1,27 @@
+name = "nscc_qwen38_terminal_bench_2_1_multi_source_smoke"
+description = "Pinned Terminal-Bench 2.1 multi-source-data-merger smoke with OpenClaw, Qwen3.8-27B, and SGLang on NSCC."
+output_dir = "runs/nscc_qwen38_terminal_bench_2_1_multi_source_smoke"
+seeds = [42]
+
+[telemetry]
+spans_html = true
+
+[benchmark]
+name = "terminal_bench"
+profile = "profiles/benchmarks/terminal_bench/tb21_multi_source_data_merger_smoke.json"
+
+[harness]
+name = "openclaw"
+profile = "profiles/harnesses/openclaw_terminal_bench.yaml"
+
+[model]
+profile = "profiles/models/qwen38_27b_nscc.json"
+
+[serving]
+profile = "profiles/serving/sglang/nscc_qwen38_tp4.yaml"
+
+[deployment]
+profile = "profiles/deployments/nscc_pbs_4gpu.toml"
+
+[limits]
+max_workers = 1

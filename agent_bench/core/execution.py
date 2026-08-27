@@ -334,12 +334,24 @@ def materialize_benchmark_data(
         out = pbs_spec.run_dir / "terminal_bench_tasks.json" if pbs_spec else Path("data/terminal_bench/tasks.json")
         from agent_bench.benchmarks.terminal_bench import loader
 
+        configured_root = resolved.benchmark.get("tasks_root")
+        tasks_root = None
+        if configured_root:
+            tasks_root = Path(
+                os.path.expandvars(os.path.expanduser(str(configured_root)))
+            ).resolve()
+            if not tasks_root.is_dir():
+                raise ConfigError(
+                    f"Terminal-Bench tasks_root does not exist: {tasks_root}"
+                )
+            target_env["AB_BENCHMARK_TASKS_ROOT"] = str(tasks_root)
+
         task_ids = [str(item) for item in (resolved.benchmark.get("instances") or [])]
         if not task_ids:
-            task_ids = loader.list_task_ids()
+            task_ids = loader.list_task_ids(tasks_root=tasks_root)
         if not task_ids:
             raise ConfigError("Terminal-Bench materialization found no task ids")
-        loader.materialize_dataset(task_ids, out)
+        loader.materialize_dataset(task_ids, out, tasks_root=tasks_root)
         out = out.resolve()
         _set_instance_data_env(target_env, out)
         return out

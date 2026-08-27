@@ -76,6 +76,17 @@ def runtime_environment(
         "AB_TELEMETRY_DOCKER": env.get("AB_TELEMETRY_DOCKER", "docker://otel/opentelemetry-collector-contrib:latest"),
     }
     out.update(runtime_defaults)
+    if resolved.spec.benchmark_name == "terminal_bench":
+        configured_root = resolved.benchmark.get("tasks_root")
+        if configured_root:
+            tasks_root = Path(
+                os.path.expandvars(os.path.expanduser(str(configured_root)))
+            ).resolve()
+            if not tasks_root.is_dir():
+                raise ConfigError(
+                    f"Terminal-Bench tasks_root does not exist: {tasks_root}"
+                )
+            out["AB_BENCHMARK_TASKS_ROOT"] = str(tasks_root)
     for key in tuple(runtime_defaults):
         if key in env and env[key]:
             out[key] = env[key]
