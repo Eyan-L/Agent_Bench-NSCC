@@ -713,9 +713,14 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
     sa_harness = None
     if needs_sa:
         sa_backend = os.environ.get("AB_DEPLOYMENT_CONTAINER_BACKEND", "docker").lower()
-        if sa_backend != "docker":
+        if sa_backend == "docker":
+            sa_container = DockerContainer()
+        elif sa_backend == "singularity":
+            sa_container = SingularityContainer()
+        else:
             raise ValueError(
-                f"swe_atlas_qa only supports AB_DEPLOYMENT_CONTAINER_BACKEND=docker (got {sa_backend!r})."
+                f"Unknown AB_DEPLOYMENT_CONTAINER_BACKEND={sa_backend!r}; "
+                "expected docker|singularity."
             )
         if harness_choice == "openclaw":
             from agent_bench.benchmarks.swe_atlas_qa.openclaw.app import (
@@ -729,9 +734,15 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
             raise ValueError(
                 f"swe_atlas_qa supports harness=openclaw|hermes (got {harness_choice!r})."
             )
-        from agent_bench.deployments.containers.docker import DockerContainer
-        logger.info("Constructing SWEAtlasQA harness (%s).", harness_choice)
-        sa_harness = sa_cls(benchmark_data_root, container=DockerContainer())
+        logger.info(
+            "Constructing SWEAtlasQA harness (%s) with %s.",
+            harness_choice,
+            type(sa_container).__name__,
+        )
+        sa_harness = sa_cls(
+            benchmark_data_root,
+            container=sa_container,
+        )
 
     # Lazy-build the TB harness only if any instance in this sweep is TB.
     # Harness choice now applies to Terminal-Bench too:

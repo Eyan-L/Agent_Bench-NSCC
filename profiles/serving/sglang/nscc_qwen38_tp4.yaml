@@ -1,0 +1,29 @@
+serving:
+  config_id: sglang-nscc-qwen38-tp4
+  backend: sglang
+  preset: single
+  serving_mode: singularity
+
+  sif: /scratch/users/ntu/n2602695/sif/sglang.sif
+  image: docker://lmsysorg/sglang:v0.5.16-cu129-runtime
+
+  endpoint:
+    scheme: http
+    bind_host: 0.0.0.0
+    client_host: 127.0.0.1
+    port: 30000
+    path: /v1
+
+  runtime:
+    tensor_parallel_size: 4
+    cuda_visible_devices: "0,1,2,3"
+    gpu_mem_util: 0.85
+    enable_hierarchical_cache: false
+    page_size: 1
+
+  scheduler:
+    max_num_seqs: 128
+    enable_prefix_caching: true
+
+  additional_flags: {}
+  extra_args: []

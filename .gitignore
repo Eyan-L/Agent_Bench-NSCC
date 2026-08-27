@@ -34,3 +34,9 @@ logs/*
 build/
 bench_platform.egg-info/
 runs
+# NSCC / PBS job outputs
+*.o[0-9]*
+*.e[0-9]*
+
+# Local run outputs
+runs/

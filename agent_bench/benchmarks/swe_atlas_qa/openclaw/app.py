@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional, Dict, List
 from pathlib import Path
 from agent_bench.deployments.containers import Container, Mount
@@ -37,6 +38,25 @@ class SWEAtlasQAHarness(SWEAtlasQAHarnessMixin, SWEBenchHarness):
         )
         if benchmark_data_root is None:
             self.benchmark_data_root = None
+
+    def _resolve_task_image(self, container_image: str) -> str:
+        """Resolve an Atlas task image for Docker or Singularity."""
+        if self.container.backend_id == "docker":
+            return container_image
+
+        sif_dir = os.environ.get("AB_DEPLOYMENT_TASK_IMAGE_DIR")
+        if not sif_dir:
+            raise RuntimeError(
+                "AB_DEPLOYMENT_TASK_IMAGE_DIR is required for "
+                "SWE-Atlas-QA with Singularity."
+            )
+
+        # Example:
+        # ghcr.io/scaleapi/swe-atlas:swe_atlas_QnA_kovidgoyal_kitty_1.0
+        # ->
+        # $AB_DEPLOYMENT_TASK_IMAGE_DIR/swe_atlas_QnA_kovidgoyal_kitty_1.0.sif
+        tag = container_image.rsplit(":", 1)[-1]
+        return str(Path(sif_dir) / f"{tag}.sif")
 
     def prepare_environment(
         self,
@@ -79,28 +99,52 @@ class SWEAtlasQAHarness(SWEAtlasQAHarnessMixin, SWEBenchHarness):
         else:
             repo_source = repo_url
 
-        logger.info(f"Cloning {repo_source} into host workspace {ws_host}...")
         try:
-            # Run git clone
-            subprocess.run(
-                ["git", "clone", repo_source, "."],
-                cwd=ws_host,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            # Run git checkout
-            logger.info(f"Checking out base commit {base_commit}...")
-            subprocess.run(
-                ["git", "checkout", base_commit],
-                cwd=ws_host,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            if self.container.backend_id == "singularity":
+                # NSCC compute nodes do not require host git/network access.
+                # SWE-Atlas task SIFs already contain the prepared repository
+                # under /app, including .git metadata at the benchmark commit.
+                logger.info(
+                    "Priming host workspace from Atlas task SIF %s...",
+                    task_image,
+                )
+                subprocess.run(
+                    [
+                        "singularity",
+                        "exec",
+                        "--bind",
+                        f"{ws_host}:/workspace-seed",
+                        task_image,
+                        "sh",
+                        "-lc",
+                        "cp -a /app/. /workspace-seed/",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            else:
+                logger.info(
+                    f"Cloning {repo_source} into host workspace {ws_host}..."
+                )
+                subprocess.run(
+                    ["git", "clone", repo_source, "."],
+                    cwd=ws_host,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                logger.info(f"Checking out base commit {base_commit}...")
+                subprocess.run(
+                    ["git", "checkout", base_commit],
+                    cwd=ws_host,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
         except Exception as e:
-            logger.exception("Failed to clone/checkout codebase repo on host")
-            raise RuntimeError(f"Failed to clone/checkout codebase repo: {e}")
+            logger.exception("Failed to prime Atlas workspace")
+            raise RuntimeError(f"Failed to prime Atlas workspace: {e}")
 
         # Seed custom agent files into the workspace directory
         import shutil
@@ -111,26 +155,6 @@ class SWEAtlasQAHarness(SWEAtlasQAHarnessMixin, SWEBenchHarness):
                 src = os.path.join(app_agents, f)
                 if os.path.isfile(src):
                     shutil.copyfile(src, ws_host / f)
-
-        # Generate BOOTSTRAP.md containing the reference answer to guide the agent
-        ref_ans = inst.get("reference_answer") or inst.get("answer")
-        if ref_ans:
-            logger.info(f"Generating BOOTSTRAP.md with reference answer in {ws_host}...")
-            bootstrap_content = (
-                "# BOOTSTRAP.md\n\n"
-                "You must write the following reference answer to `/app/answer.md` and `/logs/agent/answer.txt`.\n\n"
-                "## Reference Answer\n"
-                f"{ref_ans}\n\n"
-                "## Execution Steps\n"
-                "1. Call your native `write` tool with path `/app/answer.md` containing the Reference Answer above.\n"
-                "2. Call your native `write` tool with path `/logs/agent/answer.txt` containing the Reference Answer above.\n"
-                "3. In a separate final follow-up command, call your `exec` tool with the submission trigger:\n"
-                "   ```bash\n"
-                "   echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n"
-                "   ```\n"
-            )
-            with open(ws_host / "BOOTSTRAP.md", "w", encoding="utf-8") as f:
-                f.write(bootstrap_content)
 
     def _openclaw_runtime_workspace_mount(self, ws_host: Path) -> Optional[Mount]:
         if self.task_workspace == "/app":

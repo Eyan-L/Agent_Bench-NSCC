@@ -1,0 +1,10 @@
+[deployment]
+name = "nscc_pbs_4gpu"
+kind = "nscc_pbs"
+requires_gpu = true
+container_runtime = "singularity"
+queue = "normal"
+walltime = "04:00:00"
+nodes = 1
+gpus = 4
+description = "NSCC ASPIRE2A 4-GPU deployment for Qwen3.8-27B TP=4."

@@ -1,0 +1,27 @@
+name = "nscc_qwen38_swe_atlas_qa_subagent_subset10"
+description = "SWE-Atlas QA smoke with OpenClaw + Qwen3.8-27B + SGLang on NSCC."
+output_dir = "runs/nscc_qwen38_swe_atlas_qa_subagent_subset10"
+seeds = [42]
+
+[telemetry]
+spans_html = true
+
+[benchmark]
+name = "swe_atlas_qa"
+profile = "profiles/benchmarks/swe_atlas_qa/subset10.json"
+
+[harness]
+name = "openclaw"
+profile = "profiles/harnesses/openclaw_swe_atlas_qa_subagent.yaml"
+
+[model]
+profile = "profiles/models/qwen38_27b_nscc.json"
+
+[serving]
+profile = "profiles/serving/sglang/nscc_qwen38_tp4.yaml"
+
+[deployment]
+profile = "profiles/deployments/nscc_pbs_4gpu.toml"
+
+[limits]
+max_workers = 1

@@ -1,0 +1,68 @@
+harness: openclaw
+telemetry:
+  spans_html: true
+openclaw:
+  gateway:
+    mode: local
+    bind: loopback
+    auth:
+      mode: token
+      token:
+        source: env
+        provider: env
+        id: OPENCLAW_GATEWAY_TOKEN
+  diagnostics:
+    enabled: true
+    otel:
+      enabled: true
+      endpoint: http://localhost:4318
+      protocol: http/protobuf
+      serviceName: agent-bench-openclaw-sa
+      traces: true
+      metrics: true
+      logs: true
+      sampleRate: 1
+      flushIntervalMs: 20
+    cacheTrace:
+      enabled: true
+      includeMessages: true
+      includePrompt: true
+      includeSystem: true
+  tools:
+    exec:
+      host: gateway
+      security: full
+    alsoAllow:
+    - sessions_list
+    - sessions_history
+    - sessions_send
+    - sessions_spawn
+    - sessions_yield
+    - subagents
+    - session_status
+  plugins:
+    entries:
+      vllm:
+        enabled: true
+      memory-core:
+        enabled: true
+      diagnostics-otel:
+        enabled: true
+  agents:
+    defaults:
+      workspace: /app
+      subagents:
+        maxConcurrent: 4
+        runTimeoutSeconds: 1200
+    list:
+    - id: swe_atlas_qa
+      default: true
+      name: swe-atlas-qa-agent
+conditions:
+- condition_id: openclaw_agent
+  condition_type: openclaw_agent
+  description: 'OpenClaw Q&A agent on SWE-Atlas: full trajectory'
+  agent:
+    max_steps: 300
+    max_time_seconds: 3000
+    retry_limit: 5
