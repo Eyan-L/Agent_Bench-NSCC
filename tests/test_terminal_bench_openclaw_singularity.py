@@ -125,7 +125,18 @@ def test_terminal_bench_openclaw_singularity_returns_runtime_handle(tmp_path, mo
     assert container.specs[1].env["NODE_OPTIONS"] == "--dns-result-order=ipv4first"
 
     # Task/runtime separation and solve-time verifier isolation.
-    assert all(m.container != "/tests" for m in container.specs[0].mounts)
+    # Singularity needs an existing writable bind target because the SIF root
+    # filesystem is immutable. The mounted /tests directory must still be
+    # empty while the agent is solving; verifier files are injected only
+    # afterward by run_tests().
+    test_mounts = [
+        m for m in container.specs[0].mounts
+        if m.container == "/tests"
+    ]
+    assert len(test_mounts) == 1
+    assert Path(test_mounts[0].host).is_dir()
+    assert list(Path(test_mounts[0].host).iterdir()) == []
+
     assert container.specs[0].labels["openclaw.sessionKey"].startswith("agent:")
 
     # Exec bridge must target the Terminal-Bench task instance.
@@ -160,6 +171,23 @@ def test_driver_routes_terminal_bench_openclaw_to_generic_harness():
     assert 'if harness_choice == "openclaw":' in driver
     assert "TerminalBenchOpenClawHarness as tb_cls" in driver
     assert "tb_harness = tb_cls(benchmark_data_root, container=tb_container)" in driver
+
+
+def test_terminal_bench_prompt_variant_is_selected_explicitly(tmp_path, monkeypatch):
+    profile = tmp_path / "harness.yaml"
+    profile.write_text(
+        "terminal_bench:\n"
+        "  agent_prompt_file: AGENTS.md.dr_matched\n"
+        "  workspace_bootstrap_file: BOOTSTRAP.md.dr_matched\n"
+    )
+    monkeypatch.setenv("AB_HARNESS_CONFIG", str(profile))
+
+    assert tb_app._terminal_bench_prompt_filename(
+        "agent_prompt_file", "AGENTS.md"
+    ) == "AGENTS.md.dr_matched"
+    assert tb_app._terminal_bench_prompt_filename(
+        "workspace_bootstrap_file", "BOOTSTRAP.md"
+    ) == "BOOTSTRAP.md.dr_matched"
 
 
 def test_singularity_copy_into_directory_streams_tar(tmp_path, monkeypatch):

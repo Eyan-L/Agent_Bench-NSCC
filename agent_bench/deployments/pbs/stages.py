@@ -560,7 +560,12 @@ def _version_from_file(path: Path, key: str, default: str) -> str:
 
 
 class _FakeResolved:
-    spec = type("_Spec", (), {"harness_name": ""})()
+    spec = type(
+        "_Spec",
+        (),
+        {"harness_name": "", "benchmark_name": ""},
+    )()
     harness: dict[str, Any] = {}
+    benchmark: dict[str, Any] = {}
     model: dict[str, Any] = {}
     profile_paths: dict[str, Path] = {}

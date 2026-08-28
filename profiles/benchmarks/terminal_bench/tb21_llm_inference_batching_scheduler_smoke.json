@@ -1,0 +1,29 @@
+{
+  "_doc": "Terminal-Bench 2.1 smoke workload pinned to the upstream commit listed below. The two request buckets support substantive parallel analysis while the parent coordinates the shared shape budget and final plans.",
+  "sweep_name": "terminal_bench_2_1_llm_inference_batching_scheduler_smoke",
+  "plan_version": "tb21-7131e4375048",
+  "application": "terminal_bench",
+  "source_dataset": "harbor-framework/terminal-bench-2-1",
+  "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+  "source_dataset_task_count": 89,
+  "tasks_root": "/scratch/users/ntu/n2602695/datasets/terminal-bench-2-1-7131e4375048/tasks",
+  "instances": [
+    "llm-inference-batching-scheduler"
+  ],
+  "repo_mapping": {
+    "llm-inference-batching-scheduler": {
+      "repo_id": "terminal-bench/llm-inference-batching-scheduler",
+      "base_commit": "7131e4375048a0e408a8fb404b5f499d726b695b"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 1800,
+  "output_dir": "tb21_llm_inference_batching_scheduler_smoke",
+  "seeds": [
+    42
+  ],
+  "selection": {
+    "method": "single-task natural fan-out smoke",
+    "rationale": "the two request buckets permit independent cost-model analysis and batching experiments while the parent coordinates the shared eight-shape constraint and integrates both output plans"
+  }
+}

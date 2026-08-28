@@ -1,6 +1,6 @@
-name = "nscc_qwen38_terminal_bench_2_1_multi_source_smoke"
-description = "Pinned Terminal-Bench 2.1 multi-source-data-merger smoke with OpenClaw, Qwen3.8-27B, and SGLang on NSCC."
-output_dir = "runs/nscc_qwen38_terminal_bench_2_1_multi_source_smoke"
+name = "nscc_qwen38_terminal_bench_2_1_llm_inference_batching_scheduler_smoke"
+description = "Pinned Terminal-Bench 2.1 llm-inference-batching-scheduler subagent smoke with OpenClaw, Qwen3.8-27B, and SGLang on NSCC."
+output_dir = "runs/nscc_qwen38_terminal_bench_2_1_llm_inference_batching_scheduler_smoke"
 seeds = [42]
 
 [telemetry]

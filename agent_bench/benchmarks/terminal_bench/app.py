@@ -99,6 +99,20 @@ _BOOTSTRAP_SRC = _THIS_DIR / "openclaw" / "agents" / "BOOTSTRAP.md"
 _OPENAI_CHAT_COMPLETIONS_API = "openai-completions"
 
 
+def _terminal_bench_prompt_filename(field: str, default: str) -> str:
+    """Resolve one prompt asset selected by the active harness profile."""
+    harness_path = os.environ.get("AB_HARNESS_CONFIG")
+    if not harness_path or not os.path.isfile(harness_path):
+        return default
+    cfg = load_profile(harness_path)
+    filename = str((cfg.get("terminal_bench") or {}).get(field) or default)
+    if Path(filename).name != filename:
+        raise ValueError(
+            f"terminal_bench.{field} must be a filename, got {filename!r}"
+        )
+    return filename
+
+
 def _normalize_container_path(raw: Optional[str], default: str = "/app") -> str:
     path = (raw or "").strip() or default
     if not path.startswith("/"):
@@ -219,7 +233,17 @@ def _seed_workspace_helpers(
     these helpers, it'll just be more brittle.
     """
     try:
-        text = _render_workspace_doc_text(_BOOTSTRAP_SRC.read_text(), task_workspace)
+        bootstrap_name = _terminal_bench_prompt_filename(
+            "workspace_bootstrap_file", "BOOTSTRAP.md"
+        )
+        bootstrap_src = _BOOTSTRAP_SRC.parent / bootstrap_name
+        if not bootstrap_src.is_file():
+            raise FileNotFoundError(
+                f"Terminal-Bench workspace bootstrap not found: {bootstrap_src}"
+            )
+        text = _render_workspace_doc_text(
+            bootstrap_src.read_text(), task_workspace
+        )
         (app_dir / "BOOTSTRAP.md").write_text(text)
     except OSError as e:
         logger.warning("workspace seed (BOOTSTRAP.md) failed: %s", e)
@@ -707,16 +731,31 @@ class TerminalBenchDockerHarness:
                 else swe_skills
             )
             if os.path.isdir(src_agents):
+                agent_prompt_file = _terminal_bench_prompt_filename(
+                    "agent_prompt_file", "AGENTS.md"
+                )
+                agent_prompt_path = Path(src_agents) / agent_prompt_file
+                if not agent_prompt_path.is_file():
+                    raise FileNotFoundError(
+                        "Terminal-Bench agent prompt selected by harness is "
+                        f"missing: {agent_prompt_path}"
+                    )
                 # BOOTSTRAP.md is workspace-scoped (lives in task workspace at runtime,
                 # see _seed_workspace_helpers). The file in agents/ is just
                 # the source-of-truth — don't also copy it into
                 # state_dir/agents/<id>/, where it'd be agent-persona context.
                 for f in os.listdir(src_agents):
-                    if f == "BOOTSTRAP.md":
+                    if f == "BOOTSTRAP.md" or f.startswith("BOOTSTRAP.md."):
                         continue
+                    if f == "AGENTS.md" or f.startswith("AGENTS.md."):
+                        if f != agent_prompt_file:
+                            continue
+                        output_name = "AGENTS.md"
+                    else:
+                        output_name = f
                     s = os.path.join(src_agents, f)
                     if os.path.isfile(s):
-                        dst = state_dir / "agents" / agent_id / f
+                        dst = state_dir / "agents" / agent_id / output_name
                         if f.endswith((".md", ".txt")):
                             text = Path(s).read_text()
                             dst.write_text(
@@ -1158,6 +1197,19 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
                 "AB_TELEMETRY_ENDPOINT",
                 f"http://{self.container.host_address}:4318",
             )
+
+        # /app inside the OpenClaw runtime belongs to the runtime image itself
+        # and is read-only under Singularity. Terminal-Bench tasks commonly
+        # use /app as their task workspace, so expose that host workspace to
+        # OpenClaw as /workspace instead. This matches the proven Atlas path.
+        workspace_root = _normalize_container_path(
+            str(kwargs.get("workspace_root") or "/app")
+        )
+        if workspace_root == "/app":
+            cfg.setdefault("agents", {}).setdefault(
+                "defaults", {}
+            )["workspace"] = "/workspace"
+
         cfg_path.write_text(json.dumps(cfg, indent=2))
         return state_dir
 
@@ -1167,9 +1219,12 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
         return _oc_sandbox_name(f"oc-sbx-{run_id[:12]}-", f"agent:{agent_id}")
 
     def _runtime_workspace_mount(self, app_dir: Path, task_workspace: str) -> Optional[Mount]:
-        # The OC image's /app contains the openclaw launcher; never mask it.
+        # The OpenClaw runtime image uses /app for its own launcher/package.
+        # Never mask it. For Terminal-Bench tasks whose workspace is /app,
+        # expose the same host workspace to the runtime at /workspace instead.
+        # The task container still sees it at its canonical /app path.
         if task_workspace == "/app":
-            return None
+            return Mount(app_dir, "/workspace", "rw")
         return Mount(app_dir, task_workspace, "rw")
 
     def _best_effort_stop(self, *handles: Optional[ContainerHandle]) -> None:
@@ -1221,8 +1276,21 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
             _force_rmtree(run_root, ignore_errors=True)
         app_dir = run_root / "app"
         logs_dir = run_root / "logs" / "verifier"
+        tests_dir = run_root / "tests"
         app_dir.mkdir(parents=True)
         logs_dir.mkdir(parents=True)
+        tests_dir.mkdir(parents=True)
+
+        # Docker can create /tests later with docker cp. A Singularity SIF has
+        # an immutable root filesystem, so give it an empty writable /tests
+        # bind from the start. No verifier files are placed here until after
+        # the agent has finished solving the task.
+        task_mounts = [
+            Mount(app_dir, task_workspace),
+            Mount(logs_dir, "/logs/verifier"),
+        ]
+        if self.container.backend_id == "singularity":
+            task_mounts.append(Mount(tests_dir, "/tests"))
         try:
             self.container.copy_from_image(task_image, task_workspace, app_dir)
         except Exception as exc:
@@ -1248,7 +1316,7 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
                     "openclaw.sessionKey": scope_key,
                     "oc-eval.run_id": run_id,
                 },
-                mounts=(Mount(app_dir, task_workspace), Mount(logs_dir, "/logs/verifier")),
+                mounts=tuple(task_mounts),
                 env={"HOME": "/root"}, workdir=task_workspace,
                 entrypoint="sleep", command=("infinity",), cpus=self.task_container_cpus,
             ))
@@ -1373,7 +1441,23 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
             "verifier_timeout_sec", timeout_seconds or self._DEFAULT_VERIFIER_TIMEOUT_SECONDS
         ))
         tests_host = _require_tests_host_path(instance_data)
-        self.container.exec(task, ["rm", "-rf", "/tests"], timeout=60)
+        if self.container.backend_id == "singularity":
+            # /tests is a persistent bind mount in Singularity mode, so do not
+            # remove the mount point itself. Remove only its contents before
+            # injecting the authoritative verifier tree.
+            self.container.exec(
+                task,
+                [
+                    "sh",
+                    "-c",
+                    "find /tests -mindepth 1 -maxdepth 1 "
+                    "-exec rm -rf -- {} +",
+                ],
+                timeout=60,
+            )
+        else:
+            self.container.exec(task, ["rm", "-rf", "/tests"], timeout=60)
+
         self.container.copy_into(task, tests_host, "/tests")
         host_logs = self.workspace_base / run_id / "logs" / "verifier"
         reward = _clear_reward_file(host_logs)
