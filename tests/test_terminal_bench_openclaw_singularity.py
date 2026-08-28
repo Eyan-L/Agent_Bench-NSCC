@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 from agent_bench.benchmarks.terminal_bench import app as tb_app
+from agent_bench.benchmarks.terminal_bench import loader as tb_loader
 from agent_bench.deployments.containers.base import ContainerHandle
 from agent_bench.deployments.containers.singularity import SingularityContainer
 
@@ -188,6 +189,35 @@ def test_terminal_bench_prompt_variant_is_selected_explicitly(tmp_path, monkeypa
     assert tb_app._terminal_bench_prompt_filename(
         "workspace_bootstrap_file", "BOOTSTRAP.md"
     ) == "BOOTSTRAP.md.dr_matched"
+
+
+def test_terminal_bench_fractional_reward_is_preserved():
+    assert tb_app._terminal_bench_reward("1.0", timed_out=False) == ("PASS", 1.0)
+    assert tb_app._terminal_bench_reward("0.5556", timed_out=False) == (
+        "FAIL", 0.5556
+    )
+    assert tb_app._terminal_bench_reward("", timed_out=True) == ("TIMEOUT", 0.0)
+
+
+def test_terminal_bench_loader_accepts_roadmapbench_v1_metadata(tmp_path):
+    task = tmp_path / "fal-1.3.0-roadmap"
+    (task / "tests").mkdir(parents=True)
+    (task / "instruction.md").write_text("Implement five roadmap targets.\n")
+    (task / "task.toml").write_text(
+        'version = "1"\n'
+        '[metadata]\nname = "fal-1.3.0-roadmap"\n'
+        '[verifier]\ntimeout_sec = 1800\n'
+        '[agent]\ntimeout_sec = 7200\n'
+        '[environment]\n'
+        'docker_image = "znpt/roadmapbench-fal-1.3.0-roadmap"\n'
+    )
+
+    row = tb_loader.load_task("fal-1.3.0-roadmap", tasks_root=tmp_path)
+
+    assert row["task_name"] == "fal-1.3.0-roadmap"
+    assert row["repo"] == "fal-1.3.0-roadmap"
+    assert row["agent_timeout_sec"] == 7200
+    assert row["verifier_timeout_sec"] == 1800
 
 
 def test_singularity_copy_into_directory_streams_tar(tmp_path, monkeypatch):

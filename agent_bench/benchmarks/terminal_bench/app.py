@@ -208,6 +208,17 @@ def _clear_reward_file(host_logs_dir: Path) -> Path:
     return host_reward
 
 
+def _terminal_bench_reward(raw: str, *, timed_out: bool) -> tuple[str, float]:
+    """Interpret binary Terminal-Bench and fractional RoadmapBench rewards."""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return ("TIMEOUT" if timed_out else "ERROR", 0.0)
+    if not 0.0 <= value <= 1.0:
+        return ("ERROR", 0.0)
+    return ("PASS" if value >= 1.0 else "FAIL", value)
+
+
 def _render_workspace_doc_text(text: str, task_workspace: str) -> str:
     workspace = _normalize_container_path(task_workspace)
     if workspace == "/app":
@@ -997,18 +1008,13 @@ class TerminalBenchDockerHarness:
         except FileNotFoundError:
             pass
 
-        if reward_text == "1":
-            status = "PASS"
-        elif reward_text == "0":
-            status = "FAIL"
-        elif result["timed_out"]:
-            status = "TIMEOUT"
-        else:
-            status = "ERROR"
+        status, reward_value = _terminal_bench_reward(
+            reward_text, timed_out=result["timed_out"]
+        )
 
         return {
             "status": status,
-            "test_pass_rate": 1.0 if status == "PASS" else 0.0,
+            "test_pass_rate": reward_value,
             "passed": 1 if status == "PASS" else 0,
             "failed": 0 if status == "PASS" else 1,
             "verifier_rc": result["rc"],
@@ -1471,8 +1477,10 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
             result = subprocess.CompletedProcess([], -1, exc.stdout or "", exc.stderr or "")
             timed_out = True
         reward_text = reward.read_text().strip() if reward.exists() else ""
-        status = "PASS" if reward_text == "1" else "FAIL" if reward_text == "0" else "TIMEOUT" if timed_out else "ERROR"
-        return {"status": status, "test_pass_rate": float(status == "PASS"), "passed": int(status == "PASS"),
+        status, reward_value = _terminal_bench_reward(
+            reward_text, timed_out=timed_out
+        )
+        return {"status": status, "test_pass_rate": reward_value, "passed": int(status == "PASS"),
                 "failed": int(status != "PASS"), "verifier_rc": result.returncode,
                 "verifier_stdout_tail": (result.stdout or "")[-2000:],
                 "verifier_stderr_tail": (result.stderr or "")[-2000:], "reward_raw": reward_text or None,
@@ -1854,18 +1862,13 @@ class TerminalBenchSingularityHarness:
         except FileNotFoundError:
             pass
 
-        if reward_text == "1":
-            status = "PASS"
-        elif reward_text == "0":
-            status = "FAIL"
-        elif result["timed_out"]:
-            status = "TIMEOUT"
-        else:
-            status = "ERROR"
+        status, reward_value = _terminal_bench_reward(
+            reward_text, timed_out=result["timed_out"]
+        )
 
         return {
             "status": status,
-            "test_pass_rate": 1.0 if status == "PASS" else 0.0,
+            "test_pass_rate": reward_value,
             "passed": 1 if status == "PASS" else 0,
             "failed": 0 if status == "PASS" else 1,
             "verifier_rc": result["rc"],

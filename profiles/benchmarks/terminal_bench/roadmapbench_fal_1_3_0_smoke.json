@@ -1,0 +1,29 @@
+{
+  "_doc": "RoadmapBench single-task smoke using the official Harbor task at the pinned Hugging Face dataset revision.",
+  "sweep_name": "roadmapbench_fal_1_3_0_smoke",
+  "plan_version": "roadmapbench-59184e779909",
+  "application": "terminal_bench",
+  "source_dataset": "UnipatAI/RoadmapBench",
+  "source_commit": "59184e779909300a5a0150b06b945d39da81a099",
+  "source_dataset_task_count": 115,
+  "tasks_root": "/scratch/users/ntu/n2602695/datasets/roadmapbench-59184e779909",
+  "instances": [
+    "fal-1.3.0-roadmap"
+  ],
+  "repo_mapping": {
+    "fal-1.3.0-roadmap": {
+      "repo_id": "roadmapbench/fal-1.3.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 7200,
+  "output_dir": "roadmapbench_fal_1_3_0_smoke",
+  "seeds": [
+    42
+  ],
+  "selection": {
+    "method": "single-task multi-target roadmap smoke",
+    "rationale": "five independently scored Python framework targets provide natural delegation opportunities while remaining lighter than systems-language RoadmapBench tasks"
+  }
+}

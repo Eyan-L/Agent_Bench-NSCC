@@ -1,0 +1,75 @@
+# RoadmapBench OpenClaw harness using the Terminal-Bench container lifecycle
+# and DeepResearch-style optional delegation structure.
+harness: openclaw
+terminal_bench:
+  agent_prompt_file: AGENTS.md.dr_matched
+  workspace_bootstrap_file: BOOTSTRAP.md.dr_matched
+openclaw:
+  gateway:
+    mode: local
+    bind: loopback
+    auth:
+      mode: token
+      token:
+        source: env
+        provider: env
+        id: OPENCLAW_GATEWAY_TOKEN
+  diagnostics:
+    enabled: true
+    otel:
+      enabled: true
+      endpoint: http://localhost:4318
+      protocol: http/protobuf
+      serviceName: agent-bench-openclaw
+      traces: true
+      metrics: true
+      logs: true
+      sampleRate: 1
+      flushIntervalMs: 20
+    cacheTrace:
+      enabled: true
+      includeMessages: true
+      includePrompt: true
+      includeSystem: true
+  tools:
+    exec:
+      host: gateway
+      security: full
+    alsoAllow:
+    - sessions_list
+    - sessions_history
+    - sessions_send
+    - sessions_spawn
+    - sessions_yield
+    - subagents
+    - session_status
+  skills:
+    load:
+      extraDirs:
+      - /root/.openclaw/skills
+  plugins:
+    entries:
+      vllm:
+        enabled: true
+      memory-core:
+        enabled: true
+      diagnostics-otel:
+        enabled: true
+  agents:
+    defaults:
+      workspace: /app
+      subagents:
+        maxConcurrent: 4
+        runTimeoutSeconds: 2400
+    list:
+    - id: terminal_bench
+      default: true
+      name: roadmapbench-engineer
+conditions:
+- condition_id: openclaw_agent
+  condition_type: openclaw_agent
+  description: RoadmapBench agent with DeepResearch-style task decomposition
+  agent:
+    max_steps: 600
+    max_time_seconds: 7200
+    retry_limit: 5

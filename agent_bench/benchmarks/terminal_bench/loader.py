@@ -149,6 +149,8 @@ def load_task(task_id: str, tasks_root: str | Path | None = None) -> Dict:
     env = meta.get("environment", {}) or {}
     agent_meta = meta.get("agent", {}) or {}
     verifier_meta = meta.get("verifier", {}) or {}
+    task_meta = meta.get("task", {}) or {}
+    legacy_meta = meta.get("metadata", {}) or {}
 
     docker_image = env.get("docker_image")
     if not docker_image:
@@ -159,7 +161,7 @@ def load_task(task_id: str, tasks_root: str | Path | None = None) -> Dict:
     return {
         "instance_id": task_id,
         "benchmark": "terminal_bench",
-        "task_name": meta.get("task", {}).get("name", task_id),
+        "task_name": task_meta.get("name") or legacy_meta.get("name") or task_id,
         "instruction": instruction,
         "docker_image": docker_image,
         "workspace": workspace,
@@ -179,7 +181,7 @@ def load_task(task_id: str, tasks_root: str | Path | None = None) -> Dict:
         },
         # Echo SWE-bench-shaped fields so downstream code that reads them
         # generically (fairness validator, manifest) doesn't NPE.
-        "repo": meta.get("task", {}).get("name", task_id),
+        "repo": task_meta.get("name") or legacy_meta.get("name") or task_id,
         "base_commit": "tb2",
         "problem_statement": instruction,
     }
