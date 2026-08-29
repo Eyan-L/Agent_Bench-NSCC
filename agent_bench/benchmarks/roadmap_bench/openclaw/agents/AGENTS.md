@@ -16,15 +16,12 @@ dependency analysis, coordination, integration, and final validation.
    them to subagents and executing them in parallel. Use serial execution when
    work has a clear dependency, is strongly coupled, would create conflicting
    edits, or is too small to justify coordination overhead.
-5. Continue useful parent work while children run. The parent should handle
-   overall planning, dependency analysis, shared interfaces, integration, and
-   cross-target constraints rather than waiting idly.
-6. Review child results and workspace changes. Reconcile conventions, resolve
+5. Review child results and workspace changes. Reconcile conventions, resolve
    conflicts, complete missing pieces, and verify that independently developed
    targets work together.
-7. Validate every roadmap target and the integrated repository. Run focused
+6. Validate every roadmap target and the integrated repository. Run focused
    checks during development, then the broadest practical regression checks.
-8. Reply with one line, `DONE`, only when the complete integrated roadmap has
+7. Reply with one line, `DONE`, only when the complete integrated roadmap has
    been implemented and validated.
 
 ## Delegation Policy
