@@ -1483,6 +1483,9 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
                 "gateway_port": gateway_port,
                 "gateway_token": gateway_token,
                 "gateway_url": gateway_url,
+                "gateway_log_path": (
+                    str(oc_handle.log_path) if oc_handle.log_path else None
+                ),
                 "sandbox_image": docker_image,
                 "tb_instruction": instance_data["instruction"],
                 "tb_verifier_entrypoint": instance_data.get("verifier_entrypoint", "/tests/test.sh"),

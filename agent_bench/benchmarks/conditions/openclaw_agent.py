@@ -250,6 +250,7 @@ class OpenClawAgentCondition:
             except Exception as e:
                 logger.warning("gateway SIGTERM failed: %s", e)
         wait_for_otel_flush()
+        self._archive_gateway_log(run_dir)
         spans_path = snapshot_otel_spans(
             otel_trace_file, pre_offset, run_dir, expected_run_id=run_dir.name,
         )
@@ -278,6 +279,7 @@ class OpenClawAgentCondition:
             "completion_tokens": completion_tokens,
             "exit_code": None,
             "error_type": err or None,
+            "agent_runtime_mode": self._detect_agent_runtime_mode(payload),
             "repo_id": instance_data.get("repo"),
             "instance_id": instance_id,
             "config_id": "openclaw_agent",
@@ -365,6 +367,7 @@ class OpenClawAgentCondition:
             "error_message": err or None,
             "agent_completion_status": self._last_completion_status,
             "agent_completion_error": self._last_completion_error or None,
+            "agent_runtime_mode": self._detect_agent_runtime_mode(payload),
         }
 
     # ------------------------------------------------------------------
@@ -698,6 +701,31 @@ class OpenClawAgentCondition:
             if _is_final(obj):
                 return obj
         return candidates[-1]
+
+    def _detect_agent_runtime_mode(self, payload: Optional[Dict]) -> str:
+        stderr = str(getattr(self, "_last_stderr", "") or "")
+        if (
+            "Gateway agent failed; falling back to embedded" in stderr
+            or "falling back to embedded" in stderr.lower()
+        ):
+            return "embedded_fallback"
+        run = self._unwrap(payload)
+        meta = run.get("meta") or {}
+        trace = meta.get("executionTrace") or {}
+        if str(trace.get("runner") or "").lower() == "embedded":
+            return "embedded_fallback"
+        return "gateway"
+
+    def _archive_gateway_log(self, run_dir: Path) -> None:
+        raw_path = self._env_info.get("gateway_log_path")
+        if not raw_path:
+            return
+        source = Path(str(raw_path))
+        try:
+            if source.is_file():
+                shutil.copyfile(source, run_dir / "openclaw_gateway.log")
+        except OSError as exc:
+            logger.warning("gateway log archive failed for %s: %s", source, exc)
 
     # ------------------------------------------------------------------
     # Response parsing

@@ -28,6 +28,7 @@ class RunManifest:
     
     exit_code: Optional[int] = None
     error_message: Optional[str] = None
+    agent_runtime_mode: Optional[str] = None
     notes: str = ""
     
     total_prompt_tokens: int = 0
@@ -49,6 +50,7 @@ class RunManifest:
             "duration_seconds": self.duration_seconds,
             "exit_code": self.exit_code,
             "error_message": self.error_message,
+            "agent_runtime_mode": self.agent_runtime_mode,
             "notes": self.notes,
             "total_prompt_tokens": self.total_prompt_tokens,
             "total_completion_tokens": self.total_completion_tokens,
@@ -71,6 +73,7 @@ class RunManifest:
             duration_seconds=data.get("duration_seconds"),
             exit_code=data.get("exit_code"),
             error_message=data.get("error_message"),
+            agent_runtime_mode=data.get("agent_runtime_mode"),
             notes=data.get("notes", ""),
             total_prompt_tokens=data.get("total_prompt_tokens", 0),
             total_completion_tokens=data.get("total_completion_tokens", 0),

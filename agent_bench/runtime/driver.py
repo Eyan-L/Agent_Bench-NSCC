@@ -491,6 +491,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         manifest.telemetry_path = result.get("telemetry_path")
         manifest.verdict_path = str(verdict_path)
         manifest.exit_code = result.get("exit_code", 0)
+        manifest.agent_runtime_mode = result.get("agent_runtime_mode")
         manifest.error_message = (
             verdict.get("error_message")
             if manifest.status in ("ERROR", "TIMEOUT")

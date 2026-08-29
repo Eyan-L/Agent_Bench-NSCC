@@ -6,7 +6,7 @@ import json
 import logging
 import re
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Dict, Optional, Tuple
 
 from agent_bench.benchmarks.conditions.openclaw_agent import OpenClawAgentCondition
@@ -149,7 +149,12 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             and str(value.get("status") or "").lower() in cls._ACTIVE_CHILD_STATES
         )
 
-        transcript_path = sessions_dir / f"{parent_session_id}.jsonl"
+        transcript_path = cls._resolve_parent_transcript_path(
+            sessions_dir,
+            parent,
+        )
+        if transcript_path is None:
+            return None
         messages = []
         try:
             lines = transcript_path.read_text(errors="replace").splitlines()
@@ -191,6 +196,42 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             "message_count": len(messages),
             "done_text": done_text,
         }
+
+    @staticmethod
+    def _resolve_parent_transcript_path(
+        sessions_dir: Path,
+        parent_entry: Dict,
+    ) -> Optional[Path]:
+        """Resolve OpenClaw's physical transcript with containment checks."""
+        sessions_root = sessions_dir.resolve()
+        state_root = sessions_root.parents[2]
+        raw_session_file = str(parent_entry.get("sessionFile") or "").strip()
+
+        if raw_session_file:
+            container_path = PurePosixPath(raw_session_file)
+            if container_path.is_absolute():
+                runtime_state_root = PurePosixPath("/root/.openclaw")
+                try:
+                    relative = container_path.relative_to(runtime_state_root)
+                except ValueError:
+                    return None
+                candidate = (state_root / Path(*relative.parts)).resolve()
+                containment_root = state_root
+            else:
+                candidate = (sessions_root / Path(*container_path.parts)).resolve()
+                containment_root = sessions_root
+        else:
+            session_id = str(parent_entry.get("sessionId") or "").strip()
+            if not session_id or Path(session_id).name != session_id:
+                return None
+            candidate = (sessions_root / f"{session_id}.jsonl").resolve()
+            containment_root = sessions_root
+
+        try:
+            candidate.relative_to(containment_root)
+        except ValueError:
+            return None
+        return candidate
 
     @classmethod
     def _payload_with_resumed_completion(

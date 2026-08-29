@@ -430,6 +430,79 @@ def test_roadmap_yield_with_running_child_does_not_complete(tmp_path):
     assert snapshot["done_text"] == ""
 
 
+def test_roadmap_watcher_uses_session_file_when_it_differs_from_session_id(
+    tmp_path,
+):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    sessions_dir.mkdir(parents=True)
+    actual_name = "physical-transcript.jsonl"
+    index = {
+        "agent:roadmap_bench:main": {
+            "sessionId": "logical-session-id",
+            "sessionFile": (
+                "/root/.openclaw/agents/roadmap_bench/sessions/" + actual_name
+            ),
+            "status": "done",
+        },
+        "agent:roadmap_bench:subagent:1": {
+            "sessionId": "child-1",
+            "spawnedBy": "agent:roadmap_bench:main",
+            "status": "running",
+        },
+    }
+    (sessions_dir / "sessions.json").write_text(json.dumps(index))
+    (sessions_dir / actual_name).write_text(json.dumps(_yield_event()) + "\n")
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot["parent_session_id"] == "logical-session-id"
+    assert snapshot["yield_count"] == 1
+    assert snapshot["pending_children"] == 1
+
+
+def test_roadmap_session_file_resolution_is_contained(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    sessions_dir.mkdir(parents=True)
+
+    relative = RoadmapBenchOpenClawCondition._resolve_parent_transcript_path(
+        sessions_dir,
+        {"sessionId": "logical", "sessionFile": "physical.jsonl"},
+    )
+    escaped_relative = RoadmapBenchOpenClawCondition._resolve_parent_transcript_path(
+        sessions_dir,
+        {"sessionId": "logical", "sessionFile": "../../outside.jsonl"},
+    )
+    escaped_absolute = RoadmapBenchOpenClawCondition._resolve_parent_transcript_path(
+        sessions_dir,
+        {"sessionId": "logical", "sessionFile": "/tmp/outside.jsonl"},
+    )
+
+    assert relative == (sessions_dir / "physical.jsonl").resolve()
+    assert escaped_relative is None
+    assert escaped_absolute is None
+
+
+def test_openclaw_runtime_mode_detects_gateway_and_embedded_fallback():
+    condition = object.__new__(RoadmapBenchOpenClawCondition)
+    condition._last_stderr = ""
+    assert condition._detect_agent_runtime_mode({"result": {"meta": {}}}) == (
+        "gateway"
+    )
+
+    condition._last_stderr = (
+        "Gateway agent failed; falling back to embedded: gateway closed (1000)"
+    )
+    assert condition._detect_agent_runtime_mode(None) == "embedded_fallback"
+
+    condition._last_stderr = ""
+    embedded_payload = {
+        "result": {"meta": {"executionTrace": {"runner": "embedded"}}}
+    }
+    assert condition._detect_agent_runtime_mode(embedded_payload) == (
+        "embedded_fallback"
+    )
+
+
 def test_roadmap_child_completion_resumes_same_parent_and_finishes(tmp_path):
     sessions_dir = tmp_path / "sessions"
     _write_roadmap_session_state(
