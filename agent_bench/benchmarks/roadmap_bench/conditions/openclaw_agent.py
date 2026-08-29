@@ -20,10 +20,10 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     agent_id = "roadmap_bench"
     require_done_marker = True
     yield_watch_interval_seconds = 2.0
-    # OpenClaw's native announce call can itself wait up to 120 seconds. Give
-    # it one full timeout plus margin before treating a quiet requester as
-    # abandoned after all children have completed.
-    yield_resume_idle_timeout_seconds = 180.0
+    # A prompt error may be transient: OpenClaw can retry/fail over and append
+    # another requester turn afterward. Only treat an unchanged prompt error
+    # as final after one model idle-timeout window plus margin.
+    prompt_error_grace_seconds = 180.0
     _ACTIVE_CHILD_STATES = frozenset({"accepted", "queued", "pending", "running"})
 
     def _build_message(self, instance_data: Dict) -> str:
@@ -67,15 +67,19 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             snapshot["pending_children"],
             max(0.0, deadline - time.monotonic()),
         )
+
         last_state = None
-        last_progress_at = time.monotonic()
+        prompt_error_signature = None
+        prompt_error_since = None
+
         while time.monotonic() < deadline:
             snapshot = self._read_yield_snapshot(sessions_dir)
             if snapshot:
                 if snapshot["parent_session_id"] != parent_session_id:
                     message = (
                         "Roadmap requester session changed during yield/resume: "
-                        f"{parent_session_id} -> {snapshot['parent_session_id']}"
+                        f"{parent_session_id} -> "
+                        f"{snapshot['parent_session_id']}"
                     )
                     self._last_completion_status = self.RUNTIME_ERROR
                     self._last_completion_error = message
@@ -88,22 +92,22 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                     snapshot.get("transcript_size_bytes", 0),
                     snapshot["post_yield_parent_activity"],
                     snapshot["post_yield_parent_terminal"],
-                    snapshot.get("post_yield_terminal_reason", ""),
+                    bool(snapshot.get("post_yield_prompt_error")),
                     bool(snapshot["done_text"]),
                 )
+
                 if state != last_state:
-                    last_progress_at = time.monotonic()
                     logger.info(
                         "  Roadmap yield lifecycle: session=%s yields=%d "
                         "pending_children=%d messages=%d resumed=%s "
-                        "terminal=%s terminal_reason=%s done=%s",
+                        "terminal=%s prompt_error=%s done=%s",
                         parent_session_id,
                         snapshot["yield_count"],
                         snapshot["pending_children"],
                         snapshot["message_count"],
                         snapshot["post_yield_parent_activity"],
                         snapshot["post_yield_parent_terminal"],
-                        snapshot.get("post_yield_terminal_reason", "") or "-",
+                        bool(snapshot.get("post_yield_prompt_error")),
                         bool(snapshot["done_text"]),
                     )
                     last_state = state
@@ -115,51 +119,75 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                         yield_count=snapshot["yield_count"],
                         parent_session_id=parent_session_id,
                     )
-                    status, completion_error = self._classify_completion(resumed_payload)
+                    status, completion_error = self._classify_completion(
+                        resumed_payload
+                    )
                     self._last_completion_status = status
                     self._last_completion_error = completion_error
                     return resumed_payload, completion_error
 
+                # A normal assistant stop is definitive.
+                # toolUse/toolResult activity is not.
                 if (
                     snapshot["pending_children"] == 0
                     and snapshot["post_yield_parent_terminal"]
                 ):
-                    terminal_reason = snapshot.get(
-                        "post_yield_terminal_reason", "assistant_stop"
-                    )
                     message = (
                         "Roadmap parent resumed after child completion but "
                         "returned without DONE "
-                        f"(session={parent_session_id}, "
-                        f"terminal_reason={terminal_reason})"
+                        f"(session={parent_session_id})"
                     )
-                    # Preserve an execution error already classified from the
-                    # CLI payload (for example context_overflow or an LLM idle
-                    # timeout). The watcher only decides that waiting is over.
-                    if (
-                        terminal_reason == "prompt_error"
-                        and self._last_completion_status
-                        in {self.CONTEXT_OVERFLOW, self.RUNTIME_ERROR}
-                    ):
-                        completion_error = (
-                            self._last_completion_error or error or message
-                        )
-                        return payload, completion_error
                     self._last_completion_status = self.BLOCKED_INCOMPLETE
                     self._last_completion_error = message
                     return payload, message
 
-                if snapshot["pending_children"] == 0:
-                    idle_seconds = time.monotonic() - last_progress_at
-                    if idle_seconds >= self.yield_resume_idle_timeout_seconds:
-                        message = (
-                            "Roadmap parent made no transcript progress for "
-                            f"{idle_seconds:.1f}s after all children completed "
-                            f"and did not declare DONE (session={parent_session_id})"
+                # A prompt error is only a terminal candidate. OpenClaw may
+                # retry/fail over and append another requester/model turn.
+                prompt_error = str(
+                    snapshot.get("post_yield_prompt_error") or ""
+                ).strip()
+
+                if snapshot["pending_children"] == 0 and prompt_error:
+                    signature = (
+                        snapshot["yield_count"],
+                        snapshot["message_count"],
+                        snapshot.get("transcript_size_bytes", 0),
+                        prompt_error,
+                    )
+                    now = time.monotonic()
+
+                    if signature != prompt_error_signature:
+                        prompt_error_signature = signature
+                        prompt_error_since = now
+
+                        logger.info(
+                            "  Roadmap prompt-error candidate; waiting %.1fs "
+                            "for native retry/failover "
+                            "(session=%s error=%s)",
+                            self.prompt_error_grace_seconds,
+                            parent_session_id,
+                            prompt_error,
                         )
-                        self._last_completion_status = self.BLOCKED_INCOMPLETE
-                        self._last_completion_error = message
-                        return payload, message
+
+                    elif (
+                        prompt_error_since is not None
+                        and now - prompt_error_since
+                        >= self.prompt_error_grace_seconds
+                    ):
+                        status = (
+                            self.CONTEXT_OVERFLOW
+                            if self._is_context_overflow_text(prompt_error)
+                            else self.RUNTIME_ERROR
+                        )
+                        self._last_completion_status = status
+                        self._last_completion_error = prompt_error
+                        return payload, prompt_error
+
+                else:
+                    # Any later requester/model/tool activity clears an old
+                    # transient prompt-error candidate.
+                    prompt_error_signature = None
+                    prompt_error_since = None
 
             time.sleep(self.yield_watch_interval_seconds)
 
@@ -201,7 +229,8 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             for value in index.values()
             if isinstance(value, dict)
             and value.get("spawnedBy") == parent_key
-            and str(value.get("status") or "").lower() in cls._ACTIVE_CHILD_STATES
+            and str(value.get("status") or "").lower()
+            in cls._ACTIVE_CHILD_STATES
         )
 
         transcript_path = cls._resolve_parent_transcript_path(
@@ -210,67 +239,120 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         )
         if transcript_path is None:
             return None
+
         messages = []
         try:
-            lines = transcript_path.read_text(errors="replace").splitlines()
+            lines = transcript_path.read_text(
+                errors="replace"
+            ).splitlines()
             transcript_size_bytes = transcript_path.stat().st_size
         except OSError:
             return None
+
         for line in lines:
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if event.get("type") in {"message", "custom", "custom_message"}:
+
+            if event.get("type") in {
+                "message",
+                "custom",
+                "custom_message",
+            }:
                 messages.append(event)
 
         yield_indexes = [
             i
             for i, event in enumerate(messages)
             if event.get("type") == "custom_message"
-            and event.get("customType") == "openclaw.sessions_yield"
+            and event.get("customType")
+            == "openclaw.sessions_yield"
         ]
+
         latest_yield = yield_indexes[-1] if yield_indexes else -1
+
         done_text = ""
         post_yield_parent_activity = False
-        terminal_reason = ""
+        post_yield_parent_terminal = False
+        post_yield_prompt_error = ""
+
         for event in messages[latest_yield + 1:]:
             if (
                 event.get("type") == "custom"
-                and event.get("customType") == "openclaw:prompt-error"
+                and event.get("customType")
+                == "openclaw:prompt-error"
             ):
-                terminal_reason = "prompt_error"
+                # This is an attempt failure, not necessarily the end of
+                # the logical resumed trajectory.
+                data = event.get("data")
+
+                if isinstance(data, dict):
+                    raw_error = data.get("error")
+                else:
+                    raw_error = data
+
+                post_yield_prompt_error = str(
+                    raw_error or "OpenClaw prompt error"
+                )
+                post_yield_parent_terminal = False
+                done_text = ""
+                continue
+
+            if event.get("type") != "message":
                 continue
 
             message = event.get("message") or {}
             role = message.get("role")
-            # A later requester message means OpenClaw has started another
-            # native resume attempt after a prior prompt error.
+
+            # A later requester/model/tool message proves that any earlier
+            # prompt error was transient.
+            if role in {"user", "assistant", "toolResult"}:
+                post_yield_prompt_error = ""
+
             if role == "user":
-                terminal_reason = ""
-            if role in {"assistant", "toolResult"}:
+                post_yield_parent_terminal = False
+                done_text = ""
+                continue
+
+            if role == "toolResult":
                 post_yield_parent_activity = True
+                post_yield_parent_terminal = False
+                done_text = ""
+                continue
+
             if role != "assistant":
                 continue
 
-            # Activity is not completion. An assistant tool-call commonly has
-            # stopReason="toolUse" and may be followed by toolResult + more
-            # model work. Only a normal assistant stop proves that the resumed
-            # parent turn itself has terminated.
-            stop_reason = str(message.get("stopReason") or "").strip().lower()
-            if stop_reason == "stop":
-                terminal_reason = "assistant_stop"
-            else:
-                terminal_reason = ""
+            post_yield_parent_activity = True
+
+            stop_reason = str(
+                message.get("stopReason") or ""
+            ).strip().lower()
+
+            post_yield_parent_terminal = stop_reason == "stop"
 
             parts = [
                 str(item.get("text") or "")
                 for item in message.get("content") or []
-                if isinstance(item, dict) and item.get("type") == "text"
+                if isinstance(item, dict)
+                and item.get("type") == "text"
             ]
-            text = "\n".join(part for part in parts if part).strip()
-            if text and re.search(r"(?im)^\s*DONE(?:\s*$|\b)", text):
+            text = "\n".join(
+                part for part in parts if part
+            ).strip()
+
+            if (
+                post_yield_parent_terminal
+                and text
+                and re.search(
+                    r"(?im)^\s*DONE(?:\s*$|\b)",
+                    text,
+                )
+            ):
                 done_text = text
+            else:
+                done_text = ""
 
         return {
             "parent_session_id": str(parent_session_id),
@@ -278,9 +360,18 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             "yield_count": len(yield_indexes),
             "message_count": len(messages),
             "transcript_size_bytes": transcript_size_bytes,
-            "post_yield_parent_activity": post_yield_parent_activity,
-            "post_yield_parent_terminal": bool(terminal_reason),
-            "post_yield_terminal_reason": terminal_reason,
+            "post_yield_parent_activity": (
+                post_yield_parent_activity
+            ),
+            "post_yield_parent_terminal": (
+                post_yield_parent_terminal
+            ),
+            "post_yield_terminal_reason": (
+                "assistant_stop"
+                if post_yield_parent_terminal
+                else ""
+            ),
+            "post_yield_prompt_error": post_yield_prompt_error,
             "done_text": done_text,
         }
 
