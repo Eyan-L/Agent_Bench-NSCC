@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -77,6 +78,7 @@ class OpenClawAgentCondition:
     CONTEXT_OVERFLOW: ClassVar[str] = "context_overflow"
     BLOCKED_INCOMPLETE: ClassVar[str] = "blocked_incomplete"
     RUNTIME_ERROR: ClassVar[str] = "runtime_error"
+    require_done_marker: ClassVar[bool] = False
 
     def __init__(self, model_config, agent_config, container: Optional[Container] = None):
         if not self.agent_id:
@@ -709,17 +711,34 @@ class OpenClawAgentCondition:
         if isinstance(raw_error, dict) and raw_error:
             kind = str(raw_error.get("kind") or "runtime_error").strip().lower()
             message = str(raw_error.get("message") or kind)
-            if kind == cls.CONTEXT_OVERFLOW:
+            if kind == cls.CONTEXT_OVERFLOW or cls._is_context_overflow_text(message):
                 return cls.CONTEXT_OVERFLOW, message
             return cls.RUNTIME_ERROR, f"{kind}: {message}"
         if raw_error:
-            return cls.RUNTIME_ERROR, str(raw_error)
+            message = str(raw_error)
+            if cls._is_context_overflow_text(message):
+                return cls.CONTEXT_OVERFLOW, message
+            return cls.RUNTIME_ERROR, message
+
+        payload_error = cls._payload_error_text(payload)
+        if payload_error:
+            if cls._is_context_overflow_text(payload_error):
+                return cls.CONTEXT_OVERFLOW, payload_error
+            return cls.RUNTIME_ERROR, payload_error
 
         liveness = str(meta.get("livenessState") or "").strip().lower()
-        if liveness in {"blocked", "incomplete", "aborted", "cancelled", "canceled"}:
+        if liveness in {
+            "working", "blocked", "incomplete", "aborted", "cancelled", "canceled"
+        }:
             return (
                 cls.BLOCKED_INCOMPLETE,
                 f"OpenClaw trajectory ended with livenessState={liveness}",
+            )
+
+        if meta.get("replayInvalid"):
+            return (
+                cls.BLOCKED_INCOMPLETE,
+                "OpenClaw trajectory replay is invalid",
             )
 
         completion = meta.get("completion") or {}
@@ -731,17 +750,62 @@ class OpenClawAgentCondition:
         ).strip().lower()
         final_text = str(meta.get("finalAssistantVisibleText") or cls._parse_text(payload))
         if stop_reason in {"stop", "completed", "complete", "done"} and final_text.strip():
+            if cls.require_done_marker and not re.search(
+                r"(?im)^\s*DONE(?:\s*$|\b)", final_text
+            ):
+                return (
+                    cls.BLOCKED_INCOMPLETE,
+                    "RoadmapBench final response did not explicitly declare DONE",
+                )
             return cls.NORMAL_COMPLETION, ""
 
-        if meta.get("replayInvalid"):
-            return (
-                cls.BLOCKED_INCOMPLETE,
-                "OpenClaw trajectory replay is invalid and has no normal completion",
-            )
         return (
             cls.BLOCKED_INCOMPLETE,
             "OpenClaw returned without an explicit normal completion",
         )
+
+    @staticmethod
+    def _is_context_overflow_text(text: str) -> bool:
+        normalized = " ".join(str(text).lower().replace("_", "-").split())
+        return any(marker in normalized for marker in (
+            "context-overflow",
+            "context overflow",
+            "context length exceeded",
+            "maximum context length",
+            "context size exceeds",
+        ))
+
+    @classmethod
+    def _payload_error_text(cls, payload: Optional[Dict]) -> str:
+        """Extract explicit error payloads without scanning normal prose."""
+        if not isinstance(payload, dict):
+            return ""
+        run = cls._unwrap(payload)
+        candidates = [payload.get("error"), run.get("error")]
+        for item in run.get("payloads", []) or []:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "").lower()
+            item_text = str(item.get("text") or "")
+            if item.get("isError") or item.get("error") or item_type == "error":
+                candidates.append(item.get("error") or item_text or item)
+            elif cls._is_context_overflow_text(item_text):
+                candidates.append(item_text)
+
+        for candidate in candidates:
+            if not candidate:
+                continue
+            if isinstance(candidate, str):
+                return candidate
+            if isinstance(candidate, dict):
+                return str(
+                    candidate.get("message")
+                    or candidate.get("text")
+                    or candidate.get("kind")
+                    or candidate
+                )
+            return str(candidate)
+        return ""
 
     @classmethod
     def _parse_usage(cls, payload: Optional[Dict]) -> Tuple[int, int]:

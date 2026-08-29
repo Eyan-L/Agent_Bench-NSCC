@@ -162,7 +162,7 @@ def _protect_cleanup_from_interrupts():
 
 
 def _merge_agent_completion_into_verdict(verdict: dict, result: dict) -> dict:
-    """Preserve verifier reward while marking an abnormal agent trajectory."""
+    """Record agent outcome without turning task results into infra errors."""
     merged = dict(verdict)
     exit_code = result.get("exit_code", 0)
     completion_status = result.get("agent_completion_status")
@@ -172,15 +172,13 @@ def _merge_agent_completion_into_verdict(verdict: dict, result: dict) -> dict:
         )
 
     merged["agent_completion_status"] = completion_status
+    merged["agent_execution_outcome"] = completion_status
     merged["agent_exit_code"] = exit_code
     if completion_status == "normal_completion" and exit_code in (0, None):
         return merged
 
     merged["verifier_status"] = merged.get("status")
-    if merged.get("error_message"):
-        merged["verifier_error_message"] = merged["error_message"]
-    merged["status"] = "ERROR"
-    merged["error_message"] = (
+    merged["agent_completion_error"] = (
         result.get("agent_completion_error")
         or result.get("error_message")
         or f"agent trajectory ended as {completion_status}"

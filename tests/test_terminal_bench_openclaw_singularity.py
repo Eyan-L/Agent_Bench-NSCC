@@ -289,8 +289,6 @@ def test_openclaw_completion_classification():
     normal = {
         "status": "ok",
         "result": {"meta": {
-            "replayInvalid": True,
-            "livenessState": "working",
             "stopReason": "stop",
             "finalAssistantVisibleText": "DONE",
         }},
@@ -306,6 +304,28 @@ def test_openclaw_completion_classification():
     runtime_error = {
         "result": {"meta": {"error": {"kind": "gateway_error", "message": "down"}}}
     }
+    working = {
+        "result": {"meta": {
+            "livenessState": "working",
+            "stopReason": "stop",
+            "finalAssistantVisibleText": "DONE",
+        }}
+    }
+    replay_invalid = {
+        "result": {"meta": {
+            "replayInvalid": True,
+            "stopReason": "stop",
+            "finalAssistantVisibleText": "DONE",
+        }}
+    }
+    overflow_payload = {
+        "result": {
+            "meta": {},
+            "payloads": [{
+                "text": "Maximum context length exceeded during tool execution",
+            }],
+        }
+    }
 
     assert OpenClawAgentCondition._classify_completion(normal) == (
         "normal_completion", ""
@@ -319,6 +339,37 @@ def test_openclaw_completion_classification():
     assert OpenClawAgentCondition._classify_completion(runtime_error)[0] == (
         "runtime_error"
     )
+    assert OpenClawAgentCondition._classify_completion(working)[0] == (
+        "blocked_incomplete"
+    )
+    assert OpenClawAgentCondition._classify_completion(replay_invalid)[0] == (
+        "blocked_incomplete"
+    )
+    assert OpenClawAgentCondition._classify_completion(overflow_payload)[0] == (
+        "context_overflow"
+    )
+
+
+def test_roadmapbench_requires_explicit_done():
+    stopped_without_done = {
+        "result": {"meta": {
+            "stopReason": "stop",
+            "finalAssistantVisibleText": "Implementation and tests are complete.",
+        }}
+    }
+    stopped_with_done = {
+        "result": {"meta": {
+            "stopReason": "stop",
+            "finalAssistantVisibleText": "DONE\n\nImplementation complete.",
+        }}
+    }
+
+    assert RoadmapBenchOpenClawCondition._classify_completion(
+        stopped_without_done
+    )[0] == "blocked_incomplete"
+    assert RoadmapBenchOpenClawCondition._classify_completion(
+        stopped_with_done
+    ) == ("normal_completion", "")
 
 
 def test_roadmapbench_abnormal_completion_preserves_partial_reward():
@@ -331,12 +382,14 @@ def test_roadmapbench_abnormal_completion_preserves_partial_reward():
 
     merged = _merge_agent_completion_into_verdict(verdict, result)
 
-    assert merged["status"] == "ERROR"
+    assert merged["status"] == "FAIL"
     assert merged["verifier_status"] == "FAIL"
     assert merged["agent_completion_status"] == "context_overflow"
+    assert merged["agent_execution_outcome"] == "context_overflow"
     assert merged["reward"] == 0.7
     assert merged["test_pass_rate"] == 0.7
-    assert merged["error_message"] == "Context overflow"
+    assert merged["agent_completion_error"] == "Context overflow"
+    assert "error_message" not in merged
 
 
 def test_terminal_bench_condition_and_forced_capability_remain(monkeypatch):

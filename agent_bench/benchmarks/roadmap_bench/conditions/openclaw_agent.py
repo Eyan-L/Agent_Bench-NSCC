@@ -10,6 +10,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     """OpenClaw lead engineer implementing a multi-target roadmap."""
 
     agent_id = "roadmap_bench"
+    require_done_marker = True
 
     def _build_message(self, instance_data: Dict) -> str:
         return (
