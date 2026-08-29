@@ -161,6 +161,33 @@ def _protect_cleanup_from_interrupts():
                 pass
 
 
+def _merge_agent_completion_into_verdict(verdict: dict, result: dict) -> dict:
+    """Preserve verifier reward while marking an abnormal agent trajectory."""
+    merged = dict(verdict)
+    exit_code = result.get("exit_code", 0)
+    completion_status = result.get("agent_completion_status")
+    if not completion_status:
+        completion_status = (
+            "normal_completion" if exit_code in (0, None) else "runtime_error"
+        )
+
+    merged["agent_completion_status"] = completion_status
+    merged["agent_exit_code"] = exit_code
+    if completion_status == "normal_completion" and exit_code in (0, None):
+        return merged
+
+    merged["verifier_status"] = merged.get("status")
+    if merged.get("error_message"):
+        merged["verifier_error_message"] = merged["error_message"]
+    merged["status"] = "ERROR"
+    merged["error_message"] = (
+        result.get("agent_completion_error")
+        or result.get("error_message")
+        or f"agent trajectory ended as {completion_status}"
+    )
+    return merged
+
+
 def execute_run(run_config: RunConfig, harness: SWEBenchHarness, 
                 instance_data: dict, retry_errors: bool = True) -> RunManifest:
     """Execute a single run."""
@@ -400,8 +427,12 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         # inside the task container (TB: services + files; DR: /workspace/report.md).
         skip_patch_gate = benchmark_kind in ("terminal_bench", "deepresearch_bench", "longbench", "request_bench", "swe_atlas_qa")
         agent_exit_code = result.get("exit_code", 0)
+        is_roadmapbench = (
+            benchmark_kind == "terminal_bench"
+            and instance_data.get("benchmark_variant") == "roadmapbench"
+        )
 
-        if agent_exit_code not in (0, None):
+        if agent_exit_code not in (0, None) and not is_roadmapbench:
             verdict = {
                 "status": "ERROR",
                 "error_message": result.get("error_message")
@@ -424,6 +455,9 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 "status": "FAIL",
                 "error_message": "No patch generated",
             }
+
+        if is_roadmapbench:
+            verdict = _merge_agent_completion_into_verdict(verdict, result)
         
         # Write verdict
         verdict_path = run_dir / "verdict.json"
@@ -459,6 +493,11 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         manifest.telemetry_path = result.get("telemetry_path")
         manifest.verdict_path = str(verdict_path)
         manifest.exit_code = result.get("exit_code", 0)
+        manifest.error_message = (
+            verdict.get("error_message")
+            if manifest.status in ("ERROR", "TIMEOUT")
+            else None
+        )
         manifest.total_prompt_tokens = result["total_prompt_tokens"]
         manifest.total_completion_tokens = result["total_completion_tokens"]
         

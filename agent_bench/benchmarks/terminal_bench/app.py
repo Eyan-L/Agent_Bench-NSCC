@@ -265,33 +265,61 @@ def _seed_workspace_helpers(
     instance_data: Dict,
     task_workspace: str = "/app",
 ) -> None:
-    """Drop BOOTSTRAP.md into the per-run task workspace bind.
+    """Materialize configured prompt assets in the task workspace bind.
 
-    Sources of truth (edit these files, not inline strings):
-      - `agent_bench/benchmarks/terminal_bench/openclaw/agents/BOOTSTRAP.md` — silences
-        OC's `[Bootstrap pending] read BOOTSTRAP.md` injection
-        (system-prompt-BDZ2g8e3.js:133-139) and replaces it with explicit
-        container-path rules. The file is rendered with the task/image
-        workdir so non-/app tasks do not get misleading path instructions.
+    Terminal-Bench keeps its historical BOOTSTRAP-only behavior. Benchmark
+    profiles can opt into additional workspace files with
+    ``terminal_bench.workspace_asset_files``. This lets RoadmapBench replace
+    OpenClaw's generated AGENTS/IDENTITY/TOOLS context without changing the
+    natural Terminal-Bench prompt.
 
-    Idempotent. Best-effort: warn on OSError; the run can proceed without
-    these helpers, it'll just be more brittle.
+    ``app_dir`` is the host side of the resolved task workspace bind, so files
+    must be written directly below it even when the container path is not
+    ``/app``. Document contents are rendered with that container path.
     """
     try:
-        bootstrap_name = _terminal_bench_prompt_filename(
-            "workspace_bootstrap_file", "BOOTSTRAP.md"
-        )
-        bootstrap_src = _terminal_bench_agent_assets_dir() / bootstrap_name
-        if not bootstrap_src.is_file():
-            raise FileNotFoundError(
-                f"Terminal-Bench workspace bootstrap not found: {bootstrap_src}"
-            )
-        text = _render_workspace_doc_text(
-            bootstrap_src.read_text(), task_workspace
-        )
-        (app_dir / "BOOTSTRAP.md").write_text(text)
+        section = _terminal_bench_profile_section()
+        configured = section.get("workspace_asset_files")
+        if configured is None:
+            source_names = [
+                _terminal_bench_prompt_filename(
+                    "workspace_bootstrap_file", "BOOTSTRAP.md"
+                )
+            ]
+            destination_names = ["BOOTSTRAP.md"]
+        else:
+            if not isinstance(configured, list) or not configured:
+                raise ValueError(
+                    "terminal_bench.workspace_asset_files must be a non-empty list"
+                )
+            source_names = [str(name) for name in configured]
+            destination_names = list(source_names)
+
+        assets_dir = _terminal_bench_agent_assets_dir()
+        rendered = []
+        for source_name, destination_name in zip(source_names, destination_names):
+            if (
+                not source_name
+                or Path(source_name).name != source_name
+                or Path(destination_name).name != destination_name
+            ):
+                raise ValueError(
+                    "workspace asset names must be plain filenames: "
+                    f"{source_name!r}"
+                )
+            source = assets_dir / source_name
+            if not source.is_file():
+                raise FileNotFoundError(f"workspace asset not found: {source}")
+            rendered.append((
+                destination_name,
+                _render_workspace_doc_text(source.read_text(), task_workspace),
+            ))
+
+        app_dir.mkdir(parents=True, exist_ok=True)
+        for destination_name, text in rendered:
+            (app_dir / destination_name).write_text(text)
     except OSError as e:
-        logger.warning("workspace seed (BOOTSTRAP.md) failed: %s", e)
+        logger.warning("workspace prompt asset materialization failed: %s", e)
 
 
 # ----------------------------------------------------------------------

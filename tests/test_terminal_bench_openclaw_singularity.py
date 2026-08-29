@@ -13,6 +13,8 @@ from agent_bench.benchmarks.terminal_bench.conditions.openclaw_agent import (
 )
 from agent_bench.deployments.containers.base import ContainerHandle
 from agent_bench.deployments.containers.singularity import SingularityContainer
+from agent_bench.benchmarks.conditions.openclaw_agent import OpenClawAgentCondition
+from agent_bench.runtime.driver import _merge_agent_completion_into_verdict
 
 
 class _FakeContainer:
@@ -229,6 +231,112 @@ def test_roadmapbench_uses_own_assets_and_condition(tmp_path, monkeypatch):
     assert condition.agent_id == "roadmap_bench"
     assert "multi-target software roadmap" in message
     assert "Carry out this terminal task" not in message
+
+
+def test_roadmapbench_materializes_all_prompt_assets_in_resolved_workspace(
+    tmp_path, monkeypatch
+):
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    for name in ("AGENTS.md", "IDENTITY.md", "TOOLS.md", "BOOTSTRAP.md"):
+        (assets / name).write_text(f"{name}: work in /app\n")
+    profile = tmp_path / "harness.yaml"
+    profile.write_text(
+        "terminal_bench:\n"
+        f"  agent_assets_dir: {assets}\n"
+        "  workspace_asset_files:\n"
+        "  - AGENTS.md\n"
+        "  - IDENTITY.md\n"
+        "  - TOOLS.md\n"
+        "  - BOOTSTRAP.md\n"
+    )
+    monkeypatch.setenv("AB_HARNESS_CONFIG", str(profile))
+    workspace_bind = tmp_path / "workspace-bind"
+
+    tb_app._seed_workspace_helpers(
+        workspace_bind, {}, task_workspace="/workspace/project"
+    )
+
+    assert {p.name for p in workspace_bind.iterdir()} == {
+        "AGENTS.md", "IDENTITY.md", "TOOLS.md", "BOOTSTRAP.md"
+    }
+    for path in workspace_bind.iterdir():
+        assert "/workspace/project" in path.read_text()
+        assert "/app" not in path.read_text()
+
+
+def test_terminal_bench_workspace_seed_defaults_to_bootstrap_only(
+    tmp_path, monkeypatch
+):
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    (assets / "BOOTSTRAP.md").write_text("bootstrap")
+    (assets / "AGENTS.md").write_text("must not overwrite task prompt")
+    profile = tmp_path / "harness.yaml"
+    profile.write_text(
+        "terminal_bench:\n"
+        f"  agent_assets_dir: {assets}\n"
+    )
+    monkeypatch.setenv("AB_HARNESS_CONFIG", str(profile))
+    workspace_bind = tmp_path / "workspace-bind"
+
+    tb_app._seed_workspace_helpers(workspace_bind, {})
+
+    assert [p.name for p in workspace_bind.iterdir()] == ["BOOTSTRAP.md"]
+
+
+def test_openclaw_completion_classification():
+    normal = {
+        "status": "ok",
+        "result": {"meta": {
+            "replayInvalid": True,
+            "livenessState": "working",
+            "stopReason": "stop",
+            "finalAssistantVisibleText": "DONE",
+        }},
+    }
+    overflow = {
+        "status": "ok",
+        "result": {"meta": {
+            "livenessState": "blocked",
+            "error": {"kind": "context_overflow", "message": "too large"},
+        }},
+    }
+    blocked = {"result": {"meta": {"livenessState": "blocked"}}}
+    runtime_error = {
+        "result": {"meta": {"error": {"kind": "gateway_error", "message": "down"}}}
+    }
+
+    assert OpenClawAgentCondition._classify_completion(normal) == (
+        "normal_completion", ""
+    )
+    assert OpenClawAgentCondition._classify_completion(overflow) == (
+        "context_overflow", "too large"
+    )
+    assert OpenClawAgentCondition._classify_completion(blocked)[0] == (
+        "blocked_incomplete"
+    )
+    assert OpenClawAgentCondition._classify_completion(runtime_error)[0] == (
+        "runtime_error"
+    )
+
+
+def test_roadmapbench_abnormal_completion_preserves_partial_reward():
+    verdict = {"status": "FAIL", "reward": 0.7, "test_pass_rate": 0.7}
+    result = {
+        "exit_code": 0,
+        "agent_completion_status": "context_overflow",
+        "agent_completion_error": "Context overflow",
+    }
+
+    merged = _merge_agent_completion_into_verdict(verdict, result)
+
+    assert merged["status"] == "ERROR"
+    assert merged["verifier_status"] == "FAIL"
+    assert merged["agent_completion_status"] == "context_overflow"
+    assert merged["reward"] == 0.7
+    assert merged["test_pass_rate"] == 0.7
+    assert merged["error_message"] == "Context overflow"
 
 
 def test_terminal_bench_condition_and_forced_capability_remain(monkeypatch):

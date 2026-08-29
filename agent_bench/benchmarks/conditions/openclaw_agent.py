@@ -73,6 +73,10 @@ class OpenClawAgentCondition:
     # Subclass must set this. Used in `--agent <id>` CLI flag AND the
     # session-archive paths under state_dir/agents/<id>/.
     agent_id: ClassVar[str] = ""
+    NORMAL_COMPLETION: ClassVar[str] = "normal_completion"
+    CONTEXT_OVERFLOW: ClassVar[str] = "context_overflow"
+    BLOCKED_INCOMPLETE: ClassVar[str] = "blocked_incomplete"
+    RUNTIME_ERROR: ClassVar[str] = "runtime_error"
 
     def __init__(self, model_config, agent_config, container: Optional[Container] = None):
         if not self.agent_id:
@@ -150,6 +154,8 @@ class OpenClawAgentCondition:
         env_info: Optional[Dict] = None,
     ) -> Dict:
         self._env_info = env_info or {}
+        self._last_completion_status = self.RUNTIME_ERROR
+        self._last_completion_error = "OpenClaw invocation did not complete"
         instance_id = instance_data["instance_id"]
         logger.info("Running OpenClaw agent (%s) for %s", self.agent_id, instance_id)
 
@@ -332,6 +338,8 @@ class OpenClawAgentCondition:
             "telemetry_path": str(spans_path) if spans_path else None,
             "exit_code": getattr(self, "_last_exit_code", 0),
             "error_message": err or None,
+            "agent_completion_status": self._last_completion_status,
+            "agent_completion_error": self._last_completion_error or None,
         }
 
     # ------------------------------------------------------------------
@@ -584,6 +592,10 @@ class OpenClawAgentCondition:
                 elapsed, subprocess_timeout,
             )
             self._last_exit_code = -1
+            self._last_completion_status = self.RUNTIME_ERROR
+            self._last_completion_error = (
+                "openclaw agent wall-clock timeout (subprocess)"
+            )
             return None, "openclaw agent wall-clock timeout (subprocess)"
 
         elapsed = time.time() - dispatch_t0
@@ -600,7 +612,10 @@ class OpenClawAgentCondition:
             self._last_stdout = stdout
             self._last_stderr = stderr
             tail = stderr[-500:] or stdout[-500:]
-            return None, f"openclaw exit {proc.returncode}: {tail}"
+            error = f"openclaw exit {proc.returncode}: {tail}"
+            self._last_completion_status = self.RUNTIME_ERROR
+            self._last_completion_error = error
+            return None, error
 
         self._last_stdout = stdout
         self._last_stderr = stderr
@@ -610,9 +625,18 @@ class OpenClawAgentCondition:
             payload = self._extract_last_json(stdout)
         if payload is None:
             snippet = (stderr or stdout)[-300:]
-            return None, f"no parseable JSON in openclaw output (last 300 chars: {snippet})"
+            error = (
+                "no parseable JSON in openclaw output "
+                f"(last 300 chars: {snippet})"
+            )
+            self._last_completion_status = self.RUNTIME_ERROR
+            self._last_completion_error = error
+            return None, error
 
-        return payload, ""
+        status, error = self._classify_completion(payload)
+        self._last_completion_status = status
+        self._last_completion_error = error
+        return payload, error
 
     @staticmethod
     def _extract_last_json(text: str) -> Optional[Dict]:
@@ -663,6 +687,61 @@ class OpenClawAgentCondition:
         if isinstance(payload.get("result"), dict):
             return payload["result"]
         return payload
+
+    @classmethod
+    def _classify_completion(cls, payload: Optional[Dict]) -> Tuple[str, str]:
+        """Classify OpenClaw's semantic result independently of CLI rc.
+
+        OpenClaw can return rc=0 and top-level ``status=ok`` after its tool
+        loop was blocked by a context overflow. The authoritative lifecycle
+        fields are under ``result.meta`` (or top-level ``meta`` in local
+        mode), so inspect those before accepting a successful stop.
+        """
+        run = cls._unwrap(payload)
+        if not run:
+            return cls.RUNTIME_ERROR, "OpenClaw returned no result payload"
+
+        meta = run.get("meta") or {}
+        if not isinstance(meta, dict):
+            return cls.RUNTIME_ERROR, "OpenClaw result meta is malformed"
+
+        raw_error = meta.get("error")
+        if isinstance(raw_error, dict) and raw_error:
+            kind = str(raw_error.get("kind") or "runtime_error").strip().lower()
+            message = str(raw_error.get("message") or kind)
+            if kind == cls.CONTEXT_OVERFLOW:
+                return cls.CONTEXT_OVERFLOW, message
+            return cls.RUNTIME_ERROR, f"{kind}: {message}"
+        if raw_error:
+            return cls.RUNTIME_ERROR, str(raw_error)
+
+        liveness = str(meta.get("livenessState") or "").strip().lower()
+        if liveness in {"blocked", "incomplete", "aborted", "cancelled", "canceled"}:
+            return (
+                cls.BLOCKED_INCOMPLETE,
+                f"OpenClaw trajectory ended with livenessState={liveness}",
+            )
+
+        completion = meta.get("completion") or {}
+        stop_reason = str(
+            meta.get("stopReason")
+            or (completion.get("stopReason") if isinstance(completion, dict) else "")
+            or (completion.get("finishReason") if isinstance(completion, dict) else "")
+            or ""
+        ).strip().lower()
+        final_text = str(meta.get("finalAssistantVisibleText") or cls._parse_text(payload))
+        if stop_reason in {"stop", "completed", "complete", "done"} and final_text.strip():
+            return cls.NORMAL_COMPLETION, ""
+
+        if meta.get("replayInvalid"):
+            return (
+                cls.BLOCKED_INCOMPLETE,
+                "OpenClaw trajectory replay is invalid and has no normal completion",
+            )
+        return (
+            cls.BLOCKED_INCOMPLETE,
+            "OpenClaw returned without an explicit normal completion",
+        )
 
     @classmethod
     def _parse_usage(cls, payload: Optional[Dict]) -> Tuple[int, int]:

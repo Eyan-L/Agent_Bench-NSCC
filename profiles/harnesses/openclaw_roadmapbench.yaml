@@ -5,6 +5,11 @@ terminal_bench:
   skills_dir: agent_bench/benchmarks/roadmap_bench/openclaw/skills
   agent_prompt_file: AGENTS.md
   workspace_bootstrap_file: BOOTSTRAP.md
+  workspace_asset_files:
+  - AGENTS.md
+  - IDENTITY.md
+  - TOOLS.md
+  - BOOTSTRAP.md
 openclaw:
   gateway:
     mode: local
