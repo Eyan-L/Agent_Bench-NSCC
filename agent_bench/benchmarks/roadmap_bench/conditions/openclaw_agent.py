@@ -80,16 +80,18 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                     snapshot["yield_count"],
                     snapshot["pending_children"],
                     snapshot["message_count"],
+                    snapshot["post_yield_parent_activity"],
                     bool(snapshot["done_text"]),
                 )
                 if state != last_state:
                     logger.info(
                         "  Roadmap yield lifecycle: session=%s yields=%d "
-                        "pending_children=%d messages=%d done=%s",
+                        "pending_children=%d messages=%d resumed=%s done=%s",
                         parent_session_id,
                         snapshot["yield_count"],
                         snapshot["pending_children"],
                         snapshot["message_count"],
+                        snapshot["post_yield_parent_activity"],
                         bool(snapshot["done_text"]),
                     )
                     last_state = state
@@ -105,6 +107,19 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                     self._last_completion_status = status
                     self._last_completion_error = completion_error
                     return resumed_payload, completion_error
+
+                if (
+                    snapshot["pending_children"] == 0
+                    and snapshot["post_yield_parent_activity"]
+                ):
+                    message = (
+                        "Roadmap parent resumed after child completion but "
+                        "returned without DONE "
+                        f"(session={parent_session_id})"
+                    )
+                    self._last_completion_status = self.BLOCKED_INCOMPLETE
+                    self._last_completion_error = message
+                    return payload, message
 
             time.sleep(self.yield_watch_interval_seconds)
 
@@ -176,9 +191,13 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         ]
         latest_yield = yield_indexes[-1] if yield_indexes else -1
         done_text = ""
+        post_yield_parent_activity = False
         for event in messages[latest_yield + 1:]:
             message = event.get("message") or {}
-            if message.get("role") != "assistant":
+            role = message.get("role")
+            if role in {"assistant", "toolResult"}:
+                post_yield_parent_activity = True
+            if role != "assistant":
                 continue
             parts = [
                 str(item.get("text") or "")
@@ -194,6 +213,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             "pending_children": pending_children,
             "yield_count": len(yield_indexes),
             "message_count": len(messages),
+            "post_yield_parent_activity": post_yield_parent_activity,
             "done_text": done_text,
         }
 

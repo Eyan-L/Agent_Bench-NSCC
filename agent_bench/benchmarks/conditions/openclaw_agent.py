@@ -709,11 +709,8 @@ class OpenClawAgentCondition:
             or "falling back to embedded" in stderr.lower()
         ):
             return "embedded_fallback"
-        run = self._unwrap(payload)
-        meta = run.get("meta") or {}
-        trace = meta.get("executionTrace") or {}
-        if str(trace.get("runner") or "").lower() == "embedded":
-            return "embedded_fallback"
+        if payload is None or getattr(self, "_last_exit_code", 0) not in (0, None):
+            return "unknown"
         return "gateway"
 
     def _archive_gateway_log(self, run_dir: Path) -> None:

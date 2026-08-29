@@ -485,6 +485,7 @@ def test_roadmap_session_file_resolution_is_contained(tmp_path):
 def test_openclaw_runtime_mode_detects_gateway_and_embedded_fallback():
     condition = object.__new__(RoadmapBenchOpenClawCondition)
     condition._last_stderr = ""
+    condition._last_exit_code = 0
     assert condition._detect_agent_runtime_mode({"result": {"meta": {}}}) == (
         "gateway"
     )
@@ -499,8 +500,10 @@ def test_openclaw_runtime_mode_detects_gateway_and_embedded_fallback():
         "result": {"meta": {"executionTrace": {"runner": "embedded"}}}
     }
     assert condition._detect_agent_runtime_mode(embedded_payload) == (
-        "embedded_fallback"
+        "gateway"
     )
+    condition._last_exit_code = 1
+    assert condition._detect_agent_runtime_mode(None) == "unknown"
 
 
 def test_roadmap_child_completion_resumes_same_parent_and_finishes(tmp_path):
@@ -543,6 +546,7 @@ def test_roadmap_multiple_yield_resume_cycles_continue(tmp_path):
     waiting = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
     assert waiting["yield_count"] == 2
     assert waiting["pending_children"] == 1
+    assert waiting["post_yield_parent_activity"] is False
     assert waiting["done_text"] == ""
 
     events.append(_assistant_event("DONE\nBoth waves integrated."))
@@ -552,7 +556,49 @@ def test_roadmap_multiple_yield_resume_cycles_continue(tmp_path):
     finished = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
     assert finished["yield_count"] == 2
     assert finished["pending_children"] == 0
+    assert finished["post_yield_parent_activity"] is True
     assert finished["done_text"].startswith("DONE")
+
+
+def test_roadmap_child_done_without_announce_activity_keeps_waiting(tmp_path):
+    sessions_dir = tmp_path / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir, [_yield_event()], child_statuses=("done",)
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot["pending_children"] == 0
+    assert snapshot["post_yield_parent_activity"] is False
+    assert snapshot["done_text"] == ""
+
+
+def test_roadmap_child_done_and_parent_active_without_done_is_blocked(
+    tmp_path, monkeypatch
+):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_yield_event(), _assistant_event("Integrating child result.")],
+        child_statuses=("done",),
+    )
+    condition = object.__new__(RoadmapBenchOpenClawCondition)
+    condition._env_info = {"state_dir": str(tmp_path)}
+    condition._last_exit_code = 0
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent.time.monotonic",
+        lambda: 0.0,
+    )
+
+    _payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "initial yielded turn",
+        deadline=10.0,
+    )
+
+    assert "returned without DONE" in error
+    assert condition._last_exit_code == 0
+    assert condition._last_completion_status == "blocked_incomplete"
 
 
 def test_roadmap_yield_wait_ends_only_at_timeout(tmp_path, monkeypatch):
@@ -593,15 +639,18 @@ def test_roadmap_yield_watcher_survives_reyield_and_returns_final_done(
     snapshots = iter((
         {
             "parent_session_id": "parent-session", "pending_children": 2,
-            "yield_count": 1, "message_count": 4, "done_text": "",
+            "yield_count": 1, "message_count": 4,
+            "post_yield_parent_activity": False, "done_text": "",
         },
         {
             "parent_session_id": "parent-session", "pending_children": 1,
-            "yield_count": 2, "message_count": 8, "done_text": "",
+            "yield_count": 2, "message_count": 8,
+            "post_yield_parent_activity": False, "done_text": "",
         },
         {
             "parent_session_id": "parent-session", "pending_children": 0,
             "yield_count": 2, "message_count": 12,
+            "post_yield_parent_activity": True,
             "done_text": "DONE\nIntegrated and validated.",
         },
     ))
