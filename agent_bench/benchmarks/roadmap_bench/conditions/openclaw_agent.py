@@ -81,17 +81,20 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                     snapshot["pending_children"],
                     snapshot["message_count"],
                     snapshot["post_yield_parent_activity"],
+                    snapshot["post_yield_parent_terminal"],
                     bool(snapshot["done_text"]),
                 )
                 if state != last_state:
                     logger.info(
                         "  Roadmap yield lifecycle: session=%s yields=%d "
-                        "pending_children=%d messages=%d resumed=%s done=%s",
+                        "pending_children=%d messages=%d resumed=%s "
+                        "terminal=%s done=%s",
                         parent_session_id,
                         snapshot["yield_count"],
                         snapshot["pending_children"],
                         snapshot["message_count"],
                         snapshot["post_yield_parent_activity"],
+                        snapshot["post_yield_parent_terminal"],
                         bool(snapshot["done_text"]),
                     )
                     last_state = state
@@ -110,7 +113,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
 
                 if (
                     snapshot["pending_children"] == 0
-                    and snapshot["post_yield_parent_activity"]
+                    and snapshot["post_yield_parent_terminal"]
                 ):
                     message = (
                         "Roadmap parent resumed after child completion but "
@@ -192,6 +195,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         latest_yield = yield_indexes[-1] if yield_indexes else -1
         done_text = ""
         post_yield_parent_activity = False
+        post_yield_parent_terminal = False
         for event in messages[latest_yield + 1:]:
             message = event.get("message") or {}
             role = message.get("role")
@@ -199,6 +203,15 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 post_yield_parent_activity = True
             if role != "assistant":
                 continue
+
+            # Activity is not completion. An assistant tool-call commonly has
+            # stopReason="toolUse" and may be followed by toolResult + more
+            # model work. Only a normal assistant stop proves that the resumed
+            # parent turn itself has terminated.
+            stop_reason = str(message.get("stopReason") or "").strip().lower()
+            if stop_reason == "stop":
+                post_yield_parent_terminal = True
+
             parts = [
                 str(item.get("text") or "")
                 for item in message.get("content") or []
@@ -214,6 +227,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             "yield_count": len(yield_indexes),
             "message_count": len(messages),
             "post_yield_parent_activity": post_yield_parent_activity,
+            "post_yield_parent_terminal": post_yield_parent_terminal,
             "done_text": done_text,
         }
 
