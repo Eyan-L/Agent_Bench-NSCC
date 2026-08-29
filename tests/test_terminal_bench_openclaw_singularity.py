@@ -620,7 +620,24 @@ def test_roadmap_resumed_parent_tool_loop_is_not_terminal(tmp_path):
     assert snapshot["done_text"] == ""
 
 
-def test_roadmap_final_prompt_error_is_terminal(tmp_path):
+def test_roadmap_prompt_error_is_not_immediate_terminal(tmp_path):
+    sessions_dir = tmp_path / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_yield_event(), _prompt_error_event()],
+        child_statuses=("done",),
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(
+        sessions_dir
+    )
+
+    assert snapshot["pending_children"] == 0
+    assert snapshot["post_yield_parent_terminal"] is False
+    assert "LLM idle timeout" in snapshot["post_yield_prompt_error"]
+
+
+def test_roadmap_retry_activity_clears_prompt_error_candidate(tmp_path):
     sessions_dir = tmp_path / "sessions"
     events = [
         _yield_event(),
@@ -632,67 +649,53 @@ def test_roadmap_final_prompt_error_is_terminal(tmp_path):
                 "content": [{"type": "text", "text": "retry"}],
             },
         },
-        _prompt_error_event(),
     ]
     _write_roadmap_session_state(
-        sessions_dir, events, child_statuses=("done",)
+        sessions_dir,
+        events,
+        child_statuses=("done",),
     )
 
-    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(
+        sessions_dir
+    )
 
-    assert snapshot["pending_children"] == 0
-    assert snapshot["post_yield_parent_terminal"] is True
-    assert snapshot["post_yield_terminal_reason"] == "prompt_error"
+    assert snapshot["post_yield_parent_terminal"] is False
+    assert snapshot["post_yield_prompt_error"] == ""
 
 
-def test_roadmap_prompt_error_preserves_runtime_outcome(tmp_path, monkeypatch):
-    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+def test_roadmap_final_prompt_error_waits_for_grace(
+    tmp_path, monkeypatch
+):
+    sessions_dir = (
+        tmp_path / "agents" / "roadmap_bench" / "sessions"
+    )
     _write_roadmap_session_state(
         sessions_dir,
         [_yield_event(), _prompt_error_event()],
         child_statuses=("done",),
     )
-    condition = object.__new__(RoadmapBenchOpenClawCondition)
-    condition._env_info = {"state_dir": str(tmp_path)}
-    condition._last_exit_code = 0
-    condition._last_completion_status = condition.RUNTIME_ERROR
-    condition._last_completion_error = "LLM idle timeout"
-    monkeypatch.setattr(
-        "agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent.time.monotonic",
-        lambda: 0.0,
-    )
 
-    _payload, error = condition._await_post_turn_lifecycle(
-        {"result": {"meta": {"error": "LLM idle timeout"}}},
-        "LLM idle timeout",
-        deadline=10.0,
-    )
-
-    assert error == "LLM idle timeout"
-    assert condition._last_completion_status == "runtime_error"
-
-
-def test_roadmap_all_children_done_and_transcript_idle_is_blocked(
-    tmp_path, monkeypatch
-):
-    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
-    _write_roadmap_session_state(
-        sessions_dir, [_yield_event()], child_statuses=("done",)
-    )
     condition = object.__new__(RoadmapBenchOpenClawCondition)
     condition._env_info = {"state_dir": str(tmp_path)}
     condition._last_exit_code = 0
     condition._last_completion_status = condition.BLOCKED_INCOMPLETE
     condition._last_completion_error = "initial yielded turn"
-    condition.yield_resume_idle_timeout_seconds = 4.0
+    condition.prompt_error_grace_seconds = 4.0
+
     clock = [0.0]
+
     monkeypatch.setattr(
-        "agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent.time.monotonic",
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.monotonic",
         lambda: clock[0],
     )
     monkeypatch.setattr(
-        "agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent.time.sleep",
-        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.sleep",
+        lambda seconds: clock.__setitem__(
+            0, clock[0] + seconds
+        ),
     )
 
     _payload, error = condition._await_post_turn_lifecycle(
@@ -701,10 +704,67 @@ def test_roadmap_all_children_done_and_transcript_idle_is_blocked(
         deadline=100.0,
     )
 
-    assert "no transcript progress for 4.0s" in error
-    assert condition._last_exit_code == 0
-    assert condition._last_completion_status == "blocked_incomplete"
+    assert "LLM idle timeout" in error
+    assert condition._last_completion_status == "runtime_error"
+    assert clock[0] >= 4.0
 
+
+def test_roadmap_quiet_active_parent_waits_for_total_deadline(
+    tmp_path, monkeypatch
+):
+    sessions_dir = (
+        tmp_path / "agents" / "roadmap_bench" / "sessions"
+    )
+
+    tool_use = {
+        "type": "message",
+        "message": {
+            "role": "assistant",
+            "stopReason": "toolUse",
+            "content": [{
+                "type": "toolCall",
+                "name": "exec",
+                "arguments": {"command": "long-running-test"},
+            }],
+        },
+    }
+
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_yield_event(), tool_use],
+        child_statuses=("done",),
+    )
+
+    condition = object.__new__(RoadmapBenchOpenClawCondition)
+    condition._env_info = {"state_dir": str(tmp_path)}
+    condition._last_exit_code = 0
+    condition._last_completion_status = condition.BLOCKED_INCOMPLETE
+    condition._last_completion_error = "initial yielded turn"
+
+    clock = [0.0]
+
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.monotonic",
+        lambda: clock[0],
+    )
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.sleep",
+        lambda seconds: clock.__setitem__(
+            0, clock[0] + seconds
+        ),
+    )
+
+    _payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "initial yielded turn",
+        deadline=6.0,
+    )
+
+    assert "total agent timeout" in error
+    assert condition._last_completion_status == "blocked_incomplete"
+    assert clock[0] >= 6.0
 
 
 def test_roadmap_child_done_and_parent_active_without_done_is_blocked(
