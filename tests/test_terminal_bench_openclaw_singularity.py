@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import json
 from pathlib import Path
 
 from agent_bench.benchmarks.terminal_bench import app as tb_app
@@ -370,6 +371,190 @@ def test_roadmapbench_requires_explicit_done():
     assert RoadmapBenchOpenClawCondition._classify_completion(
         stopped_with_done
     ) == ("normal_completion", "")
+
+
+def _write_roadmap_session_state(
+    sessions_dir: Path,
+    events: list,
+    *,
+    child_statuses=("running",),
+    parent_session_id="parent-session",
+):
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    index = {
+        "agent:roadmap_bench:main": {
+            "sessionId": parent_session_id,
+            "status": "done",
+        }
+    }
+    for i, status in enumerate(child_statuses):
+        index[f"agent:roadmap_bench:subagent:{i}"] = {
+            "sessionId": f"child-{i}",
+            "spawnedBy": "agent:roadmap_bench:main",
+            "status": status,
+        }
+    (sessions_dir / "sessions.json").write_text(json.dumps(index))
+    (sessions_dir / f"{parent_session_id}.jsonl").write_text(
+        "".join(json.dumps(event) + "\n" for event in events)
+    )
+
+
+def _yield_event(message="waiting"):
+    return {
+        "type": "custom_message",
+        "customType": "openclaw.sessions_yield",
+        "content": message,
+    }
+
+
+def _assistant_event(text):
+    return {
+        "type": "message",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": text}],
+            "stopReason": "stop",
+        },
+    }
+
+
+def test_roadmap_yield_with_running_child_does_not_complete(tmp_path):
+    sessions_dir = tmp_path / "sessions"
+    _write_roadmap_session_state(sessions_dir, [_yield_event()])
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot["parent_session_id"] == "parent-session"
+    assert snapshot["yield_count"] == 1
+    assert snapshot["pending_children"] == 1
+    assert snapshot["done_text"] == ""
+
+
+def test_roadmap_child_completion_resumes_same_parent_and_finishes(tmp_path):
+    sessions_dir = tmp_path / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_yield_event(), {"type": "message", "message": {
+            "role": "user", "content": [{"type": "text", "text": "child completed"}],
+        }}, _assistant_event("DONE\nIntegrated and validated.")],
+        child_statuses=("done",),
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+    payload = RoadmapBenchOpenClawCondition._payload_with_resumed_completion(
+        {"result": {"meta": {"livenessState": "working"}}},
+        snapshot["done_text"],
+        yield_count=snapshot["yield_count"],
+        parent_session_id=snapshot["parent_session_id"],
+    )
+
+    assert snapshot["parent_session_id"] == "parent-session"
+    assert snapshot["pending_children"] == 0
+    assert RoadmapBenchOpenClawCondition._classify_completion(payload) == (
+        "normal_completion", ""
+    )
+
+
+def test_roadmap_multiple_yield_resume_cycles_continue(tmp_path):
+    sessions_dir = tmp_path / "sessions"
+    events = [
+        _yield_event("wave one"),
+        {"type": "message", "message": {"role": "user", "content": [
+            {"type": "text", "text": "first child completed"}
+        ]}},
+        _yield_event("wave two"),
+    ]
+    _write_roadmap_session_state(
+        sessions_dir, events, child_statuses=("done", "running")
+    )
+    waiting = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+    assert waiting["yield_count"] == 2
+    assert waiting["pending_children"] == 1
+    assert waiting["done_text"] == ""
+
+    events.append(_assistant_event("DONE\nBoth waves integrated."))
+    _write_roadmap_session_state(
+        sessions_dir, events, child_statuses=("done", "done")
+    )
+    finished = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+    assert finished["yield_count"] == 2
+    assert finished["pending_children"] == 0
+    assert finished["done_text"].startswith("DONE")
+
+
+def test_roadmap_yield_wait_ends_only_at_timeout(tmp_path, monkeypatch):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(sessions_dir, [_yield_event()])
+    condition = object.__new__(RoadmapBenchOpenClawCondition)
+    condition._env_info = {"state_dir": str(tmp_path)}
+    condition._last_exit_code = 0
+    ticks = iter((0.0, 0.0, 1.0, 2.0, 3.0))
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent.time.monotonic",
+        lambda: next(ticks),
+    )
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent.time.sleep",
+        lambda _seconds: None,
+    )
+
+    _payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "initial yielded turn",
+        deadline=2.0,
+    )
+
+    assert "total agent timeout" in error
+    assert condition._last_exit_code == -1
+    assert condition._last_completion_status == "blocked_incomplete"
+
+
+def test_roadmap_yield_watcher_survives_reyield_and_returns_final_done(
+    tmp_path, monkeypatch
+):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(sessions_dir, [_yield_event()])
+    condition = object.__new__(RoadmapBenchOpenClawCondition)
+    condition._env_info = {"state_dir": str(tmp_path)}
+    condition._last_exit_code = 0
+    snapshots = iter((
+        {
+            "parent_session_id": "parent-session", "pending_children": 2,
+            "yield_count": 1, "message_count": 4, "done_text": "",
+        },
+        {
+            "parent_session_id": "parent-session", "pending_children": 1,
+            "yield_count": 2, "message_count": 8, "done_text": "",
+        },
+        {
+            "parent_session_id": "parent-session", "pending_children": 0,
+            "yield_count": 2, "message_count": 12,
+            "done_text": "DONE\nIntegrated and validated.",
+        },
+    ))
+    monkeypatch.setattr(condition, "_read_yield_snapshot", lambda _path: next(snapshots))
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent.time.monotonic",
+        lambda: 0.0,
+    )
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent.time.sleep",
+        lambda _seconds: None,
+    )
+
+    payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}, "payloads": None}},
+        "initial yielded turn",
+        deadline=10.0,
+    )
+
+    assert error == ""
+    assert condition._last_exit_code == 0
+    assert condition._last_completion_status == "normal_completion"
+    assert payload["result"]["meta"]["agentBenchYieldResume"] == {
+        "yieldCount": 2,
+        "parentSessionId": "parent-session",
+    }
 
 
 def test_roadmapbench_abnormal_completion_preserves_partial_reward():

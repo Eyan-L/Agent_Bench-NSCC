@@ -117,6 +117,22 @@ class OpenClawAgentCondition:
         ``skip_patch_gate`` handles the empty case for terminal_bench)."""
         return None
 
+    def _await_post_turn_lifecycle(
+        self,
+        payload: Optional[Dict],
+        error: str,
+        *,
+        deadline: float,
+    ) -> Tuple[Optional[Dict], str]:
+        """Benchmark hook for runtimes whose logical run spans several turns.
+
+        The default is deliberately a no-op so ordinary OpenClaw benchmarks
+        retain the existing single-CLI-turn behavior. RoadmapBench overrides
+        this to keep a yielded requester alive while native subagent announce
+        delivery resumes the same parent session.
+        """
+        return payload, error
+
     # ------------------------------------------------------------------
 
     def _resolve_agent_timeout_seconds(self, instance_data: Dict) -> int:
@@ -195,12 +211,19 @@ class OpenClawAgentCondition:
             tools_container=tools_container,
         ):
             step_start_ns = time.time_ns()
+            timeout_seconds = self._resolve_agent_timeout_seconds(instance_data)
+            lifecycle_deadline = time.monotonic() + timeout_seconds
             payload, err = self._invoke_agent(
                 container_id=container_id,
                 workspace_root=workspace_root,
                 session_id=run_dir.name,
                 message=message,
-                timeout_seconds=self._resolve_agent_timeout_seconds(instance_data),
+                timeout_seconds=timeout_seconds,
+            )
+            payload, err = self._await_post_turn_lifecycle(
+                payload,
+                err,
+                deadline=lifecycle_deadline,
             )
             step_end_ns = time.time_ns()
 
