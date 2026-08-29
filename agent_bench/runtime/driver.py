@@ -257,9 +257,14 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             # discriminator.
             benchmark = instance_data.get("benchmark", "swebench")
             if benchmark == "terminal_bench":
-                from agent_bench.benchmarks.terminal_bench.conditions.openclaw_agent import (
-                    TerminalBenchOpenClawCondition as _Cls,
-                )
+                if instance_data.get("benchmark_variant") == "roadmapbench":
+                    from agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent import (
+                        RoadmapBenchOpenClawCondition as _Cls,
+                    )
+                else:
+                    from agent_bench.benchmarks.terminal_bench.conditions.openclaw_agent import (
+                        TerminalBenchOpenClawCondition as _Cls,
+                    )
             elif benchmark == "deepresearch_bench":
                 from agent_bench.benchmarks.deepresearch_bench.conditions.openclaw_agent import (
                     DeepResearchOpenClawCondition as _Cls,

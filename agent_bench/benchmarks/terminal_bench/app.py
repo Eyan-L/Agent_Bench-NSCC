@@ -95,22 +95,56 @@ _OPENCLAW_WARMUP_SEM = threading.BoundedSemaphore(
 # ----------------------------------------------------------------------
 
 _THIS_DIR = Path(__file__).resolve().parent
-_BOOTSTRAP_SRC = _THIS_DIR / "openclaw" / "agents" / "BOOTSTRAP.md"
 _OPENAI_CHAT_COMPLETIONS_API = "openai-completions"
+
+
+def _terminal_bench_profile_section() -> Dict:
+    """Return adapter-specific settings from the active harness profile."""
+    harness_path = os.environ.get("AB_HARNESS_CONFIG")
+    if not harness_path or not os.path.isfile(harness_path):
+        return {}
+    return dict(load_profile(harness_path).get("terminal_bench") or {})
 
 
 def _terminal_bench_prompt_filename(field: str, default: str) -> str:
     """Resolve one prompt asset selected by the active harness profile."""
-    harness_path = os.environ.get("AB_HARNESS_CONFIG")
-    if not harness_path or not os.path.isfile(harness_path):
-        return default
-    cfg = load_profile(harness_path)
-    filename = str((cfg.get("terminal_bench") or {}).get(field) or default)
+    filename = str(_terminal_bench_profile_section().get(field) or default)
     if Path(filename).name != filename:
         raise ValueError(
             f"terminal_bench.{field} must be a filename, got {filename!r}"
         )
     return filename
+
+
+def _terminal_bench_profile_dir(
+    field: str,
+    *,
+    repo_root: Optional[Path] = None,
+) -> Optional[Path]:
+    """Resolve an optional repo-relative prompt or skill directory."""
+    raw = _terminal_bench_profile_section().get(field)
+    if not raw:
+        return None
+    path = Path(str(raw)).expanduser()
+    if not path.is_absolute():
+        root = Path(
+            repo_root
+            or os.environ.get("AB_REPO_ROOT")
+            or _THIS_DIR.parents[2]
+        )
+        path = root / path
+    path = path.resolve()
+    if not path.is_dir():
+        raise FileNotFoundError(f"terminal_bench.{field} directory missing: {path}")
+    return path
+
+
+def _terminal_bench_agent_assets_dir(
+    *, repo_root: Optional[Path] = None
+) -> Path:
+    return _terminal_bench_profile_dir(
+        "agent_assets_dir", repo_root=repo_root
+    ) or (_THIS_DIR / "openclaw" / "agents")
 
 
 def _normalize_container_path(raw: Optional[str], default: str = "/app") -> str:
@@ -247,7 +281,7 @@ def _seed_workspace_helpers(
         bootstrap_name = _terminal_bench_prompt_filename(
             "workspace_bootstrap_file", "BOOTSTRAP.md"
         )
-        bootstrap_src = _BOOTSTRAP_SRC.parent / bootstrap_name
+        bootstrap_src = _terminal_bench_agent_assets_dir() / bootstrap_name
         if not bootstrap_src.is_file():
             raise FileNotFoundError(
                 f"Terminal-Bench workspace bootstrap not found: {bootstrap_src}"
@@ -658,9 +692,8 @@ class TerminalBenchDockerHarness:
         return env_info
 
     # ------------------------------------------------------------------
-    # State-dir compose (TB flavour). Falls back to SWE-bench prompts/skills
-    # when the TB per-app dir is empty — harmless because the prompts are
-    # generic ("you have a shell, do the task").
+    # State-dir compose. Container lifecycle remains Terminal-Bench based,
+    # while active harness profiles may select benchmark-specific assets.
     # ------------------------------------------------------------------
 
     def _build_state_dir(
@@ -726,18 +759,19 @@ class TerminalBenchDockerHarness:
             with open(state_dir / "openclaw.json", "w") as fh:
                 json.dump(oc_cfg, fh, indent=2)
 
-            tb_agents = os.path.join(repo_root, "agent_bench/benchmarks/terminal_bench/openclaw/agents")
+            tb_agents = str(
+                _terminal_bench_agent_assets_dir(repo_root=Path(repo_root))
+            )
             tb_skills = os.path.join(repo_root, "agent_bench/benchmarks/terminal_bench/openclaw/skills")
-            swe_agents = os.path.join(repo_root, "agent_bench/benchmarks/swebench/openclaw/agents")
             swe_skills = os.path.join(repo_root, "agent_bench/benchmarks/swebench/openclaw/skills")
 
-            # Prefer TB-specific prompts/skills; fall back to SWE-bench's when
-            # the TB dir is empty (current state — see openclaw/agents/).
-            src_agents = (
-                tb_agents if (os.path.isdir(tb_agents) and os.listdir(tb_agents))
-                else swe_agents
+            # Prompt and skill sources can be benchmark-specific while the
+            # Terminal-Bench container/runtime adapter remains shared.
+            src_agents = tb_agents
+            configured_skills = _terminal_bench_profile_dir(
+                "skills_dir", repo_root=Path(repo_root)
             )
-            src_skills = (
+            src_skills = str(configured_skills) if configured_skills else (
                 tb_skills if (os.path.isdir(tb_skills) and os.listdir(tb_skills))
                 else swe_skills
             )

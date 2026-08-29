@@ -1,9 +1,10 @@
-# RoadmapBench OpenClaw harness using the Terminal-Bench container lifecycle
-# and DeepResearch-style optional delegation structure.
+# RoadmapBench persona on the shared Terminal-Bench container lifecycle.
 harness: openclaw
 terminal_bench:
-  agent_prompt_file: AGENTS.md.dr_matched
-  workspace_bootstrap_file: BOOTSTRAP.md.dr_matched
+  agent_assets_dir: agent_bench/benchmarks/roadmap_bench/openclaw/agents
+  skills_dir: agent_bench/benchmarks/roadmap_bench/openclaw/skills
+  agent_prompt_file: AGENTS.md
+  workspace_bootstrap_file: BOOTSTRAP.md
 openclaw:
   gateway:
     mode: local
@@ -62,13 +63,13 @@ openclaw:
         maxConcurrent: 4
         runTimeoutSeconds: 2400
     list:
-    - id: terminal_bench
+    - id: roadmap_bench
       default: true
-      name: roadmapbench-engineer
+      name: roadmap-lead-engineer
 conditions:
 - condition_id: openclaw_agent
   condition_type: openclaw_agent
-  description: RoadmapBench agent with DeepResearch-style task decomposition
+  description: RoadmapBench lead engineer with natural parallel fan-out
   agent:
     max_steps: 600
     max_time_seconds: 7200

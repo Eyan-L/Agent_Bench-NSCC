@@ -155,12 +155,18 @@ def load_task(task_id: str, tasks_root: str | Path | None = None) -> Dict:
     docker_image = env.get("docker_image")
     if not docker_image:
         raise ValueError(f"task.toml for {task_id}: missing environment.docker_image")
+    benchmark_variant = (
+        "roadmapbench"
+        if str(docker_image).startswith("znpt/roadmapbench-")
+        else "terminal_bench"
+    )
 
     workspace, workspace_source = _task_workspace(task_dir, env)
 
     return {
         "instance_id": task_id,
         "benchmark": "terminal_bench",
+        "benchmark_variant": benchmark_variant,
         "task_name": task_meta.get("name") or legacy_meta.get("name") or task_id,
         "instruction": instruction,
         "docker_image": docker_image,

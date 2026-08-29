@@ -5,6 +5,12 @@ from pathlib import Path
 
 from agent_bench.benchmarks.terminal_bench import app as tb_app
 from agent_bench.benchmarks.terminal_bench import loader as tb_loader
+from agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent import (
+    RoadmapBenchOpenClawCondition,
+)
+from agent_bench.benchmarks.terminal_bench.conditions.openclaw_agent import (
+    TerminalBenchOpenClawCondition,
+)
 from agent_bench.deployments.containers.base import ContainerHandle
 from agent_bench.deployments.containers.singularity import SingularityContainer
 
@@ -172,6 +178,8 @@ def test_driver_routes_terminal_bench_openclaw_to_generic_harness():
     assert 'if harness_choice == "openclaw":' in driver
     assert "TerminalBenchOpenClawHarness as tb_cls" in driver
     assert "tb_harness = tb_cls(benchmark_data_root, container=tb_container)" in driver
+    assert 'instance_data.get("benchmark_variant") == "roadmapbench"' in driver
+    assert "RoadmapBenchOpenClawCondition as _Cls" in driver
 
 
 def test_terminal_bench_prompt_variant_is_selected_explicitly(tmp_path, monkeypatch):
@@ -189,6 +197,50 @@ def test_terminal_bench_prompt_variant_is_selected_explicitly(tmp_path, monkeypa
     assert tb_app._terminal_bench_prompt_filename(
         "workspace_bootstrap_file", "BOOTSTRAP.md"
     ) == "BOOTSTRAP.md.dr_matched"
+
+
+def test_roadmapbench_uses_own_assets_and_condition(tmp_path, monkeypatch):
+    repo_root = Path(__file__).resolve().parents[1]
+    profile = tmp_path / "harness.yaml"
+    profile.write_text(
+        "terminal_bench:\n"
+        "  agent_assets_dir: "
+        "agent_bench/benchmarks/roadmap_bench/openclaw/agents\n"
+        "  skills_dir: "
+        "agent_bench/benchmarks/roadmap_bench/openclaw/skills\n"
+    )
+    monkeypatch.setenv("AB_HARNESS_CONFIG", str(profile))
+    monkeypatch.setenv("AB_REPO_ROOT", str(repo_root))
+
+    assets = tb_app._terminal_bench_agent_assets_dir(repo_root=repo_root)
+    skills = tb_app._terminal_bench_profile_dir(
+        "skills_dir", repo_root=repo_root
+    )
+    assert assets.name == "agents"
+    assert (assets / "AGENTS.md").is_file()
+    assert "lead engineer" in (assets / "AGENTS.md").read_text()
+    assert "Terminal-Bench" not in (assets / "AGENTS.md").read_text()
+    assert skills is not None
+    assert (skills / "verify" / "SKILL.md").is_file()
+    assert "SWE-bench" not in (skills / "verify" / "SKILL.md").read_text()
+
+    condition = object.__new__(RoadmapBenchOpenClawCondition)
+    message = condition._build_message({"instruction": "Implement targets."})
+    assert condition.agent_id == "roadmap_bench"
+    assert "multi-target software roadmap" in message
+    assert "Carry out this terminal task" not in message
+
+
+def test_terminal_bench_condition_and_forced_capability_remain(monkeypatch):
+    condition = object.__new__(TerminalBenchOpenClawCondition)
+    monkeypatch.delenv("AB_TB_FORCE_ONE_SUBAGENT", raising=False)
+    baseline = condition._build_message({"instruction": "Do terminal work."})
+    assert "Carry out this terminal task" in baseline
+    assert "sessions_spawn exactly once" not in baseline
+
+    monkeypatch.setenv("AB_TB_FORCE_ONE_SUBAGENT", "1")
+    forced = condition._build_message({"instruction": "Do terminal work."})
+    assert "sessions_spawn exactly once" in forced
 
 
 def test_terminal_bench_fractional_reward_is_preserved():
@@ -216,8 +268,24 @@ def test_terminal_bench_loader_accepts_roadmapbench_v1_metadata(tmp_path):
 
     assert row["task_name"] == "fal-1.3.0-roadmap"
     assert row["repo"] == "fal-1.3.0-roadmap"
+    assert row["benchmark_variant"] == "roadmapbench"
     assert row["agent_timeout_sec"] == 7200
     assert row["verifier_timeout_sec"] == 1800
+
+
+def test_terminal_bench_loader_keeps_terminal_variant(tmp_path):
+    task = tmp_path / "terminal-task"
+    (task / "tests").mkdir(parents=True)
+    (task / "instruction.md").write_text("Do terminal work.\n")
+    (task / "task.toml").write_text(
+        '[task]\nname = "terminal-task"\n'
+        '[environment]\n'
+        'docker_image = "example/terminal-task:latest"\n'
+    )
+
+    row = tb_loader.load_task("terminal-task", tasks_root=tmp_path)
+
+    assert row["benchmark_variant"] == "terminal_bench"
 
 
 def test_singularity_copy_into_directory_streams_tar(tmp_path, monkeypatch):

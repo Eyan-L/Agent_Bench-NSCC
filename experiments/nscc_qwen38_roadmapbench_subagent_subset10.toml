@@ -12,7 +12,7 @@ profile = "profiles/benchmarks/terminal_bench/roadmapbench_subagent_subset10.jso
 
 [harness]
 name = "openclaw"
-profile = "profiles/harnesses/openclaw_roadmapbench_dr_matched.yaml"
+profile = "profiles/harnesses/openclaw_roadmapbench.yaml"
 
 [model]
 profile = "profiles/models/qwen38_27b_nscc.json"
