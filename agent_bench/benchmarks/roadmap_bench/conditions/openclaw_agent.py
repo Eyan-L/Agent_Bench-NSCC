@@ -23,7 +23,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     # A prompt error may be transient: OpenClaw can retry/fail over and append
     # another requester turn afterward. Only treat an unchanged prompt error
     # as final after one model idle-timeout window plus margin.
-    prompt_error_grace_seconds = 180.0
+    prompt_error_grace_seconds = 600.0
     _ACTIVE_CHILD_STATES = frozenset({"accepted", "queued", "pending", "running"})
 
     def _build_message(self, instance_data: Dict) -> str:
