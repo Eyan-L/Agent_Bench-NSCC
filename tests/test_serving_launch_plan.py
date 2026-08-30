@@ -314,6 +314,32 @@ def test_sglang_uses_tp_env_instead_of_visible_gpu_count() -> None:
     assert override.metadata["tensor_parallel_size"] == "2"
 
 
+def test_sglang_maps_max_num_seqs_to_effective_running_requests() -> None:
+    plan = _plan(
+        "profiles/models/qwen35_9b.json",
+        "profiles/serving/sglang/default.yaml",
+        backend="sglang",
+        mode="native",
+    )
+
+    assert plan.argv[plan.argv.index("--max-running-requests") + 1] == "128"
+    assert plan.metadata["max_running_requests"] == "128"
+    assert plan.env["SGLANG_MAX_RUNNING_REQUESTS"] == "128"
+
+    overridden = _plan(
+        "profiles/models/qwen35_9b.json",
+        "profiles/serving/sglang/default.yaml",
+        backend="sglang",
+        mode="native",
+        env={"AB_SERVING_MAX_RUNNING_REQUESTS": "32"},
+    )
+
+    assert overridden.argv[
+        overridden.argv.index("--max-running-requests") + 1
+    ] == "32"
+    assert overridden.metadata["max_running_requests"] == "32"
+
+
 def test_sglang_hierarchical_cache_defaults_off_and_can_be_configured(tmp_path: Path) -> None:
     default_plan = _plan(
         "profiles/models/qwen35_9b.json",

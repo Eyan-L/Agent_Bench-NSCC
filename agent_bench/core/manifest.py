@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from dataclasses import dataclass, field
 import time
 
@@ -29,6 +29,17 @@ class RunManifest:
     exit_code: Optional[int] = None
     error_message: Optional[str] = None
     agent_runtime_mode: Optional[str] = None
+    agent_execution_outcome: Optional[str] = None
+    agent_completion_error: Optional[str] = None
+    verifier_status: Optional[str] = None
+    reward: Optional[float] = None
+    test_pass_rate: Optional[float] = None
+    trajectory_path: Optional[str] = None
+    token_accounting_path: Optional[str] = None
+    trajectory_tokens: Optional[dict[str, Any]] = None
+    serving_tokens: Optional[dict[str, Any]] = None
+    runtime_observability_path: Optional[str] = None
+    runtime_observability: Optional[dict[str, Any]] = None
     notes: str = ""
     
     total_prompt_tokens: int = 0
@@ -51,6 +62,17 @@ class RunManifest:
             "exit_code": self.exit_code,
             "error_message": self.error_message,
             "agent_runtime_mode": self.agent_runtime_mode,
+            "agent_execution_outcome": self.agent_execution_outcome,
+            "agent_completion_error": self.agent_completion_error,
+            "verifier_status": self.verifier_status,
+            "reward": self.reward,
+            "test_pass_rate": self.test_pass_rate,
+            "trajectory_path": self.trajectory_path,
+            "token_accounting_path": self.token_accounting_path,
+            "trajectory_tokens": self.trajectory_tokens,
+            "serving_tokens": self.serving_tokens,
+            "runtime_observability_path": self.runtime_observability_path,
+            "runtime_observability": self.runtime_observability,
             "notes": self.notes,
             "total_prompt_tokens": self.total_prompt_tokens,
             "total_completion_tokens": self.total_completion_tokens,
@@ -74,6 +96,17 @@ class RunManifest:
             exit_code=data.get("exit_code"),
             error_message=data.get("error_message"),
             agent_runtime_mode=data.get("agent_runtime_mode"),
+            agent_execution_outcome=data.get("agent_execution_outcome"),
+            agent_completion_error=data.get("agent_completion_error"),
+            verifier_status=data.get("verifier_status"),
+            reward=data.get("reward"),
+            test_pass_rate=data.get("test_pass_rate"),
+            trajectory_path=data.get("trajectory_path"),
+            token_accounting_path=data.get("token_accounting_path"),
+            trajectory_tokens=data.get("trajectory_tokens"),
+            serving_tokens=data.get("serving_tokens"),
+            runtime_observability_path=data.get("runtime_observability_path"),
+            runtime_observability=data.get("runtime_observability"),
             notes=data.get("notes", ""),
             total_prompt_tokens=data.get("total_prompt_tokens", 0),
             total_completion_tokens=data.get("total_completion_tokens", 0),

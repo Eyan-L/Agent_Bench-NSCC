@@ -405,6 +405,13 @@ def _build_sglang_plan(
     hicache_size = _env_str(env, "SGLANG_HICACHE_SIZE", default=str(hicache_size_default))
     tool_parser = _env_optional(env, "SGLANG_TOOL_CALL_PARSER", "AB_MODEL_TOOL_CALL_PARSER", default=model.tool_call_parser or "qwen")
     reasoning_parser = _env_optional(env, "SGLANG_REASONING_PARSER", "AB_MODEL_REASONING_PARSER", default=model.reasoning_parser)
+    max_running_requests = _env_int(
+        env,
+        "SGLANG_MAX_RUNNING_REQUESTS",
+        "AB_SERVING_MAX_RUNNING_REQUESTS",
+        "AB_SERVING_MAX_NUM_SEQS",
+        default=serving.max_num_seqs,
+    )
     flashinfer_workspace_base = _env_optional(
         env,
         "FLASHINFER_WORKSPACE_BASE",
@@ -424,6 +431,8 @@ def _build_sglang_plan(
         str(gpu_util),
         "--page-size",
         page_size,
+        "--max-running-requests",
+        str(max_running_requests),
     ]
     if tp > 1:
         server_flags.extend(["--tp", str(tp)])
@@ -449,6 +458,7 @@ def _build_sglang_plan(
         "SGLANG_HICACHE_SIZE": hicache_size,
         "SGLANG_KV_MEMTRACE": "0",
         "SGLANG_KV_MEMTRACE_STRICT": "0",
+        "SGLANG_MAX_RUNNING_REQUESTS": str(max_running_requests),
     }
     if flashinfer_workspace_base:
         base_launch_env["FLASHINFER_WORKSPACE_BASE"] = flashinfer_workspace_base
@@ -463,6 +473,7 @@ def _build_sglang_plan(
         "hicache_size": hicache_size,
         "page_size": page_size,
         "mode": mode,
+        "max_running_requests": str(max_running_requests),
     }
 
     if pd_enabled:

@@ -4,7 +4,9 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 import re
+import subprocess
 import time
 from pathlib import Path, PurePosixPath
 from typing import Dict, Optional, Tuple
@@ -12,6 +14,11 @@ from typing import Dict, Optional, Tuple
 from agent_bench.benchmarks.conditions.openclaw_agent import OpenClawAgentCondition
 
 logger = logging.getLogger(__name__)
+
+_WORKSPACE_SCAFFOLD_FILES = frozenset({
+    "AGENTS.md", "BOOTSTRAP.md", "HEARTBEAT.md", "IDENTITY.md",
+    "MEMORY.md", "SOUL.md", "TOOLS.md", "USER.md",
+})
 
 
 class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
@@ -37,6 +44,106 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             f"Roadmap:\n{instance_data['instruction']}"
         )
 
+    def _collect_artifacts(
+        self,
+        container_id: Optional[str],
+        env_info: Dict,
+        run_dir: Path,
+        workspace_root: str,
+    ) -> Optional[str]:
+        """Capture tracked and agent-created untracked repository changes."""
+        del container_id, run_dir, workspace_root
+        workspace = Path(str(env_info.get("workspace_host_path") or ""))
+        if not workspace.is_dir():
+            logger.warning(
+                "Roadmap patch extraction missing host workspace: %s",
+                workspace,
+            )
+            return ""
+        return self._collect_workspace_patch(workspace)
+
+    @staticmethod
+    def _collect_workspace_patch(workspace: Path) -> str:
+        root_result = subprocess.run(
+            ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+        )
+        if root_result.returncode != 0:
+            logger.warning(
+                "Roadmap workspace is not a git repository: %s",
+                root_result.stderr.strip(),
+            )
+            return ""
+
+        repo_root = Path(root_result.stdout.strip()).resolve()
+        try:
+            workspace.resolve().relative_to(repo_root)
+        except ValueError:
+            logger.warning(
+                "Roadmap workspace %s is outside git root %s",
+                workspace,
+                repo_root,
+            )
+            return ""
+
+        excludes = [
+            f":(exclude){name}" for name in sorted(_WORKSPACE_SCAFFOLD_FILES)
+        ]
+        tracked = subprocess.run(
+            [
+                "git", "-C", str(repo_root), "diff", "--binary", "HEAD",
+                "--", ".", *excludes,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if tracked.returncode != 0:
+            logger.warning(
+                "Roadmap tracked patch extraction failed: %s",
+                tracked.stderr.strip(),
+            )
+            return ""
+
+        untracked = subprocess.run(
+            [
+                "git", "-C", str(repo_root), "ls-files", "--others",
+                "--exclude-standard", "-z",
+            ],
+            capture_output=True,
+        )
+        if untracked.returncode != 0:
+            logger.warning("Roadmap untracked file enumeration failed")
+            return tracked.stdout
+
+        patch_parts = [tracked.stdout]
+        for raw_path in untracked.stdout.split(b"\0"):
+            if not raw_path:
+                continue
+            relative = os.fsdecode(raw_path)
+            if Path(relative).parts[0] in _WORKSPACE_SCAFFOLD_FILES:
+                continue
+            diff = subprocess.run(
+                [
+                    "git", "diff", "--no-index", "--binary", "--",
+                    "/dev/null", relative,
+                ],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+            )
+            # git diff --no-index returns 1 when differences were found.
+            if diff.returncode in (0, 1):
+                patch_parts.append(diff.stdout)
+            else:
+                logger.warning(
+                    "Roadmap untracked patch extraction failed for %s: %s",
+                    relative,
+                    diff.stderr.strip(),
+                )
+
+        return "".join(part for part in patch_parts if part)
+
     def _await_post_turn_lifecycle(
         self,
         payload: Optional[Dict],
@@ -55,15 +162,45 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         if sessions_dir is None:
             return payload, error
 
+        if getattr(self, "_last_completion_status", None) == self.TIMEOUT:
+            return payload, getattr(self, "_last_completion_error", error)
+
+        # The CLI payload can lag behind the durable requester transcript. In
+        # particular, a no-yield requester can have appended a terminal DONE
+        # while the payload still reports livenessState=working. Explicit
+        # payload failures remain authoritative and must never be hidden by an
+        # older transcript terminal event.
+        payload_status, payload_error = self._classify_completion(payload)
+        if payload_status in {self.RUNTIME_ERROR, self.CONTEXT_OVERFLOW}:
+            self._last_completion_status = payload_status
+            self._last_completion_error = payload_error
+            return payload, payload_error
+
         snapshot = self._read_yield_snapshot(sessions_dir)
-        if not snapshot or snapshot["yield_count"] == 0:
+        if not snapshot:
+            return payload, error
+
+        reconciled = self._reconcile_terminal_snapshot(payload, snapshot)
+        if reconciled is not None:
+            return reconciled
+
+        # Ordinary single-turn runs retain the base condition's behavior. A
+        # child trajectory, yield, or retryable prompt error makes this a
+        # multi-turn logical run even when the parent never called yield.
+        should_watch = bool(
+            snapshot.get("total_children")
+            or snapshot.get("yield_count")
+            or snapshot.get("post_yield_prompt_error")
+        )
+        if not should_watch:
             return payload, error
 
         parent_session_id = snapshot["parent_session_id"]
         logger.info(
-            "  Roadmap parent yielded; awaiting native announce/resume "
-            "(session=%s pending_children=%d deadline_in=%.1fs)",
+            "  Roadmap trajectory awaiting native child/parent progress "
+            "(session=%s yields=%d pending_children=%d deadline_in=%.1fs)",
             parent_session_id,
+            snapshot["yield_count"],
             snapshot["pending_children"],
             max(0.0, deadline - time.monotonic()),
         )
@@ -88,10 +225,13 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 state = (
                     snapshot["yield_count"],
                     snapshot["pending_children"],
+                    snapshot.get("completed_children", 0),
                     snapshot["message_count"],
                     snapshot.get("transcript_size_bytes", 0),
-                    snapshot["post_yield_parent_activity"],
-                    snapshot["post_yield_parent_terminal"],
+                    snapshot.get("parent_active", False),
+                    snapshot.get("parent_waiting", False),
+                    snapshot.get("parent_resumed", False),
+                    snapshot.get("parent_terminal", False),
                     bool(snapshot.get("post_yield_prompt_error")),
                     bool(snapshot["done_text"]),
                 )
@@ -99,47 +239,28 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 if state != last_state:
                     logger.info(
                         "  Roadmap yield lifecycle: session=%s yields=%d "
-                        "pending_children=%d messages=%d resumed=%s "
-                        "terminal=%s prompt_error=%s done=%s",
+                        "pending_children=%d completed_children=%d messages=%d "
+                        "active=%s waiting=%s resumed=%s terminal=%s "
+                        "prompt_error=%s done=%s",
                         parent_session_id,
                         snapshot["yield_count"],
                         snapshot["pending_children"],
+                        snapshot.get("completed_children", 0),
                         snapshot["message_count"],
-                        snapshot["post_yield_parent_activity"],
-                        snapshot["post_yield_parent_terminal"],
+                        snapshot.get("parent_active", False),
+                        snapshot.get("parent_waiting", False),
+                        snapshot.get("parent_resumed", False),
+                        snapshot.get("parent_terminal", False),
                         bool(snapshot.get("post_yield_prompt_error")),
                         bool(snapshot["done_text"]),
                     )
                     last_state = state
 
-                if snapshot["done_text"]:
-                    resumed_payload = self._payload_with_resumed_completion(
-                        payload,
-                        snapshot["done_text"],
-                        yield_count=snapshot["yield_count"],
-                        parent_session_id=parent_session_id,
-                    )
-                    status, completion_error = self._classify_completion(
-                        resumed_payload
-                    )
-                    self._last_completion_status = status
-                    self._last_completion_error = completion_error
-                    return resumed_payload, completion_error
-
-                # A normal assistant stop is definitive.
-                # toolUse/toolResult activity is not.
-                if (
-                    snapshot["pending_children"] == 0
-                    and snapshot["post_yield_parent_terminal"]
-                ):
-                    message = (
-                        "Roadmap parent resumed after child completion but "
-                        "returned without DONE "
-                        f"(session={parent_session_id})"
-                    )
-                    self._last_completion_status = self.BLOCKED_INCOMPLETE
-                    self._last_completion_error = message
-                    return payload, message
+                reconciled = self._reconcile_terminal_snapshot(
+                    payload, snapshot
+                )
+                if reconciled is not None:
+                    return reconciled
 
                 # A prompt error is only a terminal candidate. OpenClaw may
                 # retry/fail over and append another requester/model turn.
@@ -192,13 +313,62 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             time.sleep(self.yield_watch_interval_seconds)
 
         message = (
-            "Roadmap parent remained yielded until the total agent timeout "
+            "Roadmap trajectory remained nonterminal until the total agent timeout "
             f"(session={parent_session_id})"
         )
         self._last_exit_code = -1
-        self._last_completion_status = self.BLOCKED_INCOMPLETE
+        self._last_completion_status = self.TIMEOUT
         self._last_completion_error = message
         return payload, message
+
+    def _reconcile_terminal_snapshot(
+        self,
+        payload: Optional[Dict],
+        snapshot: Dict,
+    ) -> Optional[Tuple[Optional[Dict], str]]:
+        """Apply a durable terminal requester event to the CLI result."""
+        if snapshot.get("done_text"):
+            reconciled_payload = self._payload_with_resumed_completion(
+                payload,
+                snapshot["done_text"],
+                yield_count=int(snapshot.get("yield_count") or 0),
+                parent_session_id=str(snapshot["parent_session_id"]),
+            )
+            self._attach_lifecycle_summary(reconciled_payload, snapshot)
+            status, completion_error = self._classify_completion(
+                reconciled_payload
+            )
+            self._last_completion_status = status
+            self._last_completion_error = completion_error
+            return reconciled_payload, completion_error
+
+        # A terminal assistant stop is definitive regardless of whether the
+        # trajectory yielded or whether children remain. A toolUse assistant
+        # turn is intentionally not terminal.
+        if snapshot.get("post_yield_parent_terminal"):
+            message = (
+                "Roadmap parent returned without DONE "
+                f"(session={snapshot['parent_session_id']})"
+            )
+            self._last_completion_status = self.BLOCKED_INCOMPLETE
+            self._last_completion_error = message
+            return payload, message
+
+        return None
+
+    @staticmethod
+    def _attach_lifecycle_summary(payload: Dict, snapshot: Dict) -> None:
+        run = payload.setdefault("result", {})
+        meta = run.setdefault("meta", {})
+        pending = list(snapshot.get("pending_child_sessions") or [])
+        meta["agentBenchLifecycle"] = {
+            "parentState": "terminal",
+            "yieldCount": int(snapshot.get("yield_count") or 0),
+            "totalChildren": int(snapshot.get("total_children") or 0),
+            "completedChildren": int(snapshot.get("completed_children") or 0),
+            "pendingChildrenAtParentTerminal": len(pending),
+            "abandonedChildren": pending,
+        }
 
     def _live_sessions_dir(self) -> Optional[Path]:
         state_dir = self._env_info.get("state_dir") or self._env_info.get(
@@ -224,13 +394,31 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         if not parent_session_id:
             return None
 
-        pending_children = sum(
-            1
-            for value in index.values()
-            if isinstance(value, dict)
-            and value.get("spawnedBy") == parent_key
-            and str(value.get("status") or "").lower()
-            in cls._ACTIVE_CHILD_STATES
+        child_entries = []
+        for key, value in index.items():
+            if not isinstance(value, dict) or value.get("spawnedBy") != parent_key:
+                continue
+            status = str(value.get("status") or "unknown").lower()
+            child_entries.append({
+                "session_key": str(key),
+                "session_id": str(value.get("sessionId") or ""),
+                "status": status,
+            })
+        pending_child_sessions = [
+            child for child in child_entries
+            if child["status"] in cls._ACTIVE_CHILD_STATES
+        ]
+        pending_children = len(pending_child_sessions)
+        completed_children = sum(
+            child["status"] in {
+                "done", "completed", "failed", "error", "timeout",
+                "timed_out", "cancelled", "canceled",
+            }
+            for child in child_entries
+        )
+        child_timeout = any(
+            child["status"] in {"timeout", "timed_out"}
+            for child in child_entries
         )
 
         transcript_path = cls._resolve_parent_transcript_path(
@@ -276,6 +464,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         post_yield_parent_activity = False
         post_yield_parent_terminal = False
         post_yield_prompt_error = ""
+        latest_event_kind = ""
 
         for event in messages[latest_yield + 1:]:
             if (
@@ -297,6 +486,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 )
                 post_yield_parent_terminal = False
                 done_text = ""
+                latest_event_kind = "prompt_error"
                 continue
 
             if event.get("type") != "message":
@@ -313,12 +503,14 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             if role == "user":
                 post_yield_parent_terminal = False
                 done_text = ""
+                latest_event_kind = "resume"
                 continue
 
             if role == "toolResult":
                 post_yield_parent_activity = True
                 post_yield_parent_terminal = False
                 done_text = ""
+                latest_event_kind = "tool_result"
                 continue
 
             if role != "assistant":
@@ -331,6 +523,11 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             ).strip().lower()
 
             post_yield_parent_terminal = stop_reason == "stop"
+            latest_event_kind = (
+                "assistant_stop"
+                if post_yield_parent_terminal
+                else "assistant_active"
+            )
 
             parts = [
                 str(item.get("text") or "")
@@ -356,7 +553,12 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
 
         return {
             "parent_session_id": str(parent_session_id),
+            "total_children": len(child_entries),
             "pending_children": pending_children,
+            "pending_child_sessions": pending_child_sessions,
+            "completed_children": completed_children,
+            "child_states": child_entries,
+            "child_timeout": child_timeout,
             "yield_count": len(yield_indexes),
             "message_count": len(messages),
             "transcript_size_bytes": transcript_size_bytes,
@@ -373,6 +575,19 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             ),
             "post_yield_prompt_error": post_yield_prompt_error,
             "done_text": done_text,
+            "parent_active": bool(
+                post_yield_parent_activity
+                and not post_yield_parent_terminal
+                and not post_yield_prompt_error
+            ),
+            "parent_waiting": bool(
+                yield_indexes and not post_yield_parent_activity
+            ),
+            "parent_resumed": bool(
+                yield_indexes and post_yield_parent_activity
+            ),
+            "parent_terminal": post_yield_parent_terminal,
+            "latest_parent_event": latest_event_kind,
         }
 
     @staticmethod

@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import json
 from pathlib import Path
+import time
 
 from agent_bench.benchmarks.terminal_bench import app as tb_app
 from agent_bench.benchmarks.terminal_bench import loader as tb_loader
@@ -426,6 +427,335 @@ def _prompt_error_event(error="LLM idle timeout (120s): no response from model")
     }
 
 
+def _roadmap_condition_for_state(tmp_path):
+    condition = object.__new__(RoadmapBenchOpenClawCondition)
+    condition._env_info = {"state_dir": str(tmp_path)}
+    condition._last_exit_code = 0
+    condition._last_completion_status = condition.BLOCKED_INCOMPLETE
+    condition._last_completion_error = "stale CLI liveness"
+    return condition
+
+
+def test_roadmap_no_yield_terminal_done_reconciles_to_normal(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_assistant_event("DONE\nIntegrated and validated.")],
+        child_statuses=(),
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+
+    payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "stale CLI liveness",
+        deadline=time.monotonic() + 10,
+    )
+
+    assert error == ""
+    assert condition._last_completion_status == "normal_completion"
+    assert payload["result"]["meta"]["finalAssistantVisibleText"].startswith(
+        "DONE"
+    )
+
+
+def test_roadmap_no_yield_terminal_stop_without_done_is_blocked(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_assistant_event("Implementation finished.")],
+        child_statuses=(),
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+
+    _payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "stale CLI liveness",
+        deadline=time.monotonic() + 10,
+    )
+
+    assert "without DONE" in error
+    assert condition._last_completion_status == "blocked_incomplete"
+
+
+def test_roadmap_done_in_tool_use_turn_is_not_terminal_done(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [{
+            "type": "message",
+            "message": {
+                "role": "assistant",
+                "stopReason": "toolUse",
+                "content": [
+                    {"type": "text", "text": "DONE"},
+                    {"type": "toolCall", "name": "exec", "arguments": {}},
+                ],
+            },
+        }],
+        child_statuses=(),
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+
+    payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "stale CLI liveness",
+        deadline=time.monotonic() + 10,
+    )
+
+    assert error == "stale CLI liveness"
+    assert payload["result"]["meta"]["livenessState"] == "working"
+    assert condition._last_completion_status == "blocked_incomplete"
+
+
+def test_roadmap_payload_context_overflow_precedes_transcript_done(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir, [_assistant_event("DONE")], child_statuses=()
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+
+    payload = {"result": {"meta": {"error": {
+        "kind": "context_overflow", "message": "context overflow"
+    }}}}
+    returned, error = condition._await_post_turn_lifecycle(
+        payload, "", deadline=time.monotonic() + 10
+    )
+
+    assert returned is payload
+    assert error == "context overflow"
+    assert condition._last_completion_status == "context_overflow"
+
+
+def test_roadmap_fatal_runtime_error_precedes_transcript_done(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir, [_assistant_event("DONE")], child_statuses=()
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+
+    payload = {"result": {"meta": {"error": {
+        "kind": "gateway_error", "message": "gateway crashed"
+    }}}}
+    returned, error = condition._await_post_turn_lifecycle(
+        payload, "", deadline=time.monotonic() + 10
+    )
+
+    assert returned is payload
+    assert "gateway_error" in error
+    assert condition._last_completion_status == "runtime_error"
+
+
+def test_roadmap_spawn_without_yield_waits_for_running_child(
+    tmp_path, monkeypatch
+):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [{
+            "type": "message",
+            "message": {
+                "role": "assistant",
+                "stopReason": "toolUse",
+                "content": [{
+                    "type": "toolCall", "name": "sessions_spawn",
+                    "arguments": {"task": "work"},
+                }],
+            },
+        }],
+        child_statuses=("running",),
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+    clock = [0.0]
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.monotonic",
+        lambda: clock[0],
+    )
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+
+    _payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "parent nonterminal",
+        deadline=4.0,
+    )
+
+    assert clock[0] >= 4.0
+    assert "total agent timeout" in error
+
+
+def test_roadmap_no_yield_children_done_then_parent_resumes_to_done(
+    tmp_path, monkeypatch
+):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [{
+            "type": "message",
+            "message": {
+                "role": "assistant", "stopReason": "toolUse",
+                "content": [{"type": "toolCall", "name": "sessions_spawn"}],
+            },
+        }],
+        child_statuses=("done",),
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+    initial = condition._read_yield_snapshot(sessions_dir)
+    resumed = dict(initial, parent_active=True, message_count=3)
+    terminal = dict(
+        resumed,
+        parent_active=False,
+        parent_terminal=True,
+        post_yield_parent_terminal=True,
+        done_text="DONE\nIntegrated child result.",
+        message_count=4,
+    )
+    snapshots = iter((initial, resumed, terminal))
+    monkeypatch.setattr(
+        condition, "_read_yield_snapshot", lambda _path: next(snapshots)
+    )
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.monotonic",
+        lambda: 0.0,
+    )
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.sleep",
+        lambda _seconds: None,
+    )
+
+    payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "parent nonterminal",
+        deadline=10.0,
+    )
+
+    assert error == ""
+    assert condition._last_completion_status == "normal_completion"
+    assert payload["result"]["meta"]["finalAssistantVisibleText"].startswith(
+        "DONE"
+    )
+
+
+def test_roadmap_parent_done_abandons_running_child_without_waiting(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_assistant_event("DONE\nParent work is complete.")],
+        child_statuses=("running",),
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+
+    payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "parent nonterminal",
+        deadline=time.monotonic() + 10,
+    )
+
+    lifecycle = payload["result"]["meta"]["agentBenchLifecycle"]
+    assert error == ""
+    assert condition._last_completion_status == "normal_completion"
+    assert lifecycle["pendingChildrenAtParentTerminal"] == 1
+    assert lifecycle["abandonedChildren"][0]["status"] == "running"
+
+
+def test_roadmap_no_spawn_nonterminal_keeps_single_turn_behavior(
+    tmp_path, monkeypatch
+):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [{
+            "type": "message",
+            "message": {
+                "role": "assistant", "stopReason": "toolUse",
+                "content": [{"type": "toolCall", "name": "exec"}],
+            },
+        }],
+        child_statuses=(),
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.sleep",
+        lambda _seconds: (_ for _ in ()).throw(AssertionError("must not wait")),
+    )
+    original = {"result": {"meta": {"livenessState": "working"}}}
+
+    payload, error = condition._await_post_turn_lifecycle(
+        original, "single turn incomplete", deadline=time.monotonic() + 10
+    )
+
+    assert payload is original
+    assert error == "single turn incomplete"
+
+
+def test_roadmap_patch_extraction_after_verifier_includes_real_workspace_changes(
+    tmp_path,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    subprocess.run(
+        ["git", "-C", str(workspace), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(workspace), "config", "user.name", "Test"],
+        check=True,
+    )
+    tracked = workspace / "tracked.txt"
+    tracked.write_text("baseline\n")
+    subprocess.run(
+        ["git", "-C", str(workspace), "add", "tracked.txt"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(workspace), "commit", "-qm", "baseline"],
+        check=True,
+    )
+
+    tracked.write_text("staged change\n")
+    subprocess.run(
+        ["git", "-C", str(workspace), "add", "tracked.txt"], check=True
+    )
+    tracked.write_text("staged and unstaged change\n")
+    (workspace / "created.txt").write_text("agent-created\n")
+    (workspace / "AGENTS.md").write_text("injected scaffold\n")
+
+    # Minimal verifier contract: observe the scored mutation without resetting
+    # the repository, then collect the durable artifact afterward.
+    assert tracked.read_text() == "staged and unstaged change\n"
+    assert (workspace / "created.txt").read_text() == "agent-created\n"
+    patch = RoadmapBenchOpenClawCondition._collect_workspace_patch(workspace)
+
+    candidate = tmp_path / "candidate.patch"
+    candidate.write_text(patch)
+    assert candidate.stat().st_size > 0
+    assert "tracked.txt" in patch
+    assert "staged and unstaged change" in patch
+    assert "created.txt" in patch
+    assert "agent-created" in patch
+    assert "AGENTS.md" not in patch
+
+    clean = tmp_path / "clean"
+    subprocess.run(
+        ["git", "clone", "-q", str(workspace), str(clean)], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(clean), "reset", "--hard", "HEAD"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(clean), "apply", "--check", str(candidate)],
+        check=True,
+    )
+
+
 def test_roadmap_yield_with_running_child_does_not_complete(tmp_path):
     sessions_dir = tmp_path / "sessions"
     _write_roadmap_session_state(sessions_dir, [_yield_event()])
@@ -763,7 +1093,7 @@ def test_roadmap_quiet_active_parent_waits_for_total_deadline(
     )
 
     assert "total agent timeout" in error
-    assert condition._last_completion_status == "blocked_incomplete"
+    assert condition._last_completion_status == "timeout"
     assert clock[0] >= 6.0
 
 
@@ -819,7 +1149,7 @@ def test_roadmap_yield_wait_ends_only_at_timeout(tmp_path, monkeypatch):
 
     assert "total agent timeout" in error
     assert condition._last_exit_code == -1
-    assert condition._last_completion_status == "blocked_incomplete"
+    assert condition._last_completion_status == "timeout"
 
 
 def test_roadmap_yield_watcher_survives_reyield_and_returns_final_done(
@@ -896,6 +1226,92 @@ def test_roadmapbench_abnormal_completion_preserves_partial_reward():
     assert merged["test_pass_rate"] == 0.7
     assert merged["agent_completion_error"] == "Context overflow"
     assert "error_message" not in merged
+
+
+def test_roadmapbench_normal_completion_keeps_verifier_failure():
+    merged = _merge_agent_completion_into_verdict(
+        {"status": "FAIL", "reward_raw": "0", "test_pass_rate": 0.0},
+        {"exit_code": 0, "agent_completion_status": "normal_completion"},
+    )
+
+    assert merged["status"] == "FAIL"
+    assert merged["verifier_status"] == "FAIL"
+    assert merged["reward"] == 0.0
+    assert merged["agent_execution_outcome"] == "normal_completion"
+    assert merged["agent_completion_error"] is None
+
+
+def test_roadmapbench_context_overflow_keeps_full_reward():
+    merged = _merge_agent_completion_into_verdict(
+        {"status": "PASS", "reward": 1.0, "test_pass_rate": 1.0},
+        {
+            "exit_code": 0,
+            "agent_completion_status": "context_overflow",
+            "agent_completion_error": "context overflow",
+        },
+    )
+
+    assert merged["verifier_status"] == "PASS"
+    assert merged["reward"] == 1.0
+    assert merged["agent_execution_outcome"] == "context_overflow"
+
+
+def test_roadmapbench_timeout_keeps_partial_reward():
+    merged = _merge_agent_completion_into_verdict(
+        {"status": "FAIL", "reward_raw": "0.833", "test_pass_rate": 0.833},
+        {
+            "exit_code": -1,
+            "agent_completion_status": "timeout",
+            "agent_completion_error": "total agent timeout",
+        },
+    )
+
+    assert merged["verifier_status"] == "FAIL"
+    assert merged["reward"] == 0.833
+    assert merged["test_pass_rate"] == 0.833
+    assert merged["agent_execution_outcome"] == "timeout"
+
+
+def test_roadmapbench_runtime_error_keeps_verifier_result():
+    merged = _merge_agent_completion_into_verdict(
+        {"status": "PASS", "reward_raw": "1", "test_pass_rate": 1.0},
+        {
+            "exit_code": 1,
+            "agent_completion_status": "runtime_error",
+            "agent_completion_error": "gateway failed",
+        },
+    )
+
+    assert merged["status"] == "PASS"
+    assert merged["verifier_status"] == "PASS"
+    assert merged["reward"] == 1.0
+    assert merged["agent_execution_outcome"] == "runtime_error"
+
+
+def test_roadmapbench_merge_never_overwrites_existing_reward_with_null():
+    merged = _merge_agent_completion_into_verdict(
+        {"status": "ERROR", "reward": 0.4, "test_pass_rate": None},
+        {"exit_code": 1, "agent_completion_status": "runtime_error"},
+    )
+
+    assert merged["verifier_status"] == "ERROR"
+    assert merged["reward"] == 0.4
+    assert merged["test_pass_rate"] is None
+
+
+def test_roadmapbench_missing_verifier_reward_remains_null():
+    merged = _merge_agent_completion_into_verdict(
+        {
+            "status": "ERROR",
+            "reward_raw": None,
+            "test_pass_rate": 0.0,
+        },
+        {"exit_code": 0, "agent_completion_status": "normal_completion"},
+    )
+
+    assert merged["verifier_status"] == "ERROR"
+    assert merged["reward"] is None
+    assert merged["test_pass_rate"] is None
 
 
 def test_terminal_bench_condition_and_forced_capability_remain(monkeypatch):

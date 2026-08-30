@@ -162,7 +162,7 @@ def _protect_cleanup_from_interrupts():
 
 
 def _merge_agent_completion_into_verdict(verdict: dict, result: dict) -> dict:
-    """Record agent outcome without turning task results into infra errors."""
+    """Add execution metadata without changing the verifier result."""
     merged = dict(verdict)
     exit_code = result.get("exit_code", 0)
     completion_status = result.get("agent_completion_status")
@@ -171,18 +171,50 @@ def _merge_agent_completion_into_verdict(verdict: dict, result: dict) -> dict:
             "normal_completion" if exit_code in (0, None) else "runtime_error"
         )
 
+    raw_verifier_status = str(
+        merged.get("verifier_status") or merged.get("status") or "ERROR"
+    ).upper()
+    merged["verifier_status"] = (
+        raw_verifier_status
+        if raw_verifier_status in {"PASS", "FAIL", "ERROR"}
+        else "ERROR"
+    )
+
+    reward = merged.get("reward")
+    if reward is None:
+        raw_reward = merged.get("reward_raw")
+        try:
+            reward = float(raw_reward) if raw_reward not in (None, "") else None
+        except (TypeError, ValueError):
+            reward = None
+    if (
+        reward is None
+        and raw_verifier_status in {"PASS", "FAIL"}
+        and isinstance(merged.get("test_pass_rate"), (int, float))
+    ):
+        reward = float(merged["test_pass_rate"])
+    merged["reward"] = float(reward) if reward is not None else None
+
+    test_pass_rate = merged.get("test_pass_rate")
+    has_valid_verifier_measurement = (
+        reward is not None or raw_verifier_status in {"PASS", "FAIL"}
+    )
+    merged["test_pass_rate"] = (
+        float(test_pass_rate)
+        if has_valid_verifier_measurement
+        and isinstance(test_pass_rate, (int, float))
+        else None
+    )
+
     merged["agent_completion_status"] = completion_status
     merged["agent_execution_outcome"] = completion_status
     merged["agent_exit_code"] = exit_code
-    if completion_status == "normal_completion" and exit_code in (0, None):
-        return merged
-
-    merged["verifier_status"] = merged.get("status")
-    merged["agent_completion_error"] = (
-        result.get("agent_completion_error")
-        or result.get("error_message")
-        or f"agent trajectory ended as {completion_status}"
+    completion_error = result.get("agent_completion_error") or result.get(
+        "error_message"
     )
+    if completion_status != "normal_completion" and not completion_error:
+        completion_error = f"agent trajectory ended as {completion_status}"
+    merged["agent_completion_error"] = completion_error or None
     return merged
 
 
@@ -456,6 +488,23 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
 
         if is_roadmapbench:
             verdict = _merge_agent_completion_into_verdict(verdict, result)
+            # Roadmap task effects live in the bound task workspace. Recollect
+            # after verifier execution so candidate.patch is a durable view of
+            # the actual scored workspace, not an empty Terminal-Bench marker.
+            try:
+                final_patch = condition._collect_artifacts(
+                    container_id,
+                    env_info,
+                    run_dir,
+                    env_info["workspace_root"],
+                )
+                if final_patch is not None:
+                    patch_tmp = patch_path.with_suffix(".patch.tmp")
+                    patch_tmp.write_text(final_patch)
+                    patch_tmp.replace(patch_path)
+            except Exception as exc:  # noqa: BLE001 - preserve verifier result
+                logger.exception("Roadmap post-verifier patch extraction failed")
+                verdict["artifact_error"] = str(exc)
         
         # Write verdict
         verdict_path = run_dir / "verdict.json"
@@ -492,6 +541,19 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         manifest.verdict_path = str(verdict_path)
         manifest.exit_code = result.get("exit_code", 0)
         manifest.agent_runtime_mode = result.get("agent_runtime_mode")
+        manifest.agent_execution_outcome = verdict.get("agent_execution_outcome")
+        manifest.agent_completion_error = verdict.get("agent_completion_error")
+        manifest.verifier_status = verdict.get("verifier_status")
+        manifest.reward = verdict.get("reward")
+        manifest.test_pass_rate = verdict.get("test_pass_rate")
+        manifest.trajectory_path = result.get("trajectory_path")
+        manifest.token_accounting_path = result.get("token_accounting_path")
+        manifest.trajectory_tokens = result.get("trajectory_tokens")
+        manifest.serving_tokens = result.get("serving_tokens")
+        manifest.runtime_observability_path = result.get(
+            "runtime_observability_path"
+        )
+        manifest.runtime_observability = result.get("runtime_observability")
         manifest.error_message = (
             verdict.get("error_message")
             if manifest.status in ("ERROR", "TIMEOUT")
@@ -516,6 +578,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         # for two-container docker mode; gateway_pid / state_dir for legacy
         # singularity; etc.). Strip keys that conflict with the positional
         # argument or carry harness refs.
+        cleanup_error = None
         try:
             cleanup_kwargs = dict(env_info or {})
             for k in ("container_id", "_harness"):
@@ -524,7 +587,24 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 harness.cleanup(container_id, **cleanup_kwargs)
         except BaseException:
             logger.exception("cleanup failed")
+            cleanup_error = "harness cleanup failed"
         finally:
+            trajectory_path = run_dir / "trajectory.jsonl"
+            if trajectory_path.exists():
+                try:
+                    from agent_bench.benchmarks.conditions.openclaw_measurement import (
+                        append_trajectory_event,
+                    )
+
+                    append_trajectory_event(
+                        run_dir,
+                        "cleanup",
+                        status="error" if cleanup_error else "completed",
+                        error=cleanup_error,
+                        lifecycle=(result.get("agent_lifecycle") if "result" in locals() else None),
+                    )
+                except Exception:
+                    logger.exception("trajectory cleanup event write failed")
             _maybe_render_spans_timeline(run_dir, manifest.telemetry_path)
             manifest.save(get_manifest_path(run_id, run_config.output_dir))
             if hasattr(trace_container, "set_trace_path"):

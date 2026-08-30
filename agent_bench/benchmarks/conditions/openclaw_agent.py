@@ -78,6 +78,7 @@ class OpenClawAgentCondition:
     CONTEXT_OVERFLOW: ClassVar[str] = "context_overflow"
     BLOCKED_INCOMPLETE: ClassVar[str] = "blocked_incomplete"
     RUNTIME_ERROR: ClassVar[str] = "runtime_error"
+    TIMEOUT: ClassVar[str] = "timeout"
     require_done_marker: ClassVar[bool] = False
 
     def __init__(self, model_config, agent_config, container: Optional[Container] = None):
@@ -347,6 +348,19 @@ class OpenClawAgentCondition:
                     end_ns=step_end_ns,
                 )
 
+        measurement: Dict = {}
+        try:
+            from agent_bench.benchmarks.conditions.openclaw_measurement import (
+                build_openclaw_measurement,
+            )
+
+            measurement = build_openclaw_measurement(
+                run_dir, agent_id=self.agent_id
+            )
+        except Exception as exc:  # noqa: BLE001 - preserve the benchmark run
+            logger.exception("OpenClaw measurement artifact generation failed")
+            measurement = {"measurement_error": str(exc)}
+
         # 4. Collect benchmark-specific artifacts (patch for SWE-bench; nothing
         #    for TB). Always write candidate.patch — driver gates on its
         #    existence + size, and the empty-patch case is allowed for TB via
@@ -368,6 +382,13 @@ class OpenClawAgentCondition:
             "agent_completion_status": self._last_completion_status,
             "agent_completion_error": self._last_completion_error or None,
             "agent_runtime_mode": self._detect_agent_runtime_mode(payload),
+            "agent_lifecycle": (
+                (self._unwrap(payload).get("meta") or {}).get(
+                    "agentBenchLifecycle"
+                )
+                if payload else None
+            ),
+            **measurement,
         }
 
     # ------------------------------------------------------------------
@@ -620,7 +641,7 @@ class OpenClawAgentCondition:
                 elapsed, subprocess_timeout,
             )
             self._last_exit_code = -1
-            self._last_completion_status = self.RUNTIME_ERROR
+            self._last_completion_status = self.TIMEOUT
             self._last_completion_error = (
                 "openclaw agent wall-clock timeout (subprocess)"
             )
@@ -1581,9 +1602,10 @@ class OpenClawAgentCondition:
         # OPENCLAW_RAW_RESPONSE_LOG points at it). Each line = one HTTP request.
         raw_resp_subpath = "logs/llm-raw-responses.jsonl"
 
-        if container_id is None:
-            ei = getattr(self, "_env_info", {}) or {}
-            state = Path(ei.get("state_dir") or ei.get("host_state_dir") or os.environ.get(
+        ei = getattr(self, "_env_info", {}) or {}
+        host_state = ei.get("state_dir") or ei.get("host_state_dir")
+        if host_state or container_id is None:
+            state = Path(host_state or os.environ.get(
                 "OPENCLAW_STATE_DIR", os.path.expanduser("~/.openclaw")
             ))
             for src, dst in [
