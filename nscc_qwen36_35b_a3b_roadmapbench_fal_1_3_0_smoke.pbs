@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# RoadmapBench high-fanout subset10 on NSCC.
-#PBS -N agent-bench-roadmap-s10
+# RoadmapBench Falcon 1.3.0 Qwen3.6-35B-A3B smoke on NSCC.
+#PBS -N agent-bench-q36-roadmap-fal13
 #PBS -P personal-n2602695
 #PBS -l select=1:ngpus=4
-#PBS -l walltime=24:00:00
+#PBS -l walltime=04:00:00
 #PBS -q normal
 #PBS -j oe
 
@@ -36,10 +36,10 @@ if [[ -z "${AB_RUN_STAMP:-}" ]]; then
     fi
 fi
 export AB_RUN_STAMP
-export AB_EXPERIMENT_BASE=/home/users/ntu/n2602695/Agent_Bench/runs/nscc_qwen38_roadmapbench_subagent_subset10
+export AB_EXPERIMENT_BASE=/home/users/ntu/n2602695/Agent_Bench/runs/nscc_qwen36_35b_a3b_roadmapbench_fal_1_3_0_smoke
 AB_RUN_DIR="${AB_RUN_DIR:-${AB_EXPERIMENT_DIR:-$AB_EXPERIMENT_BASE/$AB_RUN_STAMP}}"
 export AB_RUN_DIR
 export AB_EXPERIMENT_DIR="$AB_RUN_DIR"
 export AB_LOG_DIR="${AB_LOG_DIR:-$AB_RUN_DIR/logs}"
 export AB_STAGE_SUMMARY=prepare_environment=1,materialize_benchmark=1,prepare_images=1,start_serving=1,start_otel=1,run_benchmark=1,cleanup=1
-python3 run.py --config experiments/nscc_qwen38_roadmapbench_subagent_subset10.toml --skip-cadvisor-setup
+python3 run.py --config experiments/nscc_qwen36_35b_a3b_roadmapbench_fal_1_3_0_smoke.toml --skip-cadvisor-setup

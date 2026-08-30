@@ -18,7 +18,7 @@ profile = "profiles/harnesses/openclaw_swe_atlas_qa_subagent_prefer.yaml"
 profile = "profiles/models/qwen38_27b_nscc.json"
 
 [serving]
-profile = "profiles/serving/sglang/nscc_qwen38_tp4.yaml"
+profile = "profiles/serving/sglang/nscc_tp4.yaml"
 
 [deployment]
 profile = "profiles/deployments/nscc_pbs_4gpu.toml"

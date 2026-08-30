@@ -1,6 +1,6 @@
-name = "nscc_qwen38_roadmapbench_subagent_subset10"
-description = "Ten high-fanout RoadmapBench tasks with matched OpenClaw structure, Qwen3.8-27B, and SGLang on NSCC."
-output_dir = "runs/nscc_qwen38_roadmapbench_subagent_subset10"
+name = "nscc_qwen36_35b_a3b_roadmapbench_subagent_subset10"
+description = "Ten high-fanout RoadmapBench tasks with matched OpenClaw structure, Qwen3.6-35B-A3B, and SGLang on NSCC."
+output_dir = "runs/nscc_qwen36_35b_a3b_roadmapbench_subagent_subset10"
 seeds = [42]
 
 [telemetry]
@@ -15,10 +15,10 @@ name = "openclaw"
 profile = "profiles/harnesses/openclaw_roadmapbench.yaml"
 
 [model]
-profile = "profiles/models/qwen38_27b_nscc.json"
+profile = "profiles/models/qwen36_35b_a3b.json"
 
 [serving]
-profile = "profiles/serving/sglang/nscc_qwen38_tp4.yaml"
+profile = "profiles/serving/sglang/nscc_tp4.yaml"
 
 [deployment]
 profile = "profiles/deployments/nscc_pbs_4gpu.toml"

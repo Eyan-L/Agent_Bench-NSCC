@@ -1,5 +1,5 @@
 serving:
-  config_id: sglang-nscc-qwen38-tp4
+  config_id: sglang-nscc-tp4
   backend: sglang
   preset: single
   serving_mode: singularity
