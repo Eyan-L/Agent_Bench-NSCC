@@ -218,6 +218,20 @@ def _merge_agent_completion_into_verdict(verdict: dict, result: dict) -> dict:
     return merged
 
 
+def _roadmap_lifecycle_verifier_error(result: dict) -> Optional[str]:
+    """Return the safety error that must prevent Roadmap verification."""
+    lifecycle = result.get("agent_lifecycle")
+    if not isinstance(lifecycle, dict):
+        return None
+    if lifecycle.get("workspaceQuiesced") is not False:
+        return None
+    return str(
+        lifecycle.get("lifecycleError")
+        or lifecycle.get("orphanCancellationError")
+        or "Roadmap workspace could not be quiesced before verifier"
+    )
+
+
 def execute_run(run_config: RunConfig, harness: SWEBenchHarness, 
                 instance_data: dict, retry_errors: bool = True) -> RunManifest:
     """Execute a single run."""
@@ -461,8 +475,19 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             benchmark_kind == "terminal_bench"
             and instance_data.get("benchmark_variant") == "roadmapbench"
         )
+        lifecycle_verifier_error = (
+            _roadmap_lifecycle_verifier_error(result)
+            if is_roadmapbench else None
+        )
 
-        if agent_exit_code not in (0, None) and not is_roadmapbench:
+        if lifecycle_verifier_error:
+            verdict = {
+                "status": "ERROR",
+                "error_message": lifecycle_verifier_error,
+                "lifecycle_error": lifecycle_verifier_error,
+                "verifier_skipped": True,
+            }
+        elif agent_exit_code not in (0, None) and not is_roadmapbench:
             verdict = {
                 "status": "ERROR",
                 "error_message": result.get("error_message")
@@ -488,23 +513,8 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
 
         if is_roadmapbench:
             verdict = _merge_agent_completion_into_verdict(verdict, result)
-            # Roadmap task effects live in the bound task workspace. Recollect
-            # after verifier execution so candidate.patch is a durable view of
-            # the actual scored workspace, not an empty Terminal-Bench marker.
-            try:
-                final_patch = condition._collect_artifacts(
-                    container_id,
-                    env_info,
-                    run_dir,
-                    env_info["workspace_root"],
-                )
-                if final_patch is not None:
-                    patch_tmp = patch_path.with_suffix(".patch.tmp")
-                    patch_tmp.write_text(final_patch)
-                    patch_tmp.replace(patch_path)
-            except Exception as exc:  # noqa: BLE001 - preserve verifier result
-                logger.exception("Roadmap post-verifier patch extraction failed")
-                verdict["artifact_error"] = str(exc)
+            if isinstance(result.get("agent_lifecycle"), dict):
+                verdict["agent_lifecycle"] = result["agent_lifecycle"]
         
         # Write verdict
         verdict_path = run_dir / "verdict.json"
@@ -543,6 +553,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         manifest.agent_runtime_mode = result.get("agent_runtime_mode")
         manifest.agent_execution_outcome = verdict.get("agent_execution_outcome")
         manifest.agent_completion_error = verdict.get("agent_completion_error")
+        manifest.agent_lifecycle = verdict.get("agent_lifecycle")
         manifest.verifier_status = verdict.get("verifier_status")
         manifest.reward = verdict.get("reward")
         manifest.test_pass_rate = verdict.get("test_pass_rate")

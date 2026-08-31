@@ -267,6 +267,22 @@ def _gateway_events(run_dir: Path) -> list[dict]:
         lowered = text.lower()
         event_type = None
         fields: dict[str, Any] = {"message": text}
+        run_id_match = re.search(r"runId=(announce:\S+)", text, re.IGNORECASE)
+        announce_run_id = run_id_match.group(1) if run_id_match else ""
+        child_match = re.search(r"childSessionKey=(\S+)", text)
+        child_session_key = child_match.group(1) if child_match else ""
+        if announce_run_id:
+            fields["announce_run_id"] = announce_run_id
+            prefix = "announce:v1:"
+            remainder = (
+                announce_run_id[len(prefix):]
+                if announce_run_id.startswith(prefix)
+                else announce_run_id
+            )
+            if ":" in remainder:
+                child_session_key = remainder.rsplit(":", 1)[0]
+        if child_session_key:
+            fields["child_session_key"] = child_session_key
         if "subagent announce completion" in lowered and "timeout" in lowered:
             event_type = "announce_timeout"
             timeout = re.search(r"timeout after (\d+)ms", lowered)
@@ -388,7 +404,10 @@ def _parent_resume_count(run_dir: Path, agent_id: str) -> int:
     """Count requester episodes after the initial parent request.
 
     Compaction can replay the initial requester message at a new timestamp, so
-    text, rather than timestamp, is the durable identity used here.
+    text, rather than timestamp, is the durable identity used here. OpenClaw
+    v2026.4.22 does not persist a stable id on requester messages; two genuine
+    byte-identical resumes are therefore indistinguishable and intentionally
+    collapse until the runtime exposes a durable event identity.
     """
     sessions_dir = run_dir / "conversation" / "sessions"
     if not sessions_dir.is_dir():
@@ -556,13 +575,35 @@ def _runtime_observability(run_dir: Path, events: list[dict]) -> dict:
         event for event in events if event["event_type"] == "announce_timeout"
     ]
     announces = [event for event in events if event["event_type"] == "announce"]
-    attempts = [
-        _int(event.get("retry_attempt")) for event in announce_timeouts
-        if event.get("retry_attempt") is not None
-    ]
-    attempt_count = max(
-        attempts or [len(announce_timeouts) + len(announces)]
-    )
+    announce_groups: dict[str, dict] = {}
+    for event in [*announce_timeouts, *announces]:
+        group_key = str(
+            event.get("child_session_key")
+            or event.get("announce_run_id")
+            or "unattributed"
+        )
+        group = announce_groups.setdefault(group_key, {
+            "child_session_key": event.get("child_session_key"),
+            "announce_run_ids": [],
+            "attempt_count": 0,
+            "success_count": 0,
+            "timeout_count": 0,
+            "retry_count": 0,
+            "latency_ms": [],
+        })
+        run_id = event.get("announce_run_id")
+        if run_id and run_id not in group["announce_run_ids"]:
+            group["announce_run_ids"].append(run_id)
+        group["attempt_count"] += 1
+        latency = event.get("latency_ms")
+        if latency is not None:
+            group["latency_ms"].append(_int(latency))
+        if event["event_type"] == "announce_timeout":
+            group["timeout_count"] += 1
+            if event.get("retry_attempt") is not None:
+                group["retry_count"] += 1
+        else:
+            group["success_count"] += 1
 
     intervals = _active_intervals(run_dir)
     stuck_events = [event for event in events if event["event_type"] == "stuck_session"]
@@ -593,13 +634,14 @@ def _runtime_observability(run_dir: Path, events: list[dict]) -> dict:
         if event.get("latency_ms") is not None
     ]
     return {
-        "announce_attempt_count": attempt_count,
+        "announce_attempt_count": len(announce_timeouts) + len(announces),
         "announce_timeout_count": len(announce_timeouts),
         "announce_retry_count": sum(
             event.get("retry_attempt") is not None for event in announce_timeouts
         ),
         "announce_success_count": len(announces),
         "announce_latency_ms": announce_latencies,
+        "announce_by_child": announce_groups,
         "stuck_session_count": len(stuck_events),
         "stuck_session_by_session": dict(stuck_by_session),
         "stuck_session_classification": dict(classifications),

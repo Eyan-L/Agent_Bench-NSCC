@@ -227,3 +227,40 @@ def test_stuck_observability_ignores_run_level_usage_span(tmp_path):
     assert result["runtime_observability"]["stuck_session_classification"] == {
         "unresolved": 1
     }
+
+
+def test_announce_attempts_aggregate_across_children(tmp_path):
+    child_a = "agent:roadmap_bench:subagent:a"
+    child_b = "agent:roadmap_bench:subagent:b"
+    run_a = f"announce:v1:{child_a}:run-a"
+    run_b = f"announce:v1:{child_b}:run-b"
+    (tmp_path / "openclaw_gateway.log").write_text(
+        "2026-01-01T00:00:01Z [warn] Subagent announce completion "
+        f"runId={run_a} transient failure, retrying 2/4: "
+        "gateway timeout after 120000ms\n"
+        "2026-01-01T00:00:02Z [ws] res ✓ agent 50ms "
+        f"runId={run_a}\n"
+        "2026-01-01T00:00:03Z [warn] Subagent announce completion "
+        f"runId={run_b} transient failure, retrying 2/4: "
+        "gateway timeout after 120000ms\n"
+        "2026-01-01T00:00:04Z [ws] res ✓ agent 75ms "
+        f"runId={run_b}\n"
+    )
+
+    result = build_openclaw_measurement(tmp_path, agent_id="roadmap_bench")
+    observability = result["runtime_observability"]
+
+    assert observability["announce_attempt_count"] == 4
+    assert observability["announce_timeout_count"] == 2
+    assert observability["announce_retry_count"] == 2
+    assert observability["announce_success_count"] == 2
+    assert observability["announce_by_child"][child_a] == {
+        "child_session_key": child_a,
+        "announce_run_ids": [run_a],
+        "attempt_count": 2,
+        "success_count": 1,
+        "timeout_count": 1,
+        "retry_count": 1,
+        "latency_ms": [120000, 50],
+    }
+    assert observability["announce_by_child"][child_b]["attempt_count"] == 2

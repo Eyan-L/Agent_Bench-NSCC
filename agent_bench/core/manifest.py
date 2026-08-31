@@ -31,6 +31,7 @@ class RunManifest:
     agent_runtime_mode: Optional[str] = None
     agent_execution_outcome: Optional[str] = None
     agent_completion_error: Optional[str] = None
+    agent_lifecycle: Optional[dict[str, Any]] = None
     verifier_status: Optional[str] = None
     reward: Optional[float] = None
     test_pass_rate: Optional[float] = None
@@ -64,6 +65,7 @@ class RunManifest:
             "agent_runtime_mode": self.agent_runtime_mode,
             "agent_execution_outcome": self.agent_execution_outcome,
             "agent_completion_error": self.agent_completion_error,
+            "agent_lifecycle": self.agent_lifecycle,
             "verifier_status": self.verifier_status,
             "reward": self.reward,
             "test_pass_rate": self.test_pass_rate,
@@ -98,6 +100,7 @@ class RunManifest:
             agent_runtime_mode=data.get("agent_runtime_mode"),
             agent_execution_outcome=data.get("agent_execution_outcome"),
             agent_completion_error=data.get("agent_completion_error"),
+            agent_lifecycle=data.get("agent_lifecycle"),
             verifier_status=data.get("verifier_status"),
             reward=data.get("reward"),
             test_pass_rate=data.get("test_pass_rate"),

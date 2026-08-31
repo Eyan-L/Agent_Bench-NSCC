@@ -16,7 +16,11 @@ from agent_bench.benchmarks.terminal_bench.conditions.openclaw_agent import (
 from agent_bench.deployments.containers.base import ContainerHandle
 from agent_bench.deployments.containers.singularity import SingularityContainer
 from agent_bench.benchmarks.conditions.openclaw_agent import OpenClawAgentCondition
-from agent_bench.runtime.driver import _merge_agent_completion_into_verdict
+from agent_bench.core.manifest import RunManifest
+from agent_bench.runtime.driver import (
+    _merge_agent_completion_into_verdict,
+    _roadmap_lifecycle_verifier_error,
+)
 
 
 class _FakeContainer:
@@ -29,6 +33,7 @@ class _FakeContainer:
         self.created_networks = []
         self.removed_networks = []
         self.exec_calls = []
+        self.running = set()
 
     def check_available(self) -> None:
         pass
@@ -47,9 +52,12 @@ class _FakeContainer:
 
     def start(self, spec):
         self.specs.append(spec)
-        return ContainerHandle(
+        handle = ContainerHandle(
             id=f"{spec.name}-handle", name=spec.name, backend=self.backend_id
         )
+        self.running.add(handle.id)
+        self.running.add(handle.name)
+        return handle
 
     def wait_log_pattern(self, *_args, **_kw) -> None:
         pass
@@ -60,6 +68,11 @@ class _FakeContainer:
 
     def stop(self, handle, **_kw) -> None:
         self.stop_calls.append(handle)
+        self.running.discard(handle.id)
+        self.running.discard(handle.name)
+
+    def is_running(self, handle) -> bool:
+        return handle.id in self.running or handle.name in self.running
 
 
 class _FakeDispatcher:
@@ -175,6 +188,22 @@ def test_terminal_bench_openclaw_singularity_returns_runtime_handle(tmp_path, mo
         "/tmp/oc-plugin-deps/run-1-cli" in str(argv)
         for argv in gateway_env_writes
     )
+
+    monkeypatch.setattr(harness, "_wait_for_process_exit", lambda *_a, **_k: None)
+    quiescence = harness.quiesce_orphan_children(env_info)
+    assert quiescence == {
+        "workspaceQuiesced": True,
+        "quiescenceMethod": "stop-agent-and-restart-task-runtime",
+        "openClawRuntimeStopped": True,
+        "execBridgeStopped": True,
+        "taskRuntimeRestarted": True,
+    }
+    assert container.specs[-1].name == env_info["task_container_name"]
+    assert container.is_running(ContainerHandle(
+        env_info["task_container_id"], env_info["task_container_name"],
+        "singularity",
+    ))
+    assert env_info["agent_runtime_quiesced"] is True
 
 
 def test_driver_routes_terminal_bench_openclaw_to_generic_harness():
@@ -427,9 +456,11 @@ def _prompt_error_event(error="LLM idle timeout (120s): no response from model")
     }
 
 
-def _roadmap_condition_for_state(tmp_path):
+def _roadmap_condition_for_state(tmp_path, harness=None):
     condition = object.__new__(RoadmapBenchOpenClawCondition)
     condition._env_info = {"state_dir": str(tmp_path)}
+    if harness is not None:
+        condition._env_info["_harness"] = harness
     condition._last_exit_code = 0
     condition._last_completion_status = condition.BLOCKED_INCOMPLETE
     condition._last_completion_error = "stale CLI liveness"
@@ -648,7 +679,14 @@ def test_roadmap_parent_done_abandons_running_child_without_waiting(tmp_path):
         [_assistant_event("DONE\nParent work is complete.")],
         child_statuses=("running",),
     )
-    condition = _roadmap_condition_for_state(tmp_path)
+    order = []
+
+    class Harness:
+        def quiesce_orphan_children(self, _env_info):
+            order.append("quiesce")
+            return {"workspaceQuiesced": True, "taskRuntimeRestarted": True}
+
+    condition = _roadmap_condition_for_state(tmp_path, Harness())
 
     payload, error = condition._await_post_turn_lifecycle(
         {"result": {"meta": {"livenessState": "working"}}},
@@ -657,10 +695,119 @@ def test_roadmap_parent_done_abandons_running_child_without_waiting(tmp_path):
     )
 
     lifecycle = payload["result"]["meta"]["agentBenchLifecycle"]
+    order.append("verifier")
     assert error == ""
     assert condition._last_completion_status == "normal_completion"
     assert lifecycle["pendingChildrenAtParentTerminal"] == 1
     assert lifecycle["abandonedChildren"][0]["status"] == "running"
+    assert lifecycle["orphanChildIds"] == ["child-0"]
+    assert lifecycle["workspaceQuiesced"] is True
+    assert lifecycle["orphanCancellationAttempted"] is True
+    assert order == ["quiesce", "verifier"]
+
+
+def test_roadmap_parent_done_without_child_needs_no_quiescence(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir, [_assistant_event("DONE")], child_statuses=()
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+
+    payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "stale",
+        deadline=time.monotonic() + 10,
+    )
+
+    lifecycle = payload["result"]["meta"]["agentBenchLifecycle"]
+    assert error == ""
+    assert lifecycle["pendingChildrenAtParentTerminal"] == 0
+    assert lifecycle["workspaceQuiesced"] is True
+    assert lifecycle["orphanCancellationAttempted"] is False
+
+
+def test_roadmap_blocked_parent_quiesces_running_child_before_verifier(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_assistant_event("Implementation incomplete")],
+        child_statuses=("running",),
+    )
+    order = []
+
+    class Harness:
+        def quiesce_orphan_children(self, _env_info):
+            order.append("quiesce")
+            return {"workspaceQuiesced": True}
+
+    condition = _roadmap_condition_for_state(tmp_path, Harness())
+    payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "stale",
+        deadline=time.monotonic() + 10,
+    )
+    order.append("verifier")
+
+    assert "without DONE" in error
+    assert condition._last_completion_status == "blocked_incomplete"
+    assert payload["result"]["meta"]["agentBenchLifecycle"][
+        "workspaceQuiesced"
+    ] is True
+    assert order == ["quiesce", "verifier"]
+
+
+def test_roadmap_orphan_quiescence_failure_is_explicit(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir, [_assistant_event("DONE")], child_statuses=("running",)
+    )
+
+    class Harness:
+        def quiesce_orphan_children(self, _env_info):
+            raise RuntimeError("task restart failed")
+
+    condition = _roadmap_condition_for_state(tmp_path, Harness())
+    payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "stale",
+        deadline=time.monotonic() + 10,
+    )
+
+    lifecycle = payload["result"]["meta"]["agentBenchLifecycle"]
+    assert error == ""
+    assert condition._last_completion_status == "normal_completion"
+    assert lifecycle["workspaceQuiesced"] is False
+    assert "task restart failed" in lifecycle["lifecycleError"]
+    assert "task restart failed" in _roadmap_lifecycle_verifier_error({
+        "agent_lifecycle": lifecycle
+    })
+
+
+def test_roadmap_quiesced_lifecycle_allows_verifier():
+    assert _roadmap_lifecycle_verifier_error({
+        "agent_lifecycle": {"workspaceQuiesced": True}
+    }) is None
+
+
+def test_roadmap_lifecycle_metadata_survives_manifest_round_trip():
+    lifecycle = {
+        "pendingChildrenAtParentTerminal": 1,
+        "orphanChildIds": ["child-a"],
+        "workspaceQuiesced": True,
+    }
+    manifest = RunManifest(
+        run_id="run",
+        condition_id="condition",
+        instance_id="instance",
+        seed=0,
+        serving_config_id="serving",
+        status="FAIL",
+        agent_lifecycle=lifecycle,
+    )
+
+    restored = RunManifest.from_dict(manifest.to_dict())
+
+    assert restored.agent_lifecycle == lifecycle
 
 
 def test_roadmap_no_spawn_nonterminal_keeps_single_turn_behavior(
@@ -694,7 +841,7 @@ def test_roadmap_no_spawn_nonterminal_keeps_single_turn_behavior(
     assert error == "single turn incomplete"
 
 
-def test_roadmap_patch_extraction_after_verifier_includes_real_workspace_changes(
+def test_roadmap_candidate_patch_freezes_agent_terminal_workspace(
     tmp_path,
 ):
     workspace = tmp_path / "workspace"
@@ -726,8 +873,7 @@ def test_roadmap_patch_extraction_after_verifier_includes_real_workspace_changes
     (workspace / "created.txt").write_text("agent-created\n")
     (workspace / "AGENTS.md").write_text("injected scaffold\n")
 
-    # Minimal verifier contract: observe the scored mutation without resetting
-    # the repository, then collect the durable artifact afterward.
+    # Freeze the candidate before the verifier gets access to the workspace.
     assert tracked.read_text() == "staged and unstaged change\n"
     assert (workspace / "created.txt").read_text() == "agent-created\n"
     patch = RoadmapBenchOpenClawCondition._collect_workspace_patch(workspace)
@@ -740,6 +886,19 @@ def test_roadmap_patch_extraction_after_verifier_includes_real_workspace_changes
     assert "created.txt" in patch
     assert "agent-created" in patch
     assert "AGENTS.md" not in patch
+
+    frozen = candidate.read_text()
+    tracked.write_text("verifier mutation\n")
+    (workspace / "verifier-created.txt").write_text("not agent output\n")
+    assert candidate.read_text() == frozen
+    assert "verifier mutation" not in frozen
+    assert "verifier-created.txt" not in frozen
+
+    driver_source = (
+        Path(__file__).resolve().parents[1]
+        / "agent_bench/runtime/driver.py"
+    ).read_text()
+    assert "Roadmap post-verifier patch extraction" not in driver_source
 
     clean = tmp_path / "clean"
     subprocess.run(

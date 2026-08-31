@@ -361,6 +361,34 @@ class OpenClawAgentCondition:
             logger.exception("OpenClaw measurement artifact generation failed")
             measurement = {"measurement_error": str(exc)}
 
+        agent_lifecycle = (
+            (self._unwrap(payload).get("meta") or {}).get(
+                "agentBenchLifecycle"
+            )
+            if payload else None
+        )
+        if (
+            isinstance(agent_lifecycle, dict)
+            and agent_lifecycle.get("pendingChildrenAtParentTerminal", 0)
+        ):
+            try:
+                from agent_bench.benchmarks.conditions.openclaw_measurement import (
+                    append_trajectory_event,
+                )
+
+                append_trajectory_event(
+                    run_dir,
+                    "orphan_cleanup",
+                    status=(
+                        "completed"
+                        if agent_lifecycle.get("workspaceQuiesced") is True
+                        else "error"
+                    ),
+                    lifecycle=agent_lifecycle,
+                )
+            except Exception:
+                logger.exception("trajectory orphan cleanup event write failed")
+
         # 4. Collect benchmark-specific artifacts (patch for SWE-bench; nothing
         #    for TB). Always write candidate.patch — driver gates on its
         #    existence + size, and the empty-patch case is allowed for TB via
@@ -382,12 +410,7 @@ class OpenClawAgentCondition:
             "agent_completion_status": self._last_completion_status,
             "agent_completion_error": self._last_completion_error or None,
             "agent_runtime_mode": self._detect_agent_runtime_mode(payload),
-            "agent_lifecycle": (
-                (self._unwrap(payload).get("meta") or {}).get(
-                    "agentBenchLifecycle"
-                )
-                if payload else None
-            ),
+            "agent_lifecycle": agent_lifecycle,
             **measurement,
         }
 

@@ -436,13 +436,16 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     ) -> Optional[Tuple[Optional[Dict], str]]:
         """Apply a durable terminal requester event to the CLI result."""
         if snapshot.get("done_text"):
+            quiescence = self._quiesce_terminal_children(snapshot)
             reconciled_payload = self._payload_with_resumed_completion(
                 payload,
                 snapshot["done_text"],
                 yield_count=int(snapshot.get("yield_count") or 0),
                 parent_session_id=str(snapshot["parent_session_id"]),
             )
-            self._attach_lifecycle_summary(reconciled_payload, snapshot)
+            self._attach_lifecycle_summary(
+                reconciled_payload, snapshot, quiescence
+            )
             status, completion_error = self._classify_completion(
                 reconciled_payload
             )
@@ -454,29 +457,86 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         # trajectory yielded or whether children remain. A toolUse assistant
         # turn is intentionally not terminal.
         if snapshot.get("post_yield_parent_terminal"):
+            quiescence = self._quiesce_terminal_children(snapshot)
+            reconciled_payload = (
+                copy.deepcopy(payload) if isinstance(payload, dict) else {}
+            )
+            if not isinstance(reconciled_payload.get("result"), dict):
+                reconciled_payload["result"] = {}
+            self._attach_lifecycle_summary(
+                reconciled_payload, snapshot, quiescence
+            )
             message = (
                 "Roadmap parent returned without DONE "
                 f"(session={snapshot['parent_session_id']})"
             )
             self._last_completion_status = self.BLOCKED_INCOMPLETE
             self._last_completion_error = message
-            return payload, message
+            return reconciled_payload, message
 
         return None
 
+    def _quiesce_terminal_children(self, snapshot: Dict) -> Dict:
+        pending = list(snapshot.get("pending_child_sessions") or [])
+        if not pending:
+            return {
+                "workspaceQuiesced": True,
+                "orphanCancellationAttempted": False,
+                "orphanCancellationError": None,
+            }
+        harness = self._env_info.get("_harness")
+        if harness is None or not hasattr(harness, "quiesce_orphan_children"):
+            error = "Roadmap harness cannot quiesce terminal orphan children"
+            logger.error(error)
+            return {
+                "workspaceQuiesced": False,
+                "orphanCancellationAttempted": False,
+                "orphanCancellationError": error,
+            }
+        try:
+            details = harness.quiesce_orphan_children(self._env_info)
+            return {
+                **(details if isinstance(details, dict) else {}),
+                "workspaceQuiesced": True,
+                "orphanCancellationAttempted": True,
+                "orphanCancellationError": None,
+            }
+        except Exception as exc:  # noqa: BLE001 - surface in lifecycle result
+            error = f"Roadmap orphan quiescence failed: {exc}"
+            logger.exception(error)
+            return {
+                "workspaceQuiesced": False,
+                "orphanCancellationAttempted": True,
+                "orphanCancellationError": error,
+            }
+
     @staticmethod
-    def _attach_lifecycle_summary(payload: Dict, snapshot: Dict) -> None:
+    def _attach_lifecycle_summary(
+        payload: Dict, snapshot: Dict, quiescence: Dict
+    ) -> None:
         run = payload.setdefault("result", {})
         meta = run.setdefault("meta", {})
         pending = list(snapshot.get("pending_child_sessions") or [])
-        meta["agentBenchLifecycle"] = {
+        child_states = list(snapshot.get("child_states") or [])
+        lifecycle = {
             "parentState": "terminal",
             "yieldCount": int(snapshot.get("yield_count") or 0),
             "totalChildren": int(snapshot.get("total_children") or 0),
             "completedChildren": int(snapshot.get("completed_children") or 0),
             "pendingChildrenAtParentTerminal": len(pending),
             "abandonedChildren": pending,
+            "orphanChildIds": [
+                child.get("session_id") or child.get("session_key")
+                for child in pending
+            ],
+            "childStatesAtParentTerminal": child_states,
+            **quiescence,
         }
+        if quiescence.get("orphanCancellationError"):
+            lifecycle["lifecycleError"] = quiescence[
+                "orphanCancellationError"
+            ]
+        meta["agentBenchLifecycle"] = lifecycle
 
     def _live_sessions_dir(self) -> Optional[Path]:
         state_dir = self._env_info.get("state_dir") or self._env_info.get(

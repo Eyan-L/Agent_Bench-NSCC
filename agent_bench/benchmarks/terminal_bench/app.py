@@ -1223,6 +1223,8 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
         self.workspace_base.mkdir(parents=True, exist_ok=True)
         self.state_base = self.workspace_base.parent / "states"
         self.state_base.mkdir(parents=True, exist_ok=True)
+        self._task_specs: Dict[str, ContainerSpec] = {}
+        self._task_specs_lock = threading.Lock()
 
     def _resolve_task_image(self, docker_image: str) -> str:
         if self.container.backend_id == "docker":
@@ -1377,7 +1379,7 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
         dispatcher: Optional[OpenClawRemoteDispatcher] = None
         gateway_port: Optional[int] = None
         try:
-            task_handle = self.container.start(ContainerSpec(
+            task_spec = ContainerSpec(
                 name=task_name, image=task_image, network=net_name, user="0",
                 labels={
                     "openclaw.sandbox": "1",
@@ -1387,7 +1389,10 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
                 mounts=tuple(task_mounts),
                 env={"HOME": "/root"}, workdir=task_workspace,
                 entrypoint="sleep", command=("infinity",), cpus=self.task_container_cpus,
-            ))
+            )
+            with self._task_specs_lock:
+                self._task_specs[task_name] = task_spec
+            task_handle = self.container.start(task_spec)
             dispatcher = OpenClawRemoteDispatcher()
             dispatcher.start(state_dir=state_dir, backend=self.container.backend_id, target=task_name)
             gateway_port = _pick_free_gateway_port()
@@ -1493,6 +1498,8 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
                 **dispatcher.env_info(),
             }
         except BaseException:
+            with self._task_specs_lock:
+                self._task_specs.pop(task_name, None)
             if gateway_port is not None:
                 _release_gateway_port(gateway_port)
             if dispatcher:
@@ -1500,6 +1507,75 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
             self._best_effort_stop(oc_handle, task_handle)
             self.container.remove_network(net_name)
             raise
+
+    @staticmethod
+    def _wait_for_process_exit(pid: Optional[int], timeout: float = 10.0) -> None:
+        if not pid:
+            return
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                waited, _status = os.waitpid(int(pid), os.WNOHANG)
+                if waited == int(pid):
+                    return
+            except ChildProcessError:
+                try:
+                    os.kill(int(pid), 0)
+                except ProcessLookupError:
+                    return
+            time.sleep(0.05)
+        raise RuntimeError(f"exec bridge process {pid} did not stop")
+
+    def quiesce_orphan_children(self, env_info: Dict) -> Dict:
+        """Stop all agent writers and restart only the task runtime.
+
+        Stopping the task runtime is deliberate: terminating the gateway and
+        bridge prevents new writes, while restarting the task from its
+        original spec guarantees an already-dispatched exec cannot overlap the
+        verifier. The host-bound workspace survives the restart unchanged.
+        """
+        task_name = str(env_info.get("task_container_name") or "")
+        task_id = str(env_info.get("task_container_id") or task_name)
+        oc_id = str(env_info.get("oc_container_id") or env_info.get("container_id") or "")
+        if not task_name or not task_id or not oc_id:
+            raise RuntimeError("missing runtime handles for orphan quiescence")
+        with self._task_specs_lock:
+            task_spec = self._task_specs.get(task_name)
+        if task_spec is None:
+            raise RuntimeError(f"missing saved task ContainerSpec for {task_name}")
+
+        bridge_pid = env_info.get("bridge_pid")
+        OpenClawRemoteDispatcher.stop_external(
+            pid=bridge_pid,
+            socket_path=env_info.get("bridge_socket"),
+        )
+        self._wait_for_process_exit(bridge_pid)
+        env_info["bridge_pid"] = None
+        env_info["bridge_socket"] = None
+
+        oc_handle = ContainerHandle(oc_id, oc_id, self.container.backend_id)
+        self.container.stop(oc_handle)
+        if self.container.is_running(oc_handle):
+            raise RuntimeError(f"OpenClaw runtime remained active after stop: {oc_id}")
+
+        task_handle = ContainerHandle(task_id, task_name, self.container.backend_id)
+        self.container.stop(task_handle)
+        if self.container.is_running(task_handle):
+            raise RuntimeError(f"task runtime remained active after stop: {task_name}")
+
+        restarted = self.container.start(task_spec)
+        if not self.container.is_running(restarted):
+            raise RuntimeError(f"restarted task runtime is not active: {task_name}")
+        env_info["task_container_id"] = restarted.id
+        env_info["task_container_name"] = restarted.name
+        env_info["agent_runtime_quiesced"] = True
+        return {
+            "workspaceQuiesced": True,
+            "quiescenceMethod": "stop-agent-and-restart-task-runtime",
+            "openClawRuntimeStopped": True,
+            "execBridgeStopped": True,
+            "taskRuntimeRestarted": True,
+        }
 
     def run_tests(self, container_id: Optional[str], instance_id: str, workspace_root: str,
                   timeout_seconds: int, patch: Optional[str] = None, run_id: Optional[str] = None,
@@ -1557,6 +1633,9 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
                 network_name: Optional[str] = None, gateway_port: Optional[int] = None,
                 workspace_host_path: Optional[str] = None, state_dir: Optional[str] = None,
                 bridge_pid: Optional[int] = None, bridge_socket: Optional[str] = None, **_kw) -> None:
+        if task_container_name:
+            with self._task_specs_lock:
+                self._task_specs.pop(task_container_name, None)
         if gateway_port is not None:
             _release_gateway_port(gateway_port)
         OpenClawRemoteDispatcher.stop_external(pid=bridge_pid, socket_path=bridge_socket)
