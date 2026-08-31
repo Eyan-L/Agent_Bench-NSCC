@@ -12,7 +12,7 @@ profile = "profiles/benchmarks/terminal_bench/roadmapbench_fal_2_0_0_smoke.json"
 
 [harness]
 name = "openclaw"
-profile = "profiles/harnesses/openclaw_roadmapbench.yaml"
+profile = "profiles/harnesses/openclaw_roadmapbench_512k.yaml"
 
 [model]
 profile = "profiles/models/qwen36_35b_a3b_512k.json"
