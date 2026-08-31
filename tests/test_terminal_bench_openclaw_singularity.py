@@ -1634,3 +1634,87 @@ def test_singularity_copy_into_directory_streams_tar(tmp_path, monkeypatch):
     assert calls[0][:3] == ["tar", "-C", str(source)]
     assert calls[1][:3] == ["singularity", "exec", "instance://task"]
     assert "mkdir -p '/tests'" in calls[1][-1]
+
+
+def test_roadmap_abnormal_terminal_quiesces_running_children(tmp_path):
+    class Harness:
+        def __init__(self):
+            self.calls = 0
+
+        def quiesce_orphan_children(self, _env_info):
+            self.calls += 1
+            return {
+                "workspaceQuiesced": True,
+                "taskRuntimeRestarted": True,
+            }
+
+    cases = [
+        (
+            "context_overflow",
+            {
+                "result": {
+                    "meta": {
+                        "error": {
+                            "kind": "context_overflow",
+                            "message": "context overflow",
+                        }
+                    }
+                }
+            },
+        ),
+        (
+            "runtime_error",
+            {
+                "result": {
+                    "meta": {
+                        "error": {
+                            "kind": "gateway_error",
+                            "message": "gateway crashed",
+                        }
+                    }
+                }
+            },
+        ),
+        (
+            "timeout",
+            {
+                "result": {
+                    "meta": {
+                        "livenessState": "working",
+                    }
+                }
+            },
+        ),
+    ]
+
+    for expected_status, payload in cases:
+        case_root = tmp_path / expected_status
+        sessions_dir = (
+            case_root / "agents" / "roadmap_bench" / "sessions"
+        )
+        _write_roadmap_session_state(
+            sessions_dir,
+            [_assistant_event("partial work")],
+            child_statuses=("running",),
+        )
+
+        harness = Harness()
+        condition = _roadmap_condition_for_state(case_root, harness)
+
+        if expected_status == "timeout":
+            condition._last_completion_status = condition.TIMEOUT
+            condition._last_completion_error = "agent timeout"
+
+        returned, _error = condition._await_post_turn_lifecycle(
+            payload,
+            "",
+            deadline=time.monotonic() + 10,
+        )
+
+        assert harness.calls == 1
+        assert condition._last_completion_status == expected_status
+
+        lifecycle = returned["result"]["meta"]["agentBenchLifecycle"]
+        assert lifecycle["pendingChildrenAtParentTerminal"] == 1
+        assert lifecycle["workspaceQuiesced"] is True
+        assert lifecycle["orphanCancellationAttempted"] is True

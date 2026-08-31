@@ -270,7 +270,16 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         if sessions_dir is None:
             return payload, error
 
+        # Read the durable child/session state before handling any terminal
+        # outcome. Abnormal parent termination must quiesce pending children
+        # just like DONE / terminal-stop, otherwise they may keep writing the
+        # shared workspace while the verifier starts.
+        snapshot = self._read_yield_snapshot(sessions_dir)
+
         if getattr(self, "_last_completion_status", None) == self.TIMEOUT:
+            payload = self._quiesce_abnormal_terminal_payload(
+                payload, snapshot
+            )
             return payload, getattr(self, "_last_completion_error", error)
 
         # The CLI payload can lag behind the durable requester transcript. In
@@ -280,11 +289,13 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         # older transcript terminal event.
         payload_status, payload_error = self._classify_completion(payload)
         if payload_status in {self.RUNTIME_ERROR, self.CONTEXT_OVERFLOW}:
+            payload = self._quiesce_abnormal_terminal_payload(
+                payload, snapshot
+            )
             self._last_completion_status = payload_status
             self._last_completion_error = payload_error
             return payload, payload_error
 
-        snapshot = self._read_yield_snapshot(sessions_dir)
         if not snapshot:
             return payload, error
 
@@ -428,6 +439,27 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         self._last_completion_status = self.TIMEOUT
         self._last_completion_error = message
         return payload, message
+
+    def _quiesce_abnormal_terminal_payload(
+        self,
+        payload: Optional[Dict],
+        snapshot: Optional[Dict],
+    ) -> Optional[Dict]:
+        """Quiesce orphan children before returning an abnormal terminal result."""
+        if not snapshot or not snapshot.get("pending_children"):
+            return payload
+
+        reconciled_payload = (
+            copy.deepcopy(payload) if isinstance(payload, dict) else {}
+        )
+        if not isinstance(reconciled_payload.get("result"), dict):
+            reconciled_payload["result"] = {}
+
+        quiescence = self._quiesce_terminal_children(snapshot)
+        self._attach_lifecycle_summary(
+            reconciled_payload, snapshot, quiescence
+        )
+        return reconciled_payload
 
     def _reconcile_terminal_snapshot(
         self,
