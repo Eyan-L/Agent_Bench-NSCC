@@ -21,6 +21,11 @@ _WORKSPACE_SCAFFOLD_FILES = frozenset({
     "MEMORY.md", "SOUL.md", "TOOLS.md", "USER.md",
 })
 
+# OpenClaw runtime/workspace metadata is not part of the candidate solution.
+_WORKSPACE_SCAFFOLD_DIRS = frozenset({
+    ".openclaw",
+})
+
 
 class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     """OpenClaw lead engineer implementing a multi-target roadmap."""
@@ -116,6 +121,8 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
 
         excludes = [
             f":(exclude){name}" for name in sorted(_WORKSPACE_SCAFFOLD_FILES)
+        ] + [
+            f":(exclude){name}/**" for name in sorted(_WORKSPACE_SCAFFOLD_DIRS)
         ]
         tracked = run([
             "git", "-c", f"safe.directory={repo_root}",
@@ -144,7 +151,11 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         for relative in untracked.stdout.split("\0"):
             if not relative:
                 continue
-            if Path(relative).parts[0] in _WORKSPACE_SCAFFOLD_FILES:
+            parts = Path(relative).parts
+            if parts and (
+                parts[0] in _WORKSPACE_SCAFFOLD_FILES
+                or parts[0] in _WORKSPACE_SCAFFOLD_DIRS
+            ):
                 continue
             diff = run(
                 [
@@ -197,6 +208,8 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
 
         excludes = [
             f":(exclude){name}" for name in sorted(_WORKSPACE_SCAFFOLD_FILES)
+        ] + [
+            f":(exclude){name}/**" for name in sorted(_WORKSPACE_SCAFFOLD_DIRS)
         ]
         tracked = subprocess.run(
             [
@@ -229,7 +242,11 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             if not raw_path:
                 continue
             relative = os.fsdecode(raw_path)
-            if Path(relative).parts[0] in _WORKSPACE_SCAFFOLD_FILES:
+            parts = Path(relative).parts
+            if parts and (
+                parts[0] in _WORKSPACE_SCAFFOLD_FILES
+                or parts[0] in _WORKSPACE_SCAFFOLD_DIRS
+            ):
                 continue
             diff = subprocess.run(
                 [

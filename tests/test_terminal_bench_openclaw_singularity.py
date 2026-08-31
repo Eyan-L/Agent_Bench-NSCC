@@ -872,6 +872,10 @@ def test_roadmap_candidate_patch_freezes_agent_terminal_workspace(
     tracked.write_text("staged and unstaged change\n")
     (workspace / "created.txt").write_text("agent-created\n")
     (workspace / "AGENTS.md").write_text("injected scaffold\n")
+    (workspace / ".openclaw").mkdir()
+    (workspace / ".openclaw" / "workspace-state.json").write_text(
+        '{"runtime": "metadata"}\n'
+    )
 
     # Freeze the candidate before the verifier gets access to the workspace.
     assert tracked.read_text() == "staged and unstaged change\n"
@@ -886,6 +890,8 @@ def test_roadmap_candidate_patch_freezes_agent_terminal_workspace(
     assert "created.txt" in patch
     assert "agent-created" in patch
     assert "AGENTS.md" not in patch
+    assert ".openclaw" not in patch
+    assert "workspace-state.json" not in patch
 
     frozen = candidate.read_text()
     tracked.write_text("verifier mutation\n")
