@@ -49,6 +49,15 @@ def _message_text(message: dict) -> str:
     return "\n".join(part for part in parts if part)
 
 
+def _is_heartbeat_request(text: str) -> bool:
+    """Recognize OpenClaw heartbeat requester turns."""
+    normalized = " ".join(str(text or "").lower().split())
+    return (
+        "read heartbeat.md" in normalized
+        and "heartbeat_ok" in normalized
+    )
+
+
 def _session_file_name(entry: dict) -> str:
     raw = str(entry.get("sessionFile") or "").strip()
     if raw:
@@ -129,6 +138,7 @@ def _session_events(run_dir: Path, agent_id: str) -> list[dict]:
         seen_assistant: set[str] = set()
         seen_tool_results: set[str] = set()
         seen_resumes: set[tuple[int, str]] = set()
+        heartbeat_turn = False
         try:
             lines = path.read_text(errors="replace").splitlines()
         except OSError:
@@ -171,14 +181,28 @@ def _session_events(run_dir: Path, agent_id: str) -> list[dict]:
 
             message_role = str(message.get("role") or "")
             if message_role == "user":
-                resume_key = (timestamp_ns, _message_text(message))
+                text = _message_text(message)
+                if role == "parent" and _is_heartbeat_request(text):
+                    heartbeat_turn = True
+                    _append(
+                        events, timestamp_ns=timestamp_ns,
+                        session_id=session_id, session_key=session_key,
+                        role=role, event_type="heartbeat_request",
+                        text=text, session_state=session_state,
+                    )
+                    continue
+
+                if role == "parent":
+                    heartbeat_turn = False
+
+                resume_key = (timestamp_ns, text)
                 if resume_key in seen_resumes:
                     continue
                 seen_resumes.add(resume_key)
                 _append(
                     events, timestamp_ns=timestamp_ns, session_id=session_id,
                     session_key=session_key, role=role, event_type="resume",
-                    text=_message_text(message), session_state=session_state,
+                    text=text, session_state=session_state,
                 )
                 continue
             if message_role == "toolResult":
@@ -219,6 +243,19 @@ def _session_events(run_dir: Path, agent_id: str) -> list[dict]:
                     arguments=content.get("arguments"), session_state=session_state,
                 )
             stop_reason = str(message.get("stopReason") or "").lower()
+
+            if role == "parent" and heartbeat_turn:
+                _append(
+                    events, timestamp_ns=timestamp_ns,
+                    session_id=session_id, session_key=session_key,
+                    role=role, event_type="heartbeat_response",
+                    text=text, stop_reason=stop_reason,
+                    session_state=session_state,
+                )
+                if stop_reason == "stop":
+                    heartbeat_turn = False
+                continue
+
             if stop_reason == "stop":
                 _append(
                     events, timestamp_ns=timestamp_ns, session_id=session_id,
@@ -430,6 +467,8 @@ def _parent_resume_count(run_dir: Path, agent_id: str) -> int:
             if item.get("type") != "message" or message.get("role") != "user":
                 continue
             text = _message_text(message)
+            if _is_heartbeat_request(text):
+                continue
             if text in seen:
                 continue
             seen.add(text)

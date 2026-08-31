@@ -1718,3 +1718,44 @@ def test_roadmap_abnormal_terminal_quiesces_running_children(tmp_path):
         assert lifecycle["pendingChildrenAtParentTerminal"] == 1
         assert lifecycle["workspaceQuiesced"] is True
         assert lifecycle["orphanCancellationAttempted"] is True
+
+
+def test_roadmap_heartbeat_after_yield_is_not_parent_terminal(tmp_path):
+    sessions_dir = (
+        tmp_path / "agents" / "roadmap_bench" / "sessions"
+    )
+    heartbeat_request = {
+        "type": "message",
+        "message": {
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": (
+                    "Read HEARTBEAT.md if it exists. "
+                    "If nothing needs attention, reply HEARTBEAT_OK"
+                ),
+            }],
+        },
+    }
+
+    _write_roadmap_session_state(
+        sessions_dir,
+        [
+            _yield_event(),
+            heartbeat_request,
+            _assistant_event("HEARTBEAT_OK"),
+        ],
+        child_statuses=("running", "running"),
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(
+        sessions_dir
+    )
+
+    assert snapshot is not None
+    assert snapshot["pending_children"] == 2
+    assert snapshot["parent_terminal"] is False
+    assert snapshot["post_yield_parent_terminal"] is False
+    assert snapshot["done_text"] == ""
+    assert snapshot["parent_waiting"] is True
+    assert snapshot["latest_parent_event"] == "heartbeat_response"

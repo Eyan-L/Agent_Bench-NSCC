@@ -264,3 +264,104 @@ def test_announce_attempts_aggregate_across_children(tmp_path):
         "latency_ms": [120000, 50],
     }
     assert observability["announce_by_child"][child_b]["attempt_count"] == 2
+
+
+def test_heartbeat_is_not_resume_or_terminal_but_tokens_still_count(tmp_path):
+    sessions = tmp_path / "conversation" / "sessions"
+    sessions.mkdir(parents=True)
+
+    (sessions / "sessions.json").write_text(json.dumps({
+        "agent:roadmap_bench:main": {
+            "sessionId": "parent-id",
+            "sessionFile": "parent.jsonl",
+            "status": "running",
+        }
+    }))
+
+    _write_jsonl(sessions / "parent.jsonl", [
+        {
+            "type": "message",
+            "message": {
+                "role": "user",
+                "timestamp": 1,
+                "content": [{
+                    "type": "text",
+                    "text": "implement roadmap",
+                }],
+            },
+        },
+        {
+            "type": "custom_message",
+            "customType": "openclaw.sessions_yield",
+            "timestamp": 2,
+        },
+        {
+            "type": "message",
+            "message": {
+                "role": "user",
+                "timestamp": 3,
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        "Read HEARTBEAT.md if it exists. "
+                        "If nothing needs attention, reply HEARTBEAT_OK"
+                    ),
+                }],
+            },
+        },
+        {
+            "type": "message",
+            "message": {
+                "role": "assistant",
+                "timestamp": 4,
+                "responseId": "heartbeat-response",
+                "stopReason": "stop",
+                "content": [{
+                    "type": "text",
+                    "text": "HEARTBEAT_OK",
+                }],
+                "usage": {
+                    "input": 10,
+                    "output": 1,
+                },
+            },
+        },
+    ])
+
+    result = build_openclaw_measurement(
+        tmp_path, agent_id="roadmap_bench"
+    )
+
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()
+    ]
+
+    heartbeat_events = [
+        e["event_type"]
+        for e in events
+        if e["event_type"].startswith("heartbeat_")
+    ]
+
+    assert heartbeat_events == [
+        "heartbeat_request",
+        "heartbeat_response",
+    ]
+
+    assert not any(
+        e["event_type"] == "resume"
+        and "HEARTBEAT" in str(e.get("text") or "")
+        for e in events
+    )
+
+    assert not any(
+        e["event_type"] == "assistant_stop"
+        and e.get("text") == "HEARTBEAT_OK"
+        for e in events
+    )
+
+    parent = result["trajectory_tokens"]["parent"]
+    assert parent["resumed_turns"] == 0
+    assert parent["turn_count"] == 1
+    assert parent["input"] == 10
+    assert parent["output"] == 1

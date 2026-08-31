@@ -578,6 +578,15 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             return None
         return Path(state_dir) / "agents" / self.agent_id / "sessions"
 
+    @staticmethod
+    def _is_heartbeat_request(text: str) -> bool:
+        """Recognize OpenClaw heartbeat requester turns."""
+        normalized = " ".join(str(text or "").lower().split())
+        return (
+            "read heartbeat.md" in normalized
+            and "heartbeat_ok" in normalized
+        )
+
     @classmethod
     def _read_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
         index_path = sessions_dir / "sessions.json"
@@ -665,6 +674,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         post_yield_parent_terminal = False
         post_yield_prompt_error = ""
         latest_event_kind = ""
+        heartbeat_turn = False
 
         for event in messages[latest_yield + 1:]:
             if (
@@ -694,41 +704,6 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
 
             message = event.get("message") or {}
             role = message.get("role")
-
-            # A later requester/model/tool message proves that any earlier
-            # prompt error was transient.
-            if role in {"user", "assistant", "toolResult"}:
-                post_yield_prompt_error = ""
-
-            if role == "user":
-                post_yield_parent_terminal = False
-                done_text = ""
-                latest_event_kind = "resume"
-                continue
-
-            if role == "toolResult":
-                post_yield_parent_activity = True
-                post_yield_parent_terminal = False
-                done_text = ""
-                latest_event_kind = "tool_result"
-                continue
-
-            if role != "assistant":
-                continue
-
-            post_yield_parent_activity = True
-
-            stop_reason = str(
-                message.get("stopReason") or ""
-            ).strip().lower()
-
-            post_yield_parent_terminal = stop_reason == "stop"
-            latest_event_kind = (
-                "assistant_stop"
-                if post_yield_parent_terminal
-                else "assistant_active"
-            )
-
             parts = [
                 str(item.get("text") or "")
                 for item in message.get("content") or []
@@ -738,6 +713,54 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             text = "\n".join(
                 part for part in parts if part
             ).strip()
+
+            # A later requester/model/tool message proves that any earlier
+            # prompt error was transient.
+            if role in {"user", "assistant", "toolResult"}:
+                post_yield_prompt_error = ""
+
+            if role == "user":
+                if cls._is_heartbeat_request(text):
+                    heartbeat_turn = True
+                    latest_event_kind = "heartbeat_request"
+                    continue
+
+                heartbeat_turn = False
+                post_yield_parent_terminal = False
+                done_text = ""
+                latest_event_kind = "resume"
+                continue
+
+            if role == "toolResult":
+                if heartbeat_turn:
+                    latest_event_kind = "heartbeat_tool_result"
+                    continue
+                post_yield_parent_activity = True
+                post_yield_parent_terminal = False
+                done_text = ""
+                latest_event_kind = "tool_result"
+                continue
+
+            if role != "assistant":
+                continue
+
+            stop_reason = str(
+                message.get("stopReason") or ""
+            ).strip().lower()
+
+            if heartbeat_turn:
+                latest_event_kind = "heartbeat_response"
+                if stop_reason == "stop":
+                    heartbeat_turn = False
+                continue
+
+            post_yield_parent_activity = True
+            post_yield_parent_terminal = stop_reason == "stop"
+            latest_event_kind = (
+                "assistant_stop"
+                if post_yield_parent_terminal
+                else "assistant_active"
+            )
 
             if (
                 post_yield_parent_terminal
