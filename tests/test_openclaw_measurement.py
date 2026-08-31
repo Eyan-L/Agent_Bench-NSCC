@@ -43,6 +43,10 @@ def test_openclaw_measurement_captures_trajectory_and_both_token_layers(tmp_path
     }))
     _write_jsonl(sessions / "parent.jsonl", [
         {"type": "message", "message": {
+            "role": "user", "timestamp": 0,
+            "content": [{"type": "text", "text": "implement roadmap"}],
+        }},
+        {"type": "message", "message": {
             "role": "assistant", "timestamp": 1,
             "stopReason": "toolUse", "content": [{
                 "type": "toolCall", "id": "spawn-1",
@@ -147,3 +151,79 @@ def test_openclaw_measurement_captures_trajectory_and_both_token_layers(tmp_path
     assert json.loads(
         (tmp_path / "trajectory.jsonl").read_text().splitlines()[-1]
     )["event_type"] == "cleanup"
+
+
+def test_measurement_uses_durable_transcript_and_ignores_checkpoints(tmp_path):
+    sessions = tmp_path / "conversation" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "sessions.json").write_text(json.dumps({
+        "agent:roadmap_bench:main": {
+            "sessionId": "logical-parent",
+            "sessionFile": (
+                "/root/.openclaw/agents/roadmap_bench/sessions/physical.jsonl"
+            ),
+            "status": "done",
+        },
+    }))
+    assistant = {
+        "type": "message",
+        "message": {
+            "role": "assistant",
+            "timestamp": 1,
+            "responseId": "response-1",
+            "usage": {
+                "input": 10,
+                "cacheRead": 90,
+                "output": 5,
+            },
+            "stopReason": "toolUse",
+            "content": [{
+                "type": "toolCall",
+                "id": "call-1",
+                "name": "exec",
+                "arguments": {"command": "true"},
+            }],
+        },
+    }
+    # OpenClaw may replay a response in the durable file during recovery. A
+    # stable responseId means it remains one logical model turn.
+    _write_jsonl(sessions / "physical.jsonl", [assistant, assistant])
+    _write_jsonl(
+        sessions / "logical-parent.checkpoint.snapshot.jsonl", [assistant]
+    )
+
+    result = build_openclaw_measurement(tmp_path, agent_id="roadmap_bench")
+
+    assert result["trajectory_tokens"]["parent"] == {
+        "input": 100,
+        "output": 5,
+        "cache_read": 90,
+        "turn_count": 1,
+        "resumed_turns": 0,
+    }
+    assert result["trajectory_tokens"]["children"] == {}
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()
+    ]
+    assert sum(event["event_type"] == "tool_call" for event in events) == 1
+    assert sum(event["event_type"] == "model_usage" for event in events) == 1
+
+
+def test_stuck_observability_ignores_run_level_usage_span(tmp_path):
+    span = _usage_span(
+        "agent:roadmap_bench:main", "parent-id", 1_000_000_000, 10, 2
+    )
+    span["duration_ms"] = 600_000
+    span["end_unix_nano"] = 601_000_000_000
+    _write_jsonl(tmp_path / "spans.jsonl", [span])
+    (tmp_path / "openclaw_gateway.log").write_text(
+        "1970-01-01T00:05:00Z [diagnostic] stuck session: "
+        "sessionKey=agent:roadmap_bench:main state=processing age=150s\n"
+    )
+
+    result = build_openclaw_measurement(tmp_path, agent_id="roadmap_bench")
+
+    assert result["runtime_observability"]["stuck_session_classification"] == {
+        "unresolved": 1
+    }

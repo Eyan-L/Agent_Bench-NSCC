@@ -756,6 +756,77 @@ def test_roadmap_patch_extraction_after_verifier_includes_real_workspace_changes
     )
 
 
+def test_roadmap_patch_extraction_uses_task_runtime_without_host_git(
+    tmp_path, monkeypatch
+):
+    class PatchContainer:
+        backend_id = "singularity"
+
+        def __init__(self):
+            self.calls = []
+
+        def exec(self, handle, argv, **kwargs):
+            self.calls.append((handle, argv, kwargs))
+            if "rev-parse" in argv:
+                return subprocess.CompletedProcess(argv, 0, "/app\n", "")
+            if "ls-files" in argv:
+                return subprocess.CompletedProcess(
+                    argv, 0, "created.txt\0AGENTS.md\0", ""
+                )
+            if "--no-index" in argv:
+                return subprocess.CompletedProcess(
+                    argv,
+                    1,
+                    "diff --git a/created.txt b/created.txt\n+agent-created\n",
+                    "",
+                )
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                "diff --git a/tracked.txt b/tracked.txt\n+tracked change\n",
+                "",
+            )
+
+    condition = object.__new__(RoadmapBenchOpenClawCondition)
+    condition.container = PatchContainer()
+    host_workspace = tmp_path / "workspace"
+    host_workspace.mkdir()
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent."
+        "subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError()),
+    )
+
+    patch = condition._collect_artifacts(
+        "openclaw-runtime",
+        {
+            "backend": "singularity",
+            "task_container_id": "task-runtime",
+            "task_container_name": "task-runtime",
+            "workspace_host_path": str(host_workspace),
+        },
+        tmp_path,
+        "/app",
+    )
+
+    assert "tracked change" in patch
+    assert "agent-created" in patch
+    assert "AGENTS.md" not in patch
+    assert all(call[0].id == "task-runtime" for call in condition.container.calls)
+
+
+def test_roadmap_host_patch_extraction_missing_git_is_nonfatal(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent."
+        "subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError()),
+    )
+
+    assert RoadmapBenchOpenClawCondition._collect_workspace_patch(tmp_path) == ""
+
+
 def test_roadmap_yield_with_running_child_does_not_complete(tmp_path):
     sessions_dir = tmp_path / "sessions"
     _write_roadmap_session_state(sessions_dir, [_yield_event()])

@@ -65,6 +65,34 @@ def _session_index(sessions_dir: Path) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _session_sources(sessions_dir: Path) -> list[tuple[Path, str, dict]]:
+    """Resolve durable session transcripts without reading replay checkpoints."""
+    index = _session_index(sessions_dir)
+    sources: list[tuple[Path, str, dict]] = []
+    seen: set[Path] = set()
+    for session_key, entry in index.items():
+        if not isinstance(entry, dict):
+            continue
+        name = _session_file_name(entry)
+        if not name:
+            continue
+        path = sessions_dir / name
+        if not path.is_file() or path in seen:
+            continue
+        seen.add(path)
+        sources.append((path, str(session_key), entry))
+    if sources:
+        return sources
+
+    # Older archives may lack sessions.json. Checkpoints and generated
+    # trajectories replay durable messages and must never count as sessions.
+    for path in sorted(sessions_dir.glob("*.jsonl")):
+        if ".checkpoint." in path.name or ".trajectory." in path.name:
+            continue
+        sources.append((path, "", {}))
+    return sources
+
+
 def _append(
     events: list[dict],
     *,
@@ -92,20 +120,15 @@ def _session_events(run_dir: Path, agent_id: str) -> list[dict]:
     if not sessions_dir.is_dir():
         return []
     index = _session_index(sessions_dir)
-    by_file = {
-        _session_file_name(entry): (key, entry)
-        for key, entry in index.items()
-        if isinstance(entry, dict) and _session_file_name(entry)
-    }
     events: list[dict] = []
 
-    for path in sorted(sessions_dir.glob("*.jsonl")):
-        if path.name.endswith(".trajectory.jsonl"):
-            continue
-        session_key, entry = by_file.get(path.name, ("", {}))
+    for path, session_key, entry in _session_sources(sessions_dir):
         session_id = str(entry.get("sessionId") or path.stem)
         role = "parent" if session_key == f"agent:{agent_id}:main" else "child"
         session_state = str(entry.get("status") or "unknown")
+        seen_assistant: set[str] = set()
+        seen_tool_results: set[str] = set()
+        seen_resumes: set[tuple[int, str]] = set()
         try:
             lines = path.read_text(errors="replace").splitlines()
         except OSError:
@@ -148,6 +171,10 @@ def _session_events(run_dir: Path, agent_id: str) -> list[dict]:
 
             message_role = str(message.get("role") or "")
             if message_role == "user":
+                resume_key = (timestamp_ns, _message_text(message))
+                if resume_key in seen_resumes:
+                    continue
+                seen_resumes.add(resume_key)
                 _append(
                     events, timestamp_ns=timestamp_ns, session_id=session_id,
                     session_key=session_key, role=role, event_type="resume",
@@ -155,6 +182,11 @@ def _session_events(run_dir: Path, agent_id: str) -> list[dict]:
                 )
                 continue
             if message_role == "toolResult":
+                tool_result_id = str(message.get("toolCallId") or "")
+                if tool_result_id and tool_result_id in seen_tool_results:
+                    continue
+                if tool_result_id:
+                    seen_tool_results.add(tool_result_id)
                 _append(
                     events, timestamp_ns=timestamp_ns, session_id=session_id,
                     session_key=session_key, role=role, event_type="tool_result",
@@ -167,6 +199,12 @@ def _session_events(run_dir: Path, agent_id: str) -> list[dict]:
                 continue
             if message_role != "assistant":
                 continue
+
+            response_id = str(message.get("responseId") or "")
+            if response_id and response_id in seen_assistant:
+                continue
+            if response_id:
+                seen_assistant.add(response_id)
 
             text = _message_text(message)
             for content in message.get("content") or []:
@@ -282,7 +320,134 @@ def _read_spans(run_dir: Path) -> Iterable[dict]:
     return rows
 
 
+def _logical_tokens_from_transcripts(
+    run_dir: Path, agent_id: str
+) -> tuple[dict, list[dict]]:
+    sessions_dir = run_dir / "conversation" / "sessions"
+    sessions: dict[str, dict] = defaultdict(
+        lambda: {"input": 0, "output": 0, "cache_read": 0, "turn_count": 0}
+    )
+    usage_events: list[dict] = []
+    if not sessions_dir.is_dir():
+        return {}, []
+
+    for path, session_key, entry in _session_sources(sessions_dir):
+        session_id = str(entry.get("sessionId") or path.stem)
+        role = "parent" if session_key == f"agent:{agent_id}:main" else "child"
+        seen_responses: set[str] = set()
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            message = item.get("message") or {}
+            if item.get("type") != "message" or message.get("role") != "assistant":
+                continue
+            usage = message.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            response_id = str(message.get("responseId") or "")
+            if response_id and response_id in seen_responses:
+                continue
+            if response_id:
+                seen_responses.add(response_id)
+            uncached_input = _int(usage.get("input") or usage.get("prompt_tokens"))
+            cache_read = _int(usage.get("cacheRead") or usage.get("cache_read"))
+            input_tokens = uncached_input + cache_read
+            output_tokens = _int(
+                usage.get("output") or usage.get("completion_tokens")
+            )
+            bucket = sessions[session_key or f"session:{session_id}"]
+            bucket["input"] += input_tokens
+            bucket["output"] += output_tokens
+            bucket["cache_read"] += cache_read
+            bucket["turn_count"] += 1
+            _append(
+                usage_events,
+                timestamp_ns=_timestamp_ns(
+                    message.get("timestamp") or item.get("timestamp")
+                ),
+                session_id=session_id,
+                session_key=session_key,
+                role=role,
+                event_type="model_usage",
+                input_tokens=input_tokens,
+                uncached_input_tokens=uncached_input,
+                cache_read_tokens=cache_read,
+                output_tokens=output_tokens,
+                request_latency_ms=None,
+            )
+    return dict(sessions), usage_events
+
+
+def _parent_resume_count(run_dir: Path, agent_id: str) -> int:
+    """Count requester episodes after the initial parent request.
+
+    Compaction can replay the initial requester message at a new timestamp, so
+    text, rather than timestamp, is the durable identity used here.
+    """
+    sessions_dir = run_dir / "conversation" / "sessions"
+    if not sessions_dir.is_dir():
+        return 0
+    messages: list[str] = []
+    seen: set[str] = set()
+    for path, session_key, _entry in _session_sources(sessions_dir):
+        if session_key != f"agent:{agent_id}:main":
+            continue
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            message = item.get("message") or {}
+            if item.get("type") != "message" or message.get("role") != "user":
+                continue
+            text = _message_text(message)
+            if text in seen:
+                continue
+            seen.add(text)
+            messages.append(text)
+    return max(0, len(messages) - 1)
+
+
 def _logical_tokens(run_dir: Path, agent_id: str) -> tuple[dict, list[dict]]:
+    transcript_sessions, transcript_events = _logical_tokens_from_transcripts(
+        run_dir, agent_id
+    )
+    if transcript_sessions:
+        sessions = transcript_sessions
+        usage_events = transcript_events
+    else:
+        sessions, usage_events = _logical_tokens_from_spans(run_dir, agent_id)
+
+    parent_key = f"agent:{agent_id}:main"
+    empty = {
+        "input": 0, "output": 0, "cache_read": 0, "turn_count": 0
+    }
+    parent = dict(sessions.get(parent_key, empty))
+    parent["resumed_turns"] = _parent_resume_count(run_dir, agent_id)
+    children = {
+        key: dict(value) for key, value in sessions.items() if key != parent_key
+    }
+    return {
+        "parent": parent,
+        "children": children,
+        "total_logical_input": parent["input"] + sum(v["input"] for v in children.values()),
+        "total_logical_output": parent["output"] + sum(v["output"] for v in children.values()),
+    }, usage_events
+
+
+def _logical_tokens_from_spans(
+    run_dir: Path, agent_id: str
+) -> tuple[dict, list[dict]]:
     sessions: dict[str, dict] = defaultdict(
         lambda: {"input": 0, "output": 0, "turn_count": 0}
     )
@@ -316,18 +481,7 @@ def _logical_tokens(run_dir: Path, agent_id: str) -> tuple[dict, list[dict]]:
             request_latency_ms=span.get("duration_ms"),
         )
 
-    parent_key = f"agent:{agent_id}:main"
-    parent = dict(sessions.get(parent_key, {"input": 0, "output": 0, "turn_count": 0}))
-    parent["resumed_turns"] = max(0, parent["turn_count"] - 1)
-    children = {
-        key: dict(value) for key, value in sessions.items() if key != parent_key
-    }
-    return {
-        "parent": parent,
-        "children": children,
-        "total_logical_input": parent["input"] + sum(v["input"] for v in children.values()),
-        "total_logical_output": parent["output"] + sum(v["output"] for v in children.values()),
-    }, usage_events
+    return dict(sessions), usage_events
 
 
 def _serving_tokens(run_dir: Path) -> tuple[dict, list[dict]]:
@@ -369,12 +523,21 @@ def _active_intervals(run_dir: Path) -> list[dict]:
         if span.get("name") not in {"openclaw.model.usage", "openclaw.tool.call"}:
             continue
         attrs = span.get("attrs") or {}
-        if attrs.get("openclaw.span.source") == "raw_response_log":
+        duration_ms = float(span.get("duration_ms") or 0)
+        # OpenClaw also emits run-level aggregate model.usage spans whose
+        # interval covers the whole session. They are token summaries, not an
+        # in-flight request, and would classify every stuck diagnostic as
+        # legitimate activity. Per-request synthesized spans are authoritative.
+        if (
+            span.get("name") == "openclaw.model.usage"
+            and attrs.get("openclaw.span.source") != "raw_response_log"
+            and duration_ms > 300_000
+        ):
             continue
         start = _int(span.get("start_unix_nano"))
         end = _int(span.get("end_unix_nano"))
         if not end and start:
-            end = start + int(float(span.get("duration_ms") or 0) * 1e6)
+            end = start + int(duration_ms * 1e6)
         intervals.append({
             "start": start,
             "end": end,
@@ -412,7 +575,11 @@ def _runtime_observability(run_dir: Path, events: list[dict]) -> dict:
             interval["activity"]
             for interval in intervals
             if interval["start"] <= timestamp_ns <= interval["end"]
-            and (not session_key or interval["session_key"] == session_key)
+            and (
+                not session_key
+                or not interval["session_key"]
+                or interval["session_key"] == session_key
+            )
         })
         classification = "active_operation" if activity else "unresolved"
         event["concurrent_activity"] = activity
@@ -471,7 +638,10 @@ def build_openclaw_measurement(
         "serving_tokens": serving,
         "runtime_observability": runtime_observability,
         "sources": {
-            "trajectory_tokens": "session-attributed diagnostics OTel usage",
+            "trajectory_tokens": (
+                "deduplicated assistant usage in durable session transcripts; "
+                "session-attributed diagnostics OTel fallback"
+            ),
             "serving_tokens": "raw OpenAI-compatible HTTP responses",
         },
     }

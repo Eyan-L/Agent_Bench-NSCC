@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Dict, Optional, Tuple
 
 from agent_bench.benchmarks.conditions.openclaw_agent import OpenClawAgentCondition
+from agent_bench.deployments.containers.base import ContainerHandle
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,29 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         workspace_root: str,
     ) -> Optional[str]:
         """Capture tracked and agent-created untracked repository changes."""
-        del container_id, run_dir, workspace_root
+        del container_id, run_dir
+        task_container_id = str(env_info.get("task_container_id") or "")
+        task_container_name = str(
+            env_info.get("task_container_name") or task_container_id
+        )
+        if self.container is not None and task_container_id:
+            task_handle = ContainerHandle(
+                id=task_container_id,
+                name=task_container_name,
+                backend=str(
+                    env_info.get("backend") or self.container.backend_id
+                ),
+            )
+            try:
+                return self._collect_container_workspace_patch(
+                    task_handle, workspace_root
+                )
+            except Exception:  # noqa: BLE001 - retain host fallback
+                logger.exception(
+                    "Roadmap task-runtime patch extraction failed; "
+                    "trying host workspace"
+                )
+
         workspace = Path(str(env_info.get("workspace_host_path") or ""))
         if not workspace.is_dir():
             logger.warning(
@@ -62,13 +85,98 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             return ""
         return self._collect_workspace_patch(workspace)
 
+    def _collect_container_workspace_patch(
+        self, task_handle: ContainerHandle, workspace_root: str
+    ) -> str:
+        """Collect a patch inside the task runtime that owns the workspace."""
+        assert self.container is not None
+
+        def run(argv: list[str], *, workdir: Optional[str] = None):
+            return self.container.exec(
+                task_handle,
+                argv,
+                check=False,
+                timeout=120,
+                workdir=workdir,
+            )
+
+        root_result = run(
+            [
+                "git", "-c", f"safe.directory={workspace_root}",
+                "-C", workspace_root, "rev-parse", "--show-toplevel",
+            ]
+        )
+        if root_result.returncode != 0:
+            logger.warning(
+                "Roadmap task workspace is not a git repository: %s",
+                root_result.stderr.strip(),
+            )
+            return ""
+        repo_root = root_result.stdout.strip()
+
+        excludes = [
+            f":(exclude){name}" for name in sorted(_WORKSPACE_SCAFFOLD_FILES)
+        ]
+        tracked = run([
+            "git", "-c", f"safe.directory={repo_root}",
+            "-C", repo_root, "diff", "--binary", "HEAD",
+            "--", ".", *excludes,
+        ])
+        if tracked.returncode != 0:
+            logger.warning(
+                "Roadmap tracked patch extraction failed in task runtime: %s",
+                tracked.stderr.strip(),
+            )
+            return ""
+
+        untracked = run([
+            "git", "-c", f"safe.directory={repo_root}",
+            "-C", repo_root, "ls-files", "--others",
+            "--exclude-standard", "-z",
+        ])
+        if untracked.returncode != 0:
+            logger.warning(
+                "Roadmap untracked file enumeration failed in task runtime"
+            )
+            return tracked.stdout
+
+        patch_parts = [tracked.stdout]
+        for relative in untracked.stdout.split("\0"):
+            if not relative:
+                continue
+            if Path(relative).parts[0] in _WORKSPACE_SCAFFOLD_FILES:
+                continue
+            diff = run(
+                [
+                    "git", "-c", f"safe.directory={repo_root}",
+                    "diff", "--no-index", "--binary", "--",
+                    "/dev/null", relative,
+                ],
+                workdir=repo_root,
+            )
+            # git diff --no-index returns 1 when differences were found.
+            if diff.returncode in (0, 1):
+                patch_parts.append(diff.stdout)
+            else:
+                logger.warning(
+                    "Roadmap untracked patch extraction failed for %s: %s",
+                    relative,
+                    diff.stderr.strip(),
+                )
+
+        return "".join(part for part in patch_parts if part)
+
     @staticmethod
     def _collect_workspace_patch(workspace: Path) -> str:
-        root_result = subprocess.run(
-            ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            root_result = subprocess.run(
+                ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            logger.warning("Roadmap host patch extraction skipped: git not found")
+            return ""
         if root_result.returncode != 0:
             logger.warning(
                 "Roadmap workspace is not a git repository: %s",
