@@ -1024,6 +1024,81 @@ def test_roadmap_patch_extraction_uses_task_runtime_without_host_git(
     assert any("baseline-head" in call[1] for call in condition.container.calls)
 
 
+def test_roadmap_baseline_prefers_task_runtime_without_host_git(
+    tmp_path, monkeypatch
+):
+    baseline_head = "a" * 40
+    baseline_tree = "b" * 40
+
+    class RuntimeGitContainer:
+        backend_id = "singularity"
+
+        def __init__(self):
+            self.calls = []
+
+        def exec(self, handle, argv, **kwargs):
+            self.calls.append((handle, argv, kwargs))
+            if "rev-parse" in argv and "--show-toplevel" in argv:
+                stdout = "/app\n"
+            elif "rev-parse" in argv and "--verify" in argv:
+                stdout = baseline_head + "\n"
+            elif "rev-parse" in argv and "HEAD^{tree}" in argv:
+                stdout = baseline_tree + "\n"
+            elif "status" in argv:
+                stdout = ""
+            elif "ls-files" in argv:
+                stdout = ""
+            elif "diff" in argv:
+                stdout = "diff --git a/tracked.txt b/tracked.txt\n+change\n"
+            else:
+                raise AssertionError(f"unexpected runtime Git command: {argv}")
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+    condition = object.__new__(RoadmapBenchOpenClawCondition)
+    condition.container = RuntimeGitContainer()
+    host_workspace = tmp_path / "workspace"
+    host_workspace.mkdir()
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent."
+        "subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError()),
+    )
+    env_info = {
+        "backend": "singularity",
+        "task_container_id": "task-runtime",
+        "task_container_name": "task-runtime",
+        "workspace_host_path": str(host_workspace),
+    }
+
+    def fake_agent_run(
+        _self, _instance_data, _run_dir, _seed, _workspace_root,
+        _container_id, runtime_env,
+    ):
+        return runtime_env["roadmap_workspace_baseline"]
+
+    monkeypatch.setattr(OpenClawAgentCondition, "run", fake_agent_run)
+    baseline = condition.run(
+        {}, tmp_path, 42, "/app", "openclaw-runtime", env_info
+    )
+    assert baseline == {
+        "git_head": baseline_head,
+        "git_tree": baseline_tree,
+        "clean": True,
+        "status": [],
+    }
+    assert env_info["roadmap_workspace_baseline"] == baseline
+
+    patch = condition._collect_artifacts(
+        "openclaw-runtime", env_info, tmp_path, "/app"
+    )
+
+    assert "tracked.txt" in patch
+    diff_calls = [call for call in condition.container.calls if "diff" in call[1]]
+    assert diff_calls
+    assert all(baseline_head in call[1] for call in diff_calls)
+    assert all(call[0].id == "task-runtime" for call in condition.container.calls)
+
+
 def test_roadmap_host_patch_extraction_missing_git_is_nonfatal(
     tmp_path, monkeypatch
 ):

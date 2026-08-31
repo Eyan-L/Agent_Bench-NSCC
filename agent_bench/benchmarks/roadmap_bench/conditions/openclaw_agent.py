@@ -50,7 +50,11 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     ) -> Dict:
         runtime_env = env_info if env_info is not None else {}
         workspace = Path(str(runtime_env.get("workspace_host_path") or ""))
-        baseline = self._capture_host_workspace_baseline(workspace)
+        baseline = self._capture_task_workspace_baseline(
+            runtime_env, workspace_root
+        )
+        if not baseline:
+            baseline = self._capture_host_workspace_baseline(workspace)
         if not baseline:
             raise RuntimeError(
                 "Roadmap workspace Git baseline could not be captured before "
@@ -65,6 +69,65 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             container_id,
             runtime_env,
         )
+
+    def _capture_task_workspace_baseline(
+        self, env_info: Dict, workspace_root: str
+    ) -> Optional[Dict]:
+        """Capture the initial Git reference in the task runtime when available."""
+        task_container_id = str(env_info.get("task_container_id") or "")
+        if self.container is None or not task_container_id:
+            return None
+        task_handle = ContainerHandle(
+            id=task_container_id,
+            name=str(env_info.get("task_container_name") or task_container_id),
+            backend=str(env_info.get("backend") or self.container.backend_id),
+        )
+        excludes = [
+            f":(exclude){name}" for name in sorted(_WORKSPACE_SCAFFOLD_FILES)
+        ] + [
+            f":(exclude){name}/**" for name in sorted(_WORKSPACE_SCAFFOLD_DIRS)
+        ]
+
+        def run(argv: list[str]):
+            return self.container.exec(
+                task_handle,
+                argv,
+                check=False,
+                timeout=120,
+            )
+
+        git = ["git", "-c", f"safe.directory={workspace_root}"]
+        try:
+            root = run([
+                *git, "-C", workspace_root, "rev-parse", "--show-toplevel",
+            ])
+            head = run([
+                *git, "-C", workspace_root, "rev-parse", "--verify", "HEAD",
+            ])
+            tree = run([
+                *git, "-C", workspace_root, "rev-parse", "HEAD^{tree}",
+            ])
+            status = run([
+                *git, "-C", workspace_root, "status", "--porcelain=v1",
+                "--untracked-files=all", "--", ".", *excludes,
+            ])
+        except Exception:  # noqa: BLE001 - host Git remains a valid fallback
+            logger.exception(
+                "Roadmap task-runtime baseline capture failed; trying host Git"
+            )
+            return None
+        if any(result.returncode != 0 for result in (root, head, tree, status)):
+            logger.warning(
+                "Roadmap task-runtime baseline capture returned a Git error; "
+                "trying host Git"
+            )
+            return None
+        return {
+            "git_head": head.stdout.strip(),
+            "git_tree": tree.stdout.strip(),
+            "clean": not bool(status.stdout.strip()),
+            "status": status.stdout.splitlines(),
+        }
 
     @staticmethod
     def _capture_host_workspace_baseline(workspace: Path) -> Optional[Dict]:
