@@ -672,6 +672,11 @@ def _runtime_observability(run_dir: Path, events: list[dict]) -> dict:
         for event in [*announce_timeouts, *announces]
         if event.get("latency_ms") is not None
     ]
+    unattributed_timeouts = sum(
+        not event.get("child_session_key")
+        and not event.get("announce_run_id")
+        for event in announce_timeouts
+    )
     return {
         "announce_attempt_count": len(announce_timeouts) + len(announces),
         "announce_timeout_count": len(announce_timeouts),
@@ -681,6 +686,15 @@ def _runtime_observability(run_dir: Path, events: list[dict]) -> dict:
         "announce_success_count": len(announces),
         "announce_latency_ms": announce_latencies,
         "announce_by_child": announce_groups,
+        "announce_attribution": {
+            "unattributed_timeout_count": unattributed_timeouts,
+            "identity_source": "explicit gateway log fields only",
+            "limitation": (
+                "OpenClaw v2026.4.22 retry warnings omit childSessionKey "
+                "and announce runId; Agent_Bench does not infer identity "
+                "from timing."
+            ),
+        },
         "stuck_session_count": len(stuck_events),
         "stuck_session_by_session": dict(stuck_by_session),
         "stuck_session_classification": dict(classifications),

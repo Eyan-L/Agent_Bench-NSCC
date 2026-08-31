@@ -398,6 +398,23 @@ class OpenClawAgentCondition:
         ) or ""
         patch_path = run_dir / "candidate.patch"
         patch_path.write_text(patch_text)
+        if self.agent_id == "roadmap_bench":
+            try:
+                from agent_bench.benchmarks.conditions.openclaw_measurement import (
+                    append_trajectory_event,
+                )
+
+                append_trajectory_event(
+                    run_dir,
+                    "candidate_freeze",
+                    patch_path=str(patch_path),
+                    patch_bytes=patch_path.stat().st_size,
+                    workspace_baseline=self._env_info.get(
+                        "roadmap_workspace_baseline"
+                    ),
+                )
+            except Exception:
+                logger.exception("trajectory candidate freeze event write failed")
 
         return {
             "step_trace_path": str(step_trace_path),

@@ -39,6 +39,70 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     prompt_error_grace_seconds = 600.0
     _ACTIVE_CHILD_STATES = frozenset({"accepted", "queued", "pending", "running"})
 
+    def run(
+        self,
+        instance_data: Dict,
+        run_dir: Path,
+        seed: int,
+        workspace_root: str,
+        container_id: Optional[str],
+        env_info: Optional[Dict] = None,
+    ) -> Dict:
+        runtime_env = env_info if env_info is not None else {}
+        workspace = Path(str(runtime_env.get("workspace_host_path") or ""))
+        baseline = self._capture_host_workspace_baseline(workspace)
+        if not baseline:
+            raise RuntimeError(
+                "Roadmap workspace Git baseline could not be captured before "
+                "agent execution"
+            )
+        runtime_env["roadmap_workspace_baseline"] = baseline
+        return super().run(
+            instance_data,
+            run_dir,
+            seed,
+            workspace_root,
+            container_id,
+            runtime_env,
+        )
+
+    @staticmethod
+    def _capture_host_workspace_baseline(workspace: Path) -> Optional[Dict]:
+        """Capture the immutable Git reference before the agent can edit."""
+        if not workspace.is_dir():
+            return None
+        excludes = [
+            f":(exclude){name}" for name in sorted(_WORKSPACE_SCAFFOLD_FILES)
+        ] + [
+            f":(exclude){name}/**" for name in sorted(_WORKSPACE_SCAFFOLD_DIRS)
+        ]
+
+        def run(argv: list[str], *, text: bool = True):
+            return subprocess.run(
+                ["git", "-C", str(workspace), *argv],
+                capture_output=True,
+                text=text,
+            )
+
+        try:
+            root = run(["rev-parse", "--show-toplevel"])
+            head = run(["rev-parse", "--verify", "HEAD"])
+            tree = run(["rev-parse", "HEAD^{tree}"])
+            status = run([
+                "status", "--porcelain=v1", "--untracked-files=all",
+                "--", ".", *excludes,
+            ])
+        except FileNotFoundError:
+            return None
+        if any(result.returncode != 0 for result in (root, head, tree, status)):
+            return None
+        return {
+            "git_head": head.stdout.strip(),
+            "git_tree": tree.stdout.strip(),
+            "clean": not bool(status.stdout.strip()),
+            "status": status.stdout.splitlines(),
+        }
+
     def _build_message(self, instance_data: Dict) -> str:
         return (
             "Lead the implementation of this multi-target software roadmap in "
@@ -59,6 +123,10 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     ) -> Optional[str]:
         """Capture tracked and agent-created untracked repository changes."""
         del container_id, run_dir
+        baseline = env_info.get("roadmap_workspace_baseline") or {}
+        baseline_head = str(baseline.get("git_head") or "")
+        if not baseline_head:
+            raise RuntimeError("Roadmap workspace baseline HEAD is missing")
         task_container_id = str(env_info.get("task_container_id") or "")
         task_container_name = str(
             env_info.get("task_container_name") or task_container_id
@@ -73,7 +141,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             )
             try:
                 return self._collect_container_workspace_patch(
-                    task_handle, workspace_root
+                    task_handle, workspace_root, baseline_head
                 )
             except Exception:  # noqa: BLE001 - retain host fallback
                 logger.exception(
@@ -88,10 +156,13 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 workspace,
             )
             return ""
-        return self._collect_workspace_patch(workspace)
+        return self._collect_workspace_patch(workspace, baseline_head)
 
     def _collect_container_workspace_patch(
-        self, task_handle: ContainerHandle, workspace_root: str
+        self,
+        task_handle: ContainerHandle,
+        workspace_root: str,
+        baseline_head: str = "HEAD",
     ) -> str:
         """Collect a patch inside the task runtime that owns the workspace."""
         assert self.container is not None
@@ -126,7 +197,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         ]
         tracked = run([
             "git", "-c", f"safe.directory={repo_root}",
-            "-C", repo_root, "diff", "--binary", "HEAD",
+            "-C", repo_root, "diff", "--binary", baseline_head,
             "--", ".", *excludes,
         ])
         if tracked.returncode != 0:
@@ -178,7 +249,9 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         return "".join(part for part in patch_parts if part)
 
     @staticmethod
-    def _collect_workspace_patch(workspace: Path) -> str:
+    def _collect_workspace_patch(
+        workspace: Path, baseline_head: str = "HEAD"
+    ) -> str:
         try:
             root_result = subprocess.run(
                 ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
@@ -213,7 +286,8 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         ]
         tracked = subprocess.run(
             [
-                "git", "-C", str(repo_root), "diff", "--binary", "HEAD",
+                "git", "-C", str(repo_root), "diff", "--binary",
+                baseline_head,
                 "--", ".", *excludes,
             ],
             capture_output=True,

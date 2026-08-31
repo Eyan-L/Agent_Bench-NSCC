@@ -855,46 +855,80 @@ def test_roadmap_candidate_patch_freezes_agent_terminal_workspace(
         ["git", "-C", str(workspace), "config", "user.name", "Test"],
         check=True,
     )
-    tracked = workspace / "tracked.txt"
-    tracked.write_text("baseline\n")
+    committed_a = workspace / "committed-a.txt"
+    post_commit_c = workspace / "post-commit-c.txt"
+    staged = workspace / "staged.txt"
+    committed_a.write_text("baseline a\n")
+    post_commit_c.write_text("baseline c\n")
+    staged.write_text("baseline staged\n")
     subprocess.run(
-        ["git", "-C", str(workspace), "add", "tracked.txt"], check=True
+        ["git", "-C", str(workspace), "add", "."], check=True
     )
     subprocess.run(
         ["git", "-C", str(workspace), "commit", "-qm", "baseline"],
         check=True,
     )
-
-    tracked.write_text("staged change\n")
-    subprocess.run(
-        ["git", "-C", str(workspace), "add", "tracked.txt"], check=True
-    )
-    tracked.write_text("staged and unstaged change\n")
-    (workspace / "created.txt").write_text("agent-created\n")
+    # Runtime prompt/state materialization happens before the condition takes
+    # its baseline, but these paths are not solution dirt.
     (workspace / "AGENTS.md").write_text("injected scaffold\n")
+    (workspace / "BOOTSTRAP.md").write_text("injected bootstrap\n")
     (workspace / ".openclaw").mkdir()
     (workspace / ".openclaw" / "workspace-state.json").write_text(
         '{"runtime": "metadata"}\n'
     )
+    baseline = RoadmapBenchOpenClawCondition._capture_host_workspace_baseline(
+        workspace
+    )
+    assert baseline is not None
+    assert baseline["clean"] is True
+
+    # Agent commits its first batch, including files that must never become
+    # candidate content even when `git add -A` captures them.
+    committed_a.write_text("committed a\n")
+    (workspace / "committed-b.txt").write_text("committed b\n")
+    subprocess.run(
+        ["git", "-C", str(workspace), "add", "-A"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(workspace), "commit", "-qm", "agent commit"],
+        check=True,
+    )
+
+    # Final frozen workspace also has post-commit, staged, unstaged and
+    # untracked changes.
+    post_commit_c.write_text("post-commit c\n")
+    staged.write_text("staged version\n")
+    subprocess.run(
+        ["git", "-C", str(workspace), "add", "staged.txt"], check=True
+    )
+    staged.write_text("final unstaged version\n")
+    (workspace / "untracked-d.txt").write_text("untracked d\n")
 
     # Freeze the candidate before the verifier gets access to the workspace.
-    assert tracked.read_text() == "staged and unstaged change\n"
-    assert (workspace / "created.txt").read_text() == "agent-created\n"
-    patch = RoadmapBenchOpenClawCondition._collect_workspace_patch(workspace)
+    patch = RoadmapBenchOpenClawCondition._collect_workspace_patch(
+        workspace, baseline["git_head"]
+    )
 
     candidate = tmp_path / "candidate.patch"
     candidate.write_text(patch)
     assert candidate.stat().st_size > 0
-    assert "tracked.txt" in patch
-    assert "staged and unstaged change" in patch
-    assert "created.txt" in patch
-    assert "agent-created" in patch
+    assert "committed-a.txt" in patch
+    assert "committed a" in patch
+    assert "committed-b.txt" in patch
+    assert "committed b" in patch
+    assert "post-commit-c.txt" in patch
+    assert "post-commit c" in patch
+    assert "staged.txt" in patch
+    assert "final unstaged version" in patch
+    assert "untracked-d.txt" in patch
+    assert "untracked d" in patch
     assert "AGENTS.md" not in patch
+    assert "BOOTSTRAP.md" not in patch
     assert ".openclaw" not in patch
     assert "workspace-state.json" not in patch
 
     frozen = candidate.read_text()
-    tracked.write_text("verifier mutation\n")
+    committed_a.write_text("verifier mutation\n")
     (workspace / "verifier-created.txt").write_text("not agent output\n")
     assert candidate.read_text() == frozen
     assert "verifier mutation" not in frozen
@@ -911,14 +945,22 @@ def test_roadmap_candidate_patch_freezes_agent_terminal_workspace(
         ["git", "clone", "-q", str(workspace), str(clean)], check=True
     )
     subprocess.run(
-        ["git", "-C", str(clean), "reset", "--hard", "HEAD"],
+        ["git", "-C", str(clean), "reset", "--hard", baseline["git_head"]],
         check=True,
         capture_output=True,
     )
     subprocess.run(
-        ["git", "-C", str(clean), "apply", "--check", str(candidate)],
+        ["git", "-C", str(clean), "apply", str(candidate)],
         check=True,
     )
+    assert (clean / "committed-a.txt").read_text() == "committed a\n"
+    assert (clean / "committed-b.txt").read_text() == "committed b\n"
+    assert (clean / "post-commit-c.txt").read_text() == "post-commit c\n"
+    assert (clean / "staged.txt").read_text() == "final unstaged version\n"
+    assert (clean / "untracked-d.txt").read_text() == "untracked d\n"
+    assert not (clean / "AGENTS.md").exists()
+    assert not (clean / "BOOTSTRAP.md").exists()
+    assert not (clean / ".openclaw").exists()
 
 
 def test_roadmap_patch_extraction_uses_task_runtime_without_host_git(
@@ -969,6 +1011,7 @@ def test_roadmap_patch_extraction_uses_task_runtime_without_host_git(
             "task_container_id": "task-runtime",
             "task_container_name": "task-runtime",
             "workspace_host_path": str(host_workspace),
+            "roadmap_workspace_baseline": {"git_head": "baseline-head"},
         },
         tmp_path,
         "/app",
@@ -978,6 +1021,7 @@ def test_roadmap_patch_extraction_uses_task_runtime_without_host_git(
     assert "agent-created" in patch
     assert "AGENTS.md" not in patch
     assert all(call[0].id == "task-runtime" for call in condition.container.calls)
+    assert any("baseline-head" in call[1] for call in condition.container.calls)
 
 
 def test_roadmap_host_patch_extraction_missing_git_is_nonfatal(

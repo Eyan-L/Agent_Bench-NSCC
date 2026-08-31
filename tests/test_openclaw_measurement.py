@@ -126,6 +126,12 @@ def test_openclaw_measurement_captures_trajectory_and_both_token_layers(tmp_path
     assert observability["announce_retry_count"] == 1
     assert observability["announce_success_count"] == 1
     assert observability["announce_latency_ms"] == [120000, 57]
+    assert observability["announce_attribution"][
+        "unattributed_timeout_count"
+    ] == 1
+    assert "does not infer identity" in observability[
+        "announce_attribution"
+    ]["limitation"]
     assert observability["stuck_session_count"] == 1
     assert observability["stuck_session_classification"] == {
         "active_operation": 1
@@ -254,6 +260,9 @@ def test_announce_attempts_aggregate_across_children(tmp_path):
     assert observability["announce_timeout_count"] == 2
     assert observability["announce_retry_count"] == 2
     assert observability["announce_success_count"] == 2
+    assert observability["announce_attribution"][
+        "unattributed_timeout_count"
+    ] == 0
     assert observability["announce_by_child"][child_a] == {
         "child_session_key": child_a,
         "announce_run_ids": [run_a],
