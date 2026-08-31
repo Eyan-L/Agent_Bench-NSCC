@@ -1,0 +1,74 @@
+{
+  "_doc": "RoadmapBench formal subset10b split from fixed subset20.",
+  "sweep_name": "roadmapbench_subset10b",
+  "plan_version": "roadmapbench-59184e779909-subset10b",
+  "application": "terminal_bench",
+  "source_dataset": "UnipatAI/RoadmapBench",
+  "source_commit": "59184e779909300a5a0150b06b945d39da81a099",
+  "source_dataset_task_count": 115,
+  "tasks_root": "/scratch/users/ntu/n2602695/datasets/roadmapbench-59184e779909-subagent-subset20",
+  "instances": [
+    "pyg-2.1.0-roadmap",
+    "pyg-2.6.0-roadmap",
+    "fbr-2.27.0-roadmap",
+    "fyn-2.4.0-roadmap",
+    "plr-1.0.0-roadmap",
+    "mko-4.0.0-roadmap",
+    "mko-6.4.0-roadmap",
+    "fbr-2.43.0-roadmap",
+    "glz-6.1.0-roadmap",
+    "glz-7.0.0-roadmap"
+  ],
+  "repo_mapping": {
+    "pyg-2.1.0-roadmap": {
+      "repo_id": "roadmapbench/pyg-2.1.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "pyg-2.6.0-roadmap": {
+      "repo_id": "roadmapbench/pyg-2.6.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "fbr-2.27.0-roadmap": {
+      "repo_id": "roadmapbench/fbr-2.27.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "fyn-2.4.0-roadmap": {
+      "repo_id": "roadmapbench/fyn-2.4.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "plr-1.0.0-roadmap": {
+      "repo_id": "roadmapbench/plr-1.0.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "mko-4.0.0-roadmap": {
+      "repo_id": "roadmapbench/mko-4.0.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "mko-6.4.0-roadmap": {
+      "repo_id": "roadmapbench/mko-6.4.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "fbr-2.43.0-roadmap": {
+      "repo_id": "roadmapbench/fbr-2.43.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "glz-6.1.0-roadmap": {
+      "repo_id": "roadmapbench/glz-6.1.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "glz-7.0.0-roadmap": {
+      "repo_id": "roadmapbench/glz-7.0.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 7200,
+  "output_dir": "roadmapbench_subset10b",
+  "seeds": [
+    42
+  ],
+  "selection": {
+    "method": "manual fixed high-fanout RoadmapBench subset",
+    "rationale": "Tasks were selected before the formal paired comparison for multiple largely independent roadmap targets across modules. The same fixed 20 tasks are used for both subagent-enabled and single-agent arms."
+  }
+}
