@@ -1,0 +1,14 @@
+{
+  "_doc": "Qwen3.6-35B-A3B with YaRN factor 2 for 524288 context.",
+  "model": {
+    "config_id": "qwen36_35b_a3b_512k",
+    "name": "/scratch/users/ntu/n2602695/models/Qwen3.6-35B-A3B-512K",
+    "provider": "custom",
+    "api_key": "EMPTY",
+    "temperature": 0.0,
+    "max_tokens": 32768,
+    "context_window": 524288,
+    "tool_call_parser": "qwen3_coder",
+    "reasoning_parser": "qwen3"
+  }
+}
