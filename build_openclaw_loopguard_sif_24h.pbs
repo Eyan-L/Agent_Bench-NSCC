@@ -35,8 +35,8 @@ LOOPGUARD_BASE_COMMIT="4e7406be4311011bb7f7160104c6eebbb0333ca2"
 
 [[ -f "$BASE_SIF" ]] || { echo "ERROR: missing base SIF: $BASE_SIF" >&2; exit 1; }
 [[ -f "$VALIDATED_SIF" ]] || { echo "ERROR: missing validated SIF: $VALIDATED_SIF" >&2; exit 1; }
-[[ -x agent_bench/deployments/pbs/build_oc_sif.sh ]] || {
-    echo "ERROR: build_oc_sif.sh missing or not executable under $REPO_ROOT" >&2
+[[ -f agent_bench/deployments/pbs/build_oc_sif.sh ]] || {
+    echo "ERROR: build_oc_sif.sh missing under $REPO_ROOT" >&2
     exit 1
 }
 
