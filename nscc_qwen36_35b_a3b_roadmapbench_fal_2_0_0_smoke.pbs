@@ -27,6 +27,9 @@ cd "${PBS_O_WORKDIR:-$PWD}"
 export AB_SERVING_BASE_URL=http://127.0.0.1:30000/v1
 export AB_SERVING_API_KEY=EMPTY
 unset AB_TB_FORCE_ONE_SUBAGENT
+# This smoke validates the current OpenClaw patch set against the real pinned
+# v2026.4.22 runtime bundle. Rebuild once here; formal subset jobs reuse it.
+export AB_AGENT_RUNTIME_REBUILD=1
 export AB_PBS_SITE=NSCC
 if [[ -z "${AB_RUN_STAMP:-}" ]]; then
     AB_RUN_STAMP="$(TZ=Asia/Singapore date +%Y-%m-%d_%H-%M-%S)"
