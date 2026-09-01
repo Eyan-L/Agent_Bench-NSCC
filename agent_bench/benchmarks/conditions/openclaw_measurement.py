@@ -339,6 +339,13 @@ def _gateway_events(run_dir: Path) -> list[dict]:
             fields["age_seconds"] = _int(age.group(1)) if age else None
         elif "context-overflow-diag" in lowered:
             event_type = "context_overflow"
+        elif "compaction_loop_persisted" in lowered:
+            event_type = "loop_detected"
+            fields["detector"] = "compaction_loop_persisted"
+            tool = re.search(r"\btool=([^\s]+)", text)
+            count = re.search(r"\bcount=(\d+)", text)
+            fields["tool_name"] = tool.group(1) if tool else None
+            fields["count"] = _int(count.group(1)) if count else None
         elif "compaction" in lowered:
             event_type = "compaction"
         if event_type:
@@ -609,11 +616,30 @@ def _active_intervals(run_dir: Path) -> list[dict]:
     return intervals
 
 
+def _loop_termination(events: list[dict]) -> dict:
+    loop_events = [
+        event for event in events if event.get("event_type") == "loop_detected"
+    ]
+    if not loop_events:
+        return {}
+    terminal = loop_events[-1]
+    detector = str(terminal.get("detector") or "compaction_loop_persisted")
+    return {
+        "termination_reason": detector,
+        "loop_detector": detector,
+        "loop_tool": terminal.get("tool_name"),
+        "loop_count": terminal.get("count"),
+    }
+
+
 def _runtime_observability(run_dir: Path, events: list[dict]) -> dict:
     announce_timeouts = [
         event for event in events if event["event_type"] == "announce_timeout"
     ]
     announces = [event for event in events if event["event_type"] == "announce"]
+    loop_events = [
+        event for event in events if event.get("event_type") == "loop_detected"
+    ]
     announce_groups: dict[str, dict] = {}
     for event in [*announce_timeouts, *announces]:
         group_key = str(
@@ -695,6 +721,16 @@ def _runtime_observability(run_dir: Path, events: list[dict]) -> dict:
                 "from timing."
             ),
         },
+        "loop_detection_count": len(loop_events),
+        "loop_detections": [
+            {
+                "timestamp": event.get("timestamp"),
+                "detector": event.get("detector"),
+                "tool_name": event.get("tool_name"),
+                "count": event.get("count"),
+            }
+            for event in loop_events
+        ],
         "stuck_session_count": len(stuck_events),
         "stuck_session_by_session": dict(stuck_by_session),
         "stuck_session_classification": dict(classifications),
@@ -721,6 +757,7 @@ def build_openclaw_measurement(
     events.extend(usage_events)
     events.extend(request_events)
     runtime_observability = _runtime_observability(run_dir, events)
+    termination = _loop_termination(events)
     events.sort(key=lambda event: (event.get("timestamp_ns") or 0, event["event_type"]))
 
     trajectory_path = run_dir / "trajectory.jsonl"
@@ -744,12 +781,14 @@ def build_openclaw_measurement(
     accounting_path.write_text(json.dumps(accounting, indent=2))
     observability_path = run_dir / "runtime_observability.json"
     observability_path.write_text(json.dumps(runtime_observability, indent=2))
-    return {
+    result = {
         **accounting,
         "trajectory_path": str(trajectory_path),
         "token_accounting_path": str(accounting_path),
         "runtime_observability_path": str(observability_path),
     }
+    result.update(termination)
+    return result
 
 
 def append_trajectory_event(run_dir: Path, event_type: str, **fields: Any) -> None:
