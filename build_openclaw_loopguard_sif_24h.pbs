@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Build the current Agent_Bench-patched OpenClaw v2026.4.22 runtime as a
+# separate candidate SIF. This job never overwrites the validated production
+# openclaw_2026.4.22_patched.sif.
+#
+# Submit from the Agent_Bench repo root:
+#   qsub build_openclaw_loopguard_sif_24h.pbs
+#
+# Candidate output:
+#   $SCRATCH/sif_images/openclaw_2026.4.22_patched_loopguard.sif
+
+#PBS -N build-oc-loopguard
+#PBS -P personal-n2602695
+#PBS -l select=1:ncpus=8:mem=32gb
+#PBS -l walltime=24:00:00
+#PBS -j oe
+
+set -euo pipefail
+
+module load singularity/4.3.1 2>/dev/null || module load apptainer/1.5.0
+
+export SCRATCH=/scratch/users/ntu/$USER
+export SINGULARITY_CACHEDIR="$SCRATCH/.sing_cache"
+export SINGULARITY_TMPDIR="$SCRATCH/.sing_tmp"
+export SINGULARITY_BINDPATH="$SCRATCH:$SCRATCH"
+
+REPO_ROOT="${PBS_O_WORKDIR:-$HOME/Agent_Bench}"
+cd "$REPO_ROOT"
+
+BASE_SIF="$SCRATCH/sif_images/openclaw_2026.4.22.sif"
+VALIDATED_SIF="$SCRATCH/sif_images/openclaw_2026.4.22_patched.sif"
+NEW_SIF="$SCRATCH/sif_images/openclaw_2026.4.22_patched_loopguard.sif"
+BUILD_INFO="${NEW_SIF}.build-info.txt"
+LOOPGUARD_BASE_COMMIT="4e7406be4311011bb7f7160104c6eebbb0333ca2"
+
+[[ -f "$BASE_SIF" ]] || { echo "ERROR: missing base SIF: $BASE_SIF" >&2; exit 1; }
+[[ -f "$VALIDATED_SIF" ]] || { echo "ERROR: missing validated SIF: $VALIDATED_SIF" >&2; exit 1; }
+[[ -x agent_bench/deployments/pbs/build_oc_sif.sh ]] || {
+    echo "ERROR: build_oc_sif.sh missing or not executable under $REPO_ROOT" >&2
+    exit 1
+}
+
+# Make sure this checkout contains the new post-compaction guard patch series.
+git merge-base --is-ancestor "$LOOPGUARD_BASE_COMMIT" HEAD || {
+    echo "ERROR: checkout does not contain loop-guard commit $LOOPGUARD_BASE_COMMIT" >&2
+    echo "Current HEAD: $(git rev-parse HEAD)" >&2
+    exit 1
+}
+
+mkdir -p "$SCRATCH/sif_images" "$SINGULARITY_CACHEDIR" "$SINGULARITY_TMPDIR"
+
+{
+    echo "started_utc=$(date -u +%FT%TZ)"
+    echo "pbs_jobid=${PBS_JOBID:-unknown}"
+    echo "host=$(hostname)"
+    echo "repo_root=$REPO_ROOT"
+    echo "git_head=$(git rev-parse HEAD)"
+    echo "git_describe=$(git describe --always --dirty 2>/dev/null || true)"
+    echo "base_sif=$BASE_SIF"
+    echo "validated_sif=$VALIDATED_SIF"
+    echo "candidate_sif=$NEW_SIF"
+} > "$BUILD_INFO"
+
+printf '%s\n' \
+    "=== OpenClaw candidate SIF build ===" \
+    "repo HEAD : $(git rev-parse --short=12 HEAD)" \
+    "base      : $BASE_SIF" \
+    "validated : $VALIDATED_SIF  (WILL NOT BE MODIFIED)" \
+    "candidate : $NEW_SIF" \
+    "started   : $(date)"
+
+bash agent_bench/deployments/pbs/build_oc_sif.sh \
+    --base "$BASE_SIF" \
+    --out "$NEW_SIF" \
+    --repo-root "$REPO_ROOT" \
+    --inside-pkg /app
+
+echo "=== Candidate smoke ==="
+singularity inspect "$NEW_SIF" >/dev/null
+echo "SIF inspect: OK"
+
+singularity exec "$NEW_SIF" bash -lc '
+    set -e
+    echo "Node: $(node --version)"
+    echo "OpenClaw: $(openclaw --version)"
+    openclaw gateway --help >/dev/null
+    echo "gateway: OK"
+'
+
+echo "=== Patch status ==="
+singularity exec \
+    --bind "$REPO_ROOT/agent_bench/harnesses/openclaw:/oc-harness:ro" \
+    "$NEW_SIF" \
+    bash -lc '
+        set -e
+        export AB_HARNESS_OPENCLAW_SOURCE_ROOT=/app
+        export AB_HARNESS_OPENCLAW_PATCH_MODE=baked
+        python3 /oc-harness/apply_patch.py status
+    '
+
+{
+    echo "finished_utc=$(date -u +%FT%TZ)"
+    echo "candidate_size_bytes=$(stat -c %s "$NEW_SIF")"
+    echo "candidate_sha256=$(sha256sum "$NEW_SIF" | awk '{print $1}')"
+} >> "$BUILD_INFO"
+
+echo "=== RESULT ==="
+echo "NEW OPENCLAW CANDIDATE SIF: PASS"
+ls -lh "$VALIDATED_SIF" "$NEW_SIF"
+echo "build info: $BUILD_INFO"
+echo "Validated runtime remains untouched: $VALIDATED_SIF"
