@@ -256,13 +256,12 @@ def _transform_post_compaction_runner(text: str) -> tuple[str, bool]:
         f"{indent}const __abPostCompactionGuardKey = `${{params.runId ?? \"\"}}:${{params.sessionId ?? \"\"}}`;\n"
         f"{indent}const __abPostCompactionGuards = globalThis.__AB_HARNESS_POST_COMPACTION_GUARDS ?? "
         f"(globalThis.__AB_HARNESS_POST_COMPACTION_GUARDS = new Map());\n"
-        f"{indent}const __abPostCompactionAbortController = new AbortController();\n"
         f"{indent}const __abPostCompactionGuard = {{\n"
         f"{child}enabled: params.config?.tools?.loopDetection?.enabled !== false,\n"
         f"{child}windowSize: 3,\n"
         f"{child}remainingAttempts: 0,\n"
         f"{child}history: [],\n"
-        f"{child}abortController: __abPostCompactionAbortController,\n"
+        f"{child}abortController: void 0,\n"
         f"{child}abortError: void 0\n"
         f"{indent}}};\n"
         f"{indent}const __abArmPostCompactionGuard = () => {{\n"
@@ -273,12 +272,6 @@ def _transform_post_compaction_runner(text: str) -> tuple[str, bool]:
         f"{child}__abPostCompactionGuards.set(__abPostCompactionGuardKey, __abPostCompactionGuard);\n"
         f"{child}log.info(`[post-compaction-guard] armed for ${{__abPostCompactionGuard.windowSize}} tool outcomes`);\n"
         f"{indent}}};\n"
-        f"{indent}if (params.abortSignal) {{\n"
-        f"{child}const __abRelayParentAbort = () => "
-        f"__abPostCompactionAbortController.abort(params.abortSignal?.reason);\n"
-        f"{child}if (params.abortSignal.aborted) __abRelayParentAbort();\n"
-        f"{child}else params.abortSignal.addEventListener(\"abort\", __abRelayParentAbort, {{ once: true }});\n"
-        f"{indent}}}\n"
         f"{indent}/* AB_HARNESS_OPENCLAW_PATCH_POST_COMPACTION_LOOP_GUARD_RUNNER_END */"
     )
     insert_at = state_match.end()
@@ -287,6 +280,21 @@ def _transform_post_compaction_runner(text: str) -> tuple[str, bool]:
     call_idx = text.find("runEmbeddedAttemptWithBackend({", insert_at)
     if call_idx < 0:
         raise ValueError("runner anchor runEmbeddedAttemptWithBackend({ not found")
+    attempt_indent = _line_indent(text, call_idx)
+    attempt_child = attempt_indent + "\t"
+    call_line_start = text.rfind("\n", 0, call_idx) + 1
+    attempt_prelude = (
+        f"{attempt_indent}const __abPostCompactionAbortController = new AbortController();\n"
+        f"{attempt_indent}__abPostCompactionGuard.abortController = __abPostCompactionAbortController;\n"
+        f"{attempt_indent}const __abParentAbortSignal = params.abortSignal;\n"
+        f"{attempt_indent}const __abRelayParentAbort = () => "
+        f"__abPostCompactionAbortController.abort(__abParentAbortSignal?.reason);\n"
+        f"{attempt_indent}if (__abParentAbortSignal?.aborted) __abRelayParentAbort();\n"
+        f"{attempt_indent}else __abParentAbortSignal?.addEventListener(\"abort\", __abRelayParentAbort, {{ once: true }});\n"
+    )
+    text = text[:call_line_start] + attempt_prelude + text[call_line_start:]
+
+    call_idx = text.find("runEmbeddedAttemptWithBackend({", call_line_start + len(attempt_prelude))
     abort_idx = text.find("abortSignal: params.abortSignal,", call_idx)
     if abort_idx < 0 or abort_idx - call_idx > 40000:
         raise ValueError("runner abortSignal anchor not found near embedded attempt")
@@ -294,6 +302,29 @@ def _transform_post_compaction_runner(text: str) -> tuple[str, bool]:
         text[:abort_idx]
         + "abortSignal: __abPostCompactionAbortController.signal,"
         + text[abort_idx + len("abortSignal: params.abortSignal,") :]
+    )
+
+    call_close = f"{attempt_indent}}});"
+    call_close_idx = text.find(call_close, abort_idx)
+    if call_close_idx < 0 or call_close_idx - abort_idx > 40000:
+        raise ValueError("runner attempt closing anchor not found after abortSignal")
+    attempt_postlude = (
+        f"{attempt_indent}}}).catch((__abErr) => {{\n"
+        f"{attempt_child}throw __abPostCompactionGuard.abortError ?? __abErr;\n"
+        f"{attempt_indent}}}).finally(() => {{\n"
+        f"{attempt_child}__abParentAbortSignal?.removeEventListener?.(\"abort\", __abRelayParentAbort);\n"
+        f"{attempt_child}if (__abPostCompactionGuard.abortController === __abPostCompactionAbortController) {{\n"
+        f"{attempt_child}\t__abPostCompactionGuard.abortController = void 0;\n"
+        f"{attempt_child}}}\n"
+        f"{attempt_indent}}});\n"
+        f"{attempt_indent}if (__abPostCompactionGuard.abortError) {{\n"
+        f"{attempt_child}throw __abPostCompactionGuard.abortError;\n"
+        f"{attempt_indent}}}"
+    )
+    text = (
+        text[:call_close_idx]
+        + attempt_postlude
+        + text[call_close_idx + len(call_close) :]
     )
 
     text, timeout_armed = _insert_before_following_continue(
