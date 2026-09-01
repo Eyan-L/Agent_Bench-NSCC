@@ -8,6 +8,7 @@
       "target_glob_all": "recursive glob (relative to AB_HARNESS_OPENCLAW_SOURCE_ROOT); patch is applied to every match (used when the same source file is duplicated across plugin bundles)",
       "chunk_placeholder": "string in patch that maps to the matched glob suffix (default: CHUNK)",
       "idempotent_marker": "literal string in patched output; if present in target file, the patch is treated as already applied",
+      "name": "named content transform implemented by apply_patch.py when a stable unified diff is inappropriate for a content-hashed runtime bundle",
       "summary": "human-readable description"
     }
   },
@@ -82,6 +83,13 @@
       "target_glob_all": "**/node_modules/@mariozechner/pi-ai/dist/providers/openai-completions.js",
       "idempotent_marker": "AB_HARNESS_OPENCLAW_PATCH_RAW_RESPONSE_LOG_BEGIN",
       "summary": "tee every OpenAI-compatible streaming response (raw SDK chunks) into the file at env OPENCLAW_RAW_RESPONSE_LOG, with agent/session/run id from env. One JSONL line per LLM request. Empty env = no logging."
+    }
+  ],
+  "transforms": [
+    {
+      "name": "post_compaction_loop_guard",
+      "idempotent_marker": "AB_HARNESS_OPENCLAW_PATCH_POST_COMPACTION_LOOP_GUARD",
+      "summary": "backport openclaw/openclaw#77555 to pinned v2026.4.22: after a successful auto-compaction retry, observe the next 3 completed tool outcomes and abort if all three have identical tool name, args hash, and result hash"
     }
   ]
 }
