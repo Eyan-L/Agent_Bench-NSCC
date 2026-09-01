@@ -23,6 +23,10 @@ export SINGULARITY_BINDPATH="$SCRATCH:$SCRATCH"
 export SINGULARITYENV_HF_HOME="$HF_HOME"
 
 cd "${PBS_O_WORKDIR:-$PWD}"
+
+export AB_SERVING_BASE_URL=http://127.0.0.1:30000/v1
+export AB_SERVING_API_KEY=EMPTY
+unset AB_TB_FORCE_ONE_SUBAGENT
 export AB_PBS_SITE=NSCC
 if [[ -z "${AB_RUN_STAMP:-}" ]]; then
     AB_RUN_STAMP="$(TZ=Asia/Singapore date +%Y-%m-%d_%H-%M-%S)"
