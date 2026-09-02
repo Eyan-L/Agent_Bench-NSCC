@@ -43,7 +43,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     })
     _TERMINAL_PARENT_STATES = frozenset({
         "abandoned", "cancelled", "canceled", "completed", "done", "error",
-        "failed", "timed_out", "timeout",
+        "failed", "killed", "timed_out", "timeout",
     })
     # A turn-level stop can precede an OpenClaw retry/resume. Require the
     # durable session and transcript to remain terminal across multiple
