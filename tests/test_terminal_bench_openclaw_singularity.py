@@ -409,12 +409,13 @@ def _write_roadmap_session_state(
     *,
     child_statuses=("running",),
     parent_session_id="parent-session",
+    parent_status="done",
 ):
     sessions_dir.mkdir(parents=True, exist_ok=True)
     index = {
         "agent:roadmap_bench:main": {
             "sessionId": parent_session_id,
-            "status": "done",
+            "status": parent_status,
         }
     }
     for i, status in enumerate(child_statuses):
@@ -497,6 +498,7 @@ def test_roadmap_no_yield_terminal_stop_without_done_is_blocked(tmp_path):
         child_statuses=(),
     )
     condition = _roadmap_condition_for_state(tmp_path)
+    condition.terminal_stop_confirmation_seconds = 0.0
 
     _payload, error = condition._await_post_turn_lifecycle(
         {"result": {"meta": {"livenessState": "working"}}},
@@ -506,6 +508,202 @@ def test_roadmap_no_yield_terminal_stop_without_done_is_blocked(tmp_path):
 
     assert "without DONE" in error
     assert condition._last_completion_status == "blocked_incomplete"
+
+
+def test_roadmap_running_parent_empty_stop_is_not_terminal(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_assistant_event("")],
+        child_statuses=(),
+        parent_status="running",
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(
+        sessions_dir
+    )
+
+    assert snapshot["assistant_stop_candidate"] is True
+    assert snapshot["parent_session_status"] == "running"
+    assert snapshot["parent_session_active"] is True
+    assert snapshot["parent_session_terminal"] is False
+    assert snapshot["post_yield_parent_terminal"] is False
+    assert snapshot["parent_terminal"] is False
+
+
+def test_roadmap_running_parent_empty_stop_waits_instead_of_terminating(
+    tmp_path, monkeypatch
+):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_assistant_event("")],
+        child_statuses=(),
+        parent_status="running",
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+    clock = [0.0]
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.monotonic",
+        lambda: clock[0],
+    )
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+
+    _payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "stale CLI turn",
+        deadline=4.0,
+    )
+
+    assert "total agent timeout" in error
+    assert condition._last_completion_status == "timeout"
+
+
+def test_roadmap_activity_after_empty_stop_continues_until_done(
+    tmp_path, monkeypatch
+):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    empty_stop = _assistant_event("")
+    tool_use = {
+        "type": "message",
+        "message": {
+            "role": "assistant",
+            "stopReason": "toolUse",
+            "content": [{
+                "type": "toolCall", "name": "read",
+                "arguments": {"path": "/workspace/BOOTSTRAP.md"},
+            }],
+        },
+    }
+    tool_result = {
+        "type": "message",
+        "message": {
+            "role": "toolResult",
+            "content": [{"type": "text", "text": "bootstrap"}],
+        },
+    }
+    _write_roadmap_session_state(
+        sessions_dir,
+        [empty_stop],
+        child_statuses=(),
+        parent_status="running",
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+    clock = [0.0]
+    sleeps = [0]
+
+    def advance(seconds):
+        clock[0] += seconds
+        sleeps[0] += 1
+        if sleeps[0] == 1:
+            _write_roadmap_session_state(
+                sessions_dir,
+                [empty_stop, tool_use, tool_result],
+                child_statuses=(),
+                parent_status="running",
+            )
+        elif sleeps[0] == 2:
+            _write_roadmap_session_state(
+                sessions_dir,
+                [empty_stop, tool_use, tool_result, _assistant_event(
+                    "DONE\nIntegrated and validated."
+                )],
+                child_statuses=(),
+                parent_status="done",
+            )
+
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.monotonic",
+        lambda: clock[0],
+    )
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.sleep",
+        advance,
+    )
+
+    payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "stale CLI turn",
+        deadline=10.0,
+    )
+
+    assert error == ""
+    assert sleeps[0] >= 2
+    assert condition._last_completion_status == "normal_completion"
+    assert payload["result"]["meta"]["agentBenchLifecycle"][
+        "terminalEvidence"
+    ] == "explicit_done"
+
+
+def test_roadmap_done_parent_non_done_stop_requires_stable_confirmation(
+    tmp_path, monkeypatch
+):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_assistant_event("Implementation incomplete")],
+        child_statuses=(),
+        parent_status="done",
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+    clock = [0.0]
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.monotonic",
+        lambda: clock[0],
+    )
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+
+    payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "stale CLI turn",
+        deadline=10.0,
+    )
+
+    lifecycle = payload["result"]["meta"]["agentBenchLifecycle"]
+    assert clock[0] >= condition.terminal_stop_confirmation_seconds
+    assert "without DONE" in error
+    assert condition._last_completion_status == "blocked_incomplete"
+    assert lifecycle["parentSessionStatusAtTerminal"] == "done"
+    assert lifecycle["terminalEvidence"] == (
+        "durable_session_terminal_assistant_stop"
+    )
+
+
+def test_roadmap_explicit_done_is_terminal_while_parent_status_running(
+    tmp_path,
+):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_assistant_event("DONE\nIntegrated and validated.")],
+        child_statuses=(),
+        parent_status="running",
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+
+    payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "stale CLI turn",
+        deadline=time.monotonic() + 10,
+    )
+
+    assert error == ""
+    assert condition._last_completion_status == "normal_completion"
+    assert payload["result"]["meta"]["agentBenchLifecycle"][
+        "terminalEvidence"
+    ] == "explicit_done"
 
 
 def test_roadmap_done_in_tool_use_turn_is_not_terminal_done(tmp_path):
@@ -1464,9 +1662,14 @@ def test_roadmap_child_done_and_parent_active_without_done_is_blocked(
     condition = object.__new__(RoadmapBenchOpenClawCondition)
     condition._env_info = {"state_dir": str(tmp_path)}
     condition._last_exit_code = 0
+    clock = [0.0]
     monkeypatch.setattr(
         "agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent.time.monotonic",
-        lambda: 0.0,
+        lambda: clock[0],
+    )
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent.time.sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
     )
 
     _payload, error = condition._await_post_turn_lifecycle(

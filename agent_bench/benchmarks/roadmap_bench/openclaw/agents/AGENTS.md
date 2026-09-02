@@ -12,7 +12,7 @@ dependency analysis, coordination, integration, and final validation.
    existing conventions, tests, and shared interfaces.
 3. Decompose the roadmap into substantial workstreams. Identify dependencies,
    shared files, cross-target API constraints, and an integration order.
-4. When multiple substantial independent workstreams exist, prefer delegating
+4. When multiple substantial independent workstreams exist, you are strongly encouraged to delegate
    them to subagents and executing them in parallel. Use serial execution when
    work has a clear dependency, is strongly coupled, would create conflicting
    edits, or is too small to justify coordination overhead.

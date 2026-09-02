@@ -38,6 +38,17 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     # as final after one model idle-timeout window plus margin.
     prompt_error_grace_seconds = 600.0
     _ACTIVE_CHILD_STATES = frozenset({"accepted", "queued", "pending", "running"})
+    _ACTIVE_PARENT_STATES = frozenset({
+        "accepted", "queued", "pending", "processing", "running",
+    })
+    _TERMINAL_PARENT_STATES = frozenset({
+        "abandoned", "cancelled", "canceled", "completed", "done", "error",
+        "failed", "timed_out", "timeout",
+    })
+    # A turn-level stop can precede an OpenClaw retry/resume. Require the
+    # durable session and transcript to remain terminal across multiple
+    # watcher reads before accepting a non-DONE stop as logical completion.
+    terminal_stop_confirmation_seconds = 4.0
 
     def run(
         self,
@@ -464,6 +475,8 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             snapshot.get("total_children")
             or snapshot.get("yield_count")
             or snapshot.get("post_yield_prompt_error")
+            or snapshot.get("parent_session_active")
+            or snapshot.get("assistant_stop_candidate")
         )
         if not should_watch:
             return payload, error
@@ -481,6 +494,10 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         last_state = None
         prompt_error_signature = None
         prompt_error_since = None
+        terminal_stop_signature = self._terminal_stop_signature(snapshot)
+        terminal_stop_since = (
+            time.monotonic() if terminal_stop_signature is not None else None
+        )
 
         while time.monotonic() < deadline:
             snapshot = self._read_yield_snapshot(sessions_dir)
@@ -507,6 +524,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                     snapshot.get("parent_terminal", False),
                     bool(snapshot.get("post_yield_prompt_error")),
                     bool(snapshot["done_text"]),
+                    snapshot.get("parent_session_status", "unknown"),
                 )
 
                 if state != last_state:
@@ -514,6 +532,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                         "  Roadmap yield lifecycle: session=%s yields=%d "
                         "pending_children=%d completed_children=%d messages=%d "
                         "active=%s waiting=%s resumed=%s terminal=%s "
+                        "parent_status=%s "
                         "prompt_error=%s done=%s",
                         parent_session_id,
                         snapshot["yield_count"],
@@ -524,16 +543,34 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                         snapshot.get("parent_waiting", False),
                         snapshot.get("parent_resumed", False),
                         snapshot.get("parent_terminal", False),
+                        snapshot.get("parent_session_status", "unknown"),
                         bool(snapshot.get("post_yield_prompt_error")),
                         bool(snapshot["done_text"]),
                     )
                     last_state = state
 
-                reconciled = self._reconcile_terminal_snapshot(
-                    payload, snapshot
-                )
+                reconciled = self._reconcile_terminal_snapshot(payload, snapshot)
                 if reconciled is not None:
                     return reconciled
+
+                terminal_signature = self._terminal_stop_signature(snapshot)
+                now = time.monotonic()
+                if terminal_signature is None:
+                    terminal_stop_signature = None
+                    terminal_stop_since = None
+                elif terminal_signature != terminal_stop_signature:
+                    terminal_stop_signature = terminal_signature
+                    terminal_stop_since = now
+                elif (
+                    terminal_stop_since is not None
+                    and now - terminal_stop_since
+                    >= self.terminal_stop_confirmation_seconds
+                ):
+                    reconciled = self._reconcile_terminal_snapshot(
+                        payload, snapshot, confirm_non_done_stop=True
+                    )
+                    if reconciled is not None:
+                        return reconciled
 
                 # A prompt error is only a terminal candidate. OpenClaw may
                 # retry/fail over and append another requester/model turn.
@@ -619,9 +656,12 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         self,
         payload: Optional[Dict],
         snapshot: Dict,
+        *,
+        confirm_non_done_stop: bool = False,
     ) -> Optional[Tuple[Optional[Dict], str]]:
         """Apply a durable terminal requester event to the CLI result."""
         if snapshot.get("done_text"):
+            snapshot = dict(snapshot, terminal_evidence="explicit_done")
             quiescence = self._quiesce_terminal_children(snapshot)
             reconciled_payload = self._payload_with_resumed_completion(
                 payload,
@@ -639,10 +679,18 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             self._last_completion_error = completion_error
             return reconciled_payload, completion_error
 
-        # A terminal assistant stop is definitive regardless of whether the
-        # trajectory yielded or whether children remain. A toolUse assistant
-        # turn is intentionally not terminal.
-        if snapshot.get("post_yield_parent_terminal"):
+        # A turn-level assistant stop is only a candidate. OpenClaw can append
+        # a retry/resume after it, so require both a durable terminal session
+        # status and stable confirmation by the lifecycle watcher.
+        if (
+            confirm_non_done_stop
+            and snapshot.get("post_yield_parent_terminal")
+            and snapshot.get("parent_session_terminal")
+        ):
+            snapshot = dict(
+                snapshot,
+                terminal_evidence="durable_session_terminal_assistant_stop",
+            )
             quiescence = self._quiesce_terminal_children(snapshot)
             reconciled_payload = (
                 copy.deepcopy(payload) if isinstance(payload, dict) else {}
@@ -661,6 +709,23 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             return reconciled_payload, message
 
         return None
+
+    @staticmethod
+    def _terminal_stop_signature(snapshot: Dict) -> Optional[Tuple]:
+        """Return a stable identity for a confirmable non-DONE stop."""
+        if (
+            snapshot.get("done_text")
+            or not snapshot.get("post_yield_parent_terminal")
+            or not snapshot.get("parent_session_terminal")
+        ):
+            return None
+        return (
+            snapshot.get("parent_session_id"),
+            snapshot.get("parent_session_status"),
+            snapshot.get("message_count"),
+            snapshot.get("transcript_size_bytes"),
+            snapshot.get("latest_parent_event"),
+        )
 
     def _quiesce_terminal_children(self, snapshot: Dict) -> Dict:
         pending = list(snapshot.get("pending_child_sessions") or [])
@@ -706,6 +771,10 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         child_states = list(snapshot.get("child_states") or [])
         lifecycle = {
             "parentState": "terminal",
+            "parentSessionStatusAtTerminal": snapshot.get(
+                "parent_session_status", "unknown"
+            ),
+            "terminalEvidence": snapshot.get("terminal_evidence", "unknown"),
             "yieldCount": int(snapshot.get("yield_count") or 0),
             "totalChildren": int(snapshot.get("total_children") or 0),
             "completedChildren": int(snapshot.get("completed_children") or 0),
@@ -756,6 +825,15 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         parent_session_id = parent.get("sessionId")
         if not parent_session_id:
             return None
+        parent_session_status = str(
+            parent.get("status") or "unknown"
+        ).strip().lower()
+        parent_session_active = (
+            parent_session_status in cls._ACTIVE_PARENT_STATES
+        )
+        parent_session_terminal = (
+            parent_session_status in cls._TERMINAL_PARENT_STATES
+        )
 
         child_entries = []
         for key, value in index.items():
@@ -928,8 +1006,20 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             else:
                 done_text = ""
 
+        assistant_stop_candidate = post_yield_parent_terminal
+        logical_parent_terminal = bool(
+            done_text
+            or (
+                assistant_stop_candidate
+                and parent_session_terminal
+            )
+        )
+
         return {
             "parent_session_id": str(parent_session_id),
+            "parent_session_status": parent_session_status,
+            "parent_session_active": parent_session_active,
+            "parent_session_terminal": parent_session_terminal,
             "total_children": len(child_entries),
             "pending_children": pending_children,
             "pending_child_sessions": pending_child_sessions,
@@ -943,18 +1033,27 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 post_yield_parent_activity
             ),
             "post_yield_parent_terminal": (
-                post_yield_parent_terminal
+                assistant_stop_candidate and parent_session_terminal
             ),
             "post_yield_terminal_reason": (
-                "assistant_stop"
-                if post_yield_parent_terminal
-                else ""
+                "explicit_done"
+                if done_text
+                else (
+                    "assistant_stop"
+                    if assistant_stop_candidate and parent_session_terminal
+                    else ""
+                )
             ),
             "post_yield_prompt_error": post_yield_prompt_error,
             "done_text": done_text,
             "parent_active": bool(
-                post_yield_parent_activity
-                and not post_yield_parent_terminal
+                (
+                    parent_session_active
+                    or (
+                        post_yield_parent_activity
+                        and not logical_parent_terminal
+                    )
+                )
                 and not post_yield_prompt_error
             ),
             "parent_waiting": bool(
@@ -963,7 +1062,8 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             "parent_resumed": bool(
                 yield_indexes and post_yield_parent_activity
             ),
-            "parent_terminal": post_yield_parent_terminal,
+            "parent_terminal": logical_parent_terminal,
+            "assistant_stop_candidate": assistant_stop_candidate,
             "latest_parent_event": latest_event_kind,
         }
 
