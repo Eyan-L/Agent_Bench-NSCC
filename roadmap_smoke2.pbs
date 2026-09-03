@@ -3,7 +3,7 @@
 #PBS -N agent-bench-q36-roadmap-smoke2
 #PBS -P personal-n2602695
 #PBS -l select=1:ngpus=4
-#PBS -l walltime=04:00:00
+#PBS -l walltime=24:00:00
 #PBS -q normal
 #PBS -j oe
 
