@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Compare RoadmapBench subagent and single-agent PBS runs offline.
 
-This script only reads artifacts already produced by Agent_Bench. It does not
-launch a benchmark, model server, verifier, or task.
+The analyzer is deliberately read-only with respect to benchmark runs: it only
+consumes artifacts already produced by Agent_Bench. In paired mode it reports
+accuracy, latency, trajectory/resource efficiency, retry selection, and data
+coverage, then writes machine-readable tables plus publication-friendly plots.
 
 Examples
 --------
@@ -11,16 +13,25 @@ Summarize one or more existing subagent PBS jobs::
     python scripts/compare_roadmap_runs.py \
       16056107.pbs101 16056108.pbs101
 
-Compare the formal paired arms (extra jobs may be focused retries/smokes)::
+Compare the formal paired arms (focused retries/smokes may be added; the best
+record for each instance_id + seed is selected automatically)::
 
     python scripts/compare_roadmap_runs.py \
       --subagent 16056107.pbs101 16056108.pbs101 1609XXXX.pbs101 \
       --single-agent 1610AAAA.pbs101 1610BBBB.pbs101 \
       --strict-trajectory
 
-Arguments may also be concrete PBS run directories instead of job ids.
-Reports are written below reports/roadmap by default and their filenames carry
-the PBS job ids used for the analysis.
+Outputs are written below reports/roadmap by default:
+  * Markdown report (also printed to stdout)
+  * JSON report
+  * per-run tasks CSV
+  * paired per-task CSV (comparison mode)
+  * trajectory index JSON
+  * paired figures (PNG, when matplotlib is available)
+
+The statistical intervals in paired mode are deterministic non-parametric
+bootstrap intervals across paired RoadmapBench tasks. They quantify across-task
+variation; with one seed they are not a substitute for repeated stochastic runs.
 """
 
 from __future__ import annotations
@@ -33,9 +44,10 @@ from datetime import datetime
 import json
 import math
 from pathlib import Path
+import random
 import re
 import statistics
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 
 PBS_JOB_RE = re.compile(r"(?P<job>\d+\.pbs\d+)")
@@ -53,6 +65,16 @@ CORE_EVENTS = (
     "done",
     "candidate_freeze",
     "cleanup",
+)
+TRAJECTORY_COMPARE_FIELDS = (
+    ("model_request_count", "Model requests"),
+    ("tool_call_count", "Tool calls"),
+    ("total_prompt_tokens", "Prompt tokens"),
+    ("total_completion_tokens", "Completion tokens"),
+    ("trajectory_session_count", "Sessions"),
+    ("compaction_count", "Compactions"),
+    ("context_overflow_count", "Context overflows"),
+    ("loop_detected_count", "Loop detections"),
 )
 
 
@@ -124,9 +146,19 @@ def _number(value: Any) -> float | None:
         return None
 
 
+def _int_number(value: Any) -> int:
+    number = _number(value)
+    return int(number) if number is not None else 0
+
+
 def _mean(values: Iterable[float | None]) -> float | None:
     clean = [v for v in values if v is not None]
     return statistics.fmean(clean) if clean else None
+
+
+def _median(values: Iterable[float | None]) -> float | None:
+    clean = [v for v in values if v is not None]
+    return statistics.median(clean) if clean else None
 
 
 def _percentile(values: Sequence[float], q: float) -> float | None:
@@ -148,6 +180,12 @@ def _fmt(value: float | None, digits: int = 3) -> str:
     return "NA" if value is None else f"{value:.{digits}f}"
 
 
+def _fmt_ci(ci: Sequence[float] | None, digits: int = 3) -> str:
+    if not ci or len(ci) != 2:
+        return "NA"
+    return f"[{ci[0]:.{digits}f}, {ci[1]:.{digits}f}]"
+
+
 def _safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.+-]+", "_", value).strip("_") or "run"
 
@@ -158,6 +196,48 @@ def _job_id(path: Path) -> str:
         if match:
             return match.group("job")
     return "unknown-job"
+
+
+def _bootstrap_ci(
+    values: Sequence[float],
+    statistic: Callable[[Sequence[float]], float],
+    *,
+    samples: int,
+    seed: int = 20260903,
+    confidence: float = 0.95,
+) -> list[float] | None:
+    """Deterministic percentile bootstrap CI over paired-task observations."""
+    if not values:
+        return None
+    if len(values) == 1:
+        point = float(statistic(values))
+        return [point, point]
+    rng = random.Random(seed)
+    n = len(values)
+    draws: list[float] = []
+    for _ in range(max(1, samples)):
+        sample = [values[rng.randrange(n)] for _ in range(n)]
+        result = float(statistic(sample))
+        if math.isfinite(result):
+            draws.append(result)
+    if not draws:
+        return None
+    alpha = (1.0 - confidence) / 2.0
+    lo = _percentile(draws, alpha)
+    hi = _percentile(draws, 1.0 - alpha)
+    if lo is None or hi is None:
+        return None
+    return [lo, hi]
+
+
+def _exact_sign_test_two_sided(wins: int, losses: int) -> float | None:
+    """Exact paired sign test, excluding ties, without scipy dependency."""
+    n = wins + losses
+    if n == 0:
+        return None
+    k = min(wins, losses)
+    tail = sum(math.comb(n, i) for i in range(k + 1)) / (2**n)
+    return min(1.0, 2.0 * tail)
 
 
 def resolve_pbs_run(spec: str, runs_root: Path) -> Path:
@@ -381,192 +461,6 @@ def select_best_records(
     return sorted(selected, key=lambda r: r.key), duplicates
 
 
-def summarize_arm(records: Sequence[RunRecord]) -> dict[str, Any]:
-    statuses = Counter(record.status for record in records)
-    verifier_statuses = Counter(
-        record.verifier_status or "MISSING" for record in records
-    )
-    rewards = [r.reward for r in records if r.reward is not None]
-    pass_rates = [
-        r.test_pass_rate for r in records if r.test_pass_rate is not None
-    ]
-    durations = [
-        r.duration_seconds for r in records if r.duration_seconds is not None
-    ]
-    full_passes = sum(
-        1 for record in records
-        if record.reward is not None and record.reward >= 1.0
-    )
-    trajectory_count = sum(record.has_trajectory for record in records)
-    events: Counter[str] = Counter()
-    total_events = 0
-    total_requests = 0
-    for record in records:
-        total_events += int(record.trajectory.get("event_count") or 0)
-        events.update(record.trajectory.get("event_types") or {})
-        total_requests += int(
-            (record.trajectory.get("model_request_latency_ms") or {}).get(
-                "count"
-            ) or 0
-        )
-
-    return {
-        "task_count": len(records),
-        "evaluated_count": len(rewards),
-        "infra_error_count": statuses.get("ERROR", 0),
-        "status_counts": dict(sorted(statuses.items())),
-        "verifier_status_counts": dict(sorted(verifier_statuses.items())),
-        "accuracy": {
-            "mean_reward": _mean(rewards),
-            "mean_test_pass_rate": _mean(pass_rates),
-            "full_pass_count": full_passes,
-            "full_pass_rate": full_passes / len(rewards) if rewards else None,
-        },
-        "latency_seconds": {
-            "count": len(durations),
-            "mean": _mean(durations),
-            "median": _percentile(durations, 0.50),
-            "p90": _percentile(durations, 0.90),
-            "p95": _percentile(durations, 0.95),
-            "min": min(durations) if durations else None,
-            "max": max(durations) if durations else None,
-        },
-        "trajectory": {
-            "present_count": trajectory_count,
-            "coverage_rate": (
-                trajectory_count / len(records) if records else None
-            ),
-            "total_event_count": total_events,
-            "total_model_request_count": total_requests,
-            "event_type_counts": dict(sorted(events.items())),
-        },
-    }
-
-
-def compare_paired(
-    subagent: Sequence[RunRecord], single_agent: Sequence[RunRecord]
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    sub_map = {record.key: record for record in subagent}
-    single_map = {record.key: record for record in single_agent}
-    common = sorted(sub_map.keys() & single_map.keys())
-
-    rows: list[dict[str, Any]] = []
-    reward_deltas: list[float] = []
-    latency_deltas: list[float] = []
-    speedups: list[float] = []
-    accuracy_wins = accuracy_ties = accuracy_losses = 0
-    latency_wins = latency_ties = latency_losses = 0
-
-    for key in common:
-        sub = sub_map[key]
-        single = single_map[key]
-        reward_delta = None
-        if sub.reward is not None and single.reward is not None:
-            reward_delta = sub.reward - single.reward
-            reward_deltas.append(reward_delta)
-            if reward_delta > 1e-12:
-                accuracy_wins += 1
-            elif reward_delta < -1e-12:
-                accuracy_losses += 1
-            else:
-                accuracy_ties += 1
-
-        latency_delta = None
-        speedup = None
-        if (
-            sub.duration_seconds is not None
-            and single.duration_seconds is not None
-        ):
-            # Positive delta and speedup > 1 mean subagent is faster.
-            latency_delta = single.duration_seconds - sub.duration_seconds
-            latency_deltas.append(latency_delta)
-            if sub.duration_seconds > 0:
-                speedup = single.duration_seconds / sub.duration_seconds
-                if speedup > 0:
-                    speedups.append(speedup)
-            if latency_delta > 1e-9:
-                latency_wins += 1
-            elif latency_delta < -1e-9:
-                latency_losses += 1
-            else:
-                latency_ties += 1
-
-        rows.append(
-            {
-                "instance_id": key[0],
-                "seed": key[1],
-                "subagent_job_id": sub.job_id,
-                "single_agent_job_id": single.job_id,
-                "subagent_status": sub.status,
-                "single_agent_status": single.status,
-                "subagent_reward": sub.reward,
-                "single_agent_reward": single.reward,
-                "reward_delta_subagent_minus_single": reward_delta,
-                "subagent_duration_seconds": sub.duration_seconds,
-                "single_agent_duration_seconds": single.duration_seconds,
-                "latency_delta_single_minus_subagent_seconds": latency_delta,
-                "subagent_speedup_single_over_subagent": speedup,
-                "subagent_trajectory": sub.has_trajectory,
-                "single_agent_trajectory": single.has_trajectory,
-                "subagent_trajectory_path": (
-                    str(sub.trajectory_path) if sub.trajectory_path else None
-                ),
-                "single_agent_trajectory_path": (
-                    str(single.trajectory_path)
-                    if single.trajectory_path else None
-                ),
-            }
-        )
-
-    both_trajectories = sum(
-        bool(row["subagent_trajectory"])
-        and bool(row["single_agent_trajectory"])
-        for row in rows
-    )
-    geo_speedup = None
-    if speedups:
-        geo_speedup = math.exp(
-            statistics.fmean(math.log(value) for value in speedups)
-        )
-
-    summary = {
-        "paired_task_count": len(common),
-        "subagent_only": [
-            {"instance_id": key[0], "seed": key[1]}
-            for key in sorted(sub_map.keys() - single_map.keys())
-        ],
-        "single_agent_only": [
-            {"instance_id": key[0], "seed": key[1]}
-            for key in sorted(single_map.keys() - sub_map.keys())
-        ],
-        "accuracy": {
-            "paired_evaluable_count": len(reward_deltas),
-            "mean_reward_delta_subagent_minus_single": _mean(reward_deltas),
-            "subagent_wins": accuracy_wins,
-            "ties": accuracy_ties,
-            "subagent_losses": accuracy_losses,
-        },
-        "latency": {
-            "paired_evaluable_count": len(latency_deltas),
-            "mean_delta_single_minus_subagent_seconds": _mean(latency_deltas),
-            "median_delta_single_minus_subagent_seconds": _percentile(
-                latency_deltas, 0.50
-            ),
-            "geomean_speedup_single_over_subagent": geo_speedup,
-            "subagent_faster": latency_wins,
-            "ties": latency_ties,
-            "subagent_slower": latency_losses,
-        },
-        "trajectory": {
-            "both_present_count": both_trajectories,
-            "both_present_rate": (
-                both_trajectories / len(rows) if rows else None
-            ),
-        },
-    }
-    return summary, rows
-
-
 def record_to_dict(record: RunRecord) -> dict[str, Any]:
     latency = record.trajectory.get("model_request_latency_ms") or {}
     events = record.trajectory.get("event_types") or {}
@@ -618,6 +512,326 @@ def record_to_dict(record: RunRecord) -> dict[str, Any]:
     for event in CORE_EVENTS:
         result[f"{event}_count"] = int(events.get(event) or 0)
     return result
+
+
+def summarize_arm(records: Sequence[RunRecord]) -> dict[str, Any]:
+    statuses = Counter(record.status for record in records)
+    verifier_statuses = Counter(
+        record.verifier_status or "MISSING" for record in records
+    )
+    outcomes = Counter(
+        str(record.manifest.get("agent_execution_outcome") or "MISSING")
+        for record in records
+    )
+    rows = [record_to_dict(record) for record in records]
+    rewards = [record.reward for record in records if record.reward is not None]
+    pass_rates = [
+        record.test_pass_rate
+        for record in records
+        if record.test_pass_rate is not None
+    ]
+    durations = [
+        record.duration_seconds
+        for record in records
+        if record.duration_seconds is not None
+    ]
+    full_passes = sum(
+        1 for record in records
+        if record.reward is not None and record.reward >= 1.0
+    )
+    trajectory_count = sum(record.has_trajectory for record in records)
+    events: Counter[str] = Counter()
+    for record in records:
+        events.update(record.trajectory.get("event_types") or {})
+
+    def values(field: str) -> list[float]:
+        return [
+            value
+            for row in rows
+            if (value := _number(row.get(field))) is not None
+        ]
+
+    efficiency = {
+        "mean_model_requests_per_task": _mean(values("model_request_count")),
+        "mean_tool_calls_per_task": _mean(values("tool_call_count")),
+        "mean_prompt_tokens_per_task": _mean(values("total_prompt_tokens")),
+        "mean_completion_tokens_per_task": _mean(
+            values("total_completion_tokens")
+        ),
+        "mean_sessions_per_task": _mean(values("trajectory_session_count")),
+        "total_spawns": sum(_int_number(row.get("spawn_count")) for row in rows),
+        "total_compactions": sum(
+            _int_number(row.get("compaction_count")) for row in rows
+        ),
+        "total_context_overflows": sum(
+            _int_number(row.get("context_overflow_count")) for row in rows
+        ),
+        "total_loop_detections": sum(
+            _int_number(row.get("loop_detected_count")) for row in rows
+        ),
+    }
+
+    return {
+        "task_count": len(records),
+        "evaluated_count": len(rewards),
+        "infra_error_count": statuses.get("ERROR", 0),
+        "status_counts": dict(sorted(statuses.items())),
+        "verifier_status_counts": dict(sorted(verifier_statuses.items())),
+        "agent_execution_outcome_counts": dict(sorted(outcomes.items())),
+        "accuracy": {
+            "mean_reward": _mean(rewards),
+            "median_reward": _median(rewards),
+            "mean_test_pass_rate": _mean(pass_rates),
+            "full_pass_count": full_passes,
+            "full_pass_rate": full_passes / len(rewards) if rewards else None,
+        },
+        "latency_seconds": {
+            "count": len(durations),
+            "mean": _mean(durations),
+            "median": _percentile(durations, 0.50),
+            "p90": _percentile(durations, 0.90),
+            "p95": _percentile(durations, 0.95),
+            "min": min(durations) if durations else None,
+            "max": max(durations) if durations else None,
+        },
+        "trajectory": {
+            "present_count": trajectory_count,
+            "coverage_rate": (
+                trajectory_count / len(records) if records else None
+            ),
+            "total_event_count": sum(
+                _int_number(record.trajectory.get("event_count"))
+                for record in records
+            ),
+            "total_model_request_count": sum(
+                _int_number(row.get("model_request_count")) for row in rows
+            ),
+            "event_type_counts": dict(sorted(events.items())),
+        },
+        "efficiency": efficiency,
+    }
+
+
+def _paired_metric_summary(
+    rows: Sequence[dict[str, Any]],
+    sub_field: str,
+    single_field: str,
+) -> dict[str, Any]:
+    pairs: list[tuple[float, float]] = []
+    for row in rows:
+        sub = _number(row.get(sub_field))
+        single = _number(row.get(single_field))
+        if sub is not None and single is not None:
+            pairs.append((sub, single))
+    deltas = [sub - single for sub, single in pairs]
+    ratios = [
+        single / sub
+        for sub, single in pairs
+        if sub > 0 and single >= 0
+    ]
+    positive_ratios = [value for value in ratios if value > 0]
+    return {
+        "paired_count": len(pairs),
+        "subagent_mean": _mean([pair[0] for pair in pairs]),
+        "single_agent_mean": _mean([pair[1] for pair in pairs]),
+        "mean_delta_subagent_minus_single": _mean(deltas),
+        "median_delta_subagent_minus_single": _median(deltas),
+        "geomean_ratio_single_over_subagent": (
+            math.exp(statistics.fmean(math.log(value) for value in positive_ratios))
+            if positive_ratios
+            else None
+        ),
+    }
+
+
+def compare_paired(
+    subagent: Sequence[RunRecord],
+    single_agent: Sequence[RunRecord],
+    *,
+    bootstrap_samples: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    sub_map = {record.key: record for record in subagent}
+    single_map = {record.key: record for record in single_agent}
+    common = sorted(sub_map.keys() & single_map.keys())
+
+    rows: list[dict[str, Any]] = []
+    reward_deltas: list[float] = []
+    latency_deltas: list[float] = []
+    speedups: list[float] = []
+    accuracy_wins = accuracy_ties = accuracy_losses = 0
+    latency_wins = latency_ties = latency_losses = 0
+
+    for key in common:
+        sub = sub_map[key]
+        single = single_map[key]
+        sub_flat = record_to_dict(sub)
+        single_flat = record_to_dict(single)
+
+        reward_delta = None
+        if sub.reward is not None and single.reward is not None:
+            reward_delta = sub.reward - single.reward
+            reward_deltas.append(reward_delta)
+            if reward_delta > 1e-12:
+                accuracy_wins += 1
+            elif reward_delta < -1e-12:
+                accuracy_losses += 1
+            else:
+                accuracy_ties += 1
+
+        latency_delta = None
+        speedup = None
+        if (
+            sub.duration_seconds is not None
+            and single.duration_seconds is not None
+        ):
+            latency_delta = single.duration_seconds - sub.duration_seconds
+            latency_deltas.append(latency_delta)
+            if sub.duration_seconds > 0 and single.duration_seconds > 0:
+                speedup = single.duration_seconds / sub.duration_seconds
+                speedups.append(speedup)
+            if latency_delta > 1e-9:
+                latency_wins += 1
+            elif latency_delta < -1e-9:
+                latency_losses += 1
+            else:
+                latency_ties += 1
+
+        row: dict[str, Any] = {
+            "instance_id": key[0],
+            "seed": key[1],
+            "subagent_job_id": sub.job_id,
+            "single_agent_job_id": single.job_id,
+            "subagent_status": sub.status,
+            "single_agent_status": single.status,
+            "subagent_verifier_status": sub.verifier_status or None,
+            "single_agent_verifier_status": single.verifier_status or None,
+            "subagent_reward": sub.reward,
+            "single_agent_reward": single.reward,
+            "reward_delta_subagent_minus_single": reward_delta,
+            "subagent_duration_seconds": sub.duration_seconds,
+            "single_agent_duration_seconds": single.duration_seconds,
+            "latency_delta_single_minus_subagent_seconds": latency_delta,
+            "subagent_speedup_single_over_subagent": speedup,
+            "subagent_trajectory": sub.has_trajectory,
+            "single_agent_trajectory": single.has_trajectory,
+            "subagent_trajectory_path": (
+                str(sub.trajectory_path) if sub.trajectory_path else None
+            ),
+            "single_agent_trajectory_path": (
+                str(single.trajectory_path) if single.trajectory_path else None
+            ),
+        }
+        for field, _label in TRAJECTORY_COMPARE_FIELDS:
+            sub_value = _number(sub_flat.get(field))
+            single_value = _number(single_flat.get(field))
+            row[f"subagent_{field}"] = sub_value
+            row[f"single_agent_{field}"] = single_value
+            row[f"{field}_delta_subagent_minus_single"] = (
+                sub_value - single_value
+                if sub_value is not None and single_value is not None
+                else None
+            )
+        rows.append(row)
+
+    both_trajectories = sum(
+        bool(row["subagent_trajectory"])
+        and bool(row["single_agent_trajectory"])
+        for row in rows
+    )
+    reward_ci = _bootstrap_ci(
+        reward_deltas,
+        statistics.fmean,
+        samples=bootstrap_samples,
+        seed=20260903,
+    )
+    latency_ci = _bootstrap_ci(
+        latency_deltas,
+        statistics.fmean,
+        samples=bootstrap_samples,
+        seed=20260904,
+    )
+    speedup_ci = _bootstrap_ci(
+        speedups,
+        lambda values: math.exp(
+            statistics.fmean(math.log(value) for value in values)
+        ),
+        samples=bootstrap_samples,
+        seed=20260905,
+    )
+    geo_speedup = (
+        math.exp(statistics.fmean(math.log(value) for value in speedups))
+        if speedups
+        else None
+    )
+
+    efficiency = {
+        field: _paired_metric_summary(
+            rows, f"subagent_{field}", f"single_agent_{field}"
+        )
+        for field, _label in TRAJECTORY_COMPARE_FIELDS
+    }
+
+    summary = {
+        "paired_task_count": len(common),
+        "paired_seeds": sorted({key[1] for key in common}),
+        "subagent_only": [
+            {"instance_id": key[0], "seed": key[1]}
+            for key in sorted(sub_map.keys() - single_map.keys())
+        ],
+        "single_agent_only": [
+            {"instance_id": key[0], "seed": key[1]}
+            for key in sorted(single_map.keys() - sub_map.keys())
+        ],
+        "accuracy": {
+            "paired_evaluable_count": len(reward_deltas),
+            "mean_reward_delta_subagent_minus_single": _mean(reward_deltas),
+            "median_reward_delta_subagent_minus_single": _median(reward_deltas),
+            "mean_reward_delta_95pct_bootstrap_ci": reward_ci,
+            "subagent_wins": accuracy_wins,
+            "ties": accuracy_ties,
+            "subagent_losses": accuracy_losses,
+            "exact_sign_test_two_sided_p": _exact_sign_test_two_sided(
+                accuracy_wins, accuracy_losses
+            ),
+            "paired_sign_effect": (
+                (accuracy_wins - accuracy_losses)
+                / (accuracy_wins + accuracy_losses)
+                if accuracy_wins + accuracy_losses
+                else None
+            ),
+        },
+        "latency": {
+            "paired_evaluable_count": len(latency_deltas),
+            "mean_delta_single_minus_subagent_seconds": _mean(latency_deltas),
+            "median_delta_single_minus_subagent_seconds": _median(latency_deltas),
+            "mean_delta_95pct_bootstrap_ci_seconds": latency_ci,
+            "geomean_speedup_single_over_subagent": geo_speedup,
+            "median_speedup_single_over_subagent": _median(speedups),
+            "geomean_speedup_95pct_bootstrap_ci": speedup_ci,
+            "subagent_faster": latency_wins,
+            "ties": latency_ties,
+            "subagent_slower": latency_losses,
+            "exact_sign_test_two_sided_p": _exact_sign_test_two_sided(
+                latency_wins, latency_losses
+            ),
+        },
+        "trajectory": {
+            "both_present_count": both_trajectories,
+            "both_present_rate": (
+                both_trajectories / len(rows) if rows else None
+            ),
+            "paired_efficiency": efficiency,
+        },
+        "statistics": {
+            "bootstrap_samples": bootstrap_samples,
+            "bootstrap_unit": "paired RoadmapBench task",
+            "note": (
+                "Intervals summarize across-task variation. With one seed they "
+                "do not estimate run-to-run model stochasticity."
+            ),
+        },
+    }
+    return summary, rows
 
 
 def _duplicates_json(
@@ -678,13 +892,38 @@ def _arm_markdown(name: str, summary: dict[str, Any]) -> str:
     accuracy = summary["accuracy"]
     latency = summary["latency_seconds"]
     trajectory = summary["trajectory"]
+    efficiency = summary["efficiency"]
     return (
         f"| {name} | {summary['task_count']} | {summary['evaluated_count']} | "
         f"{summary['infra_error_count']} | {_fmt(accuracy['mean_reward'])} | "
-        f"{_fmt(accuracy['full_pass_rate'])} | {_fmt(latency['mean'], 1)} | "
-        f"{_fmt(latency['median'], 1)} | {_fmt(latency['p95'], 1)} | "
-        f"{_fmt(trajectory['coverage_rate'])} |"
+        f"{_fmt(accuracy['full_pass_rate'])} | {_fmt(latency['median'], 1)} | "
+        f"{_fmt(latency['p95'], 1)} | {_fmt(trajectory['coverage_rate'])} | "
+        f"{_fmt(efficiency['mean_model_requests_per_task'], 1)} | "
+        f"{_fmt(efficiency['mean_prompt_tokens_per_task'], 0)} |"
     )
+
+
+def _efficiency_markdown(
+    paired_summary: dict[str, Any],
+) -> list[str]:
+    efficiency = paired_summary["trajectory"]["paired_efficiency"]
+    lines = [
+        "| Metric | Paired n | Subagent mean | Single-agent mean | "
+        "Δ (sub-single) | Ratio (single/sub) |",
+        "|---|---:|---:|---:|---:|---:|",
+    ]
+    for field, label in TRAJECTORY_COMPARE_FIELDS:
+        data = efficiency[field]
+        ratio = data["geomean_ratio_single_over_subagent"]
+        ratio_text = "NA" if ratio is None else f"{ratio:.3f}x"
+        lines.append(
+            f"| {label} | {data['paired_count']} | "
+            f"{_fmt(data['subagent_mean'], 1)} | "
+            f"{_fmt(data['single_agent_mean'], 1)} | "
+            f"{_fmt(data['mean_delta_subagent_minus_single'], 1)} | "
+            f"{ratio_text} |"
+        )
+    return lines
 
 
 def render_markdown(
@@ -696,17 +935,21 @@ def render_markdown(
     paired_summary: dict[str, Any] | None = None,
     paired_rows: Sequence[dict[str, Any]] | None = None,
     duplicate_count: int = 0,
+    figure_names: Sequence[str] = (),
 ) -> str:
     lines = [
-        "# RoadmapBench accuracy / latency / trajectory report",
+        "# RoadmapBench paired accuracy / latency / trajectory report",
         "",
-        "Accuracy uses the authoritative verifier `reward`. Task latency uses "
-        "`manifest.duration_seconds`; agent self-reported test claims are not "
-        "used as accuracy.",
+        "Accuracy uses the authoritative verifier `reward`. End-to-end task "
+        "latency uses `manifest.duration_seconds`; agent self-reported test "
+        "claims are not treated as accuracy.",
+        "",
+        "## Arm-level summary",
         "",
         "| Arm | Tasks | Evaluated | Infra errors | Mean reward | Full-pass "
-        "rate | Mean latency (s) | Median (s) | P95 (s) | Trajectory coverage |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "rate | Median latency (s) | P95 (s) | Trajectory coverage | Mean "
+        "model requests | Mean prompt tokens |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         _arm_markdown("subagent", sub_summary),
     ]
     if single_summary is not None:
@@ -727,36 +970,80 @@ def render_markdown(
         trajectory = paired_summary["trajectory"]
         lines += [
             "",
-            "## Paired comparison",
+            "## Paired primary outcomes",
             "",
             f"- paired tasks: **{paired_summary['paired_task_count']}**",
+            f"- paired seeds: **{paired_summary['paired_seeds']}**",
+            f"- reward-evaluable pairs: **{accuracy['paired_evaluable_count']}**; "
+            f"latency-evaluable pairs: **{latency['paired_evaluable_count']}**",
             "- mean reward delta (subagent - single-agent): "
-            f"**{_fmt(accuracy['mean_reward_delta_subagent_minus_single'])}**",
+            f"**{_fmt(accuracy['mean_reward_delta_subagent_minus_single'])}** "
+            f"(95% task-bootstrap CI {_fmt_ci(accuracy['mean_reward_delta_95pct_bootstrap_ci'])})",
             "- accuracy W/T/L for subagent: "
             f"**{accuracy['subagent_wins']}/{accuracy['ties']}/"
-            f"{accuracy['subagent_losses']}**",
+            f"{accuracy['subagent_losses']}**; exact paired sign-test "
+            f"p={_fmt(accuracy['exact_sign_test_two_sided_p'])}",
             "- mean latency delta (single-agent - subagent): "
-            f"**{_fmt(latency['mean_delta_single_minus_subagent_seconds'], 1)} s**",
-            "- geometric mean speedup (single-agent / subagent): "
-            f"**{_fmt(latency['geomean_speedup_single_over_subagent'])}x**",
+            f"**{_fmt(latency['mean_delta_single_minus_subagent_seconds'], 1)} s** "
+            f"(95% task-bootstrap CI "
+            f"{_fmt_ci(latency['mean_delta_95pct_bootstrap_ci_seconds'], 1)})",
+            "- geometric-mean speedup (single-agent / subagent): "
+            f"**{_fmt(latency['geomean_speedup_single_over_subagent'])}x** "
+            f"(95% task-bootstrap CI "
+            f"{_fmt_ci(latency['geomean_speedup_95pct_bootstrap_ci'])})",
             "- latency faster/tie/slower for subagent: "
             f"**{latency['subagent_faster']}/{latency['ties']}/"
-            f"{latency['subagent_slower']}**",
+            f"{latency['subagent_slower']}**; exact paired sign-test "
+            f"p={_fmt(latency['exact_sign_test_two_sided_p'])}",
             "- both trajectories present: "
             f"**{trajectory['both_present_count']}/"
             f"{paired_summary['paired_task_count']}**",
             "",
-            "Positive reward delta favors subagent. Positive latency delta and "
-            "speedup > 1 mean subagent is faster.",
+            "Interpretation: positive reward delta favors subagent; latency "
+            "delta > 0 and speedup > 1 mean subagent is faster.",
+            "",
+            "The confidence intervals are bootstrapped over paired tasks. With "
+            "one seed they characterize task-to-task variation, not repeated-run "
+            "stochastic uncertainty.",
+            "",
+            "## Trajectory / resource efficiency",
+            "",
+            *_efficiency_markdown(paired_summary),
         ]
+
+        if figure_names:
+            lines += ["", "## Figures", ""]
+            captions = {
+                "tradeoff": (
+                    "Accuracy-latency trade-off; upper-right means subagent is "
+                    "both more accurate and faster."
+                ),
+                "accuracy": "Paired verifier reward by task.",
+                "latency": "Per-task end-to-end latency speedup; >1 favors subagent.",
+                "requests": (
+                    "Per-task model-request ratio; >1 means single-agent used "
+                    "more model requests."
+                ),
+            }
+            for name in figure_names:
+                key = next((key for key in captions if key in name), "figure")
+                caption = captions.get(key, "Comparison figure.")
+                lines += [
+                    f"**{caption}**",
+                    "",
+                    f"![{caption}]({name})",
+                    "",
+                ]
+
         if paired_rows:
             lines += [
                 "",
                 "## Per-task paired results",
                 "",
                 "| Task | Seed | Sub reward | Single reward | Δ reward | Sub "
-                "latency (s) | Single latency (s) | Speedup | Trajectory |",
-                "|---|---:|---:|---:|---:|---:|---:|---:|---|",
+                "latency (s) | Single latency (s) | Speedup | Sub requests | "
+                "Single requests | Trajectory |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
             ]
             for row in paired_rows:
                 trajectory_ok = (
@@ -773,8 +1060,11 @@ def render_markdown(
                     f"{_fmt(row['subagent_duration_seconds'], 1)} | "
                     f"{_fmt(row['single_agent_duration_seconds'], 1)} | "
                     f"{_fmt(row['subagent_speedup_single_over_subagent'])}x | "
+                    f"{_fmt(row['subagent_model_request_count'], 0)} | "
+                    f"{_fmt(row['single_agent_model_request_count'], 0)} | "
                     f"{trajectory_ok} |"
                 )
+
         if paired_summary["subagent_only"] or paired_summary["single_agent_only"]:
             lines += ["", "## Unpaired tasks", ""]
             if paired_summary["subagent_only"]:
@@ -831,6 +1121,198 @@ def _trajectory_index(records: Sequence[RunRecord]) -> list[dict[str, Any]]:
     ]
 
 
+def _load_pyplot():
+    try:
+        import matplotlib  # type: ignore
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt  # type: ignore
+    except Exception as exc:  # noqa: BLE001 - plotting is intentionally optional
+        print(
+            "WARNING: plots skipped because matplotlib is unavailable: "
+            f"{exc}"
+        )
+        return None
+    return plt
+
+
+def _plot_accuracy(
+    plt: Any, rows: Sequence[dict[str, Any]], path: Path, dpi: int
+) -> bool:
+    clean = [
+        row for row in rows
+        if _number(row.get("subagent_reward")) is not None
+        and _number(row.get("single_agent_reward")) is not None
+    ]
+    if not clean:
+        return False
+    clean = sorted(
+        clean,
+        key=lambda row: _number(row.get("reward_delta_subagent_minus_single")) or 0,
+    )
+    fig, ax = plt.subplots(figsize=(9, max(5.0, 0.34 * len(clean) + 1.5)))
+    y = list(range(len(clean)))
+    sub = [float(row["subagent_reward"]) for row in clean]
+    single = [float(row["single_agent_reward"]) for row in clean]
+    for yi, left, right in zip(y, sub, single):
+        ax.plot([left, right], [yi, yi], linewidth=0.8, alpha=0.45)
+    ax.scatter(sub, y, marker="o", label="subagent", zorder=3)
+    ax.scatter(single, y, marker="x", label="single-agent", zorder=3)
+    ax.set_yticks(y, [row["instance_id"] for row in clean], fontsize=8)
+    ax.set_xlabel("Verifier reward")
+    ax.set_title("RoadmapBench paired accuracy")
+    ax.set_xlim(-0.03, 1.03)
+    ax.grid(axis="x", alpha=0.25)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+def _plot_ratio_by_task(
+    plt: Any,
+    rows: Sequence[dict[str, Any]],
+    path: Path,
+    *,
+    value_field: str,
+    title: str,
+    xlabel: str,
+    dpi: int,
+) -> bool:
+    clean = [
+        row for row in rows
+        if (value := _number(row.get(value_field))) is not None and value > 0
+    ]
+    if not clean:
+        return False
+    clean = sorted(clean, key=lambda row: float(row[value_field]))
+    fig, ax = plt.subplots(figsize=(9, max(5.0, 0.34 * len(clean) + 1.5)))
+    y = list(range(len(clean)))
+    values = [float(row[value_field]) for row in clean]
+    ax.scatter(values, y, marker="o")
+    ax.axvline(1.0, linewidth=1.0, linestyle="--")
+    ax.set_yticks(y, [row["instance_id"] for row in clean], fontsize=8)
+    ax.set_xscale("log", base=2)
+    ax.set_xlabel(xlabel)
+    ax.set_title(title)
+    ax.grid(axis="x", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+def _plot_tradeoff(
+    plt: Any, rows: Sequence[dict[str, Any]], path: Path, dpi: int
+) -> bool:
+    clean = [
+        row for row in rows
+        if _number(row.get("reward_delta_subagent_minus_single")) is not None
+        and (speedup := _number(row.get("subagent_speedup_single_over_subagent")))
+        is not None
+        and speedup > 0
+    ]
+    if not clean:
+        return False
+    x = [
+        math.log2(float(row["subagent_speedup_single_over_subagent"]))
+        for row in clean
+    ]
+    y = [float(row["reward_delta_subagent_minus_single"]) for row in clean]
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.scatter(x, y, marker="o")
+    ax.axvline(0.0, linewidth=1.0, linestyle="--")
+    ax.axhline(0.0, linewidth=1.0, linestyle="--")
+    for xi, yi, row in zip(x, y, clean):
+        ax.annotate(
+            row["instance_id"],
+            (xi, yi),
+            xytext=(4, 3),
+            textcoords="offset points",
+            fontsize=6,
+            alpha=0.75,
+        )
+    ax.set_xlabel("log2 latency speedup (single-agent / subagent)")
+    ax.set_ylabel("Reward delta (subagent - single-agent)")
+    ax.set_title("Accuracy-latency trade-off by task")
+    ax.grid(alpha=0.2)
+    fig.tight_layout()
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+def generate_plots(
+    rows: Sequence[dict[str, Any]],
+    output_dir: Path,
+    basename: str,
+    *,
+    dpi: int,
+) -> list[Path]:
+    """Generate paired comparison PNGs without making plotting a hard dependency."""
+    plt = _load_pyplot()
+    if plt is None or not rows:
+        return []
+    output_dir.mkdir(parents=True, exist_ok=True)
+    generated: list[Path] = []
+
+    candidates = [
+        (
+            output_dir / f"{basename}-accuracy-paired.png",
+            lambda path: _plot_accuracy(plt, rows, path, dpi),
+        ),
+        (
+            output_dir / f"{basename}-latency-speedup.png",
+            lambda path: _plot_ratio_by_task(
+                plt,
+                rows,
+                path,
+                value_field="subagent_speedup_single_over_subagent",
+                title="RoadmapBench end-to-end latency speedup",
+                xlabel="single-agent latency / subagent latency (>1 favors subagent)",
+                dpi=dpi,
+            ),
+        ),
+        (
+            output_dir / f"{basename}-accuracy-latency-tradeoff.png",
+            lambda path: _plot_tradeoff(plt, rows, path, dpi),
+        ),
+    ]
+
+    request_rows: list[dict[str, Any]] = []
+    for row in rows:
+        sub = _number(row.get("subagent_model_request_count"))
+        single = _number(row.get("single_agent_model_request_count"))
+        if sub is None or single is None or sub <= 0 or single <= 0:
+            continue
+        augmented = dict(row)
+        augmented["model_request_ratio_single_over_subagent"] = single / sub
+        request_rows.append(augmented)
+    candidates.append(
+        (
+            output_dir / f"{basename}-trajectory-model-requests.png",
+            lambda path: _plot_ratio_by_task(
+                plt,
+                request_rows,
+                path,
+                value_field="model_request_ratio_single_over_subagent",
+                title="Trajectory model-request load",
+                xlabel="single-agent requests / subagent requests (>1 means more single-agent requests)",
+                dpi=dpi,
+            ),
+        )
+    )
+
+    for path, render in candidates:
+        try:
+            if render(path):
+                generated.append(path)
+        except Exception as exc:  # noqa: BLE001 - report data must still survive
+            print(f"WARNING: plot generation failed for {path.name}: {exc}")
+    return generated
+
+
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -859,7 +1341,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         default="reports/roadmap",
-        help="Directory for JSON/CSV/Markdown reports.",
+        help="Directory for JSON/CSV/Markdown/PNG reports.",
     )
     parser.add_argument(
         "--name", help="Optional report basename; PBS ids are used by default."
@@ -869,7 +1351,29 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Exit 2 if any selected non-ERROR task lacks trajectory.jsonl.",
     )
+    parser.add_argument(
+        "--bootstrap-samples",
+        type=int,
+        default=10000,
+        help="Paired-task bootstrap resamples for 95%% CIs (default: 10000).",
+    )
+    parser.add_argument(
+        "--no-plots",
+        action="store_true",
+        help="Do not generate paired PNG figures.",
+    )
+    parser.add_argument(
+        "--plot-dpi",
+        type=int,
+        default=180,
+        help="PNG figure DPI when plotting is available (default: 180).",
+    )
     args = parser.parse_args(argv)
+
+    if args.bootstrap_samples < 100:
+        parser.error("--bootstrap-samples must be at least 100")
+    if args.plot_dpi < 72:
+        parser.error("--plot-dpi must be at least 72")
 
     comparison = bool(args.subagent or args.single_agent)
     if comparison:
@@ -882,9 +1386,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
                 "comparison mode requires both --subagent and --single-agent"
             )
     elif not args.runs:
-        parser.error(
-            "provide positional PBS jobs or both comparison arms"
-        )
+        parser.error("provide positional PBS jobs or both comparison arms")
     return args
 
 
@@ -895,6 +1397,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     comparison = bool(args.subagent)
+    figure_paths: list[Path] = []
     if comparison:
         raw_sub = collect_records(
             args.subagent, arm="subagent", runs_root=runs_root
@@ -906,18 +1409,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         single_agent, single_duplicates = select_best_records(raw_single)
         sub_summary = summarize_arm(subagent)
         single_summary = summarize_arm(single_agent)
-        paired_summary, paired_rows = compare_paired(subagent, single_agent)
+        paired_summary, paired_rows = compare_paired(
+            subagent,
+            single_agent,
+            bootstrap_samples=args.bootstrap_samples,
+        )
         duplicates = {
-            **{f"subagent::{k}": v for k, v in sub_duplicates.items()},
+            **{f"subagent::{key}": value for key, value in sub_duplicates.items()},
             **{
-                f"single-agent::{k}": v
-                for k, v in single_duplicates.items()
+                f"single-agent::{key}": value
+                for key, value in single_duplicates.items()
             },
         }
         duplicate_count = sum(len(group) - 1 for group in duplicates.values())
-        basename = args.name or _default_name(subagent, single_agent)
+        basename = _safe_name(args.name or _default_name(subagent, single_agent))
         selected = [*subagent, *single_agent]
+
+        if not args.no_plots:
+            figure_paths = generate_plots(
+                paired_rows,
+                output_dir,
+                basename,
+                dpi=args.plot_dpi,
+            )
+        figure_names = [path.name for path in figure_paths]
+
         report = {
+            "schema_version": 2,
             "mode": "comparison",
             "subagent_jobs": _jobs(subagent),
             "single_agent_jobs": _jobs(single_agent),
@@ -925,11 +1443,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "single_agent": single_summary,
             "paired": paired_summary,
             "tasks": {
-                "subagent": [record_to_dict(r) for r in subagent],
-                "single_agent": [record_to_dict(r) for r in single_agent],
+                "subagent": [record_to_dict(record) for record in subagent],
+                "single_agent": [
+                    record_to_dict(record) for record in single_agent
+                ],
                 "paired": paired_rows,
             },
             "duplicates": _duplicates_json(duplicates),
+            "figures": figure_names,
         }
         markdown = render_markdown(
             subagent,
@@ -939,21 +1460,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             paired_summary=paired_summary,
             paired_rows=paired_rows,
             duplicate_count=duplicate_count,
+            figure_names=figure_names,
         )
     else:
-        raw_sub = collect_records(args.runs, arm="subagent", runs_root=runs_root)
+        raw_sub = collect_records(
+            args.runs, arm="subagent", runs_root=runs_root
+        )
         subagent, duplicates = select_best_records(raw_sub)
         sub_summary = summarize_arm(subagent)
         duplicate_count = sum(len(group) - 1 for group in duplicates.values())
-        basename = args.name or _default_name(subagent)
+        basename = _safe_name(args.name or _default_name(subagent))
         selected = list(subagent)
-        paired_rows = []
+        paired_rows: list[dict[str, Any]] = []
         report = {
+            "schema_version": 2,
             "mode": "summary",
             "jobs": _jobs(subagent),
             "summary": sub_summary,
-            "tasks": [record_to_dict(r) for r in subagent],
+            "tasks": [record_to_dict(record) for record in subagent],
             "duplicates": _duplicates_json(duplicates),
+            "figures": [],
         }
         markdown = render_markdown(
             subagent,
@@ -961,7 +1487,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             duplicate_count=duplicate_count,
         )
 
-    basename = _safe_name(basename)
     json_path = output_dir / f"{basename}.json"
     md_path = output_dir / f"{basename}.md"
     tasks_csv = output_dir / f"{basename}-tasks.csv"
@@ -979,6 +1504,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         paired_csv = output_dir / f"{basename}-paired.csv"
         _write_csv(paired_csv, paired_rows)
         generated.append(paired_csv)
+    generated.extend(figure_paths)
 
     missing_trajectory = [
         record
@@ -990,6 +1516,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     print("Generated:")
     for path in generated:
         print(f"  {path}")
+
+    if comparison and not args.no_plots and not figure_paths:
+        print(
+            "NOTE: no PNG figures were generated. Install matplotlib or use "
+            "--no-plots to silence this note."
+        )
 
     if missing_trajectory:
         print(
