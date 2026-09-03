@@ -1,0 +1,34 @@
+{
+  "_doc": "Focused two-task RoadmapBench retry for the subset10b instances that previously failed before agent execution because their task images lacked Git metadata.",
+  "sweep_name": "roadmapbench_smoke2",
+  "plan_version": "roadmapbench-59184e779909-smoke2",
+  "application": "terminal_bench",
+  "source_dataset": "UnipatAI/RoadmapBench",
+  "source_commit": "59184e779909300a5a0150b06b945d39da81a099",
+  "source_dataset_task_count": 115,
+  "tasks_root": "/scratch/users/ntu/n2602695/datasets/roadmapbench-59184e779909-subagent-subset20",
+  "instances": [
+    "pyg-2.1.0-roadmap",
+    "plr-1.0.0-roadmap"
+  ],
+  "repo_mapping": {
+    "pyg-2.1.0-roadmap": {
+      "repo_id": "roadmapbench/pyg-2.1.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "plr-1.0.0-roadmap": {
+      "repo_id": "roadmapbench/plr-1.0.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 7200,
+  "output_dir": "roadmapbench_smoke2",
+  "seeds": [
+    42
+  ],
+  "selection": {
+    "method": "focused retry of two fixed formal subset20 tasks",
+    "rationale": "These are the two subset10b tasks whose first formal subagent attempts failed before model execution because the upstream task SIFs lacked /app/.git. The retry preserves the original formal task, seed, per-task budget, harness, model, serving configuration, and verifier while using task SIFs repaired with synthetic initial Git baselines."
+  }
+}
