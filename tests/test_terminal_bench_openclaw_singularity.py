@@ -1889,7 +1889,7 @@ def test_terminal_bench_fractional_reward_is_preserved():
     assert tb_app._terminal_bench_reward("0.5556", timed_out=False) == (
         "FAIL", 0.5556
     )
-    assert tb_app._terminal_bench_reward("", timed_out=True) == ("TIMEOUT", 0.0)
+    assert tb_app._terminal_bench_reward("", timed_out=True) == ("TIMEOUT", None)
 
 
 def test_terminal_bench_loader_accepts_roadmapbench_v1_metadata(tmp_path):

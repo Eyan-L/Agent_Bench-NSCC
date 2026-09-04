@@ -102,6 +102,9 @@ def test_verifier_timeout_bytes_are_json_serializable(tmp_path):
 
     json.dumps(result)
     assert result["status"] == "TIMEOUT"
+    assert result["verifier_status"] == "TIMEOUT"
+    assert result["reward"] is None
+    assert result["test_pass_rate"] is None
     assert result["verifier_timed_out"] is True
     assert result["verifier_timeout_seconds"] == 5
     assert result["verifier_stdout_tail"] == "partial stdout"
@@ -131,3 +134,28 @@ def test_abnormal_no_child_exit_records_quiescence_metadata():
     assert lifecycle["quiescenceMethod"] == "no-active-children"
     assert lifecycle["orphanCancellationAttempted"] is False
     assert lifecycle["pendingChildrenAtParentTerminal"] == 0
+
+
+def test_roadmapbench_merge_preserves_verifier_timeout_status():
+    from agent_bench.runtime.driver import _merge_agent_completion_into_verdict
+
+    merged = _merge_agent_completion_into_verdict(
+        {
+            "status": "TIMEOUT",
+            "verifier_status": "TIMEOUT",
+            "reward": None,
+            "reward_raw": None,
+            "test_pass_rate": None,
+            "verifier_timed_out": True,
+        },
+        {
+            "exit_code": 0,
+            "agent_completion_status": "normal_completion",
+        },
+    )
+
+    assert merged["status"] == "TIMEOUT"
+    assert merged["verifier_status"] == "TIMEOUT"
+    assert merged["reward"] is None
+    assert merged["test_pass_rate"] is None
+    assert merged["agent_execution_outcome"] == "normal_completion"

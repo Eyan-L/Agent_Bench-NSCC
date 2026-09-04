@@ -176,7 +176,7 @@ def _merge_agent_completion_into_verdict(verdict: dict, result: dict) -> dict:
     ).upper()
     merged["verifier_status"] = (
         raw_verifier_status
-        if raw_verifier_status in {"PASS", "FAIL", "ERROR"}
+        if raw_verifier_status in {"PASS", "FAIL", "TIMEOUT", "ERROR"}
         else "ERROR"
     )
 

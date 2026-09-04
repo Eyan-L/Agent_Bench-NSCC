@@ -242,14 +242,14 @@ def _clear_reward_file(host_logs_dir: Path) -> Path:
     return host_reward
 
 
-def _terminal_bench_reward(raw: str, *, timed_out: bool) -> tuple[str, float]:
+def _terminal_bench_reward(raw: str, *, timed_out: bool) -> tuple[str, Optional[float]]:
     """Interpret binary Terminal-Bench and fractional RoadmapBench rewards."""
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        return ("TIMEOUT" if timed_out else "ERROR", 0.0)
+        return ("TIMEOUT" if timed_out else "ERROR", None)
     if not 0.0 <= value <= 1.0:
-        return ("ERROR", 0.0)
+        return ("ERROR", None)
     return ("PASS" if value >= 1.0 else "FAIL", value)
 
 
@@ -1640,7 +1640,8 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
         status, reward_value = _terminal_bench_reward(
             reward_text, timed_out=timed_out
         )
-        return {"status": status, "test_pass_rate": reward_value, "passed": int(status == "PASS"),
+        return {"status": status, "verifier_status": status, "reward": reward_value,
+                "test_pass_rate": reward_value, "passed": int(status == "PASS"),
                 "failed": int(status != "PASS"), "verifier_rc": result.returncode,
                 "verifier_timed_out": timed_out, "verifier_timeout_seconds": timeout,
                 "verifier_stdout_tail": _as_text(result.stdout)[-2000:],
