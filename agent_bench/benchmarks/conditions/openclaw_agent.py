@@ -228,6 +228,15 @@ class OpenClawAgentCondition:
             )
             step_end_ns = time.time_ns()
 
+        # Reuse the existing logical OpenClaw step boundary instead of
+        # introducing another lifecycle clock. RoadmapBench returns from
+        # _await_post_turn_lifecycle only after child/orphan quiescence.
+        phase_timing = {
+            "agent_execution_start_ns": step_start_ns,
+            "agent_execution_end_ns": step_end_ns,
+            "agent_execution_seconds": (step_end_ns - step_start_ns) / 1e9,
+        }
+
         # diagnostics-otel uses BatchSpanProcessor under the hood. Spans only
         # flush on `sdk.shutdown()`, which runs when the gateway process exits.
         # Send SIGTERM to the in-container gateway so the final spans hit the
@@ -393,11 +402,23 @@ class OpenClawAgentCondition:
         #    for TB). Always write candidate.patch — driver gates on its
         #    existence + size, and the empty-patch case is allowed for TB via
         #    skip_patch_gate at driver.py:187.
+        candidate_freeze_start_ns = time.time_ns()
         patch_text = self._collect_artifacts(
             container_id, self._env_info, run_dir, workspace_root,
         ) or ""
         patch_path = run_dir / "candidate.patch"
         patch_path.write_text(patch_text)
+        candidate_freeze_end_ns = time.time_ns()
+        phase_timing.update({
+            "post_agent_before_freeze_seconds": max(
+                0.0, (candidate_freeze_start_ns - step_end_ns) / 1e9
+            ),
+            "candidate_freeze_start_ns": candidate_freeze_start_ns,
+            "candidate_freeze_end_ns": candidate_freeze_end_ns,
+            "candidate_freeze_seconds": (
+                candidate_freeze_end_ns - candidate_freeze_start_ns
+            ) / 1e9,
+        })
         if self.agent_id == "roadmap_bench":
             try:
                 from agent_bench.benchmarks.conditions.openclaw_measurement import (
@@ -428,6 +449,8 @@ class OpenClawAgentCondition:
             "agent_completion_error": self._last_completion_error or None,
             "agent_runtime_mode": self._detect_agent_runtime_mode(payload),
             "agent_lifecycle": agent_lifecycle,
+            "agent_execution_seconds": phase_timing["agent_execution_seconds"],
+            "phase_timing": phase_timing,
             **measurement,
         }
 

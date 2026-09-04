@@ -475,6 +475,16 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             benchmark_kind == "terminal_bench"
             and instance_data.get("benchmark_variant") == "roadmapbench"
         )
+        phase_timing = result.get("phase_timing")
+        if not isinstance(phase_timing, dict):
+            phase_timing = {}
+            result["phase_timing"] = phase_timing
+        agent_start_ns = phase_timing.get("agent_execution_start_ns")
+        if isinstance(agent_start_ns, int) and manifest.wall_start_ns:
+            phase_timing["pre_agent_seconds"] = max(
+                0.0, (agent_start_ns - manifest.wall_start_ns) / 1e9
+            )
+
         lifecycle_verifier_error = (
             _roadmap_lifecycle_verifier_error(result)
             if is_roadmapbench else None
@@ -495,16 +505,27 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 "agent_exit_code": agent_exit_code,
             }
         elif skip_patch_gate or (patch_path.exists() and patch_path.stat().st_size > 0):
-            verdict = harness.run_tests(
-                container_id=container_id,
-                instance_id=run_config.instance_id,
-                workspace_root=env_info["workspace_root"],
-                timeout_seconds=run_config.wall_clock_budget_seconds,
-                patch=patch_path.read_text() if patch_path.exists() else "",
-                run_id=run_id,
-                instance_data=instance_data,
-                run_dir=run_dir,
-            )
+            verifier_start_ns = time.time_ns()
+            try:
+                verdict = harness.run_tests(
+                    container_id=container_id,
+                    instance_id=run_config.instance_id,
+                    workspace_root=env_info["workspace_root"],
+                    timeout_seconds=run_config.wall_clock_budget_seconds,
+                    patch=patch_path.read_text() if patch_path.exists() else "",
+                    run_id=run_id,
+                    instance_data=instance_data,
+                    run_dir=run_dir,
+                )
+            finally:
+                verifier_end_ns = time.time_ns()
+                phase_timing.update({
+                    "verifier_start_ns": verifier_start_ns,
+                    "verifier_end_ns": verifier_end_ns,
+                    "verifier_seconds": (
+                        verifier_end_ns - verifier_start_ns
+                    ) / 1e9,
+                })
         else:
             verdict = {
                 "status": "FAIL",
@@ -554,6 +575,8 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         manifest.agent_execution_outcome = verdict.get("agent_execution_outcome")
         manifest.agent_completion_error = verdict.get("agent_completion_error")
         manifest.agent_lifecycle = verdict.get("agent_lifecycle")
+        manifest.agent_execution_seconds = result.get("agent_execution_seconds")
+        manifest.phase_timing = result.get("phase_timing")
         manifest.verifier_status = verdict.get("verifier_status")
         manifest.reward = verdict.get("reward")
         manifest.test_pass_rate = verdict.get("test_pass_rate")

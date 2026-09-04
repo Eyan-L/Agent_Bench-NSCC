@@ -1,0 +1,128 @@
+import json
+
+from agent_bench.benchmarks.conditions.openclaw_measurement import (
+    build_openclaw_measurement,
+)
+from agent_bench.core.manifest import RunManifest
+
+
+def _write_jsonl(path, rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+
+def test_manifest_round_trip_preserves_agent_phase_timing():
+    manifest = RunManifest(
+        run_id="run",
+        condition_id="condition",
+        instance_id="instance",
+        seed=42,
+        serving_config_id="serving",
+        status="PASS",
+        duration_seconds=100.0,
+        agent_execution_seconds=60.0,
+        phase_timing={"verifier_seconds": 30.0},
+    )
+    restored = RunManifest.from_dict(manifest.to_dict())
+    assert restored.duration_seconds == 100.0
+    assert restored.agent_execution_seconds == 60.0
+    assert restored.phase_timing == {"verifier_seconds": 30.0}
+
+
+def test_child_runtime_and_unmaterialized_spawn_are_distinct(tmp_path):
+    sessions = tmp_path / "conversation" / "sessions"
+    sessions.mkdir(parents=True)
+    parent_key = "agent:roadmap_bench:main"
+    child_a = "agent:roadmap_bench:subagent:a"
+    child_b = "agent:roadmap_bench:subagent:b"
+    (sessions / "sessions.json").write_text(json.dumps({
+        parent_key: {
+            "sessionId": "parent-id",
+            "sessionFile": "parent.jsonl",
+            "status": "done",
+        },
+        child_a: {
+            "sessionId": "child-a-id",
+            "sessionFile": "child-a.jsonl",
+            "spawnedBy": parent_key,
+            "status": "done",
+            "createdAt": "2026-01-01T00:00:02Z",
+            "endedAt": "2026-01-01T00:00:05Z",
+        },
+        child_b: {
+            "sessionId": "child-b-id",
+            "sessionFile": "child-b.jsonl",
+            "spawnedBy": parent_key,
+            "status": "done",
+        },
+    }))
+    _write_jsonl(sessions / "parent.jsonl", [{
+        "type": "message",
+        "message": {
+            "role": "assistant",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "stopReason": "toolUse",
+            "content": [
+                {"type": "toolCall", "id": "spawn-a", "name": "sessions_spawn", "arguments": {"task": "a"}},
+                {"type": "toolCall", "id": "spawn-b", "name": "sessions_spawn", "arguments": {"task": "b"}},
+                {"type": "toolCall", "id": "spawn-failed", "name": "sessions_spawn", "arguments": {"task": "never materialized"}},
+            ],
+        },
+    }])
+    _write_jsonl(sessions / "child-a.jsonl", [{
+        "type": "message",
+        "message": {
+            "role": "assistant",
+            "timestamp": "2026-01-01T00:00:04Z",
+            "stopReason": "stop",
+            "content": [{"type": "text", "text": "a done"}],
+        },
+    }])
+    _write_jsonl(sessions / "child-b.jsonl", [
+        {"type": "message", "message": {
+            "role": "assistant",
+            "timestamp": "2026-01-01T00:00:06Z",
+            "stopReason": "toolUse",
+            "content": [],
+        }},
+        {"type": "message", "message": {
+            "role": "assistant",
+            "timestamp": "2026-01-01T00:00:09Z",
+            "stopReason": "stop",
+            "content": [{"type": "text", "text": "b done"}],
+        }},
+    ])
+
+    result = build_openclaw_measurement(
+        tmp_path, agent_id="roadmap_bench"
+    )
+    obs = result["runtime_observability"]
+    assert obs["spawn_attempt_count"] == 3
+    assert obs["child_session_count"] == 2
+    assert obs["unmaterialized_spawn_attempt_count"] == 1
+    assert obs["child_runtime_complete_count"] == 2
+    assert obs["child_runtime_by_session"][child_a]["runtime_seconds"] == 3.0
+    assert obs["child_runtime_by_session"][child_a]["start_timestamp_source"] == "createdAt"
+    assert obs["child_runtime_by_session"][child_a]["terminal_timestamp_source"] == "endedAt"
+    assert obs["child_runtime_by_session"][child_b]["runtime_seconds"] == 3.0
+    assert obs["child_runtime_by_session"][child_b]["start_timestamp_quality"] == "transcript_inferred"
+    assert obs["child_runtime_by_session"][child_b]["terminal_timestamp_quality"] == "transcript_inferred"
+    assert obs["child_sum_runtime_seconds"] == 6.0
+    assert obs["child_union_active_seconds"] == 6.0
+    assert obs["child_parallel_overlap_seconds"] == 0.0
+    assert obs["max_concurrent_children"] == 1
+
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()
+    ]
+    completions = {
+        event["session_key"]: event
+        for event in events
+        if event["event_type"] == "child_completion"
+    }
+    assert completions[child_a]["source_timestamp_field"] == "endedAt"
+    assert completions[child_a]["timestamp_quality"] == "session_state"
+    assert completions[child_a]["observed_timestamp_ns"] is not None
+    assert completions[child_b]["source_timestamp_field"] == "transcript_last_event"
+    assert completions[child_b]["timestamp_quality"] == "transcript_inferred"

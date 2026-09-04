@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path, PurePosixPath
 import re
+import time
 from typing import Any, Iterable, Optional
 
 
@@ -102,6 +103,92 @@ def _session_sources(sessions_dir: Path) -> list[tuple[Path, str, dict]]:
     return sources
 
 
+def _entry_time(entry: dict, fields: tuple[str, ...]) -> tuple[int, str]:
+    for field in fields:
+        timestamp_ns = _timestamp_ns(entry.get(field))
+        if timestamp_ns:
+            return timestamp_ns, field
+    return 0, ""
+
+
+def _transcript_time_bounds(path: Path) -> tuple[int, int]:
+    if not path.is_file():
+        return 0, 0
+    first = 0
+    last = 0
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return 0, 0
+    for line in lines:
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = item.get("message") or {}
+        timestamp_ns = _timestamp_ns(
+            message.get("timestamp") or item.get("timestamp")
+        )
+        if not timestamp_ns:
+            continue
+        first = timestamp_ns if not first else min(first, timestamp_ns)
+        last = max(last, timestamp_ns)
+    return first, last
+
+
+def _child_start_time(
+    entry: dict, transcript_first_ns: int
+) -> tuple[int, str, str]:
+    timestamp_ns, field = _entry_time(
+        entry, ("startedAt", "started_at", "createdAt", "created_at")
+    )
+    if timestamp_ns:
+        quality = (
+            "session_state"
+            if field in {"startedAt", "started_at"}
+            else "session_state_inferred"
+        )
+        return timestamp_ns, field, quality
+    if transcript_first_ns:
+        return (
+            transcript_first_ns, "transcript_first_event", "transcript_inferred"
+        )
+    return 0, "", "missing"
+
+
+def _child_terminal_time(
+    entry: dict, transcript_last_ns: int
+) -> tuple[int, str, str]:
+    timestamp_ns, field = _entry_time(
+        entry,
+        (
+            "endedAt", "ended_at", "completedAt", "completed_at",
+            "finishedAt", "finished_at",
+        ),
+    )
+    if timestamp_ns:
+        return timestamp_ns, field, "session_state"
+    timestamp_ns, field = _entry_time(entry, ("updatedAt", "updated_at"))
+    if timestamp_ns:
+        return timestamp_ns, field, "session_state_inferred"
+    if transcript_last_ns:
+        return transcript_last_ns, "transcript_last_event", "transcript_inferred"
+    return 0, "", "missing"
+
+
+def _child_state_time(
+    entry: dict, transcript_last_ns: int
+) -> tuple[int, str, str]:
+    timestamp_ns, field = _entry_time(
+        entry, ("updatedAt", "updated_at", "lastActivityAt", "last_activity_at")
+    )
+    if timestamp_ns:
+        return timestamp_ns, field, "session_state"
+    if transcript_last_ns:
+        return transcript_last_ns, "transcript_last_event", "transcript_inferred"
+    return 0, "", "missing"
+
+
 def _append(
     events: list[dict],
     *,
@@ -130,6 +217,7 @@ def _session_events(run_dir: Path, agent_id: str) -> list[dict]:
         return []
     index = _session_index(sessions_dir)
     events: list[dict] = []
+    session_bounds: dict[str, tuple[int, int]] = {}
 
     for path, session_key, entry in _session_sources(sessions_dir):
         session_id = str(entry.get("sessionId") or path.stem)
@@ -139,6 +227,8 @@ def _session_events(run_dir: Path, agent_id: str) -> list[dict]:
         seen_tool_results: set[str] = set()
         seen_resumes: set[tuple[int, str]] = set()
         heartbeat_turn = False
+        transcript_first_ns = 0
+        transcript_last_ns = 0
         try:
             lines = path.read_text(errors="replace").splitlines()
         except OSError:
@@ -152,6 +242,12 @@ def _session_events(run_dir: Path, agent_id: str) -> list[dict]:
             timestamp_ns = _timestamp_ns(
                 message.get("timestamp") or item.get("timestamp")
             )
+            if timestamp_ns:
+                transcript_first_ns = (
+                    timestamp_ns if not transcript_first_ns
+                    else min(transcript_first_ns, timestamp_ns)
+                )
+                transcript_last_ns = max(transcript_last_ns, timestamp_ns)
             item_type = item.get("type")
             custom_type = str(item.get("customType") or "")
             if item_type == "custom_message" and custom_type == "openclaw.sessions_yield":
@@ -270,6 +366,10 @@ def _session_events(run_dir: Path, agent_id: str) -> list[dict]:
                         text=text, session_state=session_state,
                     )
 
+        session_bounds[session_key] = (
+            transcript_first_ns, transcript_last_ns
+        )
+
     for session_key, entry in index.items():
         if not isinstance(entry, dict) or not entry.get("spawnedBy"):
             continue
@@ -280,13 +380,124 @@ def _session_events(run_dir: Path, agent_id: str) -> list[dict]:
             "timeout": "child_timeout",
             "timed_out": "child_timeout",
         }.get(status, "child_state")
+        _first_ns, last_ns = session_bounds.get(str(session_key), (0, 0))
+        if event_type in {"child_completion", "child_timeout"}:
+            source_ns, source_field, timestamp_quality = _child_terminal_time(
+                entry, last_ns
+            )
+        else:
+            source_ns, source_field, timestamp_quality = _child_state_time(
+                entry, last_ns
+            )
+        observed_ns = time.time_ns()
         _append(
-            events, timestamp_ns=0,
+            events, timestamp_ns=source_ns,
             session_id=str(entry.get("sessionId") or ""),
             session_key=str(session_key), role="child", event_type=event_type,
             session_state=status, spawned_by=entry.get("spawnedBy"),
+            source_timestamp=_iso_from_ns(source_ns),
+            source_timestamp_ns=source_ns or None,
+            source_timestamp_field=source_field or None,
+            observed_timestamp=_iso_from_ns(observed_ns),
+            observed_timestamp_ns=observed_ns,
+            timestamp_quality=timestamp_quality,
         )
     return events
+
+
+def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
+    sessions_dir = run_dir / "conversation" / "sessions"
+    index = _session_index(sessions_dir) if sessions_dir.is_dir() else {}
+    children: dict[str, dict] = {}
+    intervals: list[tuple[int, int]] = []
+    terminal_states = {"done", "completed", "timeout", "timed_out"}
+    observed_ns = time.time_ns()
+
+    for session_key, entry in index.items():
+        if not isinstance(entry, dict) or not entry.get("spawnedBy"):
+            continue
+        session_key = str(session_key)
+        name = _session_file_name(entry)
+        transcript = sessions_dir / name if name else None
+        first_ns, last_ns = (
+            _transcript_time_bounds(transcript)
+            if transcript is not None else (0, 0)
+        )
+        start_ns, start_source, start_quality = _child_start_time(entry, first_ns)
+        status = str(entry.get("status") or "unknown").lower()
+        is_terminal = status in terminal_states
+        if is_terminal:
+            end_ns, end_source, end_quality = _child_terminal_time(entry, last_ns)
+        else:
+            end_ns, end_source, end_quality = 0, "", "missing"
+
+        runtime_seconds = None
+        if is_terminal and start_ns and end_ns and end_ns >= start_ns:
+            runtime_seconds = (end_ns - start_ns) / 1e9
+            intervals.append((start_ns, end_ns))
+
+        children[session_key] = {
+            "session_id": str(entry.get("sessionId") or "") or None,
+            "spawned_by": entry.get("spawnedBy"),
+            "status": status,
+            "start_timestamp": _iso_from_ns(start_ns),
+            "start_timestamp_ns": start_ns or None,
+            "start_timestamp_source": start_source or None,
+            "start_timestamp_quality": start_quality,
+            "terminal_timestamp": _iso_from_ns(end_ns),
+            "terminal_timestamp_ns": end_ns or None,
+            "terminal_timestamp_source": end_source or None,
+            "terminal_timestamp_quality": end_quality,
+            "observed_timestamp": _iso_from_ns(observed_ns),
+            "observed_timestamp_ns": observed_ns,
+            "runtime_seconds": runtime_seconds,
+        }
+
+    complete = [
+        child for child in children.values()
+        if child.get("runtime_seconds") is not None
+    ]
+    runtime_sum = sum(float(child["runtime_seconds"]) for child in complete)
+
+    union_ns = 0
+    if intervals:
+        merged: list[list[int]] = []
+        for start_ns, end_ns in sorted(intervals):
+            if not merged or start_ns > merged[-1][1]:
+                merged.append([start_ns, end_ns])
+            else:
+                merged[-1][1] = max(merged[-1][1], end_ns)
+        union_ns = sum(end - start for start, end in merged)
+
+    max_concurrent = 0
+    concurrent = 0
+    points: list[tuple[int, int]] = []
+    for start_ns, end_ns in intervals:
+        points.append((start_ns, 1))
+        points.append((end_ns, -1))
+    for _timestamp_ns_value, delta in sorted(
+        points, key=lambda item: (item[0], item[1])
+    ):
+        concurrent += delta
+        max_concurrent = max(max_concurrent, concurrent)
+
+    union_seconds = union_ns / 1e9
+    return {
+        "child_session_count": len(children),
+        "child_runtime_complete_count": len(complete),
+        "child_runtime_by_session": children,
+        "child_sum_runtime_seconds": runtime_sum,
+        "child_union_active_seconds": union_seconds,
+        "child_parallel_overlap_seconds": max(0.0, runtime_sum - union_seconds),
+        "max_concurrent_children": max_concurrent,
+        "child_runtime_policy": {
+            "definition": (
+                "durable child start to durable terminal time; session state "
+                "timestamps preferred, transcript bounds explicitly labelled as inferred"
+            ),
+            "failed_spawn_runtime": None,
+        },
+    }
 
 
 def _gateway_events(run_dir: Path) -> list[dict]:
@@ -632,7 +843,13 @@ def _loop_termination(events: list[dict]) -> dict:
     }
 
 
-def _runtime_observability(run_dir: Path, events: list[dict]) -> dict:
+def _runtime_observability(
+    run_dir: Path, events: list[dict], agent_id: str
+) -> dict:
+    child_timing = _child_runtime_observability(run_dir, agent_id)
+    spawn_attempt_count = sum(
+        event.get("event_type") == "spawn" for event in events
+    )
     announce_timeouts = [
         event for event in events if event["event_type"] == "announce_timeout"
     ]
@@ -704,6 +921,19 @@ def _runtime_observability(run_dir: Path, events: list[dict]) -> dict:
         for event in announce_timeouts
     )
     return {
+        **child_timing,
+        "spawn_attempt_count": spawn_attempt_count,
+        "unmaterialized_spawn_attempt_count": max(
+            0, spawn_attempt_count - child_timing["child_session_count"]
+        ),
+        "spawn_attempt_attribution": (
+            "best-effort aggregate: durable transcript spawn calls minus "
+            "durable child sessions; no per-attempt child identity inferred"
+        ),
+        "spawn_runtime_policy": (
+            "failed/unmaterialized spawn waits remain in agent_execution_seconds "
+            "but never create child runtime"
+        ),
         "announce_attempt_count": len(announce_timeouts) + len(announces),
         "announce_timeout_count": len(announce_timeouts),
         "announce_retry_count": sum(
@@ -756,7 +986,9 @@ def build_openclaw_measurement(
     events.extend(_gateway_events(run_dir))
     events.extend(usage_events)
     events.extend(request_events)
-    runtime_observability = _runtime_observability(run_dir, events)
+    runtime_observability = _runtime_observability(
+        run_dir, events, agent_id
+    )
     termination = _loop_termination(events)
     events.sort(key=lambda event: (event.get("timestamp_ns") or 0, event["event_type"]))
 
