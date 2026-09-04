@@ -27,9 +27,14 @@ cd "${PBS_O_WORKDIR:-$PWD}"
 export AB_SERVING_BASE_URL=http://127.0.0.1:30000/v1
 export AB_SERVING_API_KEY=EMPTY
 unset AB_TB_FORCE_ONE_SUBAGENT
-# GPU smoke jobs must reuse the prebuilt patched OpenClaw runtime. Runtime
-# preparation still rebuilds automatically if the patched SIF is absent.
-export AB_AGENT_RUNTIME_REBUILD=0
+
+# This smoke deliberately rebuilds the shared patched OpenClaw SIF once so the
+# runtime used on NSCC definitely contains the Roadmap reliability patch:
+#   * sessions.patch deadline 10s -> 45s for reliable subagent materialization
+#   * OpenRouter/LiteLLM pricing endpoints replaced with offline data URLs
+# build_oc_sif.sh verifies the sealed image before swapping it into place.
+export AB_OPENCLAW_SUBAGENT_SESSION_PATCH_TIMEOUT_MS=45000
+export AB_AGENT_RUNTIME_REBUILD=1
 export AB_PBS_SITE=NSCC
 if [[ -z "${AB_RUN_STAMP:-}" ]]; then
     AB_RUN_STAMP="$(TZ=Asia/Singapore date +%Y-%m-%d_%H-%M-%S)"
