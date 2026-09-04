@@ -48,7 +48,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     # A turn-level stop can precede an OpenClaw retry/resume. Require the
     # durable session and transcript to remain terminal across multiple
     # watcher reads before accepting a non-DONE stop as logical completion.
-    terminal_stop_confirmation_seconds = 10.0
+    terminal_stop_confirmation_seconds = 4.0
 
     def run(
         self,
@@ -60,6 +60,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         env_info: Optional[Dict] = None,
     ) -> Dict:
         runtime_env = env_info if env_info is not None else {}
+        runtime_env["roadmap_workspace_quiesced"] = False
         workspace = Path(str(runtime_env.get("workspace_host_path") or ""))
         baseline = self._capture_task_workspace_baseline(
             runtime_env, workspace_root
@@ -197,6 +198,11 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     ) -> Optional[str]:
         """Capture tracked and agent-created untracked repository changes."""
         del container_id, run_dir
+        if env_info.get("roadmap_workspace_quiesced") is not True:
+            raise RuntimeError(
+                "Roadmap candidate freeze refused before validated "
+                "agent-writer quiescence"
+            )
         baseline = env_info.get("roadmap_workspace_baseline") or {}
         baseline_head = str(baseline.get("git_head") or "")
         if not baseline_head:
@@ -747,6 +753,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         """Return transcript activity that must not change across the freeze fence."""
         return (
             snapshot.get("parent_session_id"),
+            snapshot.get("parent_session_status"),
             snapshot.get("message_count"),
             snapshot.get("transcript_size_bytes"),
             snapshot.get("yield_count"),
@@ -761,6 +768,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     ) -> Tuple[Dict, Dict]:
         """Fence all agent writers and timestamp only a validated quiescence."""
         timed_snapshot = dict(snapshot)
+        self._env_info["roadmap_workspace_quiesced"] = False
         if (
             logical_parent_terminal
             or snapshot.get("parent_terminal")
@@ -803,6 +811,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 quiescence = {**quiescence, "terminalFenceStable": True}
 
         if quiescence.get("workspaceQuiesced") is True:
+            self._env_info["roadmap_workspace_quiesced"] = True
             timed_snapshot["workspace_quiesced_ns"] = time.time_ns()
         return timed_snapshot, quiescence
 

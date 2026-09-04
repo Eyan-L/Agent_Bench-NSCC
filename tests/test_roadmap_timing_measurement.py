@@ -72,6 +72,7 @@ def test_roadmap_quiescence_timing_separates_parent_terminal(monkeypatch, tmp_pa
     assert quiescence["workspaceQuiesced"] is True
     assert quiescence["agentWriterQuiescenceAttempted"] is True
     assert quiescence["terminalFenceStable"] is True
+    assert condition._env_info["roadmap_workspace_quiesced"] is True
     assert timed_snapshot["parent_terminal_observed_ns"] == 1_000_000_000
     assert timed_snapshot["workspace_quiesced_ns"] == 3_000_000_000
 
@@ -111,11 +112,73 @@ def test_roadmap_terminal_fence_rejects_late_parent_activity(monkeypatch, tmp_pa
         snapshot, logical_parent_terminal=True
     )
 
-    assert RoadmapBenchOpenClawCondition.terminal_stop_confirmation_seconds == 10.0
+    assert RoadmapBenchOpenClawCondition.terminal_stop_confirmation_seconds == 4.0
     assert quiescence["workspaceQuiesced"] is False
     assert quiescence["terminalFenceStable"] is False
+    assert condition._env_info["roadmap_workspace_quiesced"] is False
     assert "activity changed" in quiescence["lifecycleError"]
     assert "workspace_quiesced_ns" not in timed_snapshot
+
+
+def test_roadmap_terminal_fence_rejects_status_only_resume(monkeypatch, tmp_path):
+    class Harness:
+        def quiesce_orphan_children(self, _env_info):
+            return {
+                "workspaceQuiesced": True,
+                "quiescenceMethod": "stop-agent-and-restart-task-runtime",
+            }
+
+    condition = object.__new__(RoadmapBenchOpenClawCondition)
+    condition._env_info = {"_harness": Harness(), "state_dir": str(tmp_path)}
+    snapshot = {
+        "parent_session_id": "parent",
+        "parent_terminal": True,
+        "parent_session_terminal": True,
+        "parent_session_status": "done",
+        "message_count": 1,
+        "transcript_size_bytes": 10,
+        "yield_count": 0,
+        "latest_parent_event": "assistant_stop",
+        "pending_child_sessions": [],
+    }
+    changed = dict(
+        snapshot,
+        parent_session_status="running",
+        parent_session_terminal=False,
+        parent_terminal=False,
+    )
+    monkeypatch.setattr(
+        condition, "_read_yield_snapshot", lambda _sessions_dir: changed
+    )
+
+    timed_snapshot, quiescence = condition._quiesce_with_timing(
+        snapshot, logical_parent_terminal=True
+    )
+
+    assert quiescence["workspaceQuiesced"] is False
+    assert quiescence["terminalFenceStable"] is False
+    assert condition._env_info["roadmap_workspace_quiesced"] is False
+    assert "activity changed" in quiescence["lifecycleError"]
+    assert "workspace_quiesced_ns" not in timed_snapshot
+
+
+def test_roadmap_candidate_freeze_requires_validated_quiescence(tmp_path):
+    condition = object.__new__(RoadmapBenchOpenClawCondition)
+    condition.container = None
+    env_info = {
+        "roadmap_workspace_baseline": {"git_head": "deadbeef"},
+        "workspace_host_path": str(tmp_path),
+        "roadmap_workspace_quiesced": False,
+    }
+
+    try:
+        condition._collect_artifacts(
+            None, env_info, tmp_path, "/app"
+        )
+    except RuntimeError as exc:
+        assert "validated agent-writer quiescence" in str(exc)
+    else:
+        raise AssertionError("candidate freeze must fail closed before quiescence")
 
 
 def test_child_runtime_and_unmaterialized_spawn_are_distinct(tmp_path):
