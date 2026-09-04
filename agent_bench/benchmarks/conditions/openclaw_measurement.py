@@ -381,7 +381,10 @@ def _session_events(run_dir: Path, agent_id: str) -> list[dict]:
             "timed_out": "child_timeout",
         }.get(status, "child_state")
         _first_ns, last_ns = session_bounds.get(str(session_key), (0, 0))
-        if event_type in {"child_completion", "child_timeout"}:
+        if status in {
+            "done", "completed", "failed", "error", "timeout", "timed_out",
+            "cancelled", "canceled",
+        }:
             source_ns, source_field, timestamp_quality = _child_terminal_time(
                 entry, last_ns
             )
