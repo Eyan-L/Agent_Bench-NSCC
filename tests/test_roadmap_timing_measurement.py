@@ -109,7 +109,8 @@ def test_child_runtime_and_unmaterialized_spawn_are_distinct(tmp_path):
     assert obs["child_runtime_by_session"][child_b]["terminal_timestamp_quality"] == "transcript_inferred"
     assert obs["child_sum_runtime_seconds"] == 6.0
     assert obs["child_union_active_seconds"] == 6.0
-    assert obs["child_parallel_overlap_seconds"] == 0.0
+    assert obs["child_overlap_wall_seconds"] == 0.0
+    assert obs["child_concurrency_excess_seconds"] == 0.0
     assert obs["max_concurrent_children"] == 1
 
     events = [
@@ -123,6 +124,40 @@ def test_child_runtime_and_unmaterialized_spawn_are_distinct(tmp_path):
     }
     assert completions[child_a]["source_timestamp_field"] == "endedAt"
     assert completions[child_a]["timestamp_quality"] == "session_state"
-    assert completions[child_a]["observed_timestamp_ns"] is not None
+    assert completions[child_a]["measurement_observed_timestamp_ns"] is not None
+    assert "observed_timestamp_ns" not in completions[child_a]
     assert completions[child_b]["source_timestamp_field"] == "transcript_last_event"
     assert completions[child_b]["timestamp_quality"] == "transcript_inferred"
+
+
+def test_three_child_overlap_distinguishes_wall_from_excess(tmp_path):
+    sessions = tmp_path / "conversation" / "sessions"
+    sessions.mkdir(parents=True)
+    parent_key = "agent:roadmap_bench:main"
+    index = {
+        parent_key: {
+            "sessionId": "parent-id",
+            "status": "done",
+        }
+    }
+    for name in ("a", "b", "c"):
+        index[f"agent:roadmap_bench:subagent:{name}"] = {
+            "sessionId": f"child-{name}-id",
+            "spawnedBy": parent_key,
+            "status": "done",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "endedAt": "2026-01-01T00:00:10Z",
+        }
+    (sessions / "sessions.json").write_text(json.dumps(index))
+
+    result = build_openclaw_measurement(
+        tmp_path, agent_id="roadmap_bench"
+    )
+    obs = result["runtime_observability"]
+
+    assert obs["child_runtime_complete_count"] == 3
+    assert obs["child_sum_runtime_seconds"] == 30.0
+    assert obs["child_union_active_seconds"] == 10.0
+    assert obs["child_overlap_wall_seconds"] == 10.0
+    assert obs["child_concurrency_excess_seconds"] == 20.0
+    assert obs["max_concurrent_children"] == 3
