@@ -8,6 +8,7 @@ from agent_bench.benchmarks.roadmap_bench.conditions.measurement_compat import (
     augment_roadmap_measurement,
     stderr_recovery_events,
 )
+from agent_bench.runtime import driver
 
 
 def test_singularity_gateway_offline_env_is_installed_before_runtime(monkeypatch):
@@ -91,6 +92,11 @@ def test_roadmap_singularity_agent_requires_exact_gateway_rpc_and_rejects_fallba
     assert "exit 86" in guard
     assert "exit 87" in guard
     assert "openclaw agent --agent roadmap_bench" in guard
+    # Fallback detection reads a completed stderr file, so grep cannot race a
+    # still-running process-substitution tee.
+    assert '2>"$ab_stderr"' in guard
+    assert 'cat "$ab_stderr" >&2' in guard
+    assert "2> >(tee" not in guard
     assert env["OPENCLAW_DISABLE_PRICING_FETCH"] == "1"
     assert env["LITELLM_LOCAL_MODEL_COST_MAP"] == "True"
     assert env["SINGULARITYENV_OPENCLAW_DISABLE_PRICING_FETCH"] == "1"
@@ -111,6 +117,32 @@ def test_other_singularity_agents_are_not_gateway_guard_wrapped():
         sif="/tmp/openclaw.sif",
     )
     assert wrapped[-len(argv):] == argv
+
+
+def test_roadmap_runtime_policy_rejects_explicit_non_gateway_modes():
+    for mode in ("embedded_fallback", "unknown"):
+        error = driver._roadmap_lifecycle_verifier_error({
+            "agent_runtime_mode": mode,
+            "agent_lifecycle": {"workspaceQuiesced": True},
+        })
+        assert error is not None
+        assert "requires OpenClaw gateway runtime" in error
+        assert f"agent_runtime_mode={mode}" in error
+
+    assert driver._roadmap_lifecycle_verifier_error({
+        "agent_runtime_mode": "gateway",
+        "agent_lifecycle": {"workspaceQuiesced": True},
+    }) is None
+
+
+def test_roadmap_runtime_policy_preserves_legacy_lifecycle_check_without_mode():
+    error = driver._roadmap_lifecycle_verifier_error({
+        "agent_lifecycle": {
+            "workspaceQuiesced": False,
+            "lifecycleError": "writers still active",
+        }
+    })
+    assert error == "writers still active"
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
