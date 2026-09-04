@@ -26,7 +26,7 @@ dependency analysis, coordination, integration, and final validation.
 
 ## Delegation Policy
 
-- Up to four subagents may run concurrently.
+- Up to sixteen subagents may run concurrently.
 - Give each child a bounded, meaningful, relatively independent workstream
   grounded in the actual roadmap and repository.
 - State expected outputs and file ownership. Avoid assigning concurrent edits
