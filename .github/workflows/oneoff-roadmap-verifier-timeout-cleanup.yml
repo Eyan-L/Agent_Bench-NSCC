@@ -1,0 +1,116 @@
+name: One-off Roadmap verifier timeout cleanup
+
+on:
+  push:
+    paths:
+      - '.github/workflows/oneoff-roadmap-verifier-timeout-cleanup.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply verifier timeout semantic cleanup
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          app = Path('agent_bench/benchmarks/terminal_bench/app.py')
+          text = app.read_text()
+          old = '''def _terminal_bench_reward(raw: str, *, timed_out: bool) -> tuple[str, float]:
+              """Interpret binary Terminal-Bench and fractional RoadmapBench rewards."""
+              try:
+                  value = float(raw)
+              except (TypeError, ValueError):
+                  return ("TIMEOUT" if timed_out else "ERROR", 0.0)
+              if not 0.0 <= value <= 1.0:
+                  return ("ERROR", 0.0)
+              return ("PASS" if value >= 1.0 else "FAIL", value)
+          '''
+          new = '''def _terminal_bench_reward(raw: str, *, timed_out: bool) -> tuple[str, Optional[float]]:
+              """Interpret binary Terminal-Bench and fractional RoadmapBench rewards."""
+              try:
+                  value = float(raw)
+              except (TypeError, ValueError):
+                  return ("TIMEOUT" if timed_out else "ERROR", None)
+              if not 0.0 <= value <= 1.0:
+                  return ("ERROR", None)
+              return ("PASS" if value >= 1.0 else "FAIL", value)
+          '''
+          if text.count(old) != 1:
+              raise SystemExit(f'app.py reward helper match count={text.count(old)}')
+          text = text.replace(old, new, 1)
+
+          old = '''        return {"status": status, "test_pass_rate": reward_value, "passed": int(status == "PASS"),
+                          "failed": int(status != "PASS"), "verifier_rc": result.returncode,
+          '''
+          new = '''        return {"status": status, "verifier_status": status, "reward": reward_value,
+                          "test_pass_rate": reward_value, "passed": int(status == "PASS"),
+                          "failed": int(status != "PASS"), "verifier_rc": result.returncode,
+          '''
+          if text.count(old) != 1:
+              raise SystemExit(f'app.py OpenClaw verdict match count={text.count(old)}')
+          text = text.replace(old, new, 1)
+          app.write_text(text)
+
+          driver = Path('agent_bench/runtime/driver.py')
+          text = driver.read_text()
+          old = 'if raw_verifier_status in {"PASS", "FAIL", "ERROR"}'
+          new = 'if raw_verifier_status in {"PASS", "FAIL", "TIMEOUT", "ERROR"}'
+          if text.count(old) != 1:
+              raise SystemExit(f'driver.py verifier status whitelist match count={text.count(old)}')
+          driver.write_text(text.replace(old, new, 1))
+
+          tests = Path('tests/test_terminal_bench_openclaw_singularity.py')
+          text = tests.read_text()
+          old = 'assert tb_app._terminal_bench_reward("", timed_out=True) == ("TIMEOUT", 0.0)'
+          new = 'assert tb_app._terminal_bench_reward("", timed_out=True) == ("TIMEOUT", None)'
+          if text.count(old) != 1:
+              raise SystemExit(f'legacy timeout expectation match count={text.count(old)}')
+          tests.write_text(text.replace(old, new, 1))
+
+          p0 = Path('tests/test_roadmapbench_p0_regressions.py')
+          text = p0.read_text()
+          anchor = '''    assert result["status"] == "TIMEOUT"
+              assert result["verifier_timed_out"] is True
+          '''
+          replacement = '''    assert result["status"] == "TIMEOUT"
+              assert result["verifier_status"] == "TIMEOUT"
+              assert result["reward"] is None
+              assert result["test_pass_rate"] is None
+              assert result["verifier_timed_out"] is True
+          '''
+          if text.count(anchor) != 1:
+              raise SystemExit(f'p0 timeout assertion anchor match count={text.count(anchor)}')
+          text = text.replace(anchor, replacement, 1)
+
+          if 'def test_roadmapbench_merge_preserves_verifier_timeout_status():' not in text:
+              text += '''\n\ndef test_roadmapbench_merge_preserves_verifier_timeout_status():\n    from agent_bench.runtime.driver import _merge_agent_completion_into_verdict\n\n    merged = _merge_agent_completion_into_verdict(\n        {\n            "status": "TIMEOUT",\n            "verifier_status": "TIMEOUT",\n            "reward": None,\n            "reward_raw": None,\n            "test_pass_rate": None,\n            "verifier_timed_out": True,\n        },\n        {\n            "exit_code": 0,\n            "agent_completion_status": "normal_completion",\n        },\n    )\n\n    assert merged["status"] == "TIMEOUT"\n    assert merged["verifier_status"] == "TIMEOUT"\n    assert merged["reward"] is None\n    assert merged["test_pass_rate"] is None\n    assert merged["agent_execution_outcome"] == "normal_completion"\n'''
+          p0.write_text(text)
+          PY
+
+      - name: Run targeted regression tests
+        run: |
+          python -m pytest -q \
+            tests/test_roadmapbench_p0_regressions.py \
+            tests/test_terminal_bench_openclaw_singularity.py
+
+      - name: Commit patch and remove one-off workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/oneoff-roadmap-verifier-timeout-cleanup.yml
+          git add agent_bench/benchmarks/terminal_bench/app.py \
+                  agent_bench/runtime/driver.py \
+                  tests/test_roadmapbench_p0_regressions.py \
+                  tests/test_terminal_bench_openclaw_singularity.py
+          git commit -m "Keep verifier timeouts as null measurements"
+          git push origin HEAD:master
