@@ -392,7 +392,7 @@ def _session_events(run_dir: Path, agent_id: str) -> list[dict]:
             source_ns, source_field, timestamp_quality = _child_state_time(
                 entry, last_ns
             )
-        observed_ns = time.time_ns()
+        measurement_observed_ns = time.time_ns()
         _append(
             events, timestamp_ns=source_ns,
             session_id=str(entry.get("sessionId") or ""),
@@ -401,8 +401,8 @@ def _session_events(run_dir: Path, agent_id: str) -> list[dict]:
             source_timestamp=_iso_from_ns(source_ns),
             source_timestamp_ns=source_ns or None,
             source_timestamp_field=source_field or None,
-            observed_timestamp=_iso_from_ns(observed_ns),
-            observed_timestamp_ns=observed_ns,
+            measurement_observed_timestamp=_iso_from_ns(measurement_observed_ns),
+            measurement_observed_timestamp_ns=measurement_observed_ns,
             timestamp_quality=timestamp_quality,
         )
     return events
@@ -417,7 +417,7 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
         "done", "completed", "failed", "error", "timeout", "timed_out",
         "cancelled", "canceled",
     }
-    observed_ns = time.time_ns()
+    measurement_observed_ns = time.time_ns()
 
     for session_key, entry in index.items():
         if not isinstance(entry, dict) or not entry.get("spawnedBy"):
@@ -454,8 +454,8 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
             "terminal_timestamp_ns": end_ns or None,
             "terminal_timestamp_source": end_source or None,
             "terminal_timestamp_quality": end_quality,
-            "observed_timestamp": _iso_from_ns(observed_ns),
-            "observed_timestamp_ns": observed_ns,
+            "measurement_observed_timestamp": _iso_from_ns(measurement_observed_ns),
+            "measurement_observed_timestamp_ns": measurement_observed_ns,
             "runtime_seconds": runtime_seconds,
         }
 
@@ -477,15 +477,25 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
 
     max_concurrent = 0
     concurrent = 0
+    overlap_wall_ns = 0
+    concurrency_excess_ns = 0
+    previous_timestamp_ns: Optional[int] = None
     points: list[tuple[int, int]] = []
     for start_ns, end_ns in intervals:
         points.append((start_ns, 1))
         points.append((end_ns, -1))
-    for _timestamp_ns_value, delta in sorted(
+    for timestamp_ns_value, delta in sorted(
         points, key=lambda item: (item[0], item[1])
     ):
+        if previous_timestamp_ns is not None and timestamp_ns_value > previous_timestamp_ns:
+            span_ns = timestamp_ns_value - previous_timestamp_ns
+            if concurrent >= 2:
+                overlap_wall_ns += span_ns
+            if concurrent > 1:
+                concurrency_excess_ns += (concurrent - 1) * span_ns
         concurrent += delta
         max_concurrent = max(max_concurrent, concurrent)
+        previous_timestamp_ns = timestamp_ns_value
 
     union_seconds = union_ns / 1e9
     return {
@@ -494,12 +504,19 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
         "child_runtime_by_session": children,
         "child_sum_runtime_seconds": runtime_sum,
         "child_union_active_seconds": union_seconds,
-        "child_parallel_overlap_seconds": max(0.0, runtime_sum - union_seconds),
+        "child_overlap_wall_seconds": overlap_wall_ns / 1e9,
+        "child_concurrency_excess_seconds": concurrency_excess_ns / 1e9,
         "max_concurrent_children": max_concurrent,
         "child_runtime_policy": {
             "definition": (
                 "durable child start to durable terminal time; session state "
                 "timestamps preferred, transcript bounds explicitly labelled as inferred"
+            ),
+            "overlap_wall_definition": (
+                "wall-clock time with at least two child sessions active"
+            ),
+            "concurrency_excess_definition": (
+                "integral of max(active_children - 1, 0) over child-active time"
             ),
             "failed_spawn_runtime": None,
         },
