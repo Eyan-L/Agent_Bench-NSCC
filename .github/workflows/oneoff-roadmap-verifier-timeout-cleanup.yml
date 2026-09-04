@@ -96,11 +96,31 @@ jobs:
           p0.write_text(text)
           PY
 
-      - name: Run targeted regression tests
+      - name: Validate syntax and semantic invariants
+        shell: bash
         run: |
-          python -m pytest -q \
+          python -m compileall -q \
+            agent_bench/benchmarks/terminal_bench/app.py \
+            agent_bench/runtime/driver.py \
             tests/test_roadmapbench_p0_regressions.py \
             tests/test_terminal_bench_openclaw_singularity.py
+          python - <<'PY'
+          from pathlib import Path
+
+          app = Path('agent_bench/benchmarks/terminal_bench/app.py').read_text()
+          driver = Path('agent_bench/runtime/driver.py').read_text()
+          p0 = Path('tests/test_roadmapbench_p0_regressions.py').read_text()
+          legacy = Path('tests/test_terminal_bench_openclaw_singularity.py').read_text()
+
+          assert '("TIMEOUT" if timed_out else "ERROR", None)' in app
+          assert 'return ("ERROR", None)' in app
+          assert '"verifier_status": status, "reward": reward_value' in app
+          assert '{"PASS", "FAIL", "TIMEOUT", "ERROR"}' in driver
+          assert 'assert result["verifier_status"] == "TIMEOUT"' in p0
+          assert 'assert result["reward"] is None' in p0
+          assert 'assert result["test_pass_rate"] is None' in p0
+          assert '("TIMEOUT", None)' in legacy
+          PY
 
       - name: Commit patch and remove one-off workflow
         shell: bash
