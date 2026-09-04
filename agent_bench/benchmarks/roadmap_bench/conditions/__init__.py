@@ -5,5 +5,7 @@
 # condition module is imported; the shared builder remains unchanged for every
 # other benchmark/agent id.
 from .measurement_compat import install_roadmap_measurement_compat
+from .runtime_policy import install_roadmap_gateway_only_policy
 
 install_roadmap_measurement_compat()
+install_roadmap_gateway_only_policy()
