@@ -376,6 +376,26 @@ class OpenClawAgentCondition:
             )
             if payload else None
         )
+        if self.agent_id == "roadmap_bench" and isinstance(agent_lifecycle, dict):
+            parent_terminal_ns = agent_lifecycle.get("parentTerminalObservedNs")
+            workspace_quiesced_ns = agent_lifecycle.get("workspaceQuiescedNs")
+            if isinstance(parent_terminal_ns, int):
+                phase_timing["parent_terminal_observed_ns"] = parent_terminal_ns
+                phase_timing["parent_terminal_timestamp_quality"] = agent_lifecycle.get("parentTerminalTimestampQuality")
+                phase_timing["parent_execution_seconds"] = max(
+                    0.0, (parent_terminal_ns - step_start_ns) / 1e9
+                )
+            if isinstance(workspace_quiesced_ns, int):
+                phase_timing["workspace_quiesced_ns"] = workspace_quiesced_ns
+                phase_timing["workspace_quiesced_timestamp_quality"] = agent_lifecycle.get("workspaceQuiescedTimestampQuality")
+                phase_timing["agent_execution_end_ns"] = workspace_quiesced_ns
+                phase_timing["agent_execution_seconds"] = max(
+                    0.0, (workspace_quiesced_ns - step_start_ns) / 1e9
+                )
+                if isinstance(parent_terminal_ns, int):
+                    phase_timing["post_parent_quiescence_seconds"] = max(
+                        0.0, (workspace_quiesced_ns - parent_terminal_ns) / 1e9
+                    )
         if (
             isinstance(agent_lifecycle, dict)
             and agent_lifecycle.get("pendingChildrenAtParentTerminal", 0)

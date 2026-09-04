@@ -3,6 +3,9 @@ import json
 from agent_bench.benchmarks.conditions.openclaw_measurement import (
     build_openclaw_measurement,
 )
+from agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent import (
+    RoadmapBenchOpenClawCondition,
+)
 from agent_bench.core.manifest import RunManifest
 
 
@@ -20,14 +23,35 @@ def test_manifest_round_trip_preserves_agent_phase_timing():
         serving_config_id="serving",
         status="PASS",
         duration_seconds=100.0,
+        total_instance_seconds=110.0,
         agent_execution_seconds=60.0,
         phase_timing={"verifier_seconds": 30.0},
     )
     restored = RunManifest.from_dict(manifest.to_dict())
     assert restored.duration_seconds == 100.0
+    assert restored.total_instance_seconds == 110.0
     assert restored.agent_execution_seconds == 60.0
     assert restored.phase_timing == {"verifier_seconds": 30.0}
 
+
+def test_roadmap_quiescence_timing_separates_parent_terminal(monkeypatch):
+    condition = object.__new__(RoadmapBenchOpenClawCondition)
+    snapshot = {
+        "parent_terminal": True,
+        "parent_session_terminal": True,
+        "pending_child_sessions": [],
+    }
+    clock = iter([1_000_000_000, 3_000_000_000])
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent.time.time_ns",
+        lambda: next(clock),
+    )
+    timed_snapshot, quiescence = condition._quiesce_with_timing(
+        snapshot, logical_parent_terminal=True
+    )
+    assert quiescence["workspaceQuiesced"] is True
+    assert timed_snapshot["parent_terminal_observed_ns"] == 1_000_000_000
+    assert timed_snapshot["workspace_quiesced_ns"] == 3_000_000_000
 
 def test_child_runtime_and_unmaterialized_spawn_are_distinct(tmp_path):
     sessions = tmp_path / "conversation" / "sessions"

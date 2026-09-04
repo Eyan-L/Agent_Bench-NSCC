@@ -657,7 +657,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         if not isinstance(reconciled_payload.get("result"), dict):
             reconciled_payload["result"] = {}
 
-        quiescence = self._quiesce_terminal_children(snapshot)
+        snapshot, quiescence = self._quiesce_with_timing(snapshot)
         self._attach_lifecycle_summary(
             reconciled_payload, snapshot, quiescence
         )
@@ -673,7 +673,9 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         """Apply a durable terminal requester event to the CLI result."""
         if snapshot.get("done_text"):
             snapshot = dict(snapshot, terminal_evidence="explicit_done")
-            quiescence = self._quiesce_terminal_children(snapshot)
+            snapshot, quiescence = self._quiesce_with_timing(
+                snapshot, logical_parent_terminal=True
+            )
             reconciled_payload = self._payload_with_resumed_completion(
                 payload,
                 snapshot["done_text"],
@@ -702,7 +704,9 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 snapshot,
                 terminal_evidence="durable_session_terminal_assistant_stop",
             )
-            quiescence = self._quiesce_terminal_children(snapshot)
+            snapshot, quiescence = self._quiesce_with_timing(
+                snapshot, logical_parent_terminal=True
+            )
             reconciled_payload = (
                 copy.deepcopy(payload) if isinstance(payload, dict) else {}
             )
@@ -737,6 +741,25 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             snapshot.get("transcript_size_bytes"),
             snapshot.get("latest_parent_event"),
         )
+
+    def _quiesce_with_timing(
+        self,
+        snapshot: Dict,
+        *,
+        logical_parent_terminal: bool = False,
+    ) -> Tuple[Dict, Dict]:
+        """Timestamp logical parent terminal observation and workspace quiescence."""
+        timed_snapshot = dict(snapshot)
+        if (
+            logical_parent_terminal
+            or snapshot.get("parent_terminal")
+            or snapshot.get("parent_session_terminal")
+        ):
+            timed_snapshot["parent_terminal_observed_ns"] = time.time_ns()
+        quiescence = self._quiesce_terminal_children(snapshot)
+        if quiescence.get("workspaceQuiesced") is True:
+            timed_snapshot["workspace_quiesced_ns"] = time.time_ns()
+        return timed_snapshot, quiescence
 
     def _quiesce_terminal_children(self, snapshot: Dict) -> Dict:
         pending = list(snapshot.get("pending_child_sessions") or [])
@@ -787,6 +810,18 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 "parent_session_status", "unknown"
             ),
             "terminalEvidence": snapshot.get("terminal_evidence", "unknown"),
+            "parentTerminalObservedNs": snapshot.get("parent_terminal_observed_ns"),
+            "parentTerminalTimestampQuality": (
+                "watcher_observed"
+                if snapshot.get("parent_terminal_observed_ns")
+                else None
+            ),
+            "workspaceQuiescedNs": snapshot.get("workspace_quiesced_ns"),
+            "workspaceQuiescedTimestampQuality": (
+                "harness_observed"
+                if snapshot.get("workspace_quiesced_ns")
+                else None
+            ),
             "yieldCount": int(snapshot.get("yield_count") or 0),
             "totalChildren": int(snapshot.get("total_children") or 0),
             "completedChildren": int(snapshot.get("completed_children") or 0),
