@@ -244,10 +244,12 @@ def _clear_reward_file(host_logs_dir: Path) -> Path:
 
 def _terminal_bench_reward(raw: str, *, timed_out: bool) -> tuple[str, Optional[float]]:
     """Interpret binary Terminal-Bench and fractional RoadmapBench rewards."""
+    if timed_out:
+        return ("TIMEOUT", None)
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        return ("TIMEOUT" if timed_out else "ERROR", None)
+        return ("ERROR", None)
     if not 0.0 <= value <= 1.0:
         return ("ERROR", None)
     return ("PASS" if value >= 1.0 else "FAIL", value)
