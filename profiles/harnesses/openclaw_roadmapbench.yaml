@@ -65,7 +65,7 @@ openclaw:
     defaults:
       workspace: /app
       subagents:
-        maxConcurrent: 4
+        maxConcurrent: 16
         runTimeoutSeconds: 2400
     list:
     - id: roadmap_bench
