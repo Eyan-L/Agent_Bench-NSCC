@@ -1,0 +1,103 @@
+name: Roadmap analyzer latency policy v6
+on:
+  push:
+    paths: ['.github/workflows/oneoff-roadmap-analyzer-latency-v6.yml']
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - name: Patch analyzers
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def one(path, old, new):
+              p=Path(path); t=p.read_text(); n=t.count(old)
+              if n != 1: raise SystemExit(f'{path}: anchor count={n}: {old[:120]!r}')
+              p.write_text(t.replace(old,new,1))
+
+          c='scripts/compare_roadmap_runs_impl.py'
+          one(c,
+              '    @property\n    def has_trajectory(self) -> bool:\n        return bool(self.trajectory_path and self.trajectory_path.is_file())\n',
+              '    @property\n    def agent_execution_seconds(self) -> float | None:\n        value = _number(self.manifest.get("agent_execution_seconds"))\n        if value is not None:\n            return value\n        phase = self.manifest.get("phase_timing") or {}\n        return _number(phase.get("agent_execution_seconds")) if isinstance(phase, dict) else None\n\n    @property\n    def total_instance_seconds(self) -> float | None:\n        return _number(self.manifest.get("total_instance_seconds"))\n\n    @property\n    def latency_seconds(self) -> float | None:\n        """Primary Roadmap latency: logical agent wall time, with legacy fallback."""\n        value = self.agent_execution_seconds\n        return value if value is not None else self.duration_seconds\n\n    @property\n    def latency_source(self) -> str | None:\n        if self.agent_execution_seconds is not None:\n            return "agent_execution_seconds"\n        if self.duration_seconds is not None:\n            return "legacy_duration_seconds"\n        return None\n\n    @property\n    def has_trajectory(self) -> bool:\n        return bool(self.trajectory_path and self.trajectory_path.is_file())\n')
+          one(c,
+              '        "duration_seconds": record.duration_seconds,\n',
+              '        "duration_seconds": record.duration_seconds,\n        "total_instance_seconds": record.total_instance_seconds,\n        "agent_execution_seconds": record.agent_execution_seconds,\n        "latency_seconds": record.latency_seconds,\n        "latency_source": record.latency_source,\n')
+          one(c,
+              '    for event in CORE_EVENTS:\n        result[f"{event}_count"] = int(events.get(event) or 0)\n',
+              '    phase = record.manifest.get("phase_timing") or {}\n    if isinstance(phase, dict):\n        for field in (\n            "workspace_prepare_seconds",\n            "gateway_warmup_queue_seconds",\n            "gateway_warmup_seconds",\n            "environment_prepare_seconds",\n            "parent_execution_seconds",\n            "post_parent_quiescence_seconds",\n            "candidate_freeze_seconds",\n            "verifier_seconds",\n            "cleanup_seconds",\n        ):\n            result[field] = _number(phase.get(field))\n    for event in CORE_EVENTS:\n        result[f"{event}_count"] = int(events.get(event) or 0)\n')
+          one(c,
+              '    durations = [\n        record.duration_seconds\n        for record in records\n        if record.duration_seconds is not None\n    ]\n',
+              '    durations = [\n        record.latency_seconds\n        for record in records\n        if record.latency_seconds is not None\n    ]\n    latency_sources = Counter(\n        record.latency_source or "MISSING" for record in records\n    )\n')
+          one(c,
+              '        "latency_seconds": {\n            "count": len(durations),\n',
+              '        "latency_seconds": {\n            "primary_metric": "agent_execution_seconds",\n            "legacy_fallback": "duration_seconds",\n            "source_counts": dict(sorted(latency_sources.items())),\n            "count": len(durations),\n')
+          one(c,
+              '        if (\n            sub.duration_seconds is not None\n            and single.duration_seconds is not None\n        ):\n            latency_delta = single.duration_seconds - sub.duration_seconds\n            latency_deltas.append(latency_delta)\n            if sub.duration_seconds > 0 and single.duration_seconds > 0:\n                speedup = single.duration_seconds / sub.duration_seconds\n',
+              '        if (\n            sub.latency_seconds is not None\n            and single.latency_seconds is not None\n        ):\n            latency_delta = single.latency_seconds - sub.latency_seconds\n            latency_deltas.append(latency_delta)\n            if sub.latency_seconds > 0 and single.latency_seconds > 0:\n                speedup = single.latency_seconds / sub.latency_seconds\n')
+          one(c,
+              '            "single_agent_duration_seconds": single.duration_seconds,\n            "latency_delta_single_minus_subagent_seconds": latency_delta,\n',
+              '            "single_agent_duration_seconds": single.duration_seconds,\n            "subagent_total_instance_seconds": sub.total_instance_seconds,\n            "single_agent_total_instance_seconds": single.total_instance_seconds,\n            "subagent_agent_execution_seconds": sub.agent_execution_seconds,\n            "single_agent_agent_execution_seconds": single.agent_execution_seconds,\n            "subagent_latency_seconds": sub.latency_seconds,\n            "single_agent_latency_seconds": single.latency_seconds,\n            "subagent_latency_source": sub.latency_source,\n            "single_agent_latency_source": single.latency_source,\n            "latency_delta_single_minus_subagent_seconds": latency_delta,\n')
+          one(c,
+              '        "Accuracy uses the authoritative verifier `reward`. End-to-end task "\n        "latency uses `manifest.duration_seconds`; agent self-reported test "\n        "claims are not treated as accuracy.",\n',
+              '        "Accuracy uses the authoritative verifier `reward`. Primary latency uses "\n        "`manifest.agent_execution_seconds` (initial parent dispatch through workspace "\n        "quiescence). Older manifests without that field fall back explicitly to legacy "\n        "`duration_seconds`; agent self-reported test claims are not treated as accuracy.",\n')
+          one(c,
+              '                    "latency": "Per-task end-to-end latency speedup; >1 favors subagent.",\n',
+              '                    "latency": "Per-task agent-trajectory latency speedup; >1 favors subagent.",\n')
+          one(c,
+              '                    f"{_fmt(row[\'subagent_duration_seconds\'], 1)} | "\n                    f"{_fmt(row[\'single_agent_duration_seconds\'], 1)} | "\n',
+              '                    f"{_fmt(row[\'subagent_latency_seconds\'], 1)} | "\n                    f"{_fmt(row[\'single_agent_latency_seconds\'], 1)} | "\n')
+          one(c,
+              '                title="RoadmapBench end-to-end latency speedup",\n                xlabel="single-agent latency / subagent latency (>1 favors subagent)",\n',
+              '                title="RoadmapBench agent-trajectory latency speedup",\n                xlabel="single-agent agent latency / subagent agent latency (>1 favors subagent)",\n')
+
+          s='scripts/analyze_roadmap_runs.py'
+          one(s,
+              '        duration = base._number(row.get("duration_seconds"))\n',
+              '        duration = base._number(row.get("latency_seconds"))\n')
+          one(s,
+              '    ax.set_xlabel("End-to-end task latency (s)")\n',
+              '    ax.set_xlabel("Agent trajectory latency (s)")\n')
+          one(s,
+              '                field="duration_seconds",\n                title=f"RoadmapBench end-to-end latency by task ({arm})",\n',
+              '                field="latency_seconds",\n                title=f"RoadmapBench agent-trajectory latency by task ({arm})",\n')
+          one(s,
+              '        "This report analyzes one PBS run series only. Accuracy uses verifier "\n        "`reward`; latency uses `manifest.duration_seconds`.",\n',
+              '        "This report analyzes one PBS run series only. Accuracy uses verifier "\n        "`reward`; primary latency uses `manifest.agent_execution_seconds`, with explicit "\n        "legacy fallback to `duration_seconds` for older manifests.",\n')
+          one(s,
+              '            f"{base._fmt(base._number(row.get(\'duration_seconds\')), 1)} | "\n',
+              '            f"{base._fmt(base._number(row.get(\'latency_seconds\')), 1)} | "\n')
+          PY
+      - name: Validate latency policy
+        shell: bash
+        run: |
+          python -m compileall -q scripts/compare_roadmap_runs_impl.py scripts/analyze_roadmap_runs.py
+          python - <<'PY'
+          from pathlib import Path
+          from scripts.compare_roadmap_runs_impl import RunRecord, record_to_dict, summarize_arm
+          def rec(manifest):
+              return RunRecord(arm='x',job_id='j',pbs_run_dir=Path('.'),run_dir=Path('.'),manifest_path=Path('m'),manifest=manifest,trajectory_path=None,trajectory={})
+          fresh=rec({'instance_id':'fresh','seed':1,'duration_seconds':100.0,'agent_execution_seconds':60.0,'total_instance_seconds':110.0})
+          legacy=rec({'instance_id':'legacy','seed':1,'duration_seconds':90.0})
+          assert fresh.latency_seconds == 60.0 and fresh.latency_source == 'agent_execution_seconds'
+          assert fresh.total_instance_seconds == 110.0
+          assert legacy.latency_seconds == 90.0 and legacy.latency_source == 'legacy_duration_seconds'
+          row=record_to_dict(fresh)
+          assert row['latency_seconds'] == 60.0 and row['duration_seconds'] == 100.0
+          summary=summarize_arm([fresh,legacy])
+          assert summary['latency_seconds']['source_counts']=={'agent_execution_seconds':1,'legacy_duration_seconds':1}
+          PY
+      - name: Commit
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/oneoff-roadmap-analyzer-latency-v5.yml .github/workflows/oneoff-roadmap-analyzer-latency-v6.yml
+          git add scripts/compare_roadmap_runs_impl.py scripts/analyze_roadmap_runs.py
+          git commit -m "Use agent execution time as Roadmap latency"
+          git push origin HEAD:master
