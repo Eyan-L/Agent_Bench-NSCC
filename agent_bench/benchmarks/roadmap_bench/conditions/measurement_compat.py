@@ -12,6 +12,11 @@ that case the shared logical-token accounting has no attributable usage even
 though ``llm-raw-responses.jsonl`` has exact per-request totals. We preserve the
 normal transcript/OTel preference and use the already-computed raw serving
 aggregate only as an explicitly labelled, unattributed fallback.
+
+OpenClaw v2026.4.22 also does not always emit the gateway announce diagnostics
+consumed by the shared measurement parser. For RoadmapBench we can still infer a
+successful completion announce conservatively from durable semantics: a real
+child-completion event followed by a later parent resume.
 """
 from __future__ import annotations
 
@@ -32,14 +37,27 @@ _OVERFLOW_MARKERS = (
     "maximum context length",
     "context size exceeds",
 )
-_COMPACTION_SUCCESS_MARKERS = (
-    "succeed",
-    "success",
-    "complete",
-    "completed",
-    "retrying prompt",
-    "retry prompt",
+_COMPACTION_COMPLETED_RE = re.compile(
+    r"(?:"
+    r"\b(?:auto[- ]?)?compaction\b.{0,180}\b(?:succeeded|successful(?:ly)?|completed)\b"
+    r"|\bsuccessfully\s+compact(?:ed|ing)\b"
+    r")"
 )
+_COMPACTION_NONTERMINAL_MARKERS = (
+    "guard",
+    "armed",
+    "arming",
+    "starting",
+    "started",
+    "attempting",
+    "triggering",
+    "triggered",
+    "diagnostic",
+    "candidate",
+    "scheduled",
+)
+_COMPACTION_DEDUP_NS = 10 * 1_000_000_000
+_ANNOUNCE_PAIR_WINDOW_NS = 5 * 60 * 1_000_000_000
 
 
 def _timestamp_ns(value: Any) -> int:
@@ -81,6 +99,44 @@ def _runtime_event(timestamp_ns: int, event_type: str, text: str, **fields: Any)
     }
 
 
+def _is_completed_compaction(lowered: str) -> bool:
+    """Return true only for a terminal successful compaction diagnostic.
+
+    Older logic treated any line containing words such as ``complete`` or
+    ``retrying prompt`` as a compaction. That counted overflow diagnostics,
+    compaction start lines, and post-compaction guard messages as separate
+    compactions. A real count must represent completed compaction operations.
+    """
+    if not _COMPACTION_COMPLETED_RE.search(lowered):
+        return False
+    return not any(marker in lowered for marker in _COMPACTION_NONTERMINAL_MARKERS)
+
+
+def _tool_result_truncation(lowered: str) -> tuple[bool, int | None]:
+    normalized = (
+        lowered.replace("tool-result", "tool result")
+        .replace("tool_result", "tool result")
+    )
+    if "tool result" not in normalized:
+        return False, None
+    if not any(
+        marker in normalized
+        for marker in ("truncat", "prun", "remov", "drop", "discard")
+    ):
+        return False, None
+
+    patterns = (
+        r"(?:truncat\w*|prun\w*|remov\w*|drop\w*|discard\w*)[^\d]{0,40}(\d+)\s+(?:old\s+)?tool\s+results?",
+        r"(\d+)\s+(?:old\s+)?tool\s+results?[^\n]{0,50}(?:truncat\w*|prun\w*|remov\w*|drop\w*|discard\w*)",
+        r"tool\s+results?[^\d]{0,60}(\d+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            return True, int(match.group(1))
+    return True, None
+
+
 def stderr_recovery_events(run_dir: Path) -> list[dict]:
     """Parse timestamped recovery diagnostics from ``openclaw_stderr.log``.
 
@@ -94,6 +150,7 @@ def stderr_recovery_events(run_dir: Path) -> list[dict]:
 
     events: list[dict] = []
     seen: set[tuple[int, str, str]] = set()
+    last_compaction_ns = 0
     for raw_line in path.read_text(errors="replace").splitlines():
         line = _ANSI_RE.sub("", raw_line).strip()
         match = _LINE_RE.match(line)
@@ -104,6 +161,7 @@ def stderr_recovery_events(run_dir: Path) -> list[dict]:
             continue
         text = match.group(2).strip()
         lowered = " ".join(text.lower().split())
+        truncation, truncated_count = _tool_result_truncation(lowered)
 
         candidates: list[dict] = []
         overflow = any(marker in lowered for marker in _OVERFLOW_MARKERS)
@@ -114,40 +172,34 @@ def stderr_recovery_events(run_dir: Path) -> list[dict]:
                 text,
                 recovery=(
                     "compaction" if "compaction" in lowered
-                    else "tool_result_truncation"
-                    if "truncat" in lowered and "tool result" in lowered
+                    else "tool_result_truncation" if truncation
                     else None
                 ),
             ))
 
-        if (
-            "compaction" in lowered
-            and any(marker in lowered for marker in _COMPACTION_SUCCESS_MARKERS)
-            and not any(marker in lowered for marker in ("failed", "failure", "error"))
-        ):
-            candidates.append(_runtime_event(
-                timestamp_ns,
-                "compaction",
-                text,
-                outcome="completed",
-            ))
+        if _is_completed_compaction(lowered):
+            # One successful compaction can be echoed by more than one runtime
+            # diagnostic. Collapse only near-identical temporal duplicates;
+            # real Roadmap compactions are separated by substantially longer
+            # agent work between overflows.
+            if (
+                not last_compaction_ns
+                or timestamp_ns - last_compaction_ns > _COMPACTION_DEDUP_NS
+            ):
+                candidates.append(_runtime_event(
+                    timestamp_ns,
+                    "compaction",
+                    text,
+                    outcome="completed",
+                ))
+                last_compaction_ns = timestamp_ns
 
-        if "truncat" in lowered and "tool result" in lowered:
-            count_match = re.search(
-                r"(?:truncat\w*\s+)?(\d+)\s+tool\s+results?",
-                lowered,
-            )
-            if count_match is None:
-                count_match = re.search(
-                    r"tool\s+results?[^\d]{0,40}(\d+)", lowered
-                )
+        if truncation:
             candidates.append(_runtime_event(
                 timestamp_ns,
                 "tool_result_truncation",
                 text,
-                truncated_tool_results=(
-                    int(count_match.group(1)) if count_match else None
-                ),
+                truncated_tool_results=truncated_count,
             ))
 
         for event in candidates:
@@ -217,6 +269,66 @@ def _merge_recovery_events(run_dir: Path) -> list[dict]:
     return added
 
 
+def _infer_announce_observability(run_dir: Path, runtime: dict) -> dict:
+    """Infer successful completion announces from durable child/resume order.
+
+    The inference is intentionally conservative. We count only real
+    ``child_completion`` events and pair each with the first unused *parent*
+    ``resume`` that occurs later within five minutes. An initial parent user
+    prompt therefore cannot be mistaken for an announce success.
+    """
+    rows = _read_jsonl(Path(run_dir) / "trajectory.jsonl")
+    completions = sorted(
+        int(event.get("timestamp_ns") or 0)
+        for event in rows
+        if event.get("event_type") == "child_completion"
+        and event.get("role") == "child"
+        and int(event.get("timestamp_ns") or 0) > 0
+    )
+    resumes = sorted(
+        int(event.get("timestamp_ns") or 0)
+        for event in rows
+        if event.get("event_type") == "resume"
+        and event.get("role") == "parent"
+        and int(event.get("timestamp_ns") or 0) > 0
+    )
+
+    used: set[int] = set()
+    inferred_latencies: list[float] = []
+    for completion_ns in completions:
+        for index, resume_ns in enumerate(resumes):
+            if index in used or resume_ns <= completion_ns:
+                continue
+            if resume_ns - completion_ns > _ANNOUNCE_PAIR_WINDOW_NS:
+                break
+            used.add(index)
+            inferred_latencies.append((resume_ns - completion_ns) / 1e9)
+            break
+
+    inferred_attempts = len(completions)
+    inferred_successes = len(inferred_latencies)
+    if inferred_attempts == 0:
+        return {}
+
+    existing_attempts = int(runtime.get("announce_attempt_count") or 0)
+    existing_successes = int(runtime.get("announce_success_count") or 0)
+    attempts = max(existing_attempts, inferred_attempts)
+    successes = max(existing_successes, inferred_successes)
+    update: dict[str, Any] = {
+        "announce_attempt_count": attempts,
+        "announce_success_count": successes,
+        "announce_failure_count": max(0, attempts - successes),
+        "announce_inferred_attempt_count": inferred_attempts,
+        "announce_inferred_success_count": inferred_successes,
+    }
+    if inferred_successes > existing_successes:
+        update["announce_measurement_source"] = (
+            "durable_trajectory_child_completion_to_parent_resume"
+        )
+        update["announce_inferred_latency_seconds"] = inferred_latencies
+    return update
+
+
 def _logical_usage_missing(tokens: Any) -> bool:
     if not isinstance(tokens, dict):
         return True
@@ -276,6 +388,7 @@ def _apply_raw_response_token_fallback(result: dict) -> tuple[int | None, int | 
 
 def _rewrite_accounting_artifacts(run_dir: Path, result: dict, added_events: list[dict]) -> None:
     runtime = dict(result.get("runtime_observability") or {})
+    runtime.update(_infer_announce_observability(run_dir, runtime))
     runtime.update({
         "stderr_recovery_event_count": len(added_events),
         "stderr_compaction_count": sum(
@@ -286,6 +399,11 @@ def _rewrite_accounting_artifacts(run_dir: Path, result: dict, added_events: lis
         ),
         "tool_result_truncation_count": sum(
             event.get("event_type") == "tool_result_truncation" for event in added_events
+        ),
+        "truncated_tool_result_total": sum(
+            int(event.get("truncated_tool_results") or 0)
+            for event in added_events
+            if event.get("event_type") == "tool_result_truncation"
         ),
         "stderr_recovery_source": "openclaw_stderr.log",
     })
@@ -328,13 +446,15 @@ def _rewrite_accounting_artifacts(run_dir: Path, result: dict, added_events: lis
             "only because durable session assistant usage was unavailable"
         )
     sources["runtime_recovery_events"] = "timestamped openclaw_stderr.log"
+    if runtime.get("announce_measurement_source"):
+        sources["announce_measurement"] = runtime["announce_measurement_source"]
     accounting["sources"] = sources
     accounting_path.write_text(json.dumps(accounting, indent=2))
     result["token_accounting_path"] = str(accounting_path)
 
 
 def augment_roadmap_measurement(run_dir: Path, result: dict) -> dict:
-    """Add Roadmap-only runtime recovery and token compatibility data."""
+    """Add Roadmap-only runtime recovery, announce, and token compatibility data."""
     result = dict(result)
     added_events = _merge_recovery_events(Path(run_dir))
     _apply_raw_response_token_fallback(result)
