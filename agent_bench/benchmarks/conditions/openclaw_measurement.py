@@ -410,7 +410,10 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
     index = _session_index(sessions_dir) if sessions_dir.is_dir() else {}
     children: dict[str, dict] = {}
     intervals: list[tuple[int, int]] = []
-    terminal_states = {"done", "completed", "timeout", "timed_out"}
+    terminal_states = {
+        "done", "completed", "failed", "error", "timeout", "timed_out",
+        "cancelled", "canceled",
+    }
     observed_ns = time.time_ns()
 
     for session_key, entry in index.items():
