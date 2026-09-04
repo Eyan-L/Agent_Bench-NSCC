@@ -253,6 +253,15 @@ def _terminal_bench_reward(raw: str, *, timed_out: bool) -> tuple[str, float]:
     return ("PASS" if value >= 1.0 else "FAIL", value)
 
 
+def _as_text(value) -> str:
+    """Normalize subprocess output for JSON-safe verifier metadata."""
+    if value is None:
+        return ""
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
 def _render_workspace_doc_text(text: str, task_workspace: str) -> str:
     workspace = _normalize_container_path(task_workspace)
     if workspace == "/app":
@@ -1364,7 +1373,12 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
         try:
             self.container.copy_from_image(task_image, task_workspace, app_dir)
         except Exception as exc:
-            logger.warning("TB workspace prime skipped: %s", exc)
+            _force_rmtree(run_root, ignore_errors=True)
+            self.container.remove_network(net_name)
+            raise RuntimeError(
+                "TerminalBench workspace prime failed; refusing to start the "
+                f"agent on a partial workspace ({docker_image}:{task_workspace})"
+            ) from exc
         _seed_workspace_helpers(app_dir, instance_data, task_workspace)
 
         state_dir = self._build_state_dir(
@@ -1615,7 +1629,12 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
             )
             timed_out = False
         except subprocess.TimeoutExpired as exc:
-            result = subprocess.CompletedProcess([], -1, exc.stdout or "", exc.stderr or "")
+            stdout = _as_text(exc.stdout)
+            stderr = _as_text(exc.stderr)
+            if stderr:
+                stderr += "\n"
+            stderr += f"[harness] verifier timeout after {timeout}s"
+            result = subprocess.CompletedProcess([], -1, stdout, stderr)
             timed_out = True
         reward_text = reward.read_text().strip() if reward.exists() else ""
         status, reward_value = _terminal_bench_reward(
@@ -1623,8 +1642,9 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
         )
         return {"status": status, "test_pass_rate": reward_value, "passed": int(status == "PASS"),
                 "failed": int(status != "PASS"), "verifier_rc": result.returncode,
-                "verifier_stdout_tail": (result.stdout or "")[-2000:],
-                "verifier_stderr_tail": (result.stderr or "")[-2000:], "reward_raw": reward_text or None,
+                "verifier_timed_out": timed_out, "verifier_timeout_seconds": timeout,
+                "verifier_stdout_tail": _as_text(result.stdout)[-2000:],
+                "verifier_stderr_tail": _as_text(result.stderr)[-2000:], "reward_raw": reward_text or None,
                 "reward_path": str(reward), "evaluation_dir": str(host_logs),
                 "error_message": None if status == "PASS" else f"verifier exit {result.returncode}, reward={reward_text!r}"}
 
