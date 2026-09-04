@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Temporary RoadmapBench paired comparison excluding six known tasks.
+"""Temporary RoadmapBench paired comparison excluding eight known tasks.
 
 This wrapper intentionally leaves ``compare_roadmap_runs.py`` unchanged. It
 reuses the current comparison implementation, including rightmost-input retry
-precedence, but removes the same fixed six task IDs from BOTH arms before arm
+precedence, but removes the same fixed eight task IDs from BOTH arms before arm
 summaries, pairing, strict-trajectory validation, CSV/JSON output, and plots.
 
 Excluded tasks
@@ -14,6 +14,8 @@ Excluded tasks
 * fbr-3.0.0-roadmap   -- current subagent sample has zero spawn events
 * mko-4.0.0-roadmap   -- current subagent sample has zero spawn events
 * pyg-2.1.0-roadmap   -- current subagent sample has zero spawn events
+* glz-7.0.0-roadmap   -- current single-agent sample has no verifier reward
+* pyg-2.0.0-roadmap   -- current single-agent sample has no verifier reward
 
 Example::
 
@@ -27,9 +29,10 @@ Example::
         16104470.pbs101 \
       --strict-trajectory
 
-The resulting paired comparison should contain 14 tasks when both original arms
-contain the full RoadmapBench subset20. Output basenames automatically receive
-``-skip6`` so this temporary analysis does not overwrite the normal report.
+The resulting paired comparison should contain 12 tasks when both original arms
+contain the full RoadmapBench subset20. The script intentionally keeps the legacy
+``-skip6`` output suffix so rerunning the same command overwrites the previous
+temporary report and PNGs in place.
 """
 
 from __future__ import annotations
@@ -48,6 +51,8 @@ EXCLUDED_TASKS = frozenset(
         "fbr-3.0.0-roadmap",
         "mko-4.0.0-roadmap",
         "pyg-2.1.0-roadmap",
+        "glz-7.0.0-roadmap",
+        "pyg-2.0.0-roadmap",
     }
 )
 
@@ -58,6 +63,8 @@ _EXCLUSION_REASONS = {
     "fbr-3.0.0-roadmap": "current subagent sample has zero spawn events",
     "mko-4.0.0-roadmap": "current subagent sample has zero spawn events",
     "pyg-2.1.0-roadmap": "current subagent sample has zero spawn events",
+    "glz-7.0.0-roadmap": "current single-agent sample has no verifier reward",
+    "pyg-2.0.0-roadmap": "current single-agent sample has no verifier reward",
 }
 
 _original_select_best_records = base.select_best_records
@@ -67,7 +74,7 @@ _original_default_name = base._default_name
 
 
 def select_best_records(records):
-    """Apply normal retry precedence, then remove the fixed skip6 task set."""
+    """Apply normal retry precedence, then remove the fixed exclusion set."""
     selected, duplicates = _original_select_best_records(records)
     selected = [
         record for record in selected if record.instance_id not in EXCLUDED_TASKS
@@ -79,7 +86,7 @@ def summarize_arm(records):
     """Keep normal statistics and make the temporary exclusion machine-readable."""
     summary = _original_summarize_arm(records)
     summary["analysis_exclusions"] = {
-        "policy": "temporary_fixed_skip6",
+        "policy": "temporary_fixed_skip8",
         "applied_to": "both arms before pairing",
         "task_ids": sorted(EXCLUDED_TASKS),
         "reasons": {
@@ -96,7 +103,7 @@ def render_markdown(*args, **kwargs):
         "",
         "## Temporary analysis exclusions",
         "",
-        "This temporary comparison removes the same six tasks from **both** "
+        "This temporary comparison removes the same eight tasks from **both** "
         "subagent and single-agent arms before summaries, pairing, strict "
         "trajectory validation, and plotting:",
         "",
@@ -107,14 +114,17 @@ def render_markdown(*args, **kwargs):
         "",
         "This is an analysis-only filter; the underlying run artifacts are not "
         "modified. With the full subset20 present in both arms, the expected "
-        "paired task count is **14**.",
+        "paired task count is **12**.",
+        "",
+        "The output filename keeps the legacy `-skip6` suffix only so rerunning "
+        "the same command overwrites the previous temporary report and figures.",
         "",
     ]
     return text.rstrip() + "\n" + "\n".join(lines)
 
 
 def _default_name(subagent, single_agent=None):
-    """Prevent the temporary report from overwriting the normal comparison."""
+    """Reuse the previous temporary basename so regenerated files overwrite it."""
     return _original_default_name(subagent, single_agent) + "-skip6"
 
 
