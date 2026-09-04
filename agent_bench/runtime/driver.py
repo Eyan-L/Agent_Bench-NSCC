@@ -263,6 +263,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
     
     container_id = None
     env_info = None
+    prepare_phase_timing: dict[str, Any] = {}
     harness_spans_path = run_dir / "spans.jsonl"
     trace_container = getattr(harness, "container", None)
     if hasattr(trace_container, "set_trace_path"):
@@ -273,15 +274,27 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         # without re-loading the dataset; SWE-bench harnesses ignore the kwarg.
         # AB_*_CONFIG paths (set in main()) are the authoritative config sources
         # used by harness adapters when rendering per-run runtime config.
-        env_info = harness.prepare_environment(
-            instance_id=run_config.instance_id,
-            repo_id=run_config.repo_id,
-            base_commit=run_config.base_commit,
-            container_image=run_config.container_image,
-            workspace_root=run_config.workspace_root,
-            run_id=run_id,
-            instance_data=instance_data,
-        )
+        environment_prepare_start_ns = time.time_ns()
+        try:
+            env_info = harness.prepare_environment(
+                instance_id=run_config.instance_id,
+                repo_id=run_config.repo_id,
+                base_commit=run_config.base_commit,
+                container_image=run_config.container_image,
+                workspace_root=run_config.workspace_root,
+                run_id=run_id,
+                instance_data=instance_data,
+            )
+        finally:
+            environment_prepare_end_ns = time.time_ns()
+            prepare_phase_timing.update({
+                "environment_prepare_start_ns": environment_prepare_start_ns,
+                "environment_prepare_end_ns": environment_prepare_end_ns,
+                "environment_prepare_seconds": max(0.0, (environment_prepare_end_ns - environment_prepare_start_ns) / 1e9),
+            })
+        if isinstance(env_info, dict):
+            hpt = env_info.get("prepare_phase_timing")
+            if isinstance(hpt, dict): prepare_phase_timing.update(hpt)
 
         # Hand the harness ref to the condition for any host-side helper that
         # needs to reach harness.run_tests / exec_in_container while the agent
@@ -479,7 +492,11 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         if not isinstance(phase_timing, dict):
             phase_timing = {}
             result["phase_timing"] = phase_timing
+        phase_timing.update(prepare_phase_timing)
         agent_start_ns = phase_timing.get("agent_execution_start_ns")
+        environment_prepare_end_ns = phase_timing.get("environment_prepare_end_ns")
+        if isinstance(agent_start_ns, int) and isinstance(environment_prepare_end_ns, int):
+            phase_timing["post_prepare_before_agent_seconds"] = max(0.0, (agent_start_ns - environment_prepare_end_ns) / 1e9)
         if isinstance(agent_start_ns, int) and manifest.wall_start_ns:
             phase_timing["pre_agent_seconds"] = max(
                 0.0, (agent_start_ns - manifest.wall_start_ns) / 1e9
@@ -602,17 +619,13 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         manifest.error_message = str(e)[:500]
     
     finally:
+        # Preserve legacy duration_seconds (pre-cleanup) for historical comparability.
         manifest.wall_end_ns = time.time_ns()
         manifest.duration_seconds = (
             (manifest.wall_end_ns - manifest.wall_start_ns) / 1e9
         )
-        
-        # Cleanup. Forward env_info wholesale so harnesses can grab whichever
-        # keys they need (oc_container_id / task_container_id / network_name
-        # for two-container docker mode; gateway_pid / state_dir for legacy
-        # singularity; etc.). Strip keys that conflict with the positional
-        # argument or carry harness refs.
         cleanup_error = None
+        cleanup_start_ns = time.time_ns()
         try:
             cleanup_kwargs = dict(env_info or {})
             for k in ("container_id", "_harness"):
@@ -623,6 +636,22 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             logger.exception("cleanup failed")
             cleanup_error = "harness cleanup failed"
         finally:
+            cleanup_end_ns = time.time_ns()
+            final_phase_timing = dict(manifest.phase_timing) if isinstance(manifest.phase_timing, dict) else {}
+            if isinstance(env_info, dict):
+                hpt = env_info.get("prepare_phase_timing")
+                if isinstance(hpt, dict): final_phase_timing.update(hpt)
+            final_phase_timing.update(prepare_phase_timing)
+            final_phase_timing.update({
+                "cleanup_start_ns": cleanup_start_ns,
+                "cleanup_end_ns": cleanup_end_ns,
+                "cleanup_seconds": max(0.0, (cleanup_end_ns - cleanup_start_ns) / 1e9),
+                "total_instance_end_ns": cleanup_end_ns,
+            })
+            if manifest.wall_start_ns:
+                manifest.total_instance_seconds = max(0.0, (cleanup_end_ns - manifest.wall_start_ns) / 1e9)
+                final_phase_timing["total_instance_seconds"] = manifest.total_instance_seconds
+            manifest.phase_timing = final_phase_timing
             trajectory_path = run_dir / "trajectory.jsonl"
             if trajectory_path.exists():
                 try:

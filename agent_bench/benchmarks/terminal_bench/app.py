@@ -1372,6 +1372,7 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
         ]
         if self.container.backend_id == "singularity":
             task_mounts.append(Mount(tests_dir, "/tests"))
+        workspace_prepare_start_ns = time.time_ns()
         try:
             self.container.copy_from_image(task_image, task_workspace, app_dir)
         except Exception as exc:
@@ -1382,6 +1383,7 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
                 f"agent on a partial workspace ({docker_image}:{task_workspace})"
             ) from exc
         _seed_workspace_helpers(app_dir, instance_data, task_workspace)
+        workspace_prepare_end_ns = time.time_ns()
 
         state_dir = self._build_state_dir(
             run_id=run_id,
@@ -1456,10 +1458,12 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
                 entrypoint="/usr/local/bin/openclaw",
                 command=("gateway", "--allow-unconfigured"),
             )
+            gateway_warmup_wait_start_ns = time.time_ns()
             logger.info(
                 "  [warmup] waiting for gateway-warmup slot (run=%s)", run_id
             )
             with _OPENCLAW_WARMUP_SEM:
+                gateway_warmup_start_ns = time.time_ns()
                 logger.info(
                     "  [warmup] slot acquired; starting gateway (run=%s)",
                     run_id,
@@ -1470,6 +1474,7 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
                     self._GATEWAY_READY_RE,
                     self._GATEWAY_READY_TIMEOUT_SECONDS,
                 )
+                gateway_ready_ns = time.time_ns()
             logger.info(
                 "  [warmup] gateway ready; slot released (run=%s)", run_id
             )
@@ -1489,6 +1494,16 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
                 "EOF"
             )])
             return {
+                "prepare_phase_timing": {
+                    "workspace_prepare_start_ns": workspace_prepare_start_ns,
+                    "workspace_prepare_end_ns": workspace_prepare_end_ns,
+                    "workspace_prepare_seconds": (workspace_prepare_end_ns - workspace_prepare_start_ns) / 1e9,
+                    "gateway_warmup_wait_start_ns": gateway_warmup_wait_start_ns,
+                    "gateway_warmup_start_ns": gateway_warmup_start_ns,
+                    "gateway_ready_ns": gateway_ready_ns,
+                    "gateway_warmup_queue_seconds": max(0.0, (gateway_warmup_start_ns - gateway_warmup_wait_start_ns) / 1e9),
+                    "gateway_warmup_seconds": max(0.0, (gateway_ready_ns - gateway_warmup_start_ns) / 1e9),
+                },
                 "container_id": oc_handle.id,
                 "container_name": oc_handle.name,
                 "oc_container_id": oc_handle.id,

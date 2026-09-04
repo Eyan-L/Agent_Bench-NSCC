@@ -25,6 +25,8 @@ class RunManifest:
     wall_start_ns: Optional[int] = None
     wall_end_ns: Optional[int] = None
     duration_seconds: Optional[float] = None
+    # Cleanup-inclusive wall time; duration_seconds keeps its historical pre-cleanup boundary.
+    total_instance_seconds: Optional[float] = None
     # Logical agent wall time. For RoadmapBench this starts at the
     # initial parent dispatch and ends only after the lifecycle hook
     # has quiesced all agent writers. Setup/freeze/verifier are excluded.
@@ -65,6 +67,7 @@ class RunManifest:
             "wall_start_ns": self.wall_start_ns,
             "wall_end_ns": self.wall_end_ns,
             "duration_seconds": self.duration_seconds,
+            "total_instance_seconds": self.total_instance_seconds,
             "agent_execution_seconds": self.agent_execution_seconds,
             "phase_timing": self.phase_timing,
             "exit_code": self.exit_code,
@@ -102,6 +105,7 @@ class RunManifest:
             wall_start_ns=data.get("wall_start_ns"),
             wall_end_ns=data.get("wall_end_ns"),
             duration_seconds=data.get("duration_seconds"),
+            total_instance_seconds=data.get("total_instance_seconds"),
             agent_execution_seconds=data.get("agent_execution_seconds"),
             phase_timing=data.get("phase_timing"),
             exit_code=data.get("exit_code"),
