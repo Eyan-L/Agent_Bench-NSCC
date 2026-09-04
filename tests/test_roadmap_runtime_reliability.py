@@ -181,3 +181,34 @@ def test_terminal_evidence_does_not_override_stronger_existing_evidence():
     assert result["agent_lifecycle"]["terminalEvidence"] == (
         "durable_session_terminal"
     )
+
+
+def test_nscc_sif_builder_bakes_and_verifies_runtime_compatibility():
+    repo_root = Path(__file__).resolve().parents[1]
+    script = (
+        repo_root / "agent_bench/deployments/pbs/build_oc_sif.sh"
+    ).read_text()
+
+    # The actual NSCC runtime path is a sealed patched SIF, not merely an
+    # optional overlay. Keep the reliability patch and its fail-closed marker
+    # validation wired into that builder.
+    assert "runtime_compat_patch.py" in script
+    assert "--session-patch-timeout-ms" in script
+    assert ".agent-bench-runtime-compat.json" in script
+    assert "sessions_patch_timeout_replacements" in script
+    assert "openrouter_pricing_url_replacements" in script
+    assert "litellm_pricing_url_replacements" in script
+    assert "pricing_mode" in script
+    assert "offline_data_urls" in script
+
+
+def test_fal20_smoke_forces_reliability_sif_rebuild():
+    repo_root = Path(__file__).resolve().parents[1]
+    pbs = (
+        repo_root / "nscc_qwen36_35b_a3b_roadmapbench_fal_2_0_0_smoke.pbs"
+    ).read_text()
+
+    # The first smoke after changing the runtime must not silently reuse the
+    # stale patched SIF from the previous gateway run.
+    assert "AB_OPENCLAW_SUBAGENT_SESSION_PATCH_TIMEOUT_MS=45000" in pbs
+    assert "AB_AGENT_RUNTIME_REBUILD=1" in pbs
