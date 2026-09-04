@@ -34,13 +34,33 @@ def test_manifest_round_trip_preserves_agent_phase_timing():
     assert restored.phase_timing == {"verifier_seconds": 30.0}
 
 
-def test_roadmap_quiescence_timing_separates_parent_terminal(monkeypatch):
+def test_roadmap_quiescence_timing_separates_parent_terminal(monkeypatch, tmp_path):
+    class Harness:
+        def quiesce_orphan_children(self, _env_info):
+            return {
+                "workspaceQuiesced": True,
+                "quiescenceMethod": "stop-agent-and-restart-task-runtime",
+                "openClawRuntimeStopped": True,
+                "execBridgeStopped": True,
+                "taskRuntimeRestarted": True,
+            }
+
     condition = object.__new__(RoadmapBenchOpenClawCondition)
+    condition._env_info = {"_harness": Harness(), "state_dir": str(tmp_path)}
     snapshot = {
+        "parent_session_id": "parent",
         "parent_terminal": True,
         "parent_session_terminal": True,
+        "parent_session_status": "done",
+        "message_count": 1,
+        "transcript_size_bytes": 10,
+        "yield_count": 0,
+        "latest_parent_event": "assistant_stop",
         "pending_child_sessions": [],
     }
+    monkeypatch.setattr(
+        condition, "_read_yield_snapshot", lambda _sessions_dir: snapshot
+    )
     clock = iter([1_000_000_000, 3_000_000_000])
     monkeypatch.setattr(
         "agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent.time.time_ns",
@@ -50,8 +70,52 @@ def test_roadmap_quiescence_timing_separates_parent_terminal(monkeypatch):
         snapshot, logical_parent_terminal=True
     )
     assert quiescence["workspaceQuiesced"] is True
+    assert quiescence["agentWriterQuiescenceAttempted"] is True
+    assert quiescence["terminalFenceStable"] is True
     assert timed_snapshot["parent_terminal_observed_ns"] == 1_000_000_000
     assert timed_snapshot["workspace_quiesced_ns"] == 3_000_000_000
+
+
+def test_roadmap_terminal_fence_rejects_late_parent_activity(monkeypatch, tmp_path):
+    class Harness:
+        def quiesce_orphan_children(self, _env_info):
+            return {
+                "workspaceQuiesced": True,
+                "quiescenceMethod": "stop-agent-and-restart-task-runtime",
+            }
+
+    condition = object.__new__(RoadmapBenchOpenClawCondition)
+    condition._env_info = {"_harness": Harness(), "state_dir": str(tmp_path)}
+    snapshot = {
+        "parent_session_id": "parent",
+        "parent_terminal": True,
+        "parent_session_terminal": True,
+        "parent_session_status": "done",
+        "message_count": 1,
+        "transcript_size_bytes": 10,
+        "yield_count": 0,
+        "latest_parent_event": "assistant_stop",
+        "pending_child_sessions": [],
+    }
+    changed = dict(
+        snapshot,
+        message_count=2,
+        transcript_size_bytes=20,
+        latest_parent_event="resume",
+    )
+    monkeypatch.setattr(
+        condition, "_read_yield_snapshot", lambda _sessions_dir: changed
+    )
+
+    timed_snapshot, quiescence = condition._quiesce_with_timing(
+        snapshot, logical_parent_terminal=True
+    )
+
+    assert RoadmapBenchOpenClawCondition.terminal_stop_confirmation_seconds == 10.0
+    assert quiescence["workspaceQuiesced"] is False
+    assert quiescence["terminalFenceStable"] is False
+    assert "activity changed" in quiescence["lifecycleError"]
+    assert "workspace_quiesced_ns" not in timed_snapshot
 
 
 def test_child_runtime_and_unmaterialized_spawn_are_distinct(tmp_path):

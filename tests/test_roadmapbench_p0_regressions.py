@@ -51,6 +51,17 @@ class _VerifierTimeoutContainer:
         return None
 
 
+class _QuiesceHarness:
+    def quiesce_orphan_children(self, _env_info):
+        return {
+            "workspaceQuiesced": True,
+            "quiescenceMethod": "stop-agent-and-restart-task-runtime",
+            "openClawRuntimeStopped": True,
+            "execBridgeStopped": True,
+            "taskRuntimeRestarted": True,
+        }
+
+
 def test_openclaw_workspace_prime_failure_is_fail_closed(tmp_path):
     container = _PrimeFailContainer()
     harness = TerminalBenchOpenClawHarness.__new__(TerminalBenchOpenClawHarness)
@@ -114,6 +125,7 @@ def test_verifier_timeout_bytes_are_json_serializable(tmp_path):
 
 def test_abnormal_no_child_exit_records_quiescence_metadata():
     condition = object.__new__(RoadmapBenchOpenClawCondition)
+    condition._env_info = {"_harness": _QuiesceHarness()}
     snapshot = {
         "parent_session_status": "error",
         "yield_count": 0,
@@ -131,7 +143,8 @@ def test_abnormal_no_child_exit_records_quiescence_metadata():
 
     lifecycle = payload["result"]["meta"]["agentBenchLifecycle"]
     assert lifecycle["workspaceQuiesced"] is True
-    assert lifecycle["quiescenceMethod"] == "no-active-children"
+    assert lifecycle["quiescenceMethod"] == "stop-agent-and-restart-task-runtime"
+    assert lifecycle["agentWriterQuiescenceAttempted"] is True
     assert lifecycle["orphanCancellationAttempted"] is False
     assert lifecycle["pendingChildrenAtParentTerminal"] == 0
 

@@ -462,6 +462,9 @@ def _roadmap_condition_for_state(tmp_path, harness=None):
     condition._env_info = {"state_dir": str(tmp_path)}
     if harness is not None:
         condition._env_info["_harness"] = harness
+    # Keep unit lifecycle simulations fast; the production class default is
+    # asserted separately and remains the stricter 10-second confirmation.
+    condition.terminal_stop_confirmation_seconds = 4.0
     condition._last_exit_code = 0
     condition._last_completion_status = condition.BLOCKED_INCOMPLETE
     condition._last_completion_error = "stale CLI liveness"
@@ -909,7 +912,12 @@ def test_roadmap_parent_done_without_child_needs_no_quiescence(tmp_path):
     _write_roadmap_session_state(
         sessions_dir, [_assistant_event("DONE")], child_statuses=()
     )
-    condition = _roadmap_condition_for_state(tmp_path)
+
+    class Harness:
+        def quiesce_orphan_children(self, _env_info):
+            return {"workspaceQuiesced": True}
+
+    condition = _roadmap_condition_for_state(tmp_path, Harness())
 
     payload, error = condition._await_post_turn_lifecycle(
         {"result": {"meta": {"livenessState": "working"}}},
@@ -921,6 +929,7 @@ def test_roadmap_parent_done_without_child_needs_no_quiescence(tmp_path):
     assert error == ""
     assert lifecycle["pendingChildrenAtParentTerminal"] == 0
     assert lifecycle["workspaceQuiesced"] is True
+    assert lifecycle["agentWriterQuiescenceAttempted"] is True
     assert lifecycle["orphanCancellationAttempted"] is False
 
 
@@ -1662,6 +1671,7 @@ def test_roadmap_child_done_and_parent_active_without_done_is_blocked(
     condition = object.__new__(RoadmapBenchOpenClawCondition)
     condition._env_info = {"state_dir": str(tmp_path)}
     condition._last_exit_code = 0
+    condition.terminal_stop_confirmation_seconds = 4.0
     clock = [0.0]
     monkeypatch.setattr(
         "agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent.time.monotonic",

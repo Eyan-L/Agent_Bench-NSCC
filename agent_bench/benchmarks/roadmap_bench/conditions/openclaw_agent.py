@@ -48,7 +48,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     # A turn-level stop can precede an OpenClaw retry/resume. Require the
     # durable session and transcript to remain terminal across multiple
     # watcher reads before accepting a non-DONE stop as logical completion.
-    terminal_stop_confirmation_seconds = 4.0
+    terminal_stop_confirmation_seconds = 10.0
 
     def run(
         self,
@@ -647,7 +647,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         payload: Optional[Dict],
         snapshot: Optional[Dict],
     ) -> Optional[Dict]:
-        """Quiesce orphan children before returning an abnormal terminal result."""
+        """Quiesce agent writers before returning an abnormal terminal result."""
         if not snapshot:
             return payload
 
@@ -742,13 +742,24 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             snapshot.get("latest_parent_event"),
         )
 
+    @staticmethod
+    def _terminal_activity_signature(snapshot: Dict) -> Tuple:
+        """Return transcript activity that must not change across the freeze fence."""
+        return (
+            snapshot.get("parent_session_id"),
+            snapshot.get("message_count"),
+            snapshot.get("transcript_size_bytes"),
+            snapshot.get("yield_count"),
+            snapshot.get("latest_parent_event"),
+        )
+
     def _quiesce_with_timing(
         self,
         snapshot: Dict,
         *,
         logical_parent_terminal: bool = False,
     ) -> Tuple[Dict, Dict]:
-        """Timestamp logical parent terminal observation and workspace quiescence."""
+        """Fence all agent writers and timestamp only a validated quiescence."""
         timed_snapshot = dict(snapshot)
         if (
             logical_parent_terminal
@@ -756,44 +767,77 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             or snapshot.get("parent_session_terminal")
         ):
             timed_snapshot["parent_terminal_observed_ns"] = time.time_ns()
+
+        before_activity = self._terminal_activity_signature(snapshot)
         quiescence = self._quiesce_terminal_children(snapshot)
+
+        if quiescence.get("workspaceQuiesced") is True and logical_parent_terminal:
+            sessions_dir = self._live_sessions_dir()
+            after_snapshot = (
+                self._read_yield_snapshot(sessions_dir)
+                if sessions_dir is not None else None
+            )
+            if after_snapshot is None:
+                error = (
+                    "Roadmap could not validate durable lifecycle after agent "
+                    "writer quiescence"
+                )
+                quiescence = {
+                    **quiescence,
+                    "workspaceQuiesced": False,
+                    "terminalFenceStable": False,
+                    "lifecycleError": error,
+                }
+            elif self._terminal_activity_signature(after_snapshot) != before_activity:
+                error = (
+                    "Roadmap parent activity changed while establishing the "
+                    "terminal quiescence fence"
+                )
+                quiescence = {
+                    **quiescence,
+                    "workspaceQuiesced": False,
+                    "terminalFenceStable": False,
+                    "lifecycleError": error,
+                }
+            else:
+                quiescence = {**quiescence, "terminalFenceStable": True}
+
         if quiescence.get("workspaceQuiesced") is True:
             timed_snapshot["workspace_quiesced_ns"] = time.time_ns()
         return timed_snapshot, quiescence
 
     def _quiesce_terminal_children(self, snapshot: Dict) -> Dict:
+        """Use the harness fence to stop every agent-side workspace writer."""
         pending = list(snapshot.get("pending_child_sessions") or [])
-        if not pending:
-            return {
-                "workspaceQuiesced": True,
-                "quiescenceMethod": "no-active-children",
-                "orphanCancellationAttempted": False,
-                "orphanCancellationError": None,
-            }
         harness = self._env_info.get("_harness")
         if harness is None or not hasattr(harness, "quiesce_orphan_children"):
-            error = "Roadmap harness cannot quiesce terminal orphan children"
+            error = "Roadmap harness cannot quiesce terminal agent writers"
             logger.error(error)
             return {
                 "workspaceQuiesced": False,
+                "agentWriterQuiescenceAttempted": False,
                 "orphanCancellationAttempted": False,
-                "orphanCancellationError": error,
+                "orphanCancellationError": None,
+                "lifecycleError": error,
             }
         try:
             details = harness.quiesce_orphan_children(self._env_info)
             return {
                 **(details if isinstance(details, dict) else {}),
                 "workspaceQuiesced": True,
-                "orphanCancellationAttempted": True,
+                "agentWriterQuiescenceAttempted": True,
+                "orphanCancellationAttempted": bool(pending),
                 "orphanCancellationError": None,
             }
         except Exception as exc:  # noqa: BLE001 - surface in lifecycle result
-            error = f"Roadmap orphan quiescence failed: {exc}"
+            error = f"Roadmap agent-writer quiescence failed: {exc}"
             logger.exception(error)
             return {
                 "workspaceQuiesced": False,
-                "orphanCancellationAttempted": True,
-                "orphanCancellationError": error,
+                "agentWriterQuiescenceAttempted": True,
+                "orphanCancellationAttempted": bool(pending),
+                "orphanCancellationError": error if pending else None,
+                "lifecycleError": error,
             }
 
     @staticmethod
