@@ -198,7 +198,7 @@ def _plot_reward_latency(
     clean: list[tuple[dict[str, Any], float, float]] = []
     for row in rows:
         reward = base._number(row.get("reward"))
-        duration = base._number(row.get("duration_seconds"))
+        duration = base._number(row.get("latency_seconds"))
         if reward is not None and duration is not None:
             clean.append((row, reward, duration))
     if not clean:
@@ -217,7 +217,7 @@ def _plot_reward_latency(
             fontsize=6,
             alpha=0.75,
         )
-    ax.set_xlabel("End-to-end task latency (s)")
+    ax.set_xlabel("Agent trajectory latency (s)")
     ax.set_ylabel("Verifier reward")
     ax.set_title("RoadmapBench reward vs latency")
     ax.set_ylim(-0.03, 1.03)
@@ -262,8 +262,8 @@ def generate_single_arm_plots(
                 plt,
                 rows,
                 path,
-                field="duration_seconds",
-                title=f"RoadmapBench end-to-end latency by task ({arm})",
+                field="latency_seconds",
+                title=f"RoadmapBench agent-trajectory latency by task ({arm})",
                 xlabel="Latency (s)",
                 dpi=dpi,
             ),
@@ -340,7 +340,8 @@ def _render_markdown(
         f"# RoadmapBench single-arm report: {arm}",
         "",
         "This report analyzes one PBS run series only. Accuracy uses verifier "
-        "`reward`; latency uses `manifest.duration_seconds`.",
+        "`reward`; primary latency uses `manifest.agent_execution_seconds`, with explicit "
+        "legacy fallback to `duration_seconds` for older manifests.",
         "",
         "For duplicate `instance_id + seed` records, command-line input order "
         "is authoritative: the later/rightmost PBS input replaces earlier "
@@ -401,7 +402,7 @@ def _render_markdown(
         lines.append(
             f"| {row['instance_id']} | {row['seed']} | {row['job_id']} | "
             f"{row['status']} | {base._fmt(base._number(row.get('reward')))} | "
-            f"{base._fmt(base._number(row.get('duration_seconds')), 1)} | "
+            f"{base._fmt(base._number(row.get('latency_seconds')), 1)} | "
             f"{base._fmt(base._number(row.get('model_request_count')), 0)} | "
             f"{base._fmt(base._number(row.get('total_prompt_tokens')), 0)} | "
             f"{base._fmt(base._number(row.get('tool_call_count')), 0)} | "

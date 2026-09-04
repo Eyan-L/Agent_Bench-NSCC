@@ -132,6 +132,32 @@ class RunRecord:
         return None
 
     @property
+    def agent_execution_seconds(self) -> float | None:
+        value = _number(self.manifest.get("agent_execution_seconds"))
+        if value is not None:
+            return value
+        phase = self.manifest.get("phase_timing") or {}
+        return _number(phase.get("agent_execution_seconds")) if isinstance(phase, dict) else None
+
+    @property
+    def total_instance_seconds(self) -> float | None:
+        return _number(self.manifest.get("total_instance_seconds"))
+
+    @property
+    def latency_seconds(self) -> float | None:
+        """Primary Roadmap latency: logical agent wall time, with legacy fallback."""
+        value = self.agent_execution_seconds
+        return value if value is not None else self.duration_seconds
+
+    @property
+    def latency_source(self) -> str | None:
+        if self.agent_execution_seconds is not None:
+            return "agent_execution_seconds"
+        if self.duration_seconds is not None:
+            return "legacy_duration_seconds"
+        return None
+
+    @property
     def has_trajectory(self) -> bool:
         return bool(self.trajectory_path and self.trajectory_path.is_file())
 
@@ -477,6 +503,10 @@ def record_to_dict(record: RunRecord) -> dict[str, Any]:
         "reward": record.reward,
         "test_pass_rate": record.test_pass_rate,
         "duration_seconds": record.duration_seconds,
+        "total_instance_seconds": record.total_instance_seconds,
+        "agent_execution_seconds": record.agent_execution_seconds,
+        "latency_seconds": record.latency_seconds,
+        "latency_source": record.latency_source,
         "agent_execution_outcome": record.manifest.get(
             "agent_execution_outcome"
         ),
@@ -509,6 +539,20 @@ def record_to_dict(record: RunRecord) -> dict[str, Any]:
         "serving_request_count": serving.get("request_count"),
         "manifest_path": str(record.manifest_path),
     }
+    phase = record.manifest.get("phase_timing") or {}
+    if isinstance(phase, dict):
+        for field in (
+            "workspace_prepare_seconds",
+            "gateway_warmup_queue_seconds",
+            "gateway_warmup_seconds",
+            "environment_prepare_seconds",
+            "parent_execution_seconds",
+            "post_parent_quiescence_seconds",
+            "candidate_freeze_seconds",
+            "verifier_seconds",
+            "cleanup_seconds",
+        ):
+            result[field] = _number(phase.get(field))
     for event in CORE_EVENTS:
         result[f"{event}_count"] = int(events.get(event) or 0)
     return result
@@ -531,10 +575,13 @@ def summarize_arm(records: Sequence[RunRecord]) -> dict[str, Any]:
         if record.test_pass_rate is not None
     ]
     durations = [
-        record.duration_seconds
+        record.latency_seconds
         for record in records
-        if record.duration_seconds is not None
+        if record.latency_seconds is not None
     ]
+    latency_sources = Counter(
+        record.latency_source or "MISSING" for record in records
+    )
     full_passes = sum(
         1 for record in records
         if record.reward is not None and record.reward >= 1.0
@@ -586,6 +633,9 @@ def summarize_arm(records: Sequence[RunRecord]) -> dict[str, Any]:
             "full_pass_rate": full_passes / len(rewards) if rewards else None,
         },
         "latency_seconds": {
+            "primary_metric": "agent_execution_seconds",
+            "legacy_fallback": "duration_seconds",
+            "source_counts": dict(sorted(latency_sources.items())),
             "count": len(durations),
             "mean": _mean(durations),
             "median": _percentile(durations, 0.50),
@@ -681,13 +731,13 @@ def compare_paired(
         latency_delta = None
         speedup = None
         if (
-            sub.duration_seconds is not None
-            and single.duration_seconds is not None
+            sub.latency_seconds is not None
+            and single.latency_seconds is not None
         ):
-            latency_delta = single.duration_seconds - sub.duration_seconds
+            latency_delta = single.latency_seconds - sub.latency_seconds
             latency_deltas.append(latency_delta)
-            if sub.duration_seconds > 0 and single.duration_seconds > 0:
-                speedup = single.duration_seconds / sub.duration_seconds
+            if sub.latency_seconds > 0 and single.latency_seconds > 0:
+                speedup = single.latency_seconds / sub.latency_seconds
                 speedups.append(speedup)
             if latency_delta > 1e-9:
                 latency_wins += 1
@@ -710,6 +760,14 @@ def compare_paired(
             "reward_delta_subagent_minus_single": reward_delta,
             "subagent_duration_seconds": sub.duration_seconds,
             "single_agent_duration_seconds": single.duration_seconds,
+            "subagent_total_instance_seconds": sub.total_instance_seconds,
+            "single_agent_total_instance_seconds": single.total_instance_seconds,
+            "subagent_agent_execution_seconds": sub.agent_execution_seconds,
+            "single_agent_agent_execution_seconds": single.agent_execution_seconds,
+            "subagent_latency_seconds": sub.latency_seconds,
+            "single_agent_latency_seconds": single.latency_seconds,
+            "subagent_latency_source": sub.latency_source,
+            "single_agent_latency_source": single.latency_source,
             "latency_delta_single_minus_subagent_seconds": latency_delta,
             "subagent_speedup_single_over_subagent": speedup,
             "subagent_trajectory": sub.has_trajectory,
@@ -940,9 +998,10 @@ def render_markdown(
     lines = [
         "# RoadmapBench paired accuracy / latency / trajectory report",
         "",
-        "Accuracy uses the authoritative verifier `reward`. End-to-end task "
-        "latency uses `manifest.duration_seconds`; agent self-reported test "
-        "claims are not treated as accuracy.",
+        "Accuracy uses the authoritative verifier `reward`. Primary latency uses "
+        "`manifest.agent_execution_seconds` (initial parent dispatch through workspace "
+        "quiescence). Older manifests without that field fall back explicitly to legacy "
+        "`duration_seconds`; agent self-reported test claims are not treated as accuracy.",
         "",
         "## Arm-level summary",
         "",
@@ -1019,7 +1078,7 @@ def render_markdown(
                     "both more accurate and faster."
                 ),
                 "accuracy": "Paired verifier reward by task.",
-                "latency": "Per-task end-to-end latency speedup; >1 favors subagent.",
+                "latency": "Per-task agent-trajectory latency speedup; >1 favors subagent.",
                 "requests": (
                     "Per-task model-request ratio; >1 means single-agent used "
                     "more model requests."
@@ -1057,8 +1116,8 @@ def render_markdown(
                     f"{_fmt(row['subagent_reward'])} | "
                     f"{_fmt(row['single_agent_reward'])} | "
                     f"{_fmt(row['reward_delta_subagent_minus_single'])} | "
-                    f"{_fmt(row['subagent_duration_seconds'], 1)} | "
-                    f"{_fmt(row['single_agent_duration_seconds'], 1)} | "
+                    f"{_fmt(row['subagent_latency_seconds'], 1)} | "
+                    f"{_fmt(row['single_agent_latency_seconds'], 1)} | "
                     f"{_fmt(row['subagent_speedup_single_over_subagent'])}x | "
                     f"{_fmt(row['subagent_model_request_count'], 0)} | "
                     f"{_fmt(row['single_agent_model_request_count'], 0)} | "
@@ -1269,8 +1328,8 @@ def generate_plots(
                 rows,
                 path,
                 value_field="subagent_speedup_single_over_subagent",
-                title="RoadmapBench end-to-end latency speedup",
-                xlabel="single-agent latency / subagent latency (>1 favors subagent)",
+                title="RoadmapBench agent-trajectory latency speedup",
+                xlabel="single-agent agent latency / subagent agent latency (>1 favors subagent)",
                 dpi=dpi,
             ),
         ),
