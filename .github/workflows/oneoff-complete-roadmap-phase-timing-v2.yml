@@ -1,0 +1,287 @@
+name: Complete Roadmap phase timing v2
+
+on:
+  push:
+    paths:
+      - '.github/workflows/oneoff-complete-roadmap-phase-timing-v2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch phase timing
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def one(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              n = text.count(old)
+              if n != 1:
+                  raise SystemExit(f"{path}: anchor count={n}: {old[:120]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          # TerminalBench prepare sub-phases.
+          app = 'agent_bench/benchmarks/terminal_bench/app.py'
+          one(app,
+              '        try:\n            self.container.copy_from_image(task_image, task_workspace, app_dir)\n',
+              '        workspace_prepare_start_ns = time.time_ns()\n        try:\n            self.container.copy_from_image(task_image, task_workspace, app_dir)\n')
+          one(app,
+              '        _seed_workspace_helpers(app_dir, instance_data, task_workspace)\n',
+              '        _seed_workspace_helpers(app_dir, instance_data, task_workspace)\n        workspace_prepare_end_ns = time.time_ns()\n')
+          one(app,
+              '            logger.info(\n                "  [warmup] waiting for gateway-warmup slot (run=%s)", run_id\n            )\n',
+              '            gateway_warmup_wait_start_ns = time.time_ns()\n            logger.info(\n                "  [warmup] waiting for gateway-warmup slot (run=%s)", run_id\n            )\n')
+          one(app,
+              '            with _OPENCLAW_WARMUP_SEM:\n                logger.info(\n',
+              '            with _OPENCLAW_WARMUP_SEM:\n                gateway_warmup_start_ns = time.time_ns()\n                logger.info(\n')
+          one(app,
+              '                self.container.wait_log_pattern(\n                    oc_handle,\n                    self._GATEWAY_READY_RE,\n                    self._GATEWAY_READY_TIMEOUT_SECONDS,\n                )\n            logger.info(\n',
+              '                self.container.wait_log_pattern(\n                    oc_handle,\n                    self._GATEWAY_READY_RE,\n                    self._GATEWAY_READY_TIMEOUT_SECONDS,\n                )\n                gateway_ready_ns = time.time_ns()\n            logger.info(\n')
+          one(app,
+              '            return {\n                "container_id": oc_handle.id,\n',
+              '            return {\n                "prepare_phase_timing": {\n                    "workspace_prepare_start_ns": workspace_prepare_start_ns,\n                    "workspace_prepare_end_ns": workspace_prepare_end_ns,\n                    "workspace_prepare_seconds": (workspace_prepare_end_ns - workspace_prepare_start_ns) / 1e9,\n                    "gateway_warmup_wait_start_ns": gateway_warmup_wait_start_ns,\n                    "gateway_warmup_start_ns": gateway_warmup_start_ns,\n                    "gateway_ready_ns": gateway_ready_ns,\n                    "gateway_warmup_queue_seconds": max(0.0, (gateway_warmup_start_ns - gateway_warmup_wait_start_ns) / 1e9),\n                    "gateway_warmup_seconds": max(0.0, (gateway_ready_ns - gateway_warmup_start_ns) / 1e9),\n                },\n                "container_id": oc_handle.id,\n')
+
+          # Roadmap parent-terminal -> workspace-quiesced interval.
+          roadmap = 'agent_bench/benchmarks/roadmap_bench/conditions/openclaw_agent.py'
+          one(roadmap,
+              '        quiescence = self._quiesce_terminal_children(snapshot)\n        self._attach_lifecycle_summary(\n            reconciled_payload, snapshot, quiescence\n        )\n        return reconciled_payload\n',
+              '        snapshot, quiescence = self._quiesce_with_timing(snapshot)\n        self._attach_lifecycle_summary(\n            reconciled_payload, snapshot, quiescence\n        )\n        return reconciled_payload\n')
+          one(roadmap,
+              '            snapshot = dict(snapshot, terminal_evidence="explicit_done")\n            quiescence = self._quiesce_terminal_children(snapshot)\n',
+              '            snapshot = dict(snapshot, terminal_evidence="explicit_done")\n            snapshot, quiescence = self._quiesce_with_timing(\n                snapshot, logical_parent_terminal=True\n            )\n')
+          one(roadmap,
+              '            snapshot = dict(\n                snapshot,\n                terminal_evidence="durable_session_terminal_assistant_stop",\n            )\n            quiescence = self._quiesce_terminal_children(snapshot)\n',
+              '            snapshot = dict(\n                snapshot,\n                terminal_evidence="durable_session_terminal_assistant_stop",\n            )\n            snapshot, quiescence = self._quiesce_with_timing(\n                snapshot, logical_parent_terminal=True\n            )\n')
+          one(roadmap,
+              '    def _quiesce_terminal_children(self, snapshot: Dict) -> Dict:\n',
+              '    def _quiesce_with_timing(\n        self,\n        snapshot: Dict,\n        *,\n        logical_parent_terminal: bool = False,\n    ) -> Tuple[Dict, Dict]:\n        """Quiesce writers while preserving the parent-to-quiescence wall interval."""\n        timed_snapshot = dict(snapshot)\n        if (\n            logical_parent_terminal\n            or snapshot.get("parent_terminal")\n            or snapshot.get("parent_session_terminal")\n        ):\n            timed_snapshot["parent_terminal_observed_ns"] = time.time_ns()\n        quiescence = self._quiesce_terminal_children(snapshot)\n        if quiescence.get("workspaceQuiesced") is True:\n            timed_snapshot["workspace_quiesced_ns"] = time.time_ns()\n        return timed_snapshot, quiescence\n\n    def _quiesce_terminal_children(self, snapshot: Dict) -> Dict:\n')
+          one(roadmap,
+              '            "terminalEvidence": snapshot.get("terminal_evidence", "unknown"),\n            "yieldCount": int(snapshot.get("yield_count") or 0),\n',
+              '            "terminalEvidence": snapshot.get("terminal_evidence", "unknown"),\n            "parentTerminalObservedNs": snapshot.get("parent_terminal_observed_ns"),\n            "parentTerminalTimestampQuality": ("watcher_observed" if snapshot.get("parent_terminal_observed_ns") else None),\n            "workspaceQuiescedNs": snapshot.get("workspace_quiesced_ns"),\n            "workspaceQuiescedTimestampQuality": ("harness_observed" if snapshot.get("workspace_quiesced_ns") else None),\n            "yieldCount": int(snapshot.get("yield_count") or 0),\n')
+
+          # Refine primary Roadmap agent latency to actual quiescence and expose decomposition.
+          base = 'agent_bench/benchmarks/conditions/openclaw_agent.py'
+          old = ('        agent_lifecycle = (\n'
+                 '            (self._unwrap(payload).get("meta") or {}).get(\n'
+                 '                "agentBenchLifecycle"\n'
+                 '            )\n'
+                 '            if payload else None\n'
+                 '        )\n'
+                 '        if (\n')
+          new = ('        agent_lifecycle = (\n'
+                 '            (self._unwrap(payload).get("meta") or {}).get(\n'
+                 '                "agentBenchLifecycle"\n'
+                 '            )\n'
+                 '            if payload else None\n'
+                 '        )\n'
+                 '        if self.agent_id == "roadmap_bench" and isinstance(agent_lifecycle, dict):\n'
+                 '            parent_terminal_ns = agent_lifecycle.get("parentTerminalObservedNs")\n'
+                 '            workspace_quiesced_ns = agent_lifecycle.get("workspaceQuiescedNs")\n'
+                 '            if isinstance(parent_terminal_ns, int):\n'
+                 '                phase_timing["parent_terminal_observed_ns"] = parent_terminal_ns\n'
+                 '                phase_timing["parent_terminal_timestamp_quality"] = agent_lifecycle.get("parentTerminalTimestampQuality")\n'
+                 '                phase_timing["parent_execution_seconds"] = max(0.0, (parent_terminal_ns - step_start_ns) / 1e9)\n'
+                 '            if isinstance(workspace_quiesced_ns, int):\n'
+                 '                phase_timing["workspace_quiesced_ns"] = workspace_quiesced_ns\n'
+                 '                phase_timing["workspace_quiesced_timestamp_quality"] = agent_lifecycle.get("workspaceQuiescedTimestampQuality")\n'
+                 '                phase_timing["agent_execution_end_ns"] = workspace_quiesced_ns\n'
+                 '                phase_timing["agent_execution_seconds"] = max(0.0, (workspace_quiesced_ns - step_start_ns) / 1e9)\n'
+                 '                if isinstance(parent_terminal_ns, int):\n'
+                 '                    phase_timing["post_parent_quiescence_seconds"] = max(0.0, (workspace_quiesced_ns - parent_terminal_ns) / 1e9)\n'
+                 '        if (\n')
+          one(base, old, new)
+
+          # Driver preparation and cleanup-inclusive total instance wall time.
+          driver = 'agent_bench/runtime/driver.py'
+          one(driver,
+              '    container_id = None\n    env_info = None\n    harness_spans_path = run_dir / "spans.jsonl"\n',
+              '    container_id = None\n    env_info = None\n    prepare_phase_timing: dict[str, Any] = {}\n    harness_spans_path = run_dir / "spans.jsonl"\n')
+          old = ('        env_info = harness.prepare_environment(\n'
+                 '            instance_id=run_config.instance_id,\n'
+                 '            repo_id=run_config.repo_id,\n'
+                 '            base_commit=run_config.base_commit,\n'
+                 '            container_image=run_config.container_image,\n'
+                 '            workspace_root=run_config.workspace_root,\n'
+                 '            run_id=run_id,\n'
+                 '            instance_data=instance_data,\n'
+                 '        )\n')
+          new = ('        environment_prepare_start_ns = time.time_ns()\n'
+                 '        try:\n'
+                 '            env_info = harness.prepare_environment(\n'
+                 '                instance_id=run_config.instance_id,\n'
+                 '                repo_id=run_config.repo_id,\n'
+                 '                base_commit=run_config.base_commit,\n'
+                 '                container_image=run_config.container_image,\n'
+                 '                workspace_root=run_config.workspace_root,\n'
+                 '                run_id=run_id,\n'
+                 '                instance_data=instance_data,\n'
+                 '            )\n'
+                 '        finally:\n'
+                 '            environment_prepare_end_ns = time.time_ns()\n'
+                 '            prepare_phase_timing.update({\n'
+                 '                "environment_prepare_start_ns": environment_prepare_start_ns,\n'
+                 '                "environment_prepare_end_ns": environment_prepare_end_ns,\n'
+                 '                "environment_prepare_seconds": max(0.0, (environment_prepare_end_ns - environment_prepare_start_ns) / 1e9),\n'
+                 '            })\n'
+                 '        if isinstance(env_info, dict):\n'
+                 '            harness_prepare_timing = env_info.get("prepare_phase_timing")\n'
+                 '            if isinstance(harness_prepare_timing, dict):\n'
+                 '                prepare_phase_timing.update(harness_prepare_timing)\n')
+          one(driver, old, new)
+          one(driver,
+              '        if not isinstance(phase_timing, dict):\n            phase_timing = {}\n            result["phase_timing"] = phase_timing\n        agent_start_ns = phase_timing.get("agent_execution_start_ns")\n',
+              '        if not isinstance(phase_timing, dict):\n            phase_timing = {}\n            result["phase_timing"] = phase_timing\n        phase_timing.update(prepare_phase_timing)\n        agent_start_ns = phase_timing.get("agent_execution_start_ns")\n        environment_prepare_end_ns = phase_timing.get("environment_prepare_end_ns")\n        if isinstance(agent_start_ns, int) and isinstance(environment_prepare_end_ns, int):\n            phase_timing["post_prepare_before_agent_seconds"] = max(0.0, (agent_start_ns - environment_prepare_end_ns) / 1e9)\n')
+          old = ('    finally:\n'
+                 '        manifest.wall_end_ns = time.time_ns()\n'
+                 '        manifest.duration_seconds = (\n'
+                 '            (manifest.wall_end_ns - manifest.wall_start_ns) / 1e9\n'
+                 '        )\n'
+                 '        \n'
+                 '        # Cleanup. Forward env_info wholesale so harnesses can grab whichever\n'
+                 '        # keys they need (oc_container_id / task_container_id / network_name\n'
+                 '        # for two-container docker mode; gateway_pid / state_dir for legacy\n'
+                 '        # singularity; etc.). Strip keys that conflict with the positional\n'
+                 '        # argument or carry harness refs.\n'
+                 '        cleanup_error = None\n'
+                 '        try:\n'
+                 '            cleanup_kwargs = dict(env_info or {})\n'
+                 '            for k in ("container_id", "_harness"):\n'
+                 '                cleanup_kwargs.pop(k, None)\n'
+                 '            with _protect_cleanup_from_interrupts():\n'
+                 '                harness.cleanup(container_id, **cleanup_kwargs)\n'
+                 '        except BaseException:\n'
+                 '            logger.exception("cleanup failed")\n'
+                 '            cleanup_error = "harness cleanup failed"\n'
+                 '        finally:\n'
+                 '            trajectory_path = run_dir / "trajectory.jsonl"\n')
+          new = ('    finally:\n'
+                 '        # Keep duration_seconds at its historical pre-cleanup boundary.\n'
+                 '        manifest.wall_end_ns = time.time_ns()\n'
+                 '        manifest.duration_seconds = (\n'
+                 '            (manifest.wall_end_ns - manifest.wall_start_ns) / 1e9\n'
+                 '        )\n'
+                 '        cleanup_error = None\n'
+                 '        cleanup_start_ns = time.time_ns()\n'
+                 '        try:\n'
+                 '            cleanup_kwargs = dict(env_info or {})\n'
+                 '            for k in ("container_id", "_harness"):\n'
+                 '                cleanup_kwargs.pop(k, None)\n'
+                 '            with _protect_cleanup_from_interrupts():\n'
+                 '                harness.cleanup(container_id, **cleanup_kwargs)\n'
+                 '        except BaseException:\n'
+                 '            logger.exception("cleanup failed")\n'
+                 '            cleanup_error = "harness cleanup failed"\n'
+                 '        finally:\n'
+                 '            cleanup_end_ns = time.time_ns()\n'
+                 '            final_phase_timing = dict(manifest.phase_timing) if isinstance(manifest.phase_timing, dict) else {}\n'
+                 '            if isinstance(env_info, dict):\n'
+                 '                harness_prepare_timing = env_info.get("prepare_phase_timing")\n'
+                 '                if isinstance(harness_prepare_timing, dict):\n'
+                 '                    final_phase_timing.update(harness_prepare_timing)\n'
+                 '            final_phase_timing.update(prepare_phase_timing)\n'
+                 '            final_phase_timing.update({\n'
+                 '                "cleanup_start_ns": cleanup_start_ns,\n'
+                 '                "cleanup_end_ns": cleanup_end_ns,\n'
+                 '                "cleanup_seconds": max(0.0, (cleanup_end_ns - cleanup_start_ns) / 1e9),\n'
+                 '                "total_instance_end_ns": cleanup_end_ns,\n'
+                 '            })\n'
+                 '            if manifest.wall_start_ns:\n'
+                 '                manifest.total_instance_seconds = max(0.0, (cleanup_end_ns - manifest.wall_start_ns) / 1e9)\n'
+                 '                final_phase_timing["total_instance_seconds"] = manifest.total_instance_seconds\n'
+                 '            manifest.phase_timing = final_phase_timing\n'
+                 '            trajectory_path = run_dir / "trajectory.jsonl"\n')
+          one(driver, old, new)
+
+          # Manifest persistence.
+          manifest = 'agent_bench/core/manifest.py'
+          one(manifest,
+              '    duration_seconds: Optional[float] = None\n    # Logical agent wall time. For RoadmapBench this starts at the\n',
+              '    duration_seconds: Optional[float] = None\n    # Cleanup-inclusive wall time; duration_seconds keeps its historical pre-cleanup boundary.\n    total_instance_seconds: Optional[float] = None\n    # Logical agent wall time. For RoadmapBench this starts at the\n')
+          one(manifest,
+              '            "duration_seconds": self.duration_seconds,\n            "agent_execution_seconds": self.agent_execution_seconds,\n',
+              '            "duration_seconds": self.duration_seconds,\n            "total_instance_seconds": self.total_instance_seconds,\n            "agent_execution_seconds": self.agent_execution_seconds,\n')
+          one(manifest,
+              '            duration_seconds=data.get("duration_seconds"),\n            agent_execution_seconds=data.get("agent_execution_seconds"),\n',
+              '            duration_seconds=data.get("duration_seconds"),\n            total_instance_seconds=data.get("total_instance_seconds"),\n            agent_execution_seconds=data.get("agent_execution_seconds"),\n')
+
+          # Tests.
+          tests = 'tests/test_roadmap_timing_measurement.py'
+          one(tests,
+              'from agent_bench.core.manifest import RunManifest\n',
+              'from agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent import RoadmapBenchOpenClawCondition\nfrom agent_bench.core.manifest import RunManifest\n')
+          one(tests,
+              '        duration_seconds=100.0,\n        agent_execution_seconds=60.0,\n',
+              '        duration_seconds=100.0,\n        total_instance_seconds=110.0,\n        agent_execution_seconds=60.0,\n')
+          one(tests,
+              '    assert restored.duration_seconds == 100.0\n    assert restored.agent_execution_seconds == 60.0\n',
+              '    assert restored.duration_seconds == 100.0\n    assert restored.total_instance_seconds == 110.0\n    assert restored.agent_execution_seconds == 60.0\n')
+          p = Path(tests)
+          text = p.read_text()
+          anchor = '\n\ndef test_child_runtime_and_unmaterialized_spawn_are_distinct(tmp_path):\n'
+          if text.count(anchor) != 1:
+              raise SystemExit(f'{tests}: test insertion anchor count={text.count(anchor)}')
+          addition = '''
+
+          def test_roadmap_quiescence_timing_separates_parent_terminal(monkeypatch):
+              condition = object.__new__(RoadmapBenchOpenClawCondition)
+              snapshot = {
+                  "parent_terminal": True,
+                  "parent_session_terminal": True,
+                  "pending_child_sessions": [],
+              }
+              clock = iter([1_000_000_000, 3_000_000_000])
+              monkeypatch.setattr(
+                  "agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent.time.time_ns",
+                  lambda: next(clock),
+              )
+              timed_snapshot, quiescence = condition._quiesce_with_timing(
+                  snapshot, logical_parent_terminal=True
+              )
+              assert quiescence["workspaceQuiesced"] is True
+              assert timed_snapshot["parent_terminal_observed_ns"] == 1_000_000_000
+              assert timed_snapshot["workspace_quiesced_ns"] == 3_000_000_000
+          '''
+          # Remove YAML-induced indentation from the embedded test body.
+          addition = '\n'.join(line[10:] if line.startswith('          ') else line for line in addition.splitlines())
+          p.write_text(text.replace(anchor, addition + anchor, 1))
+          PY
+
+      - name: Validate
+        shell: bash
+        run: |
+          python -m compileall -q \
+            agent_bench/benchmarks/terminal_bench/app.py \
+            agent_bench/benchmarks/roadmap_bench/conditions/openclaw_agent.py \
+            agent_bench/benchmarks/conditions/openclaw_agent.py \
+            agent_bench/runtime/driver.py \
+            agent_bench/core/manifest.py \
+            tests/test_roadmap_timing_measurement.py
+          if python -c 'import pytest' 2>/dev/null; then
+            python -m pytest -q tests/test_roadmap_timing_measurement.py
+          fi
+
+      - name: Commit
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/oneoff-complete-roadmap-phase-timing.yml
+          git rm .github/workflows/oneoff-complete-roadmap-phase-timing-v2.yml
+          git add agent_bench/benchmarks/terminal_bench/app.py \
+                  agent_bench/benchmarks/roadmap_bench/conditions/openclaw_agent.py \
+                  agent_bench/benchmarks/conditions/openclaw_agent.py \
+                  agent_bench/runtime/driver.py \
+                  agent_bench/core/manifest.py \
+                  tests/test_roadmap_timing_measurement.py
+          git commit -m "Complete Roadmap phase timing instrumentation"
+          git push origin HEAD:master
