@@ -452,41 +452,115 @@ class SingularityContainer(Container):
         *,
         timeout: float = 600.0,
     ) -> None:
-        """Pipe `tar -cf -` from inside the sif into a host `tar -xf -`."""
+        """Extract a SIF workspace atomically with a progress-aware stall timeout.
+
+        ``timeout`` is an inactivity timeout, not a total copy deadline. Large
+        workspaces may take arbitrarily long as long as the host ``tar`` keeps
+        consuming or writing bytes. Extraction happens in a sibling staging
+        directory so a failed or stalled copy can never expose a partial tree.
+        """
         self.check_image(image)
-        dst_host.mkdir(parents=True, exist_ok=True)
+        dst_host = Path(dst_host)
+        dst_host.parent.mkdir(parents=True, exist_ok=True)
         src = src_in_image.rstrip("/")
-        producer = subprocess.Popen(
-            ["singularity", "exec", image,
-             "tar", "-C", src, "-cf", "-", "."],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=_subprocess_env(),
+        staging = Path(
+            tempfile.mkdtemp(
+                prefix=f".{dst_host.name}.prime-",
+                dir=str(dst_host.parent),
+            )
         )
-        consumer = subprocess.Popen(
-            ["tar", "-C", str(dst_host), "-xf", "-"],
-            stdin=producer.stdout, stderr=subprocess.PIPE,
-        )
-        if producer.stdout is not None:
-            # let consumer own the read end
-            producer.stdout.close()
+        producer: Optional[subprocess.Popen] = None
+        consumer: Optional[subprocess.Popen] = None
+
+        def _io_signature(pid: int) -> Optional[tuple[int, int, int, int]]:
+            try:
+                values: dict[str, int] = {}
+                for line in Path(f"/proc/{pid}/io").read_text().splitlines():
+                    key, _, raw = line.partition(":")
+                    if key in {"rchar", "wchar", "syscr", "syscw"}:
+                        values[key] = int(raw.strip())
+                return tuple(
+                    values.get(key, 0)
+                    for key in ("rchar", "wchar", "syscr", "syscw")
+                )
+            except (OSError, ValueError):
+                return None
+
         try:
-            consumer_err = consumer.communicate(timeout=timeout)[1]
-            producer_err = producer.communicate(timeout=10)[1]
-        except subprocess.TimeoutExpired:
-            consumer.kill()
-            producer.kill()
-            raise RuntimeError(
-                f"copy_from_image timed out after {timeout}s "
-                f"({image}:{src_in_image} → {dst_host})"
+            producer = subprocess.Popen(
+                ["singularity", "exec", image,
+                 "tar", "-C", src, "-cf", "-", "."],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=_subprocess_env(),
             )
-        if consumer.returncode != 0:
-            raise RuntimeError(
-                f"copy_from_image: host tar -x failed: {(consumer_err or b'').decode(errors='replace')[-500:]}"
+            consumer = subprocess.Popen(
+                ["tar", "-C", str(staging), "-xf", "-"],
+                stdin=producer.stdout, stderr=subprocess.PIPE,
             )
-        if producer.returncode != 0:
-            raise RuntimeError(
-                f"copy_from_image: in-sif tar -c failed: {(producer_err or b'').decode(errors='replace')[-500:]}"
-            )
+            if producer.stdout is not None:
+                producer.stdout.close()
+
+            last_progress = time.monotonic()
+            last_signature = _io_signature(consumer.pid)
+            while consumer.poll() is None:
+                time.sleep(5.0)
+                now = time.monotonic()
+                signature = _io_signature(consumer.pid)
+                if signature is None:
+                    # /proc is expected on NSCC. If it is unavailable, prefer
+                    # waiting over falsely killing a large but healthy copy.
+                    last_progress = now
+                elif last_signature is None or signature != last_signature:
+                    last_progress = now
+                    last_signature = signature
+                elif timeout > 0 and now - last_progress >= timeout:
+                    consumer.kill()
+                    producer.kill()
+                    consumer.communicate()
+                    producer.communicate()
+                    raise RuntimeError(
+                        f"copy_from_image stalled for {timeout}s without I/O progress "
+                        f"({image}:{src_in_image} → {dst_host})"
+                    )
+
+            consumer_err = consumer.communicate()[1]
+            try:
+                producer_err = producer.communicate(timeout=30)[1]
+            except subprocess.TimeoutExpired:
+                producer.kill()
+                producer_err = producer.communicate()[1]
+                raise RuntimeError(
+                    "copy_from_image producer did not exit after extraction "
+                    f"({image}:{src_in_image} → {dst_host})"
+                )
+
+            if consumer.returncode != 0:
+                raise RuntimeError(
+                    "copy_from_image: host tar -x failed: "
+                    f"{(consumer_err or b'').decode(errors='replace')[-500:]}"
+                )
+            if producer.returncode != 0:
+                raise RuntimeError(
+                    "copy_from_image: in-sif tar -c failed: "
+                    f"{(producer_err or b'').decode(errors='replace')[-500:]}"
+                )
+
+            if dst_host.exists():
+                if dst_host.is_dir():
+                    shutil.rmtree(dst_host)
+                else:
+                    dst_host.unlink()
+            os.replace(staging, dst_host)
+            staging = None  # type: ignore[assignment]
+        finally:
+            if consumer is not None and consumer.poll() is None:
+                consumer.kill()
+                consumer.communicate()
+            if producer is not None and producer.poll() is None:
+                producer.kill()
+                producer.communicate()
+            if staging is not None and staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
 
     # ------------------------------------------------------------------
     # Liveness / log waiting
