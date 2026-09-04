@@ -53,6 +53,7 @@ def test_roadmap_quiescence_timing_separates_parent_terminal(monkeypatch):
     assert timed_snapshot["parent_terminal_observed_ns"] == 1_000_000_000
     assert timed_snapshot["workspace_quiesced_ns"] == 3_000_000_000
 
+
 def test_child_runtime_and_unmaterialized_spawn_are_distinct(tmp_path):
     sessions = tmp_path / "conversation" / "sessions"
     sessions.mkdir(parents=True)
@@ -124,6 +125,11 @@ def test_child_runtime_and_unmaterialized_spawn_are_distinct(tmp_path):
     assert obs["spawn_attempt_count"] == 3
     assert obs["child_session_count"] == 2
     assert obs["unmaterialized_spawn_attempt_count"] == 1
+    assert obs["spawn_runtime_policy"] == (
+        "failed/unmaterialized spawn waits remain in agent_execution_seconds "
+        "but never create child runtime"
+    )
+    assert obs["child_runtime_policy"]["failed_spawn_runtime"] is None
     assert obs["child_runtime_complete_count"] == 2
     assert obs["child_runtime_by_session"][child_a]["runtime_seconds"] == 3.0
     assert obs["child_runtime_by_session"][child_a]["start_timestamp_source"] == "createdAt"
