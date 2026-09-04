@@ -125,9 +125,9 @@ def _roadmap_gateway_guarded_argv(argv: List[str], env: Dict) -> List[str]:
     short bounded window because channels/sidecars may still be settling.
 
     The upstream CLI can automatically continue in embedded mode after a
-    Gateway error. We preserve stderr for Agent_Bench diagnostics but force a
-    non-zero exit when that fallback marker appears, so a formal Roadmap run
-    cannot silently become a different runtime mode.
+    Gateway error. We capture stderr to a file, replay it to Agent_Bench after
+    the command, and force a non-zero exit when that fallback marker appears.
+    Direct redirection avoids a process-substitution flush race before grep.
     """
     gateway_url = str(env.get("OPENCLAW_GATEWAY_URL") or "")
     gateway_token = str(env.get("OPENCLAW_GATEWAY_TOKEN") or "")
@@ -163,8 +163,9 @@ done
 rm -f \"$ab_probe_log\"
 
 ab_stderr=$(mktemp /tmp/agent-bench-openclaw-stderr.XXXXXX)
-{command} 2> >(tee \"$ab_stderr\" >&2)
+{command} 2>\"$ab_stderr\"
 ab_rc=$?
+cat \"$ab_stderr\" >&2
 if grep -Fqi 'falling back to embedded' \"$ab_stderr\"; then
   echo '[agent-bench] embedded fallback detected; Roadmap gateway-only run is invalid' >&2
   rm -f \"$ab_stderr\"
