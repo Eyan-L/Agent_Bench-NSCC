@@ -494,6 +494,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         last_state = None
         prompt_error_signature = None
         prompt_error_since = None
+        last_snapshot = snapshot
         terminal_stop_signature = self._terminal_stop_signature(snapshot)
         terminal_stop_since = (
             time.monotonic() if terminal_stop_signature is not None else None
@@ -502,6 +503,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         while time.monotonic() < deadline:
             snapshot = self._read_yield_snapshot(sessions_dir)
             if snapshot:
+                last_snapshot = snapshot
                 if snapshot["parent_session_id"] != parent_session_id:
                     message = (
                         "Roadmap requester session changed during yield/resume: "
@@ -510,6 +512,9 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                     )
                     self._last_completion_status = self.RUNTIME_ERROR
                     self._last_completion_error = message
+                    payload = self._quiesce_abnormal_terminal_payload(
+                        payload, snapshot
+                    )
                     return payload, message
 
                 state = (
@@ -612,6 +617,9 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                         )
                         self._last_completion_status = status
                         self._last_completion_error = prompt_error
+                        payload = self._quiesce_abnormal_terminal_payload(
+                            payload, snapshot
+                        )
                         return payload, prompt_error
 
                 else:
@@ -629,6 +637,9 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         self._last_exit_code = -1
         self._last_completion_status = self.TIMEOUT
         self._last_completion_error = message
+        payload = self._quiesce_abnormal_terminal_payload(
+            payload, last_snapshot
+        )
         return payload, message
 
     def _quiesce_abnormal_terminal_payload(
@@ -637,7 +648,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         snapshot: Optional[Dict],
     ) -> Optional[Dict]:
         """Quiesce orphan children before returning an abnormal terminal result."""
-        if not snapshot or not snapshot.get("pending_children"):
+        if not snapshot:
             return payload
 
         reconciled_payload = (
@@ -732,6 +743,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         if not pending:
             return {
                 "workspaceQuiesced": True,
+                "quiescenceMethod": "no-active-children",
                 "orphanCancellationAttempted": False,
                 "orphanCancellationError": None,
             }
