@@ -202,13 +202,12 @@ def test_nscc_sif_builder_bakes_and_verifies_runtime_compatibility():
     assert "offline_data_urls" in script
 
 
-def test_fal20_smoke_forces_reliability_sif_rebuild():
+def test_fal20_smoke_uses_prebuilt_reliability_sif_without_rebuild():
     repo_root = Path(__file__).resolve().parents[1]
     pbs = (
         repo_root / "nscc_qwen36_35b_a3b_roadmapbench_fal_2_0_0_smoke.pbs"
     ).read_text()
 
-    # The first smoke after changing the runtime must not silently reuse the
-    # stale patched SIF from the previous gateway run.
-    assert "AB_OPENCLAW_SUBAGENT_SESSION_PATCH_TIMEOUT_MS=45000" in pbs
-    assert "AB_AGENT_RUNTIME_REBUILD=1" in pbs
+    assert "AB_AGENT_RUNTIME_SIF=\"$SCRATCH/sif_images/openclaw_2026.4.22_patched.sif\"" in pbs
+    assert "AB_AGENT_RUNTIME_REBUILD=0" in pbs
+    assert "AB_AGENT_RUNTIME_REBUILD=1" not in pbs
