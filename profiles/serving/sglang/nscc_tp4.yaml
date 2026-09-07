@@ -4,7 +4,7 @@ serving:
   preset: single
   serving_mode: singularity
 
-  sif: /scratch/users/ntu/n2602695/sif/sglang.sif
+  sif: $SCRATCH/sif/sglang.sif
   image: docker://lmsysorg/sglang:v0.5.16-cu129-runtime
 
   endpoint:
