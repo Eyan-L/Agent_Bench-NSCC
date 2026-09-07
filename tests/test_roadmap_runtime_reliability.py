@@ -93,6 +93,29 @@ def test_compaction_counts_only_completed_operations_and_emits_truncation(tmp_pa
     assert truncations[0]["truncated_tool_results"] == 318
 
 
+def test_recovery_events_are_collected_from_gateway_log_and_deduplicated(tmp_path):
+    line = "2026-09-07T10:23:00Z tool-result truncation removed 300 tool results after context overflow\n"
+    (tmp_path / "openclaw_gateway.log").write_text(
+        "2026-09-07T10:22:55Z auto-compaction succeeded; retrying prompt\n" + line
+    )
+    # Some deployments mirror the same recovery diagnostic to stderr. It must
+    # not count twice in runtime_observability.
+    (tmp_path / "openclaw_stderr.log").write_text(line)
+
+    events = stderr_recovery_events(tmp_path)
+    compactions = [event for event in events if event["event_type"] == "compaction"]
+    truncations = [
+        event
+        for event in events
+        if event["event_type"] == "tool_result_truncation"
+    ]
+
+    assert len(compactions) == 1
+    assert compactions[0]["source"] == "openclaw_gateway"
+    assert len(truncations) == 1
+    assert truncations[0]["truncated_tool_results"] == 300
+
+
 def test_announce_success_is_inferred_from_child_completion_then_parent_resume(
     tmp_path,
 ):
