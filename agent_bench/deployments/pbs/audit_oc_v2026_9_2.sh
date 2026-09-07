@@ -8,6 +8,11 @@
 #   - where are the compiled exec/sandbox/fs anchors in this image?
 #   - where is pi-ai's OpenAI-compatible provider implementation?
 #   - which legacy Agent_Bench markers are already present?
+#
+# IMPORTANT: the audit deliberately disables the host HOME and inherited
+# environment. Singularity/Apptainer normally bind $HOME and can inherit a host
+# npm/bin PATH; an unqualified `openclaw --version` can therefore report a host
+# OpenClaw rather than the copy sealed in the SIF.
 
 set -euo pipefail
 
@@ -18,22 +23,33 @@ if [[ -z "$SIF" ]]; then
 fi
 [[ -f "$SIF" ]] || { echo "ERROR: SIF not found: $SIF" >&2; exit 2; }
 
-module load singularity/4.3.1 2>/dev/null || module load singularity 2>/dev/null || true
-command -v singularity >/dev/null 2>&1 || {
-    echo "ERROR: singularity not on PATH" >&2
-    exit 2
-}
+if command -v apptainer >/dev/null 2>&1; then
+    OC_RUNTIME=apptainer
+else
+    module load singularity/4.3.1 2>/dev/null || module load singularity 2>/dev/null || true
+    command -v singularity >/dev/null 2>&1 || {
+        echo "ERROR: neither apptainer nor singularity is on PATH" >&2
+        exit 2
+    }
+    OC_RUNTIME=singularity
+fi
 
 run() {
-    singularity exec "$SIF" sh -lc "$1"
+    "$OC_RUNTIME" exec --cleanenv --no-home \
+        --env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+        "$SIF" sh -lc "$1"
 }
 
 printf '== OpenClaw candidate audit ==\n'
+printf 'runtime=%s\n' "$OC_RUNTIME"
 printf 'sif=%s\n' "$SIF"
 sha256sum "$SIF"
 
 printf '\n== version ==\n'
-run 'openclaw --version 2>/dev/null || node /app/openclaw.mjs --version 2>/dev/null || true'
+PACKAGE_VERSION="$(run 'node -e '\''const p=require("/app/package.json"); process.stdout.write(String(p.version||""))'\''' 2>/dev/null || true)"
+CLI_VERSION="$(run 'node /app/openclaw.mjs --version' 2>/dev/null || true)"
+printf 'package.json: %s\n' "${PACKAGE_VERSION:-MISSING}"
+printf 'openclaw.mjs: %s\n' "${CLI_VERSION:-MISSING}"
 
 printf '\n== native loop detection ==\n'
 NATIVE_LOOP_FILES="$(run 'grep -R -l -E "compaction_loop_persisted|post-compaction guard armed|post-compaction-guard" /app/dist 2>/dev/null | sort -u' || true)"
@@ -87,6 +103,12 @@ run 'grep -R -l "AB_HARNESS_OPENCLAW_PATCH_" /app/dist /app/node_modules 2>/dev/
 
 printf '\n== migration gate ==\n'
 FAIL=0
+if [[ "$PACKAGE_VERSION" != "2026.9.2" ]]; then
+    echo "FAIL image_version package.json=${PACKAGE_VERSION:-MISSING} expected=2026.9.2"
+    FAIL=1
+else
+    echo 'PASS image_version'
+fi
 if [[ -z "$NATIVE_LOOP_FILES" ]]; then
     echo 'FAIL native_loop_guard'
     FAIL=1
