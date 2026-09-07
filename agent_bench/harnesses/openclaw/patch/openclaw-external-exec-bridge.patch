@@ -1,13 +1,12 @@
 --- dist/bash-tools.exec-runtime-CHUNK.js
 +++ dist/bash-tools.exec-runtime-CHUNK.js
-@@ -766,6 +766,24 @@
- 	let sandboxFinalizeToken;
- 	const spawnSpec = await (async () => {
+@@ -1,6 +1,25 @@
+ 	const prepareSpawnSpec = async () => {
  		if (opts.sandbox) {
 +			/* AB_HARNESS_OPENCLAW_PATCH_EXEC_BRIDGE_BEGIN */
 +			const __ocExecBridge = process.env.OPENCLAW_EXEC_BRIDGE;
-+			console.error("[oc-patch] sandbox-exec enter; bridge=" + (__ocExecBridge || "(unset)") + " cmd=" + execCommand.slice(0, 80));
 +			if (__ocExecBridge) {
++				console.error("[oc-patch] sandbox-exec bridge; cmd=" + execCommand.slice(0, 80));
 +				return {
 +					mode: "child",
 +					argv: [
@@ -15,13 +14,13 @@
 +						"--workdir", opts.containerWorkdir ?? opts.sandbox.containerWorkdir,
 +						"--env-json", JSON.stringify(shellRuntimeEnv),
 +						"--command", execCommand,
-+						...(timeoutMs ? ["--timeout-ms", String(timeoutMs)] : []),
++						...(timeoutMs ? ["--timeout-ms", String(timeoutMs)] : [])
 +					],
 +					env: process.env,
 +					stdinMode: opts.usePty ? "pipe-open" : "pipe-closed"
 +				};
 +			}
 +			/* AB_HARNESS_OPENCLAW_PATCH_EXEC_BRIDGE_END */
- 			const backendExecSpec = await opts.sandbox.buildExecSpec?.({
+ 			if (!opts.sandbox.buildExecSpec) throw new Error("sandbox backend does not provide buildExecSpec");
+ 			const backendExecSpec = await opts.sandbox.buildExecSpec({
  				command: execCommand,
- 				workdir: opts.containerWorkdir ?? opts.sandbox.containerWorkdir,
