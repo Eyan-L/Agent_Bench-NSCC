@@ -6,11 +6,15 @@ on the Gateway log depending on the OpenClaw/SIF build. This adapter merges the
 timestamped recovery records from both sources after the shared OpenClaw
 measurement builder has run.
 
+OpenClaw v2026.4.22 can rely on Agent_Bench's raw-response log for exact
+per-request serving totals. OpenClaw v2026.9.2 exposes native per-request model
+call OpenTelemetry spans with prompt/output usage and latency. When the raw
+response log is absent, this adapter uses those native model-call spans as the
+serving-token/request fallback instead of patching pi-ai internals.
+
 Some runtimes can omit assistant ``usage`` objects from durable transcripts. In
-that case the shared logical-token accounting has no attributable usage even
-though ``llm-raw-responses.jsonl`` has exact per-request totals. We preserve the
-normal transcript/OTel preference and use the already-computed raw serving
-aggregate only as an explicitly labelled, unattributed fallback.
+that case the serving aggregate can still provide an explicitly labelled,
+unattributed logical-token fallback.
 
 Older OpenClaw builds also do not always emit the gateway announce diagnostics
 consumed by the shared measurement parser. For RoadmapBench we can still infer a
@@ -249,6 +253,18 @@ def _read_jsonl(path: Path) -> list[dict]:
     return rows
 
 
+def _write_trajectory(path: Path, events: list[dict]) -> None:
+    events.sort(
+        key=lambda event: (
+            int(event.get("timestamp_ns") or 0),
+            str(event.get("event_type") or ""),
+        )
+    )
+    with path.open("w") as stream:
+        for event in events:
+            stream.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
 def _merge_recovery_events(run_dir: Path) -> list[dict]:
     path = Path(run_dir) / "trajectory.jsonl"
     existing = _read_jsonl(path)
@@ -277,15 +293,134 @@ def _merge_recovery_events(run_dir: Path) -> list[dict]:
         existing.append(event)
         added.append(event)
 
-    existing.sort(
-        key=lambda event: (
+    _write_trajectory(path, existing)
+    return added
+
+
+def _is_native_model_request_span(span: dict) -> bool:
+    attrs = span.get("attrs") or {}
+    observation = str(attrs.get("openclaw.model_call.observation_unit") or "")
+    if observation:
+        return observation == "request"
+    if span.get("name") == "openclaw.model.call":
+        return True
+    return "openclaw.model_call.usage.prompt_tokens" in attrs
+
+
+def _native_model_call_serving(run_dir: Path) -> tuple[dict, list[dict]]:
+    totals = {"processed_input": 0, "generated_output": 0, "request_count": 0}
+    events: list[dict] = []
+    seen: set[tuple[Any, ...]] = set()
+
+    for span in _read_jsonl(Path(run_dir) / "spans.jsonl"):
+        if not _is_native_model_request_span(span):
+            continue
+        attrs = span.get("attrs") or {}
+        trace_id = span.get("trace_id") or span.get("traceId")
+        span_id = span.get("span_id") or span.get("spanId")
+        start_ns = int(span.get("start_unix_nano") or 0)
+        end_ns = int(span.get("end_unix_nano") or 0)
+        prompt = int(
+            attrs.get("openclaw.model_call.usage.prompt_tokens")
+            or attrs.get("gen_ai.usage.input_tokens")
+            or 0
+        )
+        completion = int(
+            attrs.get("openclaw.model_call.usage.output_tokens")
+            or attrs.get("gen_ai.usage.output_tokens")
+            or 0
+        )
+        fingerprint: tuple[Any, ...]
+        if trace_id and span_id:
+            fingerprint = ("ids", trace_id, span_id)
+        else:
+            fingerprint = (
+                "content",
+                start_ns,
+                end_ns,
+                attrs.get("openclaw.provider"),
+                attrs.get("openclaw.model"),
+                prompt,
+                completion,
+            )
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+
+        totals["processed_input"] += prompt
+        totals["generated_output"] += completion
+        totals["request_count"] += 1
+        duration_ms = span.get("duration_ms")
+        if duration_ms is None and start_ns and end_ns and end_ns >= start_ns:
+            duration_ms = (end_ns - start_ns) / 1e6
+        events.append(
+            {
+                "timestamp": _iso_from_ns(start_ns),
+                "timestamp_ns": start_ns or None,
+                "session_id": attrs.get("openclaw.sessionId"),
+                "session_key": attrs.get("openclaw.sessionKey"),
+                "role": "serving",
+                "event_type": "model_request",
+                "source": "native_model_call_otel",
+                "input_tokens": prompt,
+                "output_tokens": completion,
+                "request_latency_ms": duration_ms,
+                "time_to_first_byte_ms": attrs.get(
+                    "openclaw.model_call.time_to_first_byte_ms"
+                ),
+                "request_payload_bytes": attrs.get(
+                    "openclaw.model_call.request_bytes"
+                ),
+                "response_stream_bytes": attrs.get(
+                    "openclaw.model_call.response_bytes"
+                ),
+                "provider": attrs.get("openclaw.provider"),
+                "model": attrs.get("openclaw.model")
+                or attrs.get("gen_ai.request.model"),
+            }
+        )
+    return totals, events
+
+
+def _apply_native_serving_fallback(run_dir: Path, result: dict) -> list[dict]:
+    serving = result.get("serving_tokens") or {}
+    if int(serving.get("request_count") or 0) > 0:
+        result.setdefault("serving_measurement_source", "raw_response_log")
+        return []
+
+    totals, events = _native_model_call_serving(Path(run_dir))
+    if int(totals.get("request_count") or 0) <= 0:
+        return []
+
+    result["serving_tokens"] = totals
+    result["serving_measurement_source"] = "native_model_call_otel"
+
+    path = Path(run_dir) / "trajectory.jsonl"
+    existing = _read_jsonl(path)
+    exact = {
+        (
             int(event.get("timestamp_ns") or 0),
             str(event.get("event_type") or ""),
+            str(event.get("source") or ""),
+            str(event.get("model") or ""),
         )
-    )
-    with path.open("w") as stream:
-        for event in existing:
-            stream.write(json.dumps(event, ensure_ascii=False) + "\n")
+        for event in existing
+    }
+    added: list[dict] = []
+    for event in events:
+        key = (
+            int(event.get("timestamp_ns") or 0),
+            str(event.get("event_type") or ""),
+            str(event.get("source") or ""),
+            str(event.get("model") or ""),
+        )
+        if key in exact:
+            continue
+        exact.add(key)
+        existing.append(event)
+        added.append(event)
+    if added:
+        _write_trajectory(path, existing)
     return added
 
 
@@ -358,7 +493,7 @@ def _logical_usage_missing(tokens: Any) -> bool:
     return turns == 0 and total_input == 0 and total_output == 0
 
 
-def _apply_raw_response_token_fallback(result: dict) -> tuple[int | None, int | None]:
+def _apply_serving_token_fallback(result: dict) -> tuple[int | None, int | None]:
     tokens = result.get("trajectory_tokens")
     serving = result.get("serving_tokens") or {}
     request_count = int(serving.get("request_count") or 0)
@@ -370,6 +505,12 @@ def _apply_raw_response_token_fallback(result: dict) -> tuple[int | None, int | 
     if input_tokens <= 0 and output_tokens <= 0:
         return None, None
 
+    serving_source = str(result.get("serving_measurement_source") or "raw_response_log")
+    accounting_source = (
+        "raw_response_fallback_unattributed"
+        if serving_source == "raw_response_log"
+        else f"{serving_source}_fallback_unattributed"
+    )
     fallback = {
         "parent": {
             "input": 0,
@@ -388,7 +529,7 @@ def _apply_raw_response_token_fallback(result: dict) -> tuple[int | None, int | 
         },
         "total_logical_input": input_tokens,
         "total_logical_output": output_tokens,
-        "accounting_source": "raw_response_fallback_unattributed",
+        "accounting_source": accounting_source,
         "attribution_quality": "aggregate_only",
     }
     result["trajectory_tokens"] = fallback
@@ -465,15 +606,28 @@ def _rewrite_accounting_artifacts(
     accounting["serving_tokens"] = result.get("serving_tokens") or {}
     accounting["runtime_observability"] = runtime
     sources = dict(accounting.get("sources") or {})
-    if (
-        isinstance(result.get("trajectory_tokens"), dict)
-        and result["trajectory_tokens"].get("accounting_source")
-        == "raw_response_fallback_unattributed"
-    ):
+    trajectory_source = (
+        (result.get("trajectory_tokens") or {}).get("accounting_source")
+        if isinstance(result.get("trajectory_tokens"), dict)
+        else None
+    )
+    if trajectory_source == "raw_response_fallback_unattributed":
         sources["trajectory_tokens"] = (
             "raw OpenAI-compatible response usage fallback; aggregate totals "
             "only because durable session assistant usage was unavailable"
         )
+    elif trajectory_source == "native_model_call_otel_fallback_unattributed":
+        sources["trajectory_tokens"] = (
+            "native OpenClaw model-call OTel usage fallback; aggregate totals "
+            "only because durable session assistant usage was unavailable"
+        )
+    serving_source = str(result.get("serving_measurement_source") or "")
+    if serving_source == "native_model_call_otel":
+        sources["serving_tokens"] = (
+            "OpenClaw v2026.9.2 native per-request model-call OTel spans"
+        )
+    elif serving_source == "raw_response_log":
+        sources["serving_tokens"] = "raw OpenAI-compatible HTTP responses"
     sources["runtime_recovery_events"] = (
         "timestamped " + ", ".join(source_files)
         if source_files
@@ -487,10 +641,11 @@ def _rewrite_accounting_artifacts(
 
 
 def augment_roadmap_measurement(run_dir: Path, result: dict) -> dict:
-    """Add Roadmap-only runtime recovery, announce, and token compatibility data."""
+    """Add Roadmap-only runtime recovery, serving, announce, and token compatibility data."""
     result = dict(result)
+    _apply_native_serving_fallback(Path(run_dir), result)
     added_events = _merge_recovery_events(Path(run_dir))
-    _apply_raw_response_token_fallback(result)
+    _apply_serving_token_fallback(result)
     _rewrite_accounting_artifacts(Path(run_dir), result, added_events)
     return result
 
