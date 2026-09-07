@@ -1,0 +1,13 @@
+{
+  "id": "agent-bench-singularity",
+  "activation": {
+    "onStartup": true
+  },
+  "name": "Agent Bench Singularity Sandbox",
+  "description": "Routes OpenClaw sandbox exec and filesystem operations through the Agent_Bench external execution bridge.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
