@@ -1,19 +1,18 @@
-"""RoadmapBench measurement compatibility for OpenClaw v2026.4.22+.
+"""RoadmapBench measurement compatibility for OpenClaw runtimes.
 
 The durable OpenClaw session transcript remains the primary trajectory source.
-Some runtime recovery diagnostics, however, are emitted only on the agent CLI
-stderr in the NSCC SIF (not in the session trajectory): context-overflow
-recovery, successful compaction, and tool-result truncation. This adapter adds
-those machine-readable events after the shared OpenClaw measurement builder has
-run.
+Runtime recovery diagnostics can be emitted either on the agent CLI stderr or
+on the Gateway log depending on the OpenClaw/SIF build. This adapter merges the
+timestamped recovery records from both sources after the shared OpenClaw
+measurement builder has run.
 
-The same SIF can omit assistant ``usage`` objects from durable transcripts. In
+Some runtimes can omit assistant ``usage`` objects from durable transcripts. In
 that case the shared logical-token accounting has no attributable usage even
 though ``llm-raw-responses.jsonl`` has exact per-request totals. We preserve the
 normal transcript/OTel preference and use the already-computed raw serving
 aggregate only as an explicitly labelled, unattributed fallback.
 
-OpenClaw v2026.4.22 also does not always emit the gateway announce diagnostics
+Older OpenClaw builds also do not always emit the gateway announce diagnostics
 consumed by the shared measurement parser. For RoadmapBench we can still infer a
 successful completion announce conservatively from durable semantics: a real
 child-completion event followed by a later parent resume.
@@ -56,6 +55,10 @@ _COMPACTION_NONTERMINAL_MARKERS = (
     "candidate",
     "scheduled",
 )
+_RECOVERY_LOGS = (
+    ("openclaw_stderr.log", "openclaw_stderr"),
+    ("openclaw_gateway.log", "openclaw_gateway"),
+)
 _COMPACTION_DEDUP_NS = 10 * 1_000_000_000
 _ANNOUNCE_PAIR_WINDOW_NS = 5 * 60 * 1_000_000_000
 
@@ -85,7 +88,14 @@ def _iso_from_ns(value: int) -> str | None:
     return datetime.fromtimestamp(value / 1e9, tz=timezone.utc).isoformat()
 
 
-def _runtime_event(timestamp_ns: int, event_type: str, text: str, **fields: Any) -> dict:
+def _runtime_event(
+    timestamp_ns: int,
+    event_type: str,
+    text: str,
+    *,
+    source: str,
+    **fields: Any,
+) -> dict:
     return {
         "timestamp": _iso_from_ns(timestamp_ns),
         "timestamp_ns": timestamp_ns,
@@ -93,29 +103,22 @@ def _runtime_event(timestamp_ns: int, event_type: str, text: str, **fields: Any)
         "session_key": None,
         "role": "runtime",
         "event_type": event_type,
-        "source": "openclaw_stderr",
+        "source": source,
         "message": text,
         **fields,
     }
 
 
 def _is_completed_compaction(lowered: str) -> bool:
-    """Return true only for a terminal successful compaction diagnostic.
-
-    Older logic treated any line containing words such as ``complete`` or
-    ``retrying prompt`` as a compaction. That counted overflow diagnostics,
-    compaction start lines, and post-compaction guard messages as separate
-    compactions. A real count must represent completed compaction operations.
-    """
+    """Return true only for a terminal successful compaction diagnostic."""
     if not _COMPACTION_COMPLETED_RE.search(lowered):
         return False
     return not any(marker in lowered for marker in _COMPACTION_NONTERMINAL_MARKERS)
 
 
 def _tool_result_truncation(lowered: str) -> tuple[bool, int | None]:
-    normalized = (
-        lowered.replace("tool-result", "tool result")
-        .replace("tool_result", "tool result")
+    normalized = lowered.replace("tool-result", "tool result").replace(
+        "tool_result", "tool result"
     )
     if "tool result" not in normalized:
         return False, None
@@ -137,70 +140,87 @@ def _tool_result_truncation(lowered: str) -> tuple[bool, int | None]:
     return True, None
 
 
+def _timestamped_recovery_lines(run_dir: Path) -> list[tuple[int, str, str]]:
+    rows: list[tuple[int, str, str]] = []
+    for filename, source in _RECOVERY_LOGS:
+        path = Path(run_dir) / filename
+        if not path.is_file():
+            continue
+        for raw_line in path.read_text(errors="replace").splitlines():
+            line = _ANSI_RE.sub("", raw_line).strip()
+            match = _LINE_RE.match(line)
+            if not match:
+                continue
+            timestamp_ns = _timestamp_ns(match.group(1))
+            if not timestamp_ns:
+                continue
+            rows.append((timestamp_ns, source, match.group(2).strip()))
+    rows.sort(key=lambda row: (row[0], row[1], row[2]))
+    return rows
+
+
 def stderr_recovery_events(run_dir: Path) -> list[dict]:
-    """Parse timestamped recovery diagnostics from ``openclaw_stderr.log``.
+    """Parse timestamped recovery diagnostics from stderr and Gateway logs.
 
-    Untimestamped stderr lines are deliberately ignored: trajectory events must
-    retain a real temporal position rather than receiving a measurement-time
-    timestamp that would distort concurrency/timeline analysis.
+    The legacy function name is retained because existing Roadmap measurement
+    code imports it directly. Untimestamped lines are deliberately ignored so
+    the synthesized trajectory events always retain a real temporal position.
+    Duplicate diagnostics mirrored to both logs are collapsed by timestamp,
+    event type, and message.
     """
-    path = Path(run_dir) / "openclaw_stderr.log"
-    if not path.is_file():
-        return []
-
     events: list[dict] = []
     seen: set[tuple[int, str, str]] = set()
     last_compaction_ns = 0
-    for raw_line in path.read_text(errors="replace").splitlines():
-        line = _ANSI_RE.sub("", raw_line).strip()
-        match = _LINE_RE.match(line)
-        if not match:
-            continue
-        timestamp_ns = _timestamp_ns(match.group(1))
-        if not timestamp_ns:
-            continue
-        text = match.group(2).strip()
+
+    for timestamp_ns, source, text in _timestamped_recovery_lines(Path(run_dir)):
         lowered = " ".join(text.lower().split())
         truncation, truncated_count = _tool_result_truncation(lowered)
 
         candidates: list[dict] = []
         overflow = any(marker in lowered for marker in _OVERFLOW_MARKERS)
         if overflow:
-            candidates.append(_runtime_event(
-                timestamp_ns,
-                "context_overflow",
-                text,
-                recovery=(
-                    "compaction" if "compaction" in lowered
-                    else "tool_result_truncation" if truncation
-                    else None
-                ),
-            ))
+            candidates.append(
+                _runtime_event(
+                    timestamp_ns,
+                    "context_overflow",
+                    text,
+                    source=source,
+                    recovery=(
+                        "compaction"
+                        if "compaction" in lowered
+                        else "tool_result_truncation"
+                        if truncation
+                        else None
+                    ),
+                )
+            )
 
         if _is_completed_compaction(lowered):
-            # One successful compaction can be echoed by more than one runtime
-            # diagnostic. Collapse only near-identical temporal duplicates;
-            # real Roadmap compactions are separated by substantially longer
-            # agent work between overflows.
             if (
                 not last_compaction_ns
                 or timestamp_ns - last_compaction_ns > _COMPACTION_DEDUP_NS
             ):
-                candidates.append(_runtime_event(
-                    timestamp_ns,
-                    "compaction",
-                    text,
-                    outcome="completed",
-                ))
+                candidates.append(
+                    _runtime_event(
+                        timestamp_ns,
+                        "compaction",
+                        text,
+                        source=source,
+                        outcome="completed",
+                    )
+                )
                 last_compaction_ns = timestamp_ns
 
         if truncation:
-            candidates.append(_runtime_event(
-                timestamp_ns,
-                "tool_result_truncation",
-                text,
-                truncated_tool_results=truncated_count,
-            ))
+            candidates.append(
+                _runtime_event(
+                    timestamp_ns,
+                    "tool_result_truncation",
+                    text,
+                    source=source,
+                    truncated_tool_results=truncated_count,
+                )
+            )
 
         for event in candidates:
             key = (
@@ -270,13 +290,7 @@ def _merge_recovery_events(run_dir: Path) -> list[dict]:
 
 
 def _infer_announce_observability(run_dir: Path, runtime: dict) -> dict:
-    """Infer successful completion announces from durable child/resume order.
-
-    The inference is intentionally conservative. We count only real
-    ``child_completion`` events and pair each with the first unused *parent*
-    ``resume`` that occurs later within five minutes. An initial parent user
-    prompt therefore cannot be mistaken for an announce success.
-    """
+    """Infer successful completion announces from durable child/resume order."""
     rows = _read_jsonl(Path(run_dir) / "trajectory.jsonl")
     completions = sorted(
         int(event.get("timestamp_ns") or 0)
@@ -378,40 +392,55 @@ def _apply_raw_response_token_fallback(result: dict) -> tuple[int | None, int | 
         "attribution_quality": "aggregate_only",
     }
     result["trajectory_tokens"] = fallback
-    # ``OpenClawAgentCondition.run`` expands measurement last, so these keys
-    # deliberately override the zero run-level agentMeta usage in the returned
-    # result and therefore in manifest.total_*_tokens.
     result["total_prompt_tokens"] = input_tokens
     result["total_completion_tokens"] = output_tokens
     return input_tokens, output_tokens
 
 
-def _rewrite_accounting_artifacts(run_dir: Path, result: dict, added_events: list[dict]) -> None:
+def _recovery_source_filenames(run_dir: Path) -> list[str]:
+    return [
+        filename
+        for filename, _ in _RECOVERY_LOGS
+        if (Path(run_dir) / filename).is_file()
+    ]
+
+
+def _rewrite_accounting_artifacts(
+    run_dir: Path,
+    result: dict,
+    added_events: list[dict],
+) -> None:
     runtime = dict(result.get("runtime_observability") or {})
     runtime.update(_infer_announce_observability(run_dir, runtime))
-    runtime.update({
-        "stderr_recovery_event_count": len(added_events),
-        "stderr_compaction_count": sum(
-            event.get("event_type") == "compaction" for event in added_events
-        ),
-        "stderr_context_overflow_count": sum(
-            event.get("event_type") == "context_overflow" for event in added_events
-        ),
-        "tool_result_truncation_count": sum(
-            event.get("event_type") == "tool_result_truncation" for event in added_events
-        ),
-        "truncated_tool_result_total": sum(
-            int(event.get("truncated_tool_results") or 0)
-            for event in added_events
-            if event.get("event_type") == "tool_result_truncation"
-        ),
-        "stderr_recovery_source": "openclaw_stderr.log",
-    })
+    source_files = _recovery_source_filenames(run_dir)
+    runtime.update(
+        {
+            # Keep the legacy stderr_* names for report compatibility. The
+            # values now cover both supported OpenClaw recovery log surfaces.
+            "stderr_recovery_event_count": len(added_events),
+            "stderr_compaction_count": sum(
+                event.get("event_type") == "compaction" for event in added_events
+            ),
+            "stderr_context_overflow_count": sum(
+                event.get("event_type") == "context_overflow"
+                for event in added_events
+            ),
+            "tool_result_truncation_count": sum(
+                event.get("event_type") == "tool_result_truncation"
+                for event in added_events
+            ),
+            "truncated_tool_result_total": sum(
+                int(event.get("truncated_tool_results") or 0)
+                for event in added_events
+                if event.get("event_type") == "tool_result_truncation"
+            ),
+            "stderr_recovery_source": "+".join(source_files),
+            "recovery_log_sources": source_files,
+        }
+    )
     result["runtime_observability"] = runtime
 
-    observability_path = Path(
-        str(result.get("runtime_observability_path") or "")
-    )
+    observability_path = Path(str(result.get("runtime_observability_path") or ""))
     if not observability_path.is_absolute():
         observability_path = Path(run_dir) / (
             observability_path.name or "runtime_observability.json"
@@ -445,7 +474,11 @@ def _rewrite_accounting_artifacts(run_dir: Path, result: dict, added_events: lis
             "raw OpenAI-compatible response usage fallback; aggregate totals "
             "only because durable session assistant usage was unavailable"
         )
-    sources["runtime_recovery_events"] = "timestamped openclaw_stderr.log"
+    sources["runtime_recovery_events"] = (
+        "timestamped " + ", ".join(source_files)
+        if source_files
+        else "no supported OpenClaw recovery log found"
+    )
     if runtime.get("announce_measurement_source"):
         sources["announce_measurement"] = runtime["announce_measurement_source"]
     accounting["sources"] = sources
