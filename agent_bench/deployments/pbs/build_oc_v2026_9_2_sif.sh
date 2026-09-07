@@ -91,31 +91,28 @@ OUT_NEW="${OUT_SIF}.new"
 rm -f "$OUT_NEW"
 "$RUNTIME" build "$OUT_NEW" "$SANDBOX_DIR"
 
-# Verify the sealed image itself, not merely the writable sandbox.
+# Verify the sealed image itself, not merely the writable sandbox.  Use Node,
+# which is part of OpenClaw's runtime contract; do not require Python in-image.
 VERSION="$($RUNTIME exec --cleanenv --no-home "$OUT_NEW" node -p 'require("/app/package.json").version')"
 [[ "$VERSION" == "2026.9.2" ]] || {
     echo "ERROR: sealed candidate version is $VERSION, expected 2026.9.2" >&2
     exit 1
 }
 
-"$RUNTIME" exec --cleanenv --no-home "$OUT_NEW" \
-    python3 - <<'PY'
-import json
-from pathlib import Path
-p = Path('/app/.agent-bench-v2026.9.2.json')
-if not p.is_file():
-    raise SystemExit('missing /app/.agent-bench-v2026.9.2.json')
-s = json.loads(p.read_text())
-if s.get('upstream_version') != '2026.9.2':
-    raise SystemExit('unexpected upstream_version in status marker')
-verification = s.get('verification') or {}
-if not verification.get('verified'):
-    raise SystemExit('semantic patch verification did not pass')
-for key in ('exec_bridge', 'sandbox_bypass', 'fs_helper', 'fs_run', 'fs_write', 'fs_read', 'fs_check'):
-    if not (verification.get('markers') or {}).get(key):
-        raise SystemExit('missing sealed marker: ' + key)
-print(json.dumps(s, sort_keys=True))
-PY
+"$RUNTIME" exec --cleanenv --no-home "$OUT_NEW" node -e '
+const fs = require("node:fs");
+const p = "/app/.agent-bench-v2026.9.2.json";
+if (!fs.existsSync(p)) throw new Error("missing " + p);
+const s = JSON.parse(fs.readFileSync(p, "utf8"));
+if (s.upstream_version !== "2026.9.2") throw new Error("unexpected upstream_version");
+const verification = s.verification || {};
+if (!verification.verified) throw new Error("semantic patch verification did not pass");
+const markers = verification.markers || {};
+for (const key of ["exec_bridge", "sandbox_bypass", "fs_helper", "fs_run", "fs_write", "fs_read", "fs_check"]) {
+  if (!Array.isArray(markers[key]) || markers[key].length === 0) throw new Error("missing sealed marker: " + key);
+}
+process.stdout.write(JSON.stringify(s) + "\n");
+'
 
 bash "$AUDIT" "$OUT_NEW"
 
