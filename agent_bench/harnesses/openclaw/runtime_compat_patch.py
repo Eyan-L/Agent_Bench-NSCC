@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-"""Patch pinned OpenClaw runtime details that are not configurable upstream.
+"""Patch pinned OpenClaw runtime details that remain NSCC-specific.
 
-RoadmapBench currently pins OpenClaw v2026.4.22 in the NSCC runtime SIF. Two
-runtime behaviours matter for reliable fan-out on firewalled compute nodes:
+The current RoadmapBench migration target is OpenClaw v2026.9.2. Unlike the old
+v2026.4.22 runtime, this release already contains native rolling tool-loop
+detection, a post-compaction loop guard, and richer OpenTelemetry diagnostics.
+Those behaviors must not be backported here.
 
-* ``sessions_spawn`` patches the freshly-created child session through the
-  Gateway with a hard-coded 10 second ``sessions.patch`` deadline. Real NSCC
-  runs have observed a valid patch RPC taking >13 seconds, so that deadline can
-  reject a child that would otherwise start normally.
-* the bundled model-pricing catalogue performs public OpenRouter/LiteLLM HTTP
-  fetches even though RoadmapBench uses a fully specified local SGLang model.
-  Those requests are both unnecessary and unreliable on NSCC.
+Two compatibility concerns remain relevant on firewalled NSCC nodes:
 
-This script is intentionally narrow: it edits only JavaScript runtime bundles
-containing the exact known anchors, records what it changed, and fails closed
-when an expected anchor cannot be found. It is run while building the writable
-OpenClaw overlay, never against the immutable upstream SIF.
+* Older OpenClaw builds used a hard-coded 10 second ``sessions.patch`` timeout
+  while materializing subagents. The v2026.9.2 migration does not assume that
+  old anchor still exists. The patch can still relax it when present, but the
+  caller may explicitly allow the anchor to be absent.
+* The bundled model-pricing catalogue still contains public OpenRouter/LiteLLM
+  endpoints. RoadmapBench uses a fully specified local SGLang model, so those
+  requests are unnecessary and unreliable on NSCC. They remain fail-closed by
+  default and are replaced with local ``data:`` responses.
+
+This script edits only exact runtime anchors, records every replacement, and is
+run while building a writable OpenClaw SIF sandbox.
 """
 from __future__ import annotations
 
@@ -33,15 +36,14 @@ LITELLM_PRICING_URL = (
     "https://raw.githubusercontent.com/BerriAI/litellm/main/"
     "model_prices_and_context_window.json"
 )
-# Node's fetch() supports data: URLs. Keep the response shapes accepted by the
-# two catalogue loaders while guaranteeing that no public-network request is
-# issued for pricing metadata.
 OPENROUTER_OFFLINE_URL = "data:application/json,%7B%22data%22%3A%5B%5D%7D"
 LITELLM_OFFLINE_URL = "data:application/json,%7B%7D"
 
-# v2026.4.22 source shape:
+# Historical source shape:
 #   callGateway({ method: "sessions.patch", ..., timeoutMs: 10_000 })
-# Bundlers may render the literal as 10000 or 1e4, hence the alternatives.
+# Bundlers may render the literal as 10000 or 1e4. On v2026.9.2 this anchor is
+# optional: if upstream has already changed the spawn transport/deadline, the
+# migration build must not fail merely because the old literal disappeared.
 _SESSION_PATCH_TIMEOUT_RE = re.compile(
     r"(method\s*:\s*['\"]sessions\.patch['\"][\s\S]{0,2000}?"
     r"timeoutMs\s*:\s*)(?:10_000|10000|1e4)(?![\w.])"
@@ -105,13 +107,13 @@ def patch_runtime_tree(
 
     if require_session_patch and session_patch_replacements == 0:
         raise RuntimeError(
-            "could not locate the v2026.4.22 sessions.patch 10s timeout; "
-            "refusing to build an overlay that may silently reject subagents"
+            "could not locate the historical sessions.patch 10s timeout; "
+            "refusing to build while require_session_patch=True"
         )
     if require_pricing and (openrouter_replacements == 0 or litellm_replacements == 0):
         raise RuntimeError(
             "could not locate both OpenRouter and LiteLLM pricing endpoints; "
-            "refusing to build an overlay that may perform public pricing fetches "
+            "refusing to build a runtime that may perform public pricing fetches "
             f"(openrouter={openrouter_replacements}, litellm={litellm_replacements})"
         )
 
@@ -120,7 +122,9 @@ def patch_runtime_tree(
         "files_scanned": files_scanned,
         "files_changed": files_changed,
         "session_patch_timeout_ms": session_patch_timeout_ms,
+        "session_patch_required": require_session_patch,
         "sessions_patch_timeout_replacements": session_patch_replacements,
+        "pricing_required": require_pricing,
         "openrouter_pricing_url_replacements": openrouter_replacements,
         "litellm_pricing_url_replacements": litellm_replacements,
         "pricing_mode": "offline_data_urls",
@@ -135,12 +139,21 @@ def main() -> int:
         type=int,
         default=DEFAULT_SESSION_PATCH_TIMEOUT_MS,
     )
+    parser.add_argument(
+        "--allow-missing-session-patch",
+        action="store_true",
+        help=(
+            "do not fail when the historical 10s sessions.patch anchor is absent; "
+            "intended for v2026.9.2+ where upstream may already have changed it"
+        ),
+    )
     parser.add_argument("--status-out", default="")
     args = parser.parse_args()
 
     status = patch_runtime_tree(
         Path(args.root),
         session_patch_timeout_ms=args.session_patch_timeout_ms,
+        require_session_patch=not args.allow_missing_session_patch,
     )
     rendered = json.dumps(status, indent=2, sort_keys=True)
     if args.status_out:
