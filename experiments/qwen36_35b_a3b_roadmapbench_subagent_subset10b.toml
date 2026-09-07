@@ -8,7 +8,7 @@ spans_html = true
 
 [benchmark]
 name = "terminal_bench"
-profile = "profiles/benchmarks/terminal_bench/roadmapbench_subset10b.json"
+profile = "profiles/benchmarks/roadmap/roadmapbench_subset10b.json"
 
 [harness]
 name = "openclaw"
