@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from agent_bench.benchmarks.conditions import openclaw_measurement as shared_measurement
 from agent_bench.benchmarks.roadmap_bench.conditions.measurement_compat import (
     augment_roadmap_measurement,
 )
@@ -165,3 +166,48 @@ def test_v2026_4_22_raw_serving_totals_remain_authoritative_when_spans_exist(
         == "raw_response_fallback_unattributed"
     )
     assert not (tmp_path / "trajectory.jsonl").exists()
+
+
+def test_v2026_9_2_model_and_tool_spans_count_as_active_runtime_work(
+    tmp_path: Path,
+):
+    request = _model_call_span(
+        span_id="request-span",
+        start_ns=10_000_000_000,
+        duration_ms=125.0,
+        prompt_tokens=100,
+        output_tokens=25,
+    )
+    turn = {
+        **_model_call_span(
+            span_id="turn-span",
+            start_ns=11_000_000_000,
+            duration_ms=400.0,
+            prompt_tokens=0,
+            output_tokens=0,
+        ),
+        "attrs": {
+            "openclaw.model_call.observation_unit": "turn",
+            "openclaw.sessionKey": "agent:roadmap_bench:main",
+        },
+    }
+    tool = {
+        "name": "openclaw.tool.execution",
+        "start_unix_nano": 12_000_000_000,
+        "end_unix_nano": 12_300_000_000,
+        "duration_ms": 300.0,
+        "attrs": {
+            "openclaw.toolName": "exec",
+            "gen_ai.tool.name": "exec",
+            "openclaw.sessionKey": "agent:roadmap_bench:main",
+        },
+    }
+    _write_jsonl(tmp_path / "spans.jsonl", [request, turn, tool])
+
+    intervals = shared_measurement._active_intervals(tmp_path)
+
+    assert len(intervals) == 2
+    assert intervals[0]["activity"] == "model_request"
+    assert intervals[0]["start"] == 10_000_000_000
+    assert intervals[1]["activity"] == "tool:exec"
+    assert intervals[1]["start"] == 12_000_000_000
