@@ -54,7 +54,12 @@ openclaw:
       extraDirs:
       - /root/.openclaw/skills
   plugins:
+    load:
+      paths:
+      - /app/extensions/agent-bench-singularity
     entries:
+      agent-bench-singularity:
+        enabled: true
       vllm:
         enabled: true
       memory-core:
