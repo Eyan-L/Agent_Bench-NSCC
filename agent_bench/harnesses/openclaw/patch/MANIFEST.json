@@ -1,48 +1,25 @@
 {
   "_doc": {
-    "purpose": "Agent_Bench patches that remain necessary on the pinned OpenClaw v2026.9.2 runtime.",
+    "purpose": "Minimal Agent_Bench patches that remain necessary on pinned OpenClaw v2026.9.2.",
     "fields": {
       "file": "relative path under patch/ to the unified diff",
-      "target_glob": "glob relative to AB_HARNESS_OPENCLAW_SOURCE_ROOT for content-hashed bundles",
-      "target_path": "exact relative path used instead of target_glob",
       "target_glob_all": "recursive glob; patch every match",
-      "chunk_placeholder": "placeholder replaced with the resolved bundle hash",
       "idempotent_marker": "literal marker proving the patch is present",
       "summary": "human-readable description"
     },
     "upstream_native": [
       "rolling tool-loop detection",
       "post-compaction loop guard",
-      "model/tool/exec OpenTelemetry diagnostics"
+      "model/tool/exec OpenTelemetry diagnostics",
+      "custom sandbox backend registry and filesystem bridge SDK"
     ],
-    "migration_policy": "Do not backport features already native in v2026.9.2. Keep only Agent_Bench/NSCC integration and raw-serving measurement patches. Every listed patch is required and build failure is intentional when an anchor moves."
+    "agent_bench_plugin": "agent-bench-singularity overrides the built-in docker sandbox backend through OpenClaw's public plugin SDK and routes exec/fs operations through the existing Agent_Bench external execution bridge.",
+    "migration_policy": "Do not patch OpenClaw core when a pinned public SDK extension point exists. Every remaining binary patch is required and build failure is intentional when its anchor moves."
   },
   "upstream": {
     "pin": "see VERSION"
   },
   "patches": [
-    {
-      "file": "openclaw-external-exec-bridge.patch",
-      "target_glob": "dist/bash-tools.exec-runtime-*.js",
-      "chunk_placeholder": "CHUNK",
-      "idempotent_marker": "AB_HARNESS_OPENCLAW_PATCH_EXEC_BRIDGE_BEGIN",
-      "summary": "route sandbox exec through the Agent_Bench external Singularity bridge"
-    },
-    {
-      "file": "openclaw-ensure-sandbox-bridge-bypass.patch",
-      "target_glob": "dist/docker-*.js",
-      "chunk_placeholder": "CHUNK",
-      "idempotent_marker": "AB_HARNESS_OPENCLAW_PATCH_ENSURE_BRIDGE_BYPASS_BEGIN",
-      "summary": "bypass OpenClaw Docker lifecycle because Agent_Bench pre-starts and owns the Singularity task container"
-    },
-    {
-      "file": "openclaw-fs-bridge.patch",
-      "target_glob": "dist/sandbox-*.js",
-      "chunk_placeholder": "CHUNK",
-      "target_content_hint": "readPinnedFile",
-      "idempotent_marker": "AB_HARNESS_OPENCLAW_PATCH_FS_BRIDGE_HELPER_BEGIN",
-      "summary": "route sandbox filesystem operations through the same Agent_Bench external bridge"
-    },
     {
       "file": "pi-ai-validation-jsonstring.patch",
       "target_glob_all": "**/node_modules/@mariozechner/pi-ai/dist/utils/validation.js",
