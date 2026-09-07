@@ -120,7 +120,7 @@ def test_v2026_9_2_native_model_call_spans_replace_missing_raw_serving_log(
 
     accounting = json.loads((tmp_path / "token_accounting.json").read_text())
     assert accounting["serving_tokens"]["request_count"] == 2
-    assert "native OpenClaw model.call OTel spans" in accounting["sources"]["serving_tokens"]
+    assert "native per-request model-call OTel spans" in accounting["sources"]["serving_tokens"]
 
 
 def test_v2026_4_22_raw_serving_totals_remain_authoritative_when_spans_exist(
