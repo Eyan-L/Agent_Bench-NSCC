@@ -1,6 +1,6 @@
-name = "nscc_qwen36_35b_a3b_roadmapbench_fal_2_0_0_smoke"
+name = "qwen36_35b_a3b_roadmapbench_fal_2_0_0_smoke"
 description = "RoadmapBench Falcon 2.0.0 natural fan-out smoke with the dedicated Roadmap OpenClaw persona and Qwen3.6-35B-A3B on NSCC."
-output_dir = "runs/nscc_qwen36_35b_a3b_roadmapbench_fal_2_0_0_smoke"
+output_dir = "runs/qwen36_35b_a3b_roadmapbench_fal_2_0_0_smoke"
 seeds = [42]
 
 [telemetry]

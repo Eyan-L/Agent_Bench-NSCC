@@ -1,6 +1,6 @@
-name = "nscc_qwen36_35b_a3b_roadmapbench_subagent_subset10a"
+name = "qwen36_35b_a3b_roadmapbench_subagent_subset10b"
 description = "Ten fixed high-fanout RoadmapBench tasks for the formal subagent-enabled Qwen3.6-35B-A3B experiment on NSCC."
-output_dir = "runs/nscc_qwen36_35b_a3b_roadmapbench_subagent_subset10a"
+output_dir = "runs/qwen36_35b_a3b_roadmapbench_subagent_subset10b"
 seeds = [42]
 
 [telemetry]
@@ -8,7 +8,7 @@ spans_html = true
 
 [benchmark]
 name = "terminal_bench"
-profile = "profiles/benchmarks/terminal_bench/roadmapbench_subset10a.json"
+profile = "profiles/benchmarks/terminal_bench/roadmapbench_subset10b.json"
 
 [harness]
 name = "openclaw"
