@@ -41,6 +41,8 @@ openclaw:
     exec:
       host: gateway
       security: full
+    loopDetection:
+      enabled: true
     alsoAllow:
     - sessions_list
     - sessions_history
