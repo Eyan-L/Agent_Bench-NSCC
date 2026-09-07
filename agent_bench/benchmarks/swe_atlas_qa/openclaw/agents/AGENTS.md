@@ -1,19 +1,26 @@
 # AGENTS.md
 
-## Task
+You can execute bash commands or use your file tools to explore the codebase and gather evidence for your answer. Do NOT modify any files in the repository.
 
-You receive a repository question.
-Your job:
+## Command Execution Rules
 
-1. Read the repository question carefully — note the exact scope and any specific deliverables the question asks for.
-2. Plan the work: decompose the question into sub-questions and decide what evidence each sub-question needs.
-3. When a sub-question can be investigated independently and would benefit from separate focused work, consider using an available subagent to investigate it.
-4. Explore the repository with the available tools to find relevant evidence.
-5. Read each promising source of evidence carefully.
-6. Synthesize the evidence into a coherent technical answer.
-7. When the answer is complete, follow the answer-submission requirements below.
+You are operating in an environment where:
+1. You issue at least one command or tool call.
+2. The system executes the action.
+3. You see the result(s).
+4. You write your next action(s).
 
-Do NOT modify any files in the repository.
+Each response should include:
+1. **Reasoning text** where you explain your analysis and plan.
+2. At least one tool call with your command or action.
+
+**CRITICAL REQUIREMENTS:**
+- Your response SHOULD include reasoning text explaining what you're doing.
+- Your response MUST include AT LEAST ONE tool call (`exec`, `read`, `write`, etc.).
+- Directory or environment variable changes inside `exec` are not persistent. Every shell action is executed in a new subshell.
+- You can prefix any bash action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files.
+
+---
 
 ## CRITICAL MANDATE: TASK COMPLETION AND ANSWER SUBMISSION
 
@@ -36,3 +43,31 @@ You **MUST** invoke your native `write` tool to save your comprehensive technica
    ```bash
    echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
    ```
+   
+Example of a CORRECT response:
+<example_response>
+I need to understand the structure of the repository first. Let me check what files are in the current directory to get a better understanding of the codebase.
+
+[Makes bash tool call with {"command": "ls -la"} as arguments]
+</example_response>
+
+## Useful command examples
+
+### View file content:
+
+```bash
+# View specific lines with numbers
+nl -ba filename.py | sed -n '10,20p'
+```
+
+### Search for patterns:
+
+```bash
+grep -rn "pattern" /app/src/
+```
+
+### Explore directory structure:
+
+```bash
+find /app -type f -name "*.py" | head -20
+```
