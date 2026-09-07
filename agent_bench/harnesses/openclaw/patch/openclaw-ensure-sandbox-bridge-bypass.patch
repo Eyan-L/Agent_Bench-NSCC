@@ -1,18 +1,17 @@
 --- dist/docker-CHUNK.js
 +++ dist/docker-CHUNK.js
-@@ -795,6 +795,15 @@
+@@ -1,6 +1,12 @@
  async function ensureSandboxContainer(params) {
+ 	const engine = params.engine ?? DOCKER_SANDBOX_ENGINE;
+ 	const slug = params.cfg.scope === "shared" ? "shared" : slugifySessionKey(params.scopeKey);
+ 	const prefix = engine.id === "podman" ? resolvePodmanSandboxContainerPrefix(params.cfg.docker.containerPrefix) : params.cfg.docker.containerPrefix;
+ 	const containerName = buildSandboxContainerName(prefix, slug);
 +	/* AB_HARNESS_OPENCLAW_PATCH_ENSURE_BRIDGE_BYPASS_BEGIN */
 +	if (process.env.OPENCLAW_BYPASS_ENSURE_SANDBOX) {
-+		const __scopeKey = resolveSandboxScopeKey(params.cfg.scope, params.sessionKey);
-+		const __slug = params.cfg.scope === "shared" ? "shared" : slugifySessionKey(__scopeKey);
-+		const __containerName = `${params.cfg.docker.containerPrefix}${__slug}`.slice(0, 63);
-+		console.error("[oc-patch] ensureSandboxContainer bypass; container=" + __containerName);
-+		return __containerName;
++		console.error("[oc-patch] ensureSandboxContainer bypass; container=" + containerName);
++		return containerName;
 +	}
 +	/* AB_HARNESS_OPENCLAW_PATCH_ENSURE_BRIDGE_BYPASS_END */
- 	const scopeKey = resolveSandboxScopeKey(params.cfg.scope, params.sessionKey);
- 	const slug = params.cfg.scope === "shared" ? "shared" : slugifySessionKey(scopeKey);
- 	const containerName = `${params.cfg.docker.containerPrefix}${slug}`.slice(0, 63);
- 	const expectedHash = computeSandboxConfigHash({
- 		docker: params.cfg.docker,
+ 	return await sandboxContainerLifecycleQueue.enqueue(containerName, async () => {
+ 		return await ensureSandboxContainerLifecycle(params, containerName);
+ 	});
