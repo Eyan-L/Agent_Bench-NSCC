@@ -1,18 +1,14 @@
 #!/usr/bin/env bash
 # Read-only structural audit for the OpenClaw v2026.9.2 base/candidate SIF.
 #
-# This intentionally does not modify the image. It answers the migration
-# questions we need before porting Agent_Bench's NSCC bridge patches:
-#   - is this really OpenClaw 2026.9.2?
-#   - is upstream loop detection/post-compaction guard present?
-#   - where are the compiled exec/sandbox/fs anchors in this image?
-#   - where is pi-ai's OpenAI-compatible provider implementation?
-#   - which legacy Agent_Bench markers are already present?
+# Base images are checked for the pinned upstream version and native runtime
+# anchors. Candidate images that contain /app/.agent-bench-v2026.9.2.json are
+# additionally checked for the complete Agent_Bench bridge patch set, absence
+# of legacy v2026.4.22 loop/telemetry patches, and removal of public pricing
+# endpoints.
 #
-# IMPORTANT: the audit deliberately disables the host HOME and inherited
-# environment. Singularity/Apptainer normally bind $HOME and can inherit a host
-# npm/bin PATH; an unqualified `openclaw --version` can therefore report a host
-# OpenClaw rather than the copy sealed in the SIF.
+# IMPORTANT: disable host HOME and inherited PATH. Singularity/Apptainer
+# otherwise can report a host npm OpenClaw instead of the copy sealed in the SIF.
 
 set -euo pipefail
 
@@ -90,16 +86,48 @@ else
     echo 'MISSING: readPinnedFile/runCheckedCommand anchors'
 fi
 
+printf '\n== native model/tool telemetry ==\n'
+MODEL_OTEL_FILES="$(run 'grep -R -l -E "openclaw\.model\.usage|openclaw\.model\.call" /app/dist/extensions/diagnostics-otel /app/dist 2>/dev/null | sort -u | head -30' || true)"
+TOOL_OTEL_FILES="$(run 'grep -R -l "openclaw.tool.execution" /app/dist/extensions/diagnostics-otel /app/dist 2>/dev/null | sort -u | head -30' || true)"
+[[ -n "$MODEL_OTEL_FILES" ]] && printf 'model:\n%s\n' "$MODEL_OTEL_FILES" || echo 'MISSING: native model telemetry strings'
+[[ -n "$TOOL_OTEL_FILES" ]] && printf 'tool:\n%s\n' "$TOOL_OTEL_FILES" || echo 'MISSING: native tool telemetry strings'
+
 printf '\n== pi-ai OpenAI provider ==\n'
 PI_AI_FILES="$(run 'find /app -type f -path "*/@mariozechner/pi-ai/dist/providers/openai-completions.js" -print 2>/dev/null | sort -u' || true)"
 if [[ -n "$PI_AI_FILES" ]]; then
     printf '%s\n' "$PI_AI_FILES"
 else
-    echo 'MISSING: pi-ai openai-completions.js'
+    echo 'INFO: legacy pi-ai openai-completions.js path absent; v2026.9.2 uses native OTel measurement path'
 fi
 
-printf '\n== existing Agent_Bench markers ==\n'
-run 'grep -R -l "AB_HARNESS_OPENCLAW_PATCH_" /app/dist /app/node_modules 2>/dev/null | sort -u | head -80 || true'
+CANDIDATE=0
+if run 'test -f /app/.agent-bench-v2026.9.2.json' >/dev/null 2>&1; then
+    CANDIDATE=1
+fi
+
+printf '\n== Agent_Bench v2026.9.2 candidate markers ==\n'
+if [[ "$CANDIDATE" -eq 1 ]]; then
+    run 'cat /app/.agent-bench-v2026.9.2.json'
+    run 'grep -R -l "AB_HARNESS_OPENCLAW_V2026_9_2_" /app/dist 2>/dev/null | sort -u || true'
+else
+    echo 'base image: no candidate status marker (expected before patching)'
+fi
+
+printf '\n== legacy Agent_Bench markers ==\n'
+LEGACY_MARKERS="$(run 'grep -R -l -E "AB_HARNESS_OPENCLAW_PATCH_POST_COMPACTION_LOOP_GUARD|AB_HARNESS_OPENCLAW_PATCH_MODEL_USAGE_BEGIN|AB_HARNESS_OPENCLAW_PATCH_GATEWAY_AGENT_USAGE_BEGIN|AB_HARNESS_OPENCLAW_PATCH_TOOL_CALL_BEGIN|AB_HARNESS_OPENCLAW_PATCH_TOOL_CALL_HANDLER_BEGIN" /app/dist /app/node_modules 2>/dev/null | sort -u | head -80' || true)"
+if [[ -n "$LEGACY_MARKERS" ]]; then
+    printf '%s\n' "$LEGACY_MARKERS"
+else
+    echo 'none'
+fi
+
+printf '\n== public pricing endpoints ==\n'
+PRICING_FILES="$(run 'grep -R -l -E "https://openrouter\.ai/api/v1/models|https://raw\.githubusercontent\.com/BerriAI/litellm/main/model_prices_and_context_window\.json" /app/dist /app/packages /app/node_modules 2>/dev/null | sort -u | head -80' || true)"
+if [[ -n "$PRICING_FILES" ]]; then
+    printf '%s\n' "$PRICING_FILES"
+else
+    echo 'none'
+fi
 
 printf '\n== migration gate ==\n'
 FAIL=0
@@ -139,10 +167,50 @@ if [[ -z "$FS_FILES" ]]; then
 else
     echo 'PASS sandbox_fs_anchor'
 fi
-if [[ -z "$PI_AI_FILES" ]]; then
-    echo 'WARN pi_ai_provider_missing (raw-response patch strategy may need to change)'
+if [[ -z "$MODEL_OTEL_FILES" ]]; then
+    echo 'FAIL native_model_otel'
+    FAIL=1
 else
-    echo 'PASS pi_ai_provider'
+    echo 'PASS native_model_otel'
+fi
+if [[ -z "$TOOL_OTEL_FILES" ]]; then
+    echo 'FAIL native_tool_otel'
+    FAIL=1
+else
+    echo 'PASS native_tool_otel'
+fi
+
+if [[ "$CANDIDATE" -eq 1 ]]; then
+    for marker in \
+        AB_HARNESS_OPENCLAW_V2026_9_2_EXEC_BRIDGE_BEGIN \
+        AB_HARNESS_OPENCLAW_V2026_9_2_SANDBOX_BYPASS_BEGIN \
+        AB_HARNESS_OPENCLAW_V2026_9_2_FS_BRIDGE_HELPER_BEGIN \
+        AB_HARNESS_OPENCLAW_V2026_9_2_FS_BRIDGE_RUN_BEGIN \
+        AB_HARNESS_OPENCLAW_V2026_9_2_FS_BRIDGE_WRITE_BEGIN \
+        AB_HARNESS_OPENCLAW_V2026_9_2_FS_BRIDGE_READ_BEGIN \
+        AB_HARNESS_OPENCLAW_V2026_9_2_FS_BRIDGE_CHECK_BEGIN
+    do
+        if run "grep -R -q '$marker' /app/dist"; then
+            echo "PASS candidate_marker $marker"
+        else
+            echo "FAIL candidate_marker $marker"
+            FAIL=1
+        fi
+    done
+    if [[ -n "$LEGACY_MARKERS" ]]; then
+        echo 'FAIL legacy_v2026_4_22_markers_present'
+        FAIL=1
+    else
+        echo 'PASS no_legacy_v2026_4_22_markers'
+    fi
+    if [[ -n "$PRICING_FILES" ]]; then
+        echo 'FAIL public_pricing_endpoints_present'
+        FAIL=1
+    else
+        echo 'PASS public_pricing_endpoints_absent'
+    fi
+else
+    echo 'INFO base_image_only candidate bridge markers not required yet'
 fi
 
 exit "$FAIL"
