@@ -47,10 +47,33 @@ def test_runtime_patch_relaxes_only_sessions_patch_and_disables_public_pricing(
     assert LITELLM_PRICING_URL not in patched
     assert OPENROUTER_OFFLINE_URL in patched
     assert LITELLM_OFFLINE_URL in patched
+    assert status["session_patch_required"] is True
     assert status["sessions_patch_timeout_replacements"] == 1
     assert status["openrouter_pricing_url_replacements"] == 1
     assert status["litellm_pricing_url_replacements"] == 1
     assert status["pricing_mode"] == "offline_data_urls"
+
+
+def test_runtime_patch_allows_missing_historical_session_anchor_on_new_runtime(
+    tmp_path,
+):
+    bundle = tmp_path / "dist" / "chunk.js"
+    bundle.parent.mkdir(parents=True)
+    bundle.write_text(
+        f"const openrouter='{OPENROUTER_PRICING_URL}';\n"
+        f"const litellm='{LITELLM_PRICING_URL}';\n"
+    )
+
+    status = patch_runtime_tree(
+        tmp_path,
+        session_patch_timeout_ms=45_000,
+        require_session_patch=False,
+    )
+
+    assert status["session_patch_required"] is False
+    assert status["sessions_patch_timeout_replacements"] == 0
+    assert status["openrouter_pricing_url_replacements"] == 1
+    assert status["litellm_pricing_url_replacements"] == 1
 
 
 def test_runtime_patch_fails_closed_when_pricing_anchors_disappear(tmp_path):
@@ -193,23 +216,55 @@ def test_terminal_evidence_does_not_override_stronger_existing_evidence():
     )
 
 
-def test_nscc_sif_builder_bakes_and_verifies_runtime_compatibility():
+def test_v202692_sif_builder_is_strict_and_uses_native_loop_safety():
     repo_root = Path(__file__).resolve().parents[1]
     script = (
         repo_root / "agent_bench/deployments/pbs/build_oc_sif.sh"
     ).read_text()
 
-    # The actual NSCC runtime path is a sealed patched SIF, not merely an
-    # optional overlay. Keep the reliability patch and its fail-closed marker
-    # validation wired into that builder.
+    assert "2026.9.2" in script
+    assert "ghcr.io/openclaw/openclaw:${OPENCLAW_VERSION}" in script
     assert "runtime_compat_patch.py" in script
-    assert "--session-patch-timeout-ms" in script
+    assert "--allow-missing-session-patch" in script
     assert ".agent-bench-runtime-compat.json" in script
-    assert "sessions_patch_timeout_replacements" in script
+    assert "session_patch_required" in script
     assert "openrouter_pricing_url_replacements" in script
     assert "litellm_pricing_url_replacements" in script
     assert "pricing_mode" in script
     assert "offline_data_urls" in script
+    assert "AB_HARNESS_OPENCLAW_PATCH_MODE=baked" in script
+    assert "compaction_loop_persisted" in script
+    assert "global circuit breaker to prevent runaway loops" in script
+    assert "sha256sum" in script
+
+
+def test_v202692_manifest_drops_upstreamed_loop_and_telemetry_backports():
+    repo_root = Path(__file__).resolve().parents[1]
+    manifest = json.loads(
+        (repo_root / "agent_bench/harnesses/openclaw/patch/MANIFEST.json").read_text()
+    )
+    patch_names = {entry["file"] for entry in manifest["patches"]}
+
+    assert manifest["transforms"] == []
+    assert "openclaw-external-exec-bridge.patch" in patch_names
+    assert "openclaw-ensure-sandbox-bridge-bypass.patch" in patch_names
+    assert "openclaw-fs-bridge.patch" in patch_names
+    assert "pi-ai-validation-jsonstring.patch" in patch_names
+    assert "openclaw-pi-ai-raw-response.patch" in patch_names
+    assert "openclaw-cli-model-usage.patch" not in patch_names
+    assert "openclaw-gateway-model-usage.patch" not in patch_names
+    assert "openclaw-tool-call-emit.patch" not in patch_names
+    assert "openclaw-diagnostics-otel-tool-call.patch" not in patch_names
+
+
+def test_paired_roadmap_harnesses_enable_native_loop_detection():
+    repo_root = Path(__file__).resolve().parents[1]
+    for name in (
+        "openclaw_roadmapbench.yaml",
+        "openclaw_roadmapbench_single_agent.yaml",
+    ):
+        text = (repo_root / "profiles/harnesses" / name).read_text()
+        assert "loopDetection:\n      enabled: true" in text
 
 
 def test_pbs_run_stamp_accepts_dummy_job_id():
