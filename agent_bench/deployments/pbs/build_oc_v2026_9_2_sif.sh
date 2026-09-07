@@ -114,6 +114,29 @@ for (const key of ["exec_bridge", "sandbox_bypass", "fs_helper", "fs_run", "fs_w
 process.stdout.write(JSON.stringify(s) + "\n");
 '
 
+# Parse the status marker from the sealed image and syntax-check every bundle
+# that received an Agent_Bench bridge transform.  This catches bad semantic
+# insertion points before the candidate ever reaches NSCC.
+PATCHED_RUNTIME_FILES="$($RUNTIME exec --cleanenv --no-home "$OUT_NEW" node -e '
+const fs = require("node:fs");
+const s = JSON.parse(fs.readFileSync("/app/.agent-bench-v2026.9.2.json", "utf8"));
+const files = new Set([
+  ...(s.exec_bridge_files_changed || []),
+  ...(s.sandbox_bypass_files_changed || []),
+  ...(s.fs_bridge_files_changed || []),
+]);
+for (const file of files) process.stdout.write(file + "\n");
+')"
+if [[ -z "$PATCHED_RUNTIME_FILES" ]]; then
+    echo "ERROR: status marker contains no patched runtime bundles" >&2
+    exit 1
+fi
+while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    printf '[build-oc-9.2] node --check /app/%s\n' "$rel"
+    "$RUNTIME" exec --cleanenv --no-home "$OUT_NEW" node --check "/app/$rel"
+done <<< "$PATCHED_RUNTIME_FILES"
+
 bash "$AUDIT" "$OUT_NEW"
 
 if [[ -f "$OUT_SIF" ]]; then
