@@ -12,6 +12,11 @@ from agent_bench.deployments.containers.base import (
 )
 from agent_bench.deployments.containers.docker import DockerContainer
 from agent_bench.deployments.containers.singularity import SingularityContainer
+from agent_bench.deployments.containers.singularity_liveness import (
+    install_singularity_main_process_liveness,
+)
+
+install_singularity_main_process_liveness()
 
 __all__ = [
     "Container",
