@@ -6,8 +6,10 @@ fall back to the legacy v2026.4.22 builder when the candidate is absent.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from typing import Mapping
+import sys
+from typing import Mapping, Sequence
 
 from agent_bench.core.spec import ConfigError
 
@@ -68,6 +70,61 @@ def require_prebuilt_openclaw_v9_candidate(
             f"{candidate}. Refusing legacy pull/build fallback."
         )
     return []
+
+
+def preflight_openclaw_v9_candidate_for_harness(
+    harness: str,
+    env: Mapping[str, str],
+) -> None:
+    """Fail before expensive PBS stages when the sealed candidate is absent."""
+    if not env.get("PBS_JOBID") or harness != "openclaw":
+        return
+    explicit_version = str(env.get("AB_AGENT_RUNTIME_VERSION") or "").strip()
+    if explicit_version and explicit_version != OPENCLAW_VERSION:
+        # Explicit legacy experiments retain their historical runtime path.
+        return
+
+    user = env.get("USER") or os.environ.get("USER") or "user"
+    scratch = env.get("SCRATCH") or f"/scratch/users/ntu/{user}"
+    effective = dict(env)
+    effective.setdefault(
+        "AB_AGENT_RUNTIME_SIF",
+        f"{scratch}/sif_images/openclaw_{OPENCLAW_VERSION}_agentbench.sif",
+    )
+    effective.setdefault("AB_AGENT_RUNTIME_REBUILD", "0")
+    require_prebuilt_openclaw_v9_candidate(effective)
+
+
+def _config_arg(argv: Sequence[str]) -> str | None:
+    for index, arg in enumerate(argv):
+        if arg == "--config" and index + 1 < len(argv):
+            return argv[index + 1]
+        if arg.startswith("--config="):
+            return arg.split("=", 1)[1]
+    return None
+
+
+def preflight_openclaw_v9_pbs_candidate(
+    argv: Sequence[str] | None = None,
+    env: Mapping[str, str] | None = None,
+) -> None:
+    """Resolve the requested harness and preflight v9.2 inside PBS jobs."""
+    source_env = os.environ if env is None else env
+    if not source_env.get("PBS_JOBID"):
+        return
+    config = _config_arg(list(sys.argv[1:] if argv is None else argv))
+    if not config:
+        return
+
+    from agent_bench.core.spec import load_resolved_experiment
+
+    resolved = load_resolved_experiment(config)
+    harness = str(
+        resolved.harness.get("harness")
+        or resolved.harness.get("name")
+        or resolved.spec.harness_name
+    )
+    preflight_openclaw_v9_candidate_for_harness(harness, source_env)
 
 
 def install_openclaw_v9_pbs_policy() -> None:
