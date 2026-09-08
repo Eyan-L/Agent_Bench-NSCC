@@ -1493,6 +1493,11 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
                 f"{cli_stage_export}"
                 "EOF"
             )])
+            session_exporter_pid = self._start_roadmap_session_exporter(
+                oc_handle=oc_handle,
+                state_dir=state_dir,
+                agent_id=agent_id,
+            )
             return {
                 "prepare_phase_timing": {
                     "workspace_prepare_start_ns": workspace_prepare_start_ns,
@@ -1519,6 +1524,7 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
                 "gateway_port": gateway_port,
                 "gateway_token": gateway_token,
                 "gateway_url": gateway_url,
+                "session_exporter_pid": session_exporter_pid,
                 "gateway_log_path": (
                     str(oc_handle.log_path) if oc_handle.log_path else None
                 ),
@@ -1538,6 +1544,53 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
             self._best_effort_stop(oc_handle, task_handle)
             self.container.remove_network(net_name)
             raise
+
+    def _start_roadmap_session_exporter(
+        self,
+        *,
+        oc_handle: ContainerHandle,
+        state_dir: Path,
+        agent_id: str,
+    ) -> Optional[int]:
+        """Project OpenClaw v9's STRICT SQLite store for host-side watchers."""
+        version = str(os.environ.get("AB_AGENT_RUNTIME_VERSION") or "").lstrip("v")
+        if agent_id != "roadmap_bench" or version != "2026.9.2":
+            return None
+
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "roadmap_bench"
+            / "openclaw"
+            / "sqlite_session_exporter.mjs"
+        )
+        target = state_dir / "agent-bench" / source.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        ready_path = target.parent / "sqlite-session-exporter.ready.json"
+        ready_path.unlink(missing_ok=True)
+        pid = self.container.exec_background(
+            oc_handle,
+            [
+                "bash",
+                "-c",
+                "mkdir -p /root/.openclaw/logs; "
+                "exec node /root/.openclaw/agent-bench/sqlite_session_exporter.mjs "
+                f"/root/.openclaw/agents/{agent_id}/agent/openclaw-agent.sqlite "
+                f"/root/.openclaw/agents/{agent_id}/sessions "
+                "/root/.openclaw/agent-bench/sqlite-session-exporter.ready.json "
+                ">/root/.openclaw/logs/sqlite-session-exporter.log 2>&1 "
+                "</dev/null",
+            ],
+        )
+        deadline = time.monotonic() + 30
+        while not ready_path.is_file() and time.monotonic() < deadline:
+            time.sleep(0.25)
+        if not ready_path.is_file():
+            raise RuntimeError(
+                "OpenClaw SQLite session exporter did not become ready within 30s"
+            )
+        logger.info("  started Roadmap SQLite session exporter pid=%s", pid)
+        return pid
 
     @staticmethod
     def _wait_for_process_exit(pid: Optional[int], timeout: float = 10.0) -> None:

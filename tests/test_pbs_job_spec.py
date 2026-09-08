@@ -10,7 +10,8 @@ import types
 import pytest
 
 from agent_bench.core.execution import materialize_benchmark_data
-from agent_bench.core.spec import load_resolved_experiment
+from agent_bench.core.spec import ConfigError, load_resolved_experiment
+from agent_bench.core.strict_benchmark import validate_benchmark_counts
 from agent_bench.deployments.pbs.job_spec import RUNTIME_STAGES, build_pbs_job_spec, dump_spec_json
 from agent_bench.deployments.pbs.stages import (
     image_preparation_commands,
@@ -21,6 +22,20 @@ from agent_bench.deployments.pbs.stages import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_strict_benchmark_policy_accepts_completed_verifier_outcomes():
+    validate_benchmark_counts(10, 0)
+
+
+def test_strict_benchmark_policy_rejects_any_infrastructure_error():
+    with pytest.raises(ConfigError, match="9 completed, 1 error"):
+        validate_benchmark_counts(9, 1)
+
+
+def test_strict_benchmark_policy_rejects_all_error_cell():
+    with pytest.raises(ConfigError, match="0 completed, 1 error"):
+        validate_benchmark_counts(0, 1)
 
 
 def _write_nscc_vllm_experiment(tmp_path: Path, *, stage_lines: list[str]) -> Path:

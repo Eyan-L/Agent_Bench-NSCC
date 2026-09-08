@@ -39,6 +39,9 @@ class RunManifest:
     agent_execution_outcome: Optional[str] = None
     agent_completion_error: Optional[str] = None
     agent_lifecycle: Optional[dict[str, Any]] = None
+    benchmark_valid: Optional[bool] = None
+    benchmark_invalid_reason: Optional[str] = None
+    verifier_eligible: Optional[bool] = None
     verifier_status: Optional[str] = None
     reward: Optional[float] = None
     test_pass_rate: Optional[float] = None
@@ -76,6 +79,9 @@ class RunManifest:
             "agent_execution_outcome": self.agent_execution_outcome,
             "agent_completion_error": self.agent_completion_error,
             "agent_lifecycle": self.agent_lifecycle,
+            "benchmark_valid": self.benchmark_valid,
+            "benchmark_invalid_reason": self.benchmark_invalid_reason,
+            "verifier_eligible": self.verifier_eligible,
             "verifier_status": self.verifier_status,
             "reward": self.reward,
             "test_pass_rate": self.test_pass_rate,
@@ -114,6 +120,9 @@ class RunManifest:
             agent_execution_outcome=data.get("agent_execution_outcome"),
             agent_completion_error=data.get("agent_completion_error"),
             agent_lifecycle=data.get("agent_lifecycle"),
+            benchmark_valid=data.get("benchmark_valid"),
+            benchmark_invalid_reason=data.get("benchmark_invalid_reason"),
+            verifier_eligible=data.get("verifier_eligible"),
             verifier_status=data.get("verifier_status"),
             reward=data.get("reward"),
             test_pass_rate=data.get("test_pass_rate"),

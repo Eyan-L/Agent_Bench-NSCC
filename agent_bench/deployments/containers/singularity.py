@@ -107,6 +107,7 @@ class SingularityContainer(Container):
         self._keepalive_dir.mkdir(parents=True, exist_ok=True)
         # Per-instance bg-exec PIDs, so `stop` can clean them up.
         self._main_pids: dict[str, int] = {}
+        self._aux_processes: dict[str, list[subprocess.Popen]] = {}
         # Per-handle start-time env, replayed on every exec() so the
         # singularity backend matches docker semantics: env set at container
         # creation is visible to subsequent execs. `singularity exec
@@ -267,6 +268,23 @@ class SingularityContainer(Container):
         )
 
     def stop(self, h: ContainerHandle) -> None:
+        for proc in self._aux_processes.pop(h.name, []):
+            if proc.poll() is not None:
+                continue
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=10)
+            except (ProcessLookupError, PermissionError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait(timeout=5)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                except subprocess.TimeoutExpired:
+                    logger.warning(
+                        "auxiliary singularity exec did not exit after SIGKILL: pid=%s",
+                        proc.pid,
+                    )
         # Kill any bg-exec we tracked (e.g. the OC gateway exec).
         pid = self._main_pids.pop(h.name, None)
         if pid:
@@ -321,6 +339,46 @@ class SingularityContainer(Container):
                 f"stderr: {r.stderr[-500:]}"
             )
         return r
+
+    def exec_background(
+        self,
+        h: ContainerHandle,
+        argv: list[str],
+        *,
+        workdir: Optional[str] = None,
+        env: Optional[dict[str, str]] = None,
+    ) -> Optional[int]:
+        """Run a persistent auxiliary command tied to the instance lifecycle."""
+        cmd: list[str] = ["singularity", "exec"]
+        if workdir:
+            cmd += ["--pwd", workdir]
+        merged: dict[str, str] = {}
+        stashed = self._handle_env.get(h.name)
+        if stashed:
+            merged.update(stashed)
+        if env:
+            merged.update(env)
+        exec_env = _subprocess_env()
+        for key, value in merged.items():
+            _set_singularity_env(exec_env, key, value)
+        cmd += [f"instance://{h.name}", *argv]
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            env=exec_env,
+        )
+        time.sleep(0.25)
+        returncode = proc.poll()
+        if returncode is not None:
+            raise RuntimeError(
+                f"singularity background exec failed "
+                f"({argv[0] if argv else ''}): rc={returncode}"
+            )
+        self._aux_processes.setdefault(h.name, []).append(proc)
+        return proc.pid
 
     def copy_into(self, h: ContainerHandle, src: Path, dst: str) -> None:
         """Copy a file or directory into a running instance.

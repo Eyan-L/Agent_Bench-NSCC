@@ -740,15 +740,6 @@ class OpenClawAgentCondition:
             proc.returncode, elapsed, len(stdout), len(stderr),
         )
 
-        if proc.returncode != 0:
-            self._last_stdout = stdout
-            self._last_stderr = stderr
-            tail = stderr[-500:] or stdout[-500:]
-            error = f"openclaw exit {proc.returncode}: {tail}"
-            self._last_completion_status = self.RUNTIME_ERROR
-            self._last_completion_error = error
-            return None, error
-
         self._last_stdout = stdout
         self._last_stderr = stderr
 
@@ -758,6 +749,8 @@ class OpenClawAgentCondition:
         if payload is None:
             snippet = (stderr or stdout)[-300:]
             error = (
+                f"openclaw exit {proc.returncode}: " if proc.returncode != 0 else ""
+            ) + (
                 "no parseable JSON in openclaw output "
                 f"(last 300 chars: {snippet})"
             )
@@ -766,6 +759,12 @@ class OpenClawAgentCondition:
             return None, error
 
         status, error = self._classify_completion(payload)
+        if proc.returncode != 0 and status not in {
+            self.CONTEXT_OVERFLOW, self.TIMEOUT
+        }:
+            status = self.RUNTIME_ERROR
+            if not error:
+                error = f"openclaw exit {proc.returncode}"
         self._last_completion_status = status
         self._last_completion_error = error
         return payload, error
@@ -813,6 +812,11 @@ class OpenClawAgentCondition:
             or "falling back to embedded" in stderr.lower()
         ):
             return "embedded_fallback"
+        if (
+            "[agent-bench] Roadmap gateway RPC ready; "
+            "gateway execution selected"
+        ) in stderr:
+            return "gateway"
         if payload is None or getattr(self, "_last_exit_code", 0) not in (0, None):
             return "unknown"
         return "gateway"

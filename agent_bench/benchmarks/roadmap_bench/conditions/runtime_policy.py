@@ -40,7 +40,7 @@ def repair_roadmap_terminal_evidence(result: dict) -> dict:
 def install_roadmap_gateway_only_policy() -> None:
     from agent_bench.runtime import driver
 
-    current: Callable[[dict], Optional[str]] = driver._roadmap_lifecycle_verifier_error
+    current: Callable[[dict], Optional[str]] = driver._roadmap_benchmark_invalid_reason
     if not getattr(current, "_roadmap_gateway_only_policy", False):
         def wrapped(result: dict) -> Optional[str]:
             runtime_mode = str(result.get("agent_runtime_mode") or "").strip()
@@ -52,7 +52,7 @@ def install_roadmap_gateway_only_policy() -> None:
             return current(result)
 
         setattr(wrapped, "_roadmap_gateway_only_policy", True)
-        driver._roadmap_lifecycle_verifier_error = wrapped
+        driver._roadmap_benchmark_invalid_reason = wrapped
 
     # RoadmapBenchOpenClawCondition.run calls super().run(), so a narrowly
     # guarded base wrapper repairs the result before the generic driver writes

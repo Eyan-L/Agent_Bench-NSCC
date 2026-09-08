@@ -318,3 +318,69 @@ def test_three_child_overlap_distinguishes_wall_from_excess(tmp_path):
     assert obs["child_overlap_wall_seconds"] == 10.0
     assert obs["child_concurrency_excess_seconds"] == 20.0
     assert obs["max_concurrent_children"] == 3
+
+
+def test_nonterminal_children_are_right_censored_for_concurrency(tmp_path):
+    sessions = tmp_path / "conversation" / "sessions"
+    sessions.mkdir(parents=True)
+    parent_key = "agent:roadmap_bench:main"
+    index = {
+        parent_key: {
+            "sessionId": "parent-id",
+            "status": "done",
+            "startedAt": "2026-01-01T00:00:00Z",
+            "endedAt": "2026-01-01T00:00:09Z",
+        }
+    }
+    for name, second in (("a", 2), ("b", 4), ("c", 6)):
+        index[f"agent:roadmap_bench:subagent:{name}"] = {
+            "sessionId": f"child-{name}-id",
+            "spawnedBy": parent_key,
+            "status": "unknown",
+            "label": f"target-{name}",
+            "createdAt": f"2026-01-01T00:00:0{second}Z",
+        }
+    (sessions / "sessions.json").write_text(json.dumps(index))
+    quiesced_ns = 1_767_225_610_000_000_000
+    (tmp_path / "openclaw_response.json").write_text(json.dumps({
+        "result": {
+            "meta": {
+                "agentBenchLifecycle": {
+                    "workspaceQuiescedNs": quiesced_ns,
+                }
+            }
+        }
+    }))
+
+    result = build_openclaw_measurement(
+        tmp_path, agent_id="roadmap_bench"
+    )
+    obs = result["runtime_observability"]
+
+    assert obs["child_session_count"] == 3
+    assert obs["child_runtime_complete_count"] == 0
+    assert obs["child_runtime_observed_count"] == 3
+    assert obs["child_sum_runtime_seconds"] == 18.0
+    assert obs["child_union_active_seconds"] == 8.0
+    assert obs["child_overlap_wall_seconds"] == 6.0
+    assert obs["child_concurrency_excess_seconds"] == 10.0
+    assert obs["max_concurrent_children"] == 3
+
+    child = obs["child_runtime_by_session"][
+        "agent:roadmap_bench:subagent:a"
+    ]
+    assert child["runtime_seconds"] == 8.0
+    assert child["runtime_complete"] is False
+    assert child["runtime_censored"] is True
+    assert child["terminal_timestamp"] is None
+    assert child["interval_end_timestamp_ns"] == quiesced_ns
+    assert child["interval_end_timestamp_source"] == "workspaceQuiescedNs"
+
+    timeline = obs["agent_timeline"]
+    assert timeline["observation_end_timestamp_ns"] == quiesced_ns
+    assert [agent["role"] for agent in timeline["agents"]] == [
+        "parent", "child", "child", "child",
+    ]
+    assert sum(
+        bool(agent["runtime_censored"]) for agent in timeline["agents"]
+    ) == 3

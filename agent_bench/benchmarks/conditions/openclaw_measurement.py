@@ -189,6 +189,41 @@ def _child_state_time(
     return 0, "", "missing"
 
 
+def _lifecycle_observation_boundary(
+    run_dir: Path, fallback_ns: int
+) -> tuple[int, str, str]:
+    """Return the fence after which agent sessions cannot keep running."""
+    path = run_dir / "openclaw_response.json"
+    try:
+        payload = json.loads(path.read_text(errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+
+    lifecycle = None
+    pending = [payload]
+    while pending:
+        value = pending.pop()
+        if not isinstance(value, dict):
+            continue
+        candidate = value.get("agentBenchLifecycle")
+        if isinstance(candidate, dict):
+            lifecycle = candidate
+            break
+        pending.extend(item for item in value.values() if isinstance(item, dict))
+
+    if lifecycle:
+        for field in ("workspaceQuiescedNs", "parentTerminalObservedNs"):
+            timestamp_ns = _timestamp_ns(lifecycle.get(field))
+            if timestamp_ns:
+                quality = (
+                    "harness_observed_censor"
+                    if field == "workspaceQuiescedNs"
+                    else "watcher_observed_censor"
+                )
+                return timestamp_ns, field, quality
+    return fallback_ns, "measurement_observed", "measurement_observed_censor"
+
+
 def _append(
     events: list[dict],
     *,
@@ -418,6 +453,9 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
         "cancelled", "canceled",
     }
     measurement_observed_ns = time.time_ns()
+    observation_end_ns, observation_end_source, observation_end_quality = (
+        _lifecycle_observation_boundary(run_dir, measurement_observed_ns)
+    )
 
     for session_key, entry in index.items():
         if not isinstance(entry, dict) or not entry.get("spawnedBy"):
@@ -435,10 +473,12 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
         if is_terminal:
             end_ns, end_source, end_quality = _child_terminal_time(entry, last_ns)
         else:
-            end_ns, end_source, end_quality = 0, "", "missing"
+            end_ns = observation_end_ns
+            end_source = observation_end_source
+            end_quality = observation_end_quality
 
         runtime_seconds = None
-        if is_terminal and start_ns and end_ns and end_ns >= start_ns:
+        if start_ns and end_ns and end_ns >= start_ns:
             runtime_seconds = (end_ns - start_ns) / 1e9
             intervals.append((start_ns, end_ns))
 
@@ -450,20 +490,35 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
             "start_timestamp_ns": start_ns or None,
             "start_timestamp_source": start_source or None,
             "start_timestamp_quality": start_quality,
-            "terminal_timestamp": _iso_from_ns(end_ns),
-            "terminal_timestamp_ns": end_ns or None,
-            "terminal_timestamp_source": end_source or None,
-            "terminal_timestamp_quality": end_quality,
+            "terminal_timestamp": _iso_from_ns(end_ns) if is_terminal else None,
+            "terminal_timestamp_ns": (end_ns or None) if is_terminal else None,
+            "terminal_timestamp_source": (
+                (end_source or None) if is_terminal else None
+            ),
+            "terminal_timestamp_quality": (
+                end_quality if is_terminal else "missing"
+            ),
+            "interval_end_timestamp": _iso_from_ns(end_ns),
+            "interval_end_timestamp_ns": end_ns or None,
+            "interval_end_timestamp_source": end_source or None,
+            "interval_end_timestamp_quality": end_quality,
             "measurement_observed_timestamp": _iso_from_ns(measurement_observed_ns),
             "measurement_observed_timestamp_ns": measurement_observed_ns,
             "runtime_seconds": runtime_seconds,
+            "runtime_complete": is_terminal and runtime_seconds is not None,
+            "runtime_censored": not is_terminal and runtime_seconds is not None,
+            "label": entry.get("label"),
         }
 
     complete = [
         child for child in children.values()
+        if child.get("runtime_complete")
+    ]
+    observed = [
+        child for child in children.values()
         if child.get("runtime_seconds") is not None
     ]
-    runtime_sum = sum(float(child["runtime_seconds"]) for child in complete)
+    runtime_sum = sum(float(child["runtime_seconds"]) for child in observed)
 
     union_ns = 0
     if intervals:
@@ -497,20 +552,111 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
         max_concurrent = max(max_concurrent, concurrent)
         previous_timestamp_ns = timestamp_ns_value
 
+    timeline_agents = []
+    parent_candidates = [
+        (key, entry) for key, entry in index.items()
+        if isinstance(entry, dict) and not entry.get("spawnedBy")
+    ]
+    if parent_candidates:
+        parent_key, parent_entry = parent_candidates[0]
+        parent_name = _session_file_name(parent_entry)
+        parent_transcript = sessions_dir / parent_name if parent_name else None
+        parent_first_ns, parent_last_ns = (
+            _transcript_time_bounds(parent_transcript)
+            if parent_transcript is not None else (0, 0)
+        )
+        parent_start_ns, parent_start_source = _entry_time(
+            parent_entry,
+            (
+                "startedAt", "started_at", "sessionStartedAt",
+                "session_started_at", "createdAt", "created_at",
+            ),
+        )
+        if not parent_start_ns:
+            parent_start_ns = parent_first_ns
+            parent_start_source = "transcript_first_event" if parent_first_ns else ""
+        parent_status = str(parent_entry.get("status") or "unknown").lower()
+        parent_terminal = parent_status in terminal_states
+        if parent_terminal:
+            parent_end_ns, parent_end_source, parent_end_quality = (
+                _child_terminal_time(parent_entry, parent_last_ns)
+            )
+        else:
+            parent_end_ns = observation_end_ns
+            parent_end_source = observation_end_source
+            parent_end_quality = observation_end_quality
+        if parent_start_ns and parent_end_ns >= parent_start_ns:
+            timeline_agents.append({
+                "role": "parent",
+                "label": agent_id,
+                "session_key": str(parent_key),
+                "session_id": str(parent_entry.get("sessionId") or "") or None,
+                "status": parent_status,
+                "start_timestamp": _iso_from_ns(parent_start_ns),
+                "start_timestamp_ns": parent_start_ns,
+                "start_timestamp_source": parent_start_source or None,
+                "end_timestamp": _iso_from_ns(parent_end_ns),
+                "end_timestamp_ns": parent_end_ns,
+                "end_timestamp_source": parent_end_source or None,
+                "end_timestamp_quality": parent_end_quality,
+                "duration_seconds": (parent_end_ns - parent_start_ns) / 1e9,
+                "runtime_censored": not parent_terminal,
+            })
+    for session_key, child in children.items():
+        start_ns = _int(child.get("start_timestamp_ns"))
+        end_ns = _int(child.get("interval_end_timestamp_ns"))
+        if not start_ns or not end_ns or end_ns < start_ns:
+            continue
+        timeline_agents.append({
+            "role": "child",
+            "label": child.get("label") or child.get("session_id") or session_key,
+            "session_key": session_key,
+            "session_id": child.get("session_id"),
+            "status": child.get("status"),
+            "start_timestamp": child.get("start_timestamp"),
+            "start_timestamp_ns": start_ns,
+            "start_timestamp_source": child.get("start_timestamp_source"),
+            "end_timestamp": child.get("interval_end_timestamp"),
+            "end_timestamp_ns": end_ns,
+            "end_timestamp_source": child.get("interval_end_timestamp_source"),
+            "end_timestamp_quality": child.get("interval_end_timestamp_quality"),
+            "duration_seconds": child.get("runtime_seconds"),
+            "runtime_censored": child.get("runtime_censored", False),
+        })
+    timeline_agents.sort(
+        key=lambda item: (
+            0 if item["role"] == "parent" else 1,
+            item["start_timestamp_ns"],
+            str(item["session_key"]),
+        )
+    )
+
     union_seconds = union_ns / 1e9
     return {
         "child_session_count": len(children),
         "child_runtime_complete_count": len(complete),
+        "child_runtime_observed_count": len(observed),
         "child_runtime_by_session": children,
         "child_sum_runtime_seconds": runtime_sum,
         "child_union_active_seconds": union_seconds,
         "child_overlap_wall_seconds": overlap_wall_ns / 1e9,
         "child_concurrency_excess_seconds": concurrency_excess_ns / 1e9,
         "max_concurrent_children": max_concurrent,
+        "agent_timeline": {
+            "observation_end_timestamp": _iso_from_ns(observation_end_ns),
+            "observation_end_timestamp_ns": observation_end_ns,
+            "observation_end_timestamp_source": observation_end_source,
+            "observation_end_timestamp_quality": observation_end_quality,
+            "agents": timeline_agents,
+        },
         "child_runtime_policy": {
             "definition": (
-                "durable child start to durable terminal time; session state "
-                "timestamps preferred, transcript bounds explicitly labelled as inferred"
+                "durable child start to terminal time; non-terminal materialized "
+                "children are right-censored at the agent-writer quiescence fence"
+            ),
+            "censored_runtime": (
+                "included in observed runtime and concurrency, excluded from "
+                "child_runtime_complete_count"
             ),
             "overlap_wall_definition": (
                 "wall-clock time with at least two child sessions active"

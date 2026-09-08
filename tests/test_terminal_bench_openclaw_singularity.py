@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import subprocess
 import json
 from pathlib import Path
@@ -16,11 +17,29 @@ from agent_bench.benchmarks.terminal_bench.conditions.openclaw_agent import (
 from agent_bench.deployments.containers.base import ContainerHandle
 from agent_bench.deployments.containers.singularity import SingularityContainer
 from agent_bench.benchmarks.conditions.openclaw_agent import OpenClawAgentCondition
+from agent_bench.benchmarks.deepresearch_bench.app import DeepResearchHarness
+from agent_bench.benchmarks.longbench.app import LongBenchHarness
+from agent_bench.benchmarks.terminal_bench.agent_harness_base import (
+    TerminalBenchAgentHarnessBase,
+)
 from agent_bench.core.manifest import RunManifest
 from agent_bench.runtime.driver import (
     _merge_agent_completion_into_verdict,
     _roadmap_lifecycle_verifier_error,
 )
+
+
+def test_non_swe_harness_run_tests_accepts_driver_run_dir():
+    harnesses = [
+        tb_app.TerminalBenchDockerHarness,
+        tb_app.TerminalBenchSingularityHarness,
+        TerminalBenchAgentHarnessBase,
+        DeepResearchHarness,
+        LongBenchHarness,
+    ]
+
+    for harness in harnesses:
+        assert "run_dir" in inspect.signature(harness.run_tests).parameters
 
 
 class _FakeContainer:
@@ -65,6 +84,13 @@ class _FakeContainer:
     def exec(self, *args, **kwargs):
         self.exec_calls.append((args, kwargs))
         return subprocess.CompletedProcess([], 0, "", "")
+
+    def exec_background(self, *args, **kwargs):
+        self.exec_calls.append((args, kwargs))
+        ready_path = getattr(self, "exporter_ready_path", None)
+        if ready_path is not None:
+            Path(ready_path).write_text('{"pid": 4242}')
+        return 4242
 
     def stop(self, handle, **_kw) -> None:
         self.stop_calls.append(handle)
@@ -204,6 +230,39 @@ def test_terminal_bench_openclaw_singularity_returns_runtime_handle(tmp_path, mo
         "singularity",
     ))
     assert env_info["agent_runtime_quiesced"] is True
+
+
+def test_roadmap_v9_starts_runtime_sqlite_session_exporter(tmp_path, monkeypatch):
+    runtime_sif = tmp_path / "openclaw.sif"
+    runtime_sif.touch()
+    monkeypatch.setenv("AB_AGENT_RUNTIME_SIF", str(runtime_sif))
+    monkeypatch.setenv("AB_AGENT_RUNTIME_VERSION", "2026.9.2")
+    container = _FakeContainer()
+    harness = tb_app.TerminalBenchOpenClawHarness(
+        container=container, workspace_base=tmp_path / "workspaces"
+    )
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    container.exporter_ready_path = (
+        state_dir / "agent-bench" / "sqlite-session-exporter.ready.json"
+    )
+
+    pid = harness._start_roadmap_session_exporter(
+        oc_handle=ContainerHandle("oc", "oc", "singularity"),
+        state_dir=state_dir,
+        agent_id="roadmap_bench",
+    )
+
+    assert pid == 4242
+    staged = state_dir / "agent-bench" / "sqlite_session_exporter.mjs"
+    assert staged.is_file()
+    assert 'from "node:sqlite"' in staged.read_text()
+    exporter_calls = [
+        call for call in container.exec_calls
+        if "sqlite_session_exporter.mjs" in str(call)
+    ]
+    assert len(exporter_calls) == 1
+    assert "openclaw-agent.sqlite" in str(exporter_calls[0])
 
 
 def test_driver_routes_terminal_bench_openclaw_to_generic_harness():
@@ -777,7 +836,7 @@ def test_roadmap_payload_context_overflow_precedes_transcript_done(tmp_path):
         payload, "", deadline=time.monotonic() + 10
     )
 
-    assert returned is payload
+    assert returned["result"]["meta"]["error"] == payload["result"]["meta"]["error"]
     assert error == "context overflow"
     assert condition._last_completion_status == "context_overflow"
 
@@ -796,7 +855,7 @@ def test_roadmap_fatal_runtime_error_precedes_transcript_done(tmp_path):
         payload, "", deadline=time.monotonic() + 10
     )
 
-    assert returned is payload
+    assert returned["result"]["meta"]["error"] == payload["result"]["meta"]["error"]
     assert "gateway_error" in error
     assert condition._last_completion_status == "runtime_error"
 
@@ -1243,6 +1302,7 @@ def test_roadmap_patch_extraction_uses_task_runtime_without_host_git(
             "task_container_name": "task-runtime",
             "workspace_host_path": str(host_workspace),
             "roadmap_workspace_baseline": {"git_head": "baseline-head"},
+            "roadmap_workspace_quiesced": True,
         },
         tmp_path,
         "/app",
@@ -1318,6 +1378,7 @@ def test_roadmap_baseline_prefers_task_runtime_without_host_git(
         "status": [],
     }
     assert env_info["roadmap_workspace_baseline"] == baseline
+    env_info["roadmap_workspace_quiesced"] = True
 
     patch = condition._collect_artifacts(
         "openclaw-runtime", env_info, tmp_path, "/app"
@@ -1428,6 +1489,15 @@ def test_openclaw_runtime_mode_detects_gateway_and_embedded_fallback():
     )
     condition._last_exit_code = 1
     assert condition._detect_agent_runtime_mode(None) == "unknown"
+
+    condition._last_stderr = (
+        "[agent-bench] Roadmap gateway RPC ready; gateway execution selected\n"
+        "LLM request failed: network connection error."
+    )
+    assert condition._detect_agent_runtime_mode(None) == "gateway"
+
+    condition._last_stderr += "\nfalling back to embedded"
+    assert condition._detect_agent_runtime_mode(None) == "embedded_fallback"
 
 
 def test_roadmap_child_completion_resumes_same_parent_and_finishes(tmp_path):

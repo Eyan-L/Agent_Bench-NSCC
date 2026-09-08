@@ -13,6 +13,7 @@ def _record(
     instance_id: str = "task-1",
     duration_seconds: float | None = 100.0,
     agent_execution_seconds: float | None = None,
+    benchmark_valid: bool | None = None,
 ) -> compare.RunRecord:
     run_dir = tmp_path / f"{arm}-{instance_id}"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -25,6 +26,8 @@ def _record(
     }
     if agent_execution_seconds is not None:
         manifest["agent_execution_seconds"] = agent_execution_seconds
+    if benchmark_valid is not None:
+        manifest["benchmark_valid"] = benchmark_valid
     manifest_path = run_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest))
     return compare.RunRecord(
@@ -123,6 +126,77 @@ def test_actual_subagent_count_comes_from_runtime_observability(tmp_path):
     assert len(row["child_intervals"]) == 2
     assert "spawn_count" not in row
     assert "model_request_count" not in row
+
+
+def test_invalid_benchmark_keeps_diagnostics_but_not_formal_metrics(tmp_path):
+    valid = _record(
+        tmp_path,
+        instance_id="valid",
+        agent_execution_seconds=30.0,
+        benchmark_valid=True,
+    )
+    invalid = _record(
+        tmp_path,
+        instance_id="invalid",
+        agent_execution_seconds=90.0,
+        benchmark_valid=False,
+    )
+    invalid.manifest["reward"] = 0.0
+
+    summary = compare.summarize_arm([valid, invalid])
+
+    assert summary["task_count"] == 2
+    assert summary["benchmark_valid_count"] == 1
+    assert summary["benchmark_invalid_count"] == 1
+    assert summary["evaluated_count"] == 1
+    assert summary["accuracy"]["mean_reward"] == 1.0
+    assert summary["latency_seconds"]["count"] == 1
+    assert summary["latency_seconds"]["mean"] == 30.0
+
+
+def test_invalid_pair_is_excluded_from_formal_paired_metrics(tmp_path):
+    sub = _record(
+        tmp_path,
+        arm="subagent",
+        agent_execution_seconds=30.0,
+        benchmark_valid=False,
+    )
+    single = _record(
+        tmp_path,
+        arm="single-agent",
+        agent_execution_seconds=60.0,
+        benchmark_valid=True,
+    )
+
+    summary, rows = compare.compare_paired(
+        [sub], [single], bootstrap_samples=100
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["pair_benchmark_valid"] is False
+    assert summary["paired_benchmark_valid_count"] == 0
+    assert summary["paired_benchmark_invalid_count"] == 1
+    assert summary["accuracy"]["paired_evaluable_count"] == 0
+    assert summary["latency"]["paired_evaluable_count"] == 0
+
+
+def test_valid_retry_is_selected_over_scored_infrastructure_error(tmp_path):
+    invalid = _record(
+        tmp_path,
+        arm="invalid",
+        benchmark_valid=False,
+    )
+    invalid.manifest["status"] = "ERROR"
+    valid = _record(
+        tmp_path,
+        arm="valid",
+        benchmark_valid=True,
+    )
+    valid.manifest["reward"] = None
+
+    selected, _duplicates = compare.select_best_records([invalid, valid])
+
+    assert selected == [valid]
 
 
 def test_roadmap_profile_and_prompt_allow_sixteen_concurrent_subagents():

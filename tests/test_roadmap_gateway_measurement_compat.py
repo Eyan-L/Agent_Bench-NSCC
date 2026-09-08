@@ -91,6 +91,7 @@ def test_roadmap_singularity_agent_requires_exact_gateway_rpc_and_rejects_fallba
     assert "falling back to embedded" in guard
     assert "exit 86" in guard
     assert "exit 87" in guard
+    assert "Roadmap gateway RPC ready; gateway execution selected" in guard
     assert "openclaw agent --agent roadmap_bench" in guard
     # Fallback detection reads a completed stderr file, so grep cannot race a
     # still-running process-substitution tee.
@@ -120,19 +121,30 @@ def test_other_singularity_agents_are_not_gateway_guard_wrapped():
 
 
 def test_roadmap_runtime_policy_rejects_explicit_non_gateway_modes():
-    for mode in ("embedded_fallback", "unknown"):
-        error = driver._roadmap_lifecycle_verifier_error({
+    for mode in ("embedded_fallback", "embedded"):
+        error = driver._roadmap_benchmark_invalid_reason({
             "agent_runtime_mode": mode,
+            "agent_execution_outcome": "runtime_error",
             "agent_lifecycle": {"workspaceQuiesced": True},
         })
         assert error is not None
         assert "requires OpenClaw gateway runtime" in error
         assert f"agent_runtime_mode={mode}" in error
 
-    assert driver._roadmap_lifecycle_verifier_error({
+    assert driver._roadmap_benchmark_invalid_reason({
         "agent_runtime_mode": "gateway",
         "agent_lifecycle": {"workspaceQuiesced": True},
     }) is None
+
+
+def test_roadmap_runtime_policy_rejects_unknown_mode_independent_of_outcome():
+    error = driver._roadmap_benchmark_invalid_reason({
+        "agent_runtime_mode": "unknown",
+        "agent_execution_outcome": "runtime_error",
+        "agent_lifecycle": {"workspaceQuiesced": True},
+    })
+    assert error is not None
+    assert "agent_runtime_mode=unknown" in error
 
 
 def test_roadmap_runtime_policy_preserves_legacy_lifecycle_check_without_mode():
@@ -143,6 +155,32 @@ def test_roadmap_runtime_policy_preserves_legacy_lifecycle_check_without_mode():
         }
     })
     assert error == "writers still active"
+
+
+def test_runtime_failure_keeps_verifier_measurement_but_is_benchmark_invalid():
+    verdict = driver._finalize_roadmap_verdict(
+        {
+            "status": "FAIL",
+            "verifier_status": "FAIL",
+            "reward": 0.4,
+            "test_pass_rate": 0.4,
+        },
+        {
+            "agent_execution_outcome": "runtime_error",
+            "agent_completion_error": "incomplete_turn: Connection error",
+            "exit_code": 1,
+            "agent_lifecycle": {"workspaceQuiesced": True},
+        },
+        verifier_error=None,
+        benchmark_invalid_reason="incomplete_turn: Connection error",
+    )
+
+    assert verdict["status"] == "ERROR"
+    assert verdict["benchmark_valid"] is False
+    assert verdict["verifier_eligible"] is True
+    assert verdict["verifier_status"] == "FAIL"
+    assert verdict["reward"] == 0.4
+    assert verdict["test_pass_rate"] == 0.4
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:

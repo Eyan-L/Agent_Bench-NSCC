@@ -161,6 +161,7 @@ while ! openclaw gateway call status \
   sleep 2
 done
 rm -f \"$ab_probe_log\"
+echo '[agent-bench] Roadmap gateway RPC ready; gateway execution selected' >&2
 
 ab_stderr=$(mktemp /tmp/agent-bench-openclaw-stderr.XXXXXX)
 {command} 2>\"$ab_stderr\"

@@ -120,6 +120,17 @@ class Container(Protocol):
         env: Optional[dict[str, str]] = None,
     ) -> subprocess.CompletedProcess: ...
 
+    def exec_background(
+        self,
+        h: ContainerHandle,
+        argv: list[str],
+        *,
+        workdir: Optional[str] = None,
+        env: Optional[dict[str, str]] = None,
+    ) -> Optional[int]:
+        """Start a command whose lifetime is owned by the container handle."""
+        ...
+
     def copy_into(self, h: ContainerHandle, src: Path, dst: str) -> None: ...
 
     def copy_out(

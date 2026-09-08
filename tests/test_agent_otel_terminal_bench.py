@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import sys
 from types import ModuleType, SimpleNamespace
 
 from agent_bench.benchmarks.conditions.agent_otel import (
@@ -26,6 +27,7 @@ from agent_bench.benchmarks.terminal_bench.conditions.react import (
     TerminalBenchReactCondition,
 )
 from agent_bench.core.profile_io import load_profile
+from agent_bench.deployments.containers.docker import DockerContainer
 from agent_bench.harnesses.openhands import driver as openhands_driver
 from agent_bench.harnesses.openhands.driver import (
     _BridgeToolExecutor,
@@ -42,6 +44,34 @@ from agent_bench.harnesses.openhands.driver import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_docker_container_traced_subprocess_writes_span(tmp_path: Path) -> None:
+    spans_path = tmp_path / "spans.jsonl"
+    container = DockerContainer()
+    container.set_trace_path(spans_path)
+
+    result = container._run_traced(
+        "agent_bench.container.exec",
+        [
+            sys.executable,
+            "-c",
+            "import sys; print('ok'); print('err', file=sys.stderr)",
+        ],
+        attrs={"agent_bench.container.name": "demo"},
+    )
+
+    assert result.returncode == 0
+    rows = [json.loads(line) for line in spans_path.read_text().splitlines()]
+    assert len(rows) == 1
+    span = rows[0]
+    attrs = span["attrs"]
+    assert span["name"] == "agent_bench.container.exec"
+    assert attrs["agent_bench.container.name"] == "demo"
+    assert attrs["agent_bench.returncode"] == 0
+    assert "ok" in attrs["agent_bench.stdout_preview"]
+    assert "err" in attrs["agent_bench.stderr_preview"]
+    assert sys.executable in attrs["agent_bench.command_json"]
 
 
 def test_shared_otel_writes_flat_and_raw_spans(tmp_path):

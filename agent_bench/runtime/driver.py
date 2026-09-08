@@ -107,8 +107,30 @@ def _maybe_render_spans_timeline(run_dir: Path, telemetry_path: Optional[str]) -
         spans = _load_spans(spans_path)
         if not spans:
             return
+        agent_timeline = None
+        observability_path = run_dir / "runtime_observability.json"
+        if observability_path.is_file():
+            try:
+                import json
+
+                observability = json.loads(
+                    observability_path.read_text(encoding="utf-8")
+                )
+                if isinstance(observability, dict):
+                    candidate = observability.get("agent_timeline")
+                    if isinstance(candidate, dict):
+                        agent_timeline = candidate
+            except (OSError, ValueError):
+                logger.debug(
+                    "could not load agent timeline from %s",
+                    observability_path,
+                    exc_info=True,
+                )
         output_path = run_dir / "spans_timeline.html"
-        output_path.write_text(render_html(spans, spans_path), encoding="utf-8")
+        output_path.write_text(
+            render_html(spans, spans_path, agent_timeline=agent_timeline),
+            encoding="utf-8",
+        )
         logger.info("  spans timeline -> %s", output_path)
     except Exception as exc:  # noqa: BLE001 - best-effort artifact
         logger.warning("spans timeline generation failed for %s: %s", run_dir.name, exc)
@@ -230,6 +252,44 @@ def _roadmap_lifecycle_verifier_error(result: dict) -> Optional[str]:
         or lifecycle.get("orphanCancellationError")
         or "Roadmap workspace could not be quiesced before verifier"
     )
+
+
+def _roadmap_benchmark_invalid_reason(result: dict) -> Optional[str]:
+    """Return why a scored Roadmap sample is ineligible for formal metrics."""
+    outcome = str(
+        result.get("agent_execution_outcome")
+        or result.get("agent_completion_status")
+        or ""
+    ).strip().lower()
+    if outcome == "runtime_error":
+        return str(
+            result.get("agent_completion_error")
+            or result.get("error_message")
+            or "Roadmap agent runtime failed"
+        )
+    return None
+
+
+def _finalize_roadmap_verdict(
+    verdict: dict,
+    result: dict,
+    *,
+    verifier_error: Optional[str],
+    benchmark_invalid_reason: Optional[str],
+) -> dict:
+    """Attach orthogonal execution, verifier, and benchmark-validity state."""
+    merged = _merge_agent_completion_into_verdict(verdict, result)
+    if isinstance(result.get("agent_lifecycle"), dict):
+        merged["agent_lifecycle"] = result["agent_lifecycle"]
+    merged["verifier_eligible"] = verifier_error is None
+    merged["benchmark_valid"] = benchmark_invalid_reason is None
+    merged["benchmark_invalid_reason"] = benchmark_invalid_reason
+    if benchmark_invalid_reason:
+        # A verifier result remains useful diagnostically, but this sample
+        # must not be counted as a valid benchmark measurement.
+        merged["status"] = "ERROR"
+        merged["error_message"] = benchmark_invalid_reason
+    return merged
 
 
 def execute_run(run_config: RunConfig, harness: SWEBenchHarness, 
@@ -506,6 +566,12 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             _roadmap_lifecycle_verifier_error(result)
             if is_roadmapbench else None
         )
+        benchmark_invalid_reason = (
+            _roadmap_benchmark_invalid_reason(result)
+            if is_roadmapbench else None
+        )
+        if lifecycle_verifier_error and not benchmark_invalid_reason:
+            benchmark_invalid_reason = lifecycle_verifier_error
 
         if lifecycle_verifier_error:
             verdict = {
@@ -550,9 +616,12 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             }
 
         if is_roadmapbench:
-            verdict = _merge_agent_completion_into_verdict(verdict, result)
-            if isinstance(result.get("agent_lifecycle"), dict):
-                verdict["agent_lifecycle"] = result["agent_lifecycle"]
+            verdict = _finalize_roadmap_verdict(
+                verdict,
+                result,
+                verifier_error=lifecycle_verifier_error,
+                benchmark_invalid_reason=benchmark_invalid_reason,
+            )
         
         # Write verdict
         verdict_path = run_dir / "verdict.json"
@@ -592,6 +661,11 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         manifest.agent_execution_outcome = verdict.get("agent_execution_outcome")
         manifest.agent_completion_error = verdict.get("agent_completion_error")
         manifest.agent_lifecycle = verdict.get("agent_lifecycle")
+        manifest.benchmark_valid = verdict.get("benchmark_valid")
+        manifest.benchmark_invalid_reason = verdict.get(
+            "benchmark_invalid_reason"
+        )
+        manifest.verifier_eligible = verdict.get("verifier_eligible")
         manifest.agent_execution_seconds = result.get("agent_execution_seconds")
         manifest.phase_timing = result.get("phase_timing")
         manifest.verifier_status = verdict.get("verifier_status")

@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sqlite3
+import subprocess
 
 from agent_bench.benchmarks.conditions import openclaw_measurement
 from agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent import (
     RoadmapBenchOpenClawCondition,
 )
 from agent_bench.benchmarks.roadmap_bench.conditions.sqlite_session_compat import (
+    _archive_sqlite_database,
     _export_sqlite_store,
     _runtime_version,
 )
@@ -241,3 +243,146 @@ def test_sqlite_projection_preserves_explicit_parent_for_measurement(tmp_path: P
 def test_runtime_observability_version_uses_active_runtime(monkeypatch):
     monkeypatch.setenv("AB_AGENT_RUNTIME_VERSION", "2026.9.2")
     assert _runtime_version() == "v2026.9.2"
+
+
+def test_v9_watcher_prefers_runtime_projection_when_host_sqlite_is_unreadable(
+    tmp_path: Path,
+):
+    sessions_dir = tmp_path / "run" / "agents" / "roadmap_bench" / "sessions"
+    sessions_dir.mkdir(parents=True)
+    parent_key = "agent:roadmap_bench:explicit:parent"
+    (sessions_dir / "sessions.json").write_text(json.dumps({
+        parent_key: {
+            "sessionId": "parent",
+            "sessionFile": "parent.jsonl",
+            "status": "done",
+        }
+    }))
+    (sessions_dir / "parent.jsonl").write_text(_event({
+        "role": "assistant",
+        "content": [{"type": "text", "text": "DONE"}],
+        "stopReason": "stop",
+    }) + "\n")
+    db_path = sessions_dir.parent / "agent" / "openclaw-agent.sqlite"
+    db_path.parent.mkdir()
+    db_path.write_bytes(b"not readable by host sqlite")
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot is not None
+    assert snapshot["parent_session_key"] == parent_key
+    assert snapshot["parent_terminal"] is True
+
+
+def test_v9_database_archive_falls_back_to_file_copy(tmp_path: Path, monkeypatch):
+    source = tmp_path / "openclaw-agent.sqlite"
+    destination = tmp_path / "archive" / "openclaw-agent.sqlite"
+    source.write_bytes(b"strict-sqlite-placeholder")
+
+    def unsupported(_path):
+        raise sqlite3.OperationalError("near STRICT: syntax error")
+
+    module = __import__(
+        "agent_bench.benchmarks.roadmap_bench.conditions.sqlite_session_compat",
+        fromlist=["_readonly_connection"],
+    )
+    monkeypatch.setattr(module, "_readonly_connection", unsupported)
+
+    _archive_sqlite_database(source, destination)
+
+    assert destination.read_bytes() == source.read_bytes()
+
+
+def test_nonzero_openclaw_exit_preserves_structured_error_payload():
+    payload = {
+        "status": "error",
+        "result": {
+            "meta": {
+                "livenessState": "abandoned",
+                "replayInvalid": True,
+                "error": {"kind": "incomplete_turn", "message": "Connection error"},
+            }
+        },
+    }
+
+    class ErrorContainer:
+        backend_id = "singularity"
+
+        def exec(self, *_args, **_kwargs):
+            return subprocess.CompletedProcess([], 1, json.dumps(payload), "transport failed")
+
+    condition = object.__new__(RoadmapBenchOpenClawCondition)
+    condition.container = ErrorContainer()
+    condition._env_info = {}
+
+    result, error = condition._invoke_agent(
+        "oc-runtime", "/workspace", "run", "task", 60
+    )
+
+    assert result == payload
+    assert condition._last_exit_code == 1
+    assert condition._last_completion_status == condition.RUNTIME_ERROR
+    assert "incomplete_turn" in error
+    assert condition._last_stdout == json.dumps(payload)
+
+
+def _write_explicit_parent(run_dir: Path) -> str:
+    parent_key = f"agent:roadmap_bench:explicit:{run_dir.name}"
+    sessions = run_dir / "conversation" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "sessions.json").write_text(json.dumps({
+        parent_key: {
+            "sessionId": run_dir.name,
+            "sessionFile": f"{run_dir.name}.jsonl",
+            "status": "done",
+        }
+    }))
+    event = {
+        "type": "message",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "DONE"}],
+            "stopReason": "stop",
+            "responseId": "response-1",
+            "timestamp": 1_700_000_000_000,
+            "usage": {"input": 5, "cacheRead": 3, "output": 2},
+        },
+    }
+    (sessions / f"{run_dir.name}.jsonl").write_text(json.dumps(event) + "\n")
+    return parent_key
+
+
+def test_explicit_sqlite_parent_model_usage_event_is_parent(tmp_path: Path):
+    run_dir = tmp_path / "explicit-run"
+    parent_key = _write_explicit_parent(run_dir)
+
+    logical, usage_events = openclaw_measurement._logical_tokens(
+        run_dir, "roadmap_bench"
+    )
+
+    assert logical["parent"]["input"] == 8
+    assert logical["parent"]["output"] == 2
+    assert parent_key not in logical["children"]
+    parent_usage = [
+        event
+        for event in usage_events
+        if event.get("session_key") == parent_key
+        and event.get("event_type") == "model_usage"
+    ]
+    assert parent_usage
+    assert all(event["role"] == "parent" for event in parent_usage)
+
+
+def test_v9_runtime_metadata_does_not_claim_legacy_announce_limit(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AB_AGENT_RUNTIME_VERSION", "2026.9.2")
+    result = openclaw_measurement._runtime_observability(
+        tmp_path, [], "roadmap_bench"
+    )
+
+    assert result["runtime_version"] == "v2026.9.2"
+    limitation = result["announce_attribution"]["limitation"]
+    assert "v2026.4.22" not in limitation
+    assert "does not infer identity from timing" in limitation

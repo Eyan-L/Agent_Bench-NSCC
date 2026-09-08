@@ -14,6 +14,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import shutil
 import sqlite3
 import time
 from typing import Dict, Optional, Tuple
@@ -111,8 +112,11 @@ def _read_sqlite_store(
         connection = _readonly_connection(db_path)
         connection.execute("BEGIN")
         required = {"session_nodes", "session_windows", "transcript_events"}
+        # ``sqlite_schema`` is only an alias on newer SQLite releases.  NSCC's
+        # Python runtime can be linked against an older library, while
+        # ``sqlite_master`` is supported by both old and new versions.
         rows = connection.execute(
-            "SELECT name FROM sqlite_schema WHERE type='table'"
+            "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
         present = {str(row[0]) for row in rows}
         if not required.issubset(present):
@@ -463,6 +467,14 @@ def _archive_sqlite_database(db_path: Path, destination: Path) -> None:
         source = _readonly_connection(db_path)
         target = sqlite3.connect(destination)
         source.backup(target)
+    except sqlite3.Error:
+        # OpenClaw v9 uses STRICT tables, which NSCC's Python-linked SQLite
+        # 3.26 cannot parse. The gateway has stopped before archival, so a
+        # direct copy is a consistent fallback without requiring host SQLite.
+        if target is not None:
+            target.close()
+            target = None
+        shutil.copy2(db_path, destination)
     finally:
         if target is not None:
             target.close()
@@ -560,10 +572,13 @@ def install_roadmap_sqlite_session_compat() -> None:
     underlying_read = getattr(current_read, "__func__", current_read)
     if not getattr(underlying_read, "_roadmap_sqlite_session_compat", False):
         def read_snapshot(cls, sessions_dir: Path):
-            snapshot = _sqlite_yield_snapshot(cls, sessions_dir)
+            # The runtime-side Node exporter can read v9 STRICT databases even
+            # when host Python cannot. Prefer that durable projection when it
+            # has been published, retaining direct SQLite for tests/new hosts.
+            snapshot = underlying_read(cls, sessions_dir)
             if snapshot is not None:
                 return snapshot
-            return underlying_read(cls, sessions_dir)
+            return _sqlite_yield_snapshot(cls, sessions_dir)
 
         setattr(read_snapshot, "_roadmap_sqlite_session_compat", True)
         RoadmapBenchOpenClawCondition._read_yield_snapshot = classmethod(read_snapshot)
@@ -585,8 +600,10 @@ def install_roadmap_sqlite_session_compat() -> None:
                 return
             out_dir = run_dir / "conversation"
             try:
-                if _export_sqlite_store(db_path, out_dir / "sessions"):
-                    logger.info("  archived OpenClaw SQLite session projection")
+                sessions_out = out_dir / "sessions"
+                if not (sessions_out / "sessions.json").is_file():
+                    if _export_sqlite_store(db_path, sessions_out):
+                        logger.info("  archived OpenClaw SQLite session projection")
                 _archive_sqlite_database(db_path, out_dir / "openclaw-agent.sqlite")
             except Exception as exc:  # noqa: BLE001 - measurement remains best-effort
                 logger.warning("OpenClaw SQLite session archive failed: %s", exc)

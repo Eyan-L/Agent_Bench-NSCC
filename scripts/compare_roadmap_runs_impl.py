@@ -113,6 +113,15 @@ class RunRecord:
         return str(self.manifest.get("verifier_status") or "").upper()
 
     @property
+    def benchmark_valid(self) -> bool:
+        value = self.manifest.get("benchmark_valid")
+        if isinstance(value, bool):
+            return value
+        # Historical manifests predate the explicit validity field; ERROR was
+        # the existing infrastructure-invalid signal.
+        return self.status != "ERROR"
+
+    @property
     def reward(self) -> float | None:
         return _number(self.manifest.get("reward"))
 
@@ -457,8 +466,9 @@ def collect_records(
     return records
 
 
-def _selection_score(record: RunRecord) -> tuple[int, int, int, int, int]:
+def _selection_score(record: RunRecord) -> tuple[int, int, int, int, int, int]:
     """Prefer a successful focused retry over an earlier infra ERROR."""
+    benchmark_valid = 1 if record.benchmark_valid else 0
     reward = 1 if record.reward is not None else 0
     non_error = 1 if record.status != "ERROR" else 0
     trajectory = 1 if record.has_trajectory else 0
@@ -467,7 +477,7 @@ def _selection_score(record: RunRecord) -> tuple[int, int, int, int, int]:
         mtime = record.manifest_path.stat().st_mtime_ns
     except OSError:
         mtime = 0
-    return reward, non_error, trajectory, wall_end, mtime
+    return benchmark_valid, reward, non_error, trajectory, wall_end, mtime
 
 
 def select_best_records(
@@ -499,6 +509,11 @@ def record_to_dict(record: RunRecord) -> dict[str, Any]:
         "seed": record.seed,
         "run_id": record.manifest.get("run_id"),
         "status": record.status,
+        "benchmark_valid": record.benchmark_valid,
+        "benchmark_invalid_reason": record.manifest.get(
+            "benchmark_invalid_reason"
+        ),
+        "verifier_eligible": record.manifest.get("verifier_eligible"),
         "verifier_status": record.verifier_status or None,
         "reward": record.reward,
         "test_pass_rate": record.test_pass_rate,
@@ -559,6 +574,7 @@ def record_to_dict(record: RunRecord) -> dict[str, Any]:
 
 
 def summarize_arm(records: Sequence[RunRecord]) -> dict[str, Any]:
+    valid_records = [record for record in records if record.benchmark_valid]
     statuses = Counter(record.status for record in records)
     verifier_statuses = Counter(
         record.verifier_status or "MISSING" for record in records
@@ -568,22 +584,25 @@ def summarize_arm(records: Sequence[RunRecord]) -> dict[str, Any]:
         for record in records
     )
     rows = [record_to_dict(record) for record in records]
-    rewards = [record.reward for record in records if record.reward is not None]
+    valid_rows = [row for row in rows if row["benchmark_valid"]]
+    rewards = [
+        record.reward for record in valid_records if record.reward is not None
+    ]
     pass_rates = [
         record.test_pass_rate
-        for record in records
+        for record in valid_records
         if record.test_pass_rate is not None
     ]
     durations = [
         record.latency_seconds
-        for record in records
+        for record in valid_records
         if record.latency_seconds is not None
     ]
     latency_sources = Counter(
-        record.latency_source or "MISSING" for record in records
+        record.latency_source or "MISSING" for record in valid_records
     )
     full_passes = sum(
-        1 for record in records
+        1 for record in valid_records
         if record.reward is not None and record.reward >= 1.0
     )
     trajectory_count = sum(record.has_trajectory for record in records)
@@ -594,7 +613,7 @@ def summarize_arm(records: Sequence[RunRecord]) -> dict[str, Any]:
     def values(field: str) -> list[float]:
         return [
             value
-            for row in rows
+            for row in valid_rows
             if (value := _number(row.get(field))) is not None
         ]
 
@@ -606,20 +625,24 @@ def summarize_arm(records: Sequence[RunRecord]) -> dict[str, Any]:
             values("total_completion_tokens")
         ),
         "mean_sessions_per_task": _mean(values("trajectory_session_count")),
-        "total_spawns": sum(_int_number(row.get("spawn_count")) for row in rows),
+        "total_spawns": sum(
+            _int_number(row.get("spawn_count")) for row in valid_rows
+        ),
         "total_compactions": sum(
-            _int_number(row.get("compaction_count")) for row in rows
+            _int_number(row.get("compaction_count")) for row in valid_rows
         ),
         "total_context_overflows": sum(
-            _int_number(row.get("context_overflow_count")) for row in rows
+            _int_number(row.get("context_overflow_count")) for row in valid_rows
         ),
         "total_loop_detections": sum(
-            _int_number(row.get("loop_detected_count")) for row in rows
+            _int_number(row.get("loop_detected_count")) for row in valid_rows
         ),
     }
 
     return {
         "task_count": len(records),
+        "benchmark_valid_count": len(valid_records),
+        "benchmark_invalid_count": len(records) - len(valid_records),
         "evaluated_count": len(rewards),
         "infra_error_count": statuses.get("ERROR", 0),
         "status_counts": dict(sorted(statuses.items())),
@@ -714,11 +737,16 @@ def compare_paired(
     for key in common:
         sub = sub_map[key]
         single = single_map[key]
+        pair_benchmark_valid = sub.benchmark_valid and single.benchmark_valid
         sub_flat = record_to_dict(sub)
         single_flat = record_to_dict(single)
 
         reward_delta = None
-        if sub.reward is not None and single.reward is not None:
+        if (
+            pair_benchmark_valid
+            and sub.reward is not None
+            and single.reward is not None
+        ):
             reward_delta = sub.reward - single.reward
             reward_deltas.append(reward_delta)
             if reward_delta > 1e-12:
@@ -731,6 +759,8 @@ def compare_paired(
         latency_delta = None
         speedup = None
         if (
+            pair_benchmark_valid
+            and
             sub.latency_seconds is not None
             and single.latency_seconds is not None
         ):
@@ -753,6 +783,9 @@ def compare_paired(
             "single_agent_job_id": single.job_id,
             "subagent_status": sub.status,
             "single_agent_status": single.status,
+            "pair_benchmark_valid": pair_benchmark_valid,
+            "subagent_benchmark_valid": sub.benchmark_valid,
+            "single_agent_benchmark_valid": single.benchmark_valid,
             "subagent_verifier_status": sub.verifier_status or None,
             "single_agent_verifier_status": single.verifier_status or None,
             "subagent_reward": sub.reward,
@@ -822,15 +855,18 @@ def compare_paired(
         else None
     )
 
+    valid_rows = [row for row in rows if row["pair_benchmark_valid"]]
     efficiency = {
         field: _paired_metric_summary(
-            rows, f"subagent_{field}", f"single_agent_{field}"
+            valid_rows, f"subagent_{field}", f"single_agent_{field}"
         )
         for field, _label in TRAJECTORY_COMPARE_FIELDS
     }
 
     summary = {
         "paired_task_count": len(common),
+        "paired_benchmark_valid_count": len(valid_rows),
+        "paired_benchmark_invalid_count": len(rows) - len(valid_rows),
         "paired_seeds": sorted({key[1] for key in common}),
         "subagent_only": [
             {"instance_id": key[0], "seed": key[1]}
