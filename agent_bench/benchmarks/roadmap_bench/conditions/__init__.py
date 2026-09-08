@@ -6,7 +6,9 @@
 from .measurement_compat import install_roadmap_measurement_compat
 from .otel_compat import install_roadmap_otel_activity_compat
 from .runtime_policy import install_roadmap_gateway_only_policy
+from .session_compat import install_roadmap_session_compat
 
 install_roadmap_measurement_compat()
 install_roadmap_otel_activity_compat()
 install_roadmap_gateway_only_policy()
+install_roadmap_session_compat()
