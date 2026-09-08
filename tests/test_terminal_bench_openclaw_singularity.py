@@ -410,10 +410,11 @@ def _write_roadmap_session_state(
     child_statuses=("running",),
     parent_session_id="parent-session",
     parent_status="done",
+    parent_key="agent:roadmap_bench:main",
 ):
     sessions_dir.mkdir(parents=True, exist_ok=True)
     index = {
-        "agent:roadmap_bench:main": {
+        parent_key: {
             "sessionId": parent_session_id,
             "status": parent_status,
         }
@@ -421,7 +422,7 @@ def _write_roadmap_session_state(
     for i, status in enumerate(child_statuses):
         index[f"agent:roadmap_bench:subagent:{i}"] = {
             "sessionId": f"child-{i}",
-            "spawnedBy": "agent:roadmap_bench:main",
+            "spawnedBy": parent_key,
             "status": status,
         }
     (sessions_dir / "sessions.json").write_text(json.dumps(index))
@@ -447,6 +448,29 @@ def _assistant_event(text):
             "stopReason": "stop",
         },
     }
+
+
+def test_roadmap_snapshot_supports_explicit_parent_session_key(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    parent_key = "agent:roadmap_bench:explicit:parent-session"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_assistant_event("DONE\nIntegrated and validated.")],
+        child_statuses=("running", "done"),
+        parent_status="running",
+        parent_key=parent_key,
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(
+        sessions_dir
+    )
+
+    assert snapshot is not None
+    assert snapshot["parent_session_key"] == parent_key
+    assert snapshot["parent_session_id"] == "parent-session"
+    assert snapshot["pending_children"] == 1
+    assert snapshot["completed_children"] == 1
+    assert snapshot["done_text"].startswith("DONE")
 
 
 def _prompt_error_event(error="LLM idle timeout (120s): no response from model"):

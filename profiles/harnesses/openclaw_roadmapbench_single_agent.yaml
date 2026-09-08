@@ -19,7 +19,7 @@ openclaw:
       mode: token
       token:
         source: env
-        provider: env
+        provider: default
         id: OPENCLAW_GATEWAY_TOKEN
   diagnostics:
     enabled: true

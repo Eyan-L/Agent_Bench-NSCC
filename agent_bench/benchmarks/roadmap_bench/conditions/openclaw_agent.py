@@ -920,8 +920,10 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         if not isinstance(index, dict):
             return None
 
-        parent_key = f"agent:{cls.agent_id}:main"
-        parent = index.get(parent_key) or {}
+        selected_parent = cls._select_parent_session(sessions_dir, index)
+        if selected_parent is None:
+            return None
+        parent_key, parent = selected_parent
         parent_session_id = parent.get("sessionId")
         if not parent_session_id:
             return None
@@ -1116,6 +1118,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         )
 
         return {
+            "parent_session_key": str(parent_key),
             "parent_session_id": str(parent_session_id),
             "parent_session_status": parent_session_status,
             "parent_session_active": parent_session_active,
@@ -1166,6 +1169,53 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             "assistant_stop_candidate": assistant_stop_candidate,
             "latest_parent_event": latest_event_kind,
         }
+
+    @classmethod
+    def _select_parent_session(
+        cls,
+        sessions_dir: Path,
+        index: Dict,
+    ) -> Optional[Tuple[str, Dict]]:
+        """Select the durable requester across OpenClaw session-key formats."""
+        prefix = f"agent:{cls.agent_id}:"
+        candidates = []
+        for key, value in index.items():
+            if (
+                not isinstance(key, str)
+                or not key.startswith(prefix)
+                or not isinstance(value, dict)
+                or value.get("spawnedBy")
+                or not value.get("sessionId")
+            ):
+                continue
+
+            transcript = cls._resolve_parent_transcript_path(
+                sessions_dir, value
+            )
+            try:
+                transcript_mtime = transcript.stat().st_mtime_ns
+            except (AttributeError, OSError):
+                transcript_mtime = -1
+            updated_at = value.get("updatedAt")
+            try:
+                updated_rank = float(updated_at)
+            except (TypeError, ValueError):
+                updated_rank = -1.0
+            candidates.append((
+                updated_rank,
+                transcript_mtime,
+                key == f"{prefix}main",
+                key,
+                value,
+            ))
+
+        if not candidates:
+            return None
+        _updated, _mtime, _legacy, key, value = max(
+            candidates,
+            key=lambda item: item[:3],
+        )
+        return key, value
 
     @staticmethod
     def _resolve_parent_transcript_path(
