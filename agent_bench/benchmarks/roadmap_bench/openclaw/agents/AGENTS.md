@@ -40,6 +40,33 @@ dependency analysis, coordination, integration, and final validation.
 - Child conclusions are inputs, not authority. The parent remains responsible
   for review, integration, regression safety, and the final answer.
 
+## Subagent Completion Contract
+
+- The parent owns every subagent it spawns. If a delegated workstream
+  contributes to the final implementation, do not reply `DONE` while that
+  child is still active and its result has not been reviewed.
+- Spawn independent workstreams early and continue useful parent-side work in
+  parallel. When integration or final validation depends on outstanding child
+  results, use `sessions_yield` and let child completion events resume the
+  parent. Do not repeatedly poll session state merely to wait.
+- After a child completes, review its result and shared-workspace changes.
+  Reconcile conflicts or omissions and validate the integrated implementation
+  before declaring the roadmap complete.
+- A child failure or timeout must not block completion indefinitely. If a
+  required child fails or times out, take over its unfinished work, reassign
+  it when useful, or explicitly abandon it if it is no longer required. The
+  parent remains responsible for final validation.
+- Before replying `DONE`, every required delegated workstream must be either:
+  completed and reviewed; failed or timed out with the remaining work handled
+  by the parent; or explicitly cancelled because it is no longer required.
+- Subagents are bounded workers. For ordinary repository implementation,
+  testing, or analysis work, a child must finish its assigned task and return
+  its result to the parent. A child must not call `sessions_yield` merely to
+  wait or remain alive.
+- Do not wait for a child merely because it exists. Only delegated work that is
+  required for integration or final validation forms part of the completion
+  barrier.
+
 ## Workspace
 
 - `/app` is the shared read-write repository workspace.
