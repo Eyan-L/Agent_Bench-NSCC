@@ -596,12 +596,20 @@ class OpenClawAgentCondition:
         """Return (stable identity, completion status, error), if terminal."""
         return None
 
+    def _payload_for_durable_invocation_terminal(
+        self,
+        status: str,
+        diagnostic: str,
+    ) -> Optional[Dict]:
+        """Build a result when a durable session outlives its blocked CLI."""
+        return None
+
     def _communicate_with_durable_watch(
         self,
         proc: subprocess.Popen,
         timeout_seconds: float,
     ) -> Tuple[str, str, Optional[Tuple[str, str]]]:
-        """Wait for a CLI while allowing durable fatal state to end the wait."""
+        """Wait for a CLI while allowing stable durable terminal state to end it."""
         deadline = time.monotonic() + timeout_seconds
         candidate = None
         while True:
@@ -848,10 +856,18 @@ class OpenClawAgentCondition:
         self._last_stderr = stderr
 
         if durable_interrupt is not None:
-            status, error = durable_interrupt
+            status, diagnostic = durable_interrupt
+            payload = self._payload_for_durable_invocation_terminal(
+                status, diagnostic
+            )
+            if payload is not None and status == self.NORMAL_COMPLETION:
+                self._last_exit_code = 0
+                self._last_completion_status = status
+                self._last_completion_error = ""
+                return payload, ""
             self._last_completion_status = status
-            self._last_completion_error = error
-            return None, error
+            self._last_completion_error = diagnostic
+            return None, diagnostic
 
         payload = self._extract_last_json(stderr)
         if payload is None:
@@ -972,6 +988,11 @@ class OpenClawAgentCondition:
         meta = run.get("meta") or {}
         if not isinstance(meta, dict):
             return cls.RUNTIME_ERROR, "OpenClaw result meta is malformed"
+
+        # Emitted only by a benchmark durable-session watcher after stable
+        # logical completion when the command-line RPC itself remains stuck.
+        if meta.get("agentBenchDurableRuntimeTermination") is True:
+            return cls.NORMAL_COMPLETION, ""
 
         raw_error = meta.get("error")
         if isinstance(raw_error, dict) and raw_error:
