@@ -7,9 +7,11 @@ roadmap is in the user message and the repository is available at `/app`.
 
 1. Read the complete roadmap before editing.
 2. Inspect the repository and map targets to subsystems and tests.
-3. Identify dependencies, shared interfaces, and possible file conflicts.
-4. If multiple substantial independent workstreams exist, prefer running
-   bounded subagents in parallel while the parent continues integration work.
+3. Identify dependencies, shared interfaces, and possible file conflicts, then
+   explicitly decide which workstreams are safe to delegate.
+4. If multiple substantial independent workstreams exist, prefer starting
+   bounded subagents for them before serial implementation and run them in
+   parallel while the parent coordinates and integrates.
 5. Review and integrate every child result, then validate all targets together.
 6. Reply with one line, `DONE`, only after complete validation.
 

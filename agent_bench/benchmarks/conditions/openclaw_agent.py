@@ -405,6 +405,29 @@ class OpenClawAgentCondition:
                     phase_timing["post_parent_quiescence_seconds"] = max(
                         0.0, (workspace_quiesced_ns - parent_terminal_ns) / 1e9
                     )
+            try:
+                from agent_bench.benchmarks.conditions.openclaw_measurement import (
+                    append_trajectory_event,
+                )
+
+                append_trajectory_event(
+                    run_dir,
+                    "runtime_termination",
+                    timestamp_ns=parent_terminal_ns,
+                    status=self._last_completion_status,
+                    parent_session_status=agent_lifecycle.get(
+                        "parentSessionStatusAtTerminal"
+                    ),
+                    terminal_evidence=agent_lifecycle.get("terminalEvidence"),
+                    done_marker=bool(agent_lifecycle.get("done_marker")),
+                    stop_reason=agent_lifecycle.get("stopReason"),
+                    pending_children=agent_lifecycle.get(
+                        "pendingChildrenAtParentTerminal"
+                    ),
+                    workspace_quiesced=agent_lifecycle.get("workspaceQuiesced"),
+                )
+            except Exception:
+                logger.exception("trajectory runtime termination event write failed")
         if (
             isinstance(agent_lifecycle, dict)
             and agent_lifecycle.get("pendingChildrenAtParentTerminal", 0)

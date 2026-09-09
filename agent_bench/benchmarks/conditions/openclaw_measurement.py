@@ -387,7 +387,7 @@ def _session_events(run_dir: Path, agent_id: str) -> list[dict]:
                     heartbeat_turn = False
                 continue
 
-            if stop_reason == "stop":
+            if stop_reason in {"stop", "length"}:
                 _append(
                     events, timestamp_ns=timestamp_ns, session_id=session_id,
                     session_key=session_key, role=role,

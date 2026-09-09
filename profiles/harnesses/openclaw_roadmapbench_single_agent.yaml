@@ -58,7 +58,7 @@ openclaw:
       vllm:
         enabled: true
       memory-core:
-        enabled: true
+        enabled: false
       diagnostics-otel:
         enabled: true
   agents:

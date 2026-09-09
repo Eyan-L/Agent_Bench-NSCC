@@ -37,6 +37,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _append_roadmap_trajectory_event(
+    run_dir: Path, event_type: str, **fields: Any
+) -> None:
+    """Append best-effort harness events without affecting benchmark results."""
+    try:
+        from agent_bench.benchmarks.conditions.openclaw_measurement import (
+            append_trajectory_event,
+        )
+
+        append_trajectory_event(run_dir, event_type, **fields)
+    except Exception:
+        logger.exception("trajectory %s event write failed", event_type)
+
+
 def _telemetry_bool(value: Any) -> Optional[bool]:
     if isinstance(value, bool):
         return value
@@ -573,6 +587,8 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         if lifecycle_verifier_error and not benchmark_invalid_reason:
             benchmark_invalid_reason = lifecycle_verifier_error
 
+        verifier_start_ns = None
+        verifier_end_ns = None
         if lifecycle_verifier_error:
             verdict = {
                 "status": "ERROR",
@@ -589,6 +605,17 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             }
         elif skip_patch_gate or (patch_path.exists() and patch_path.stat().st_size > 0):
             verifier_start_ns = time.time_ns()
+            if is_roadmapbench:
+                _append_roadmap_trajectory_event(
+                    run_dir,
+                    "verifier_start",
+                    timestamp_ns=verifier_start_ns,
+                    instance_id=run_config.instance_id,
+                    candidate_patch_path=str(patch_path),
+                    candidate_patch_bytes=(
+                        patch_path.stat().st_size if patch_path.exists() else 0
+                    ),
+                )
             try:
                 verdict = harness.run_tests(
                     container_id=container_id,
@@ -600,6 +627,16 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                     instance_data=instance_data,
                     run_dir=run_dir,
                 )
+            except BaseException as exc:
+                if is_roadmapbench:
+                    _append_roadmap_trajectory_event(
+                        run_dir,
+                        "verifier_result",
+                        timestamp_ns=time.time_ns(),
+                        status="ERROR",
+                        error=str(exc),
+                    )
+                raise
             finally:
                 verifier_end_ns = time.time_ns()
                 phase_timing.update({
@@ -622,6 +659,22 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 verifier_error=lifecycle_verifier_error,
                 benchmark_invalid_reason=benchmark_invalid_reason,
             )
+            if (
+                isinstance(verifier_end_ns, int)
+                and isinstance(verifier_start_ns, int)
+            ):
+                _append_roadmap_trajectory_event(
+                    run_dir,
+                    "verifier_result",
+                    timestamp_ns=verifier_end_ns,
+                    status=verdict.get("status"),
+                    verifier_status=verdict.get("verifier_status"),
+                    reward=verdict.get("reward"),
+                    test_pass_rate=verdict.get("test_pass_rate"),
+                    verifier_rc=verdict.get("verifier_rc"),
+                    timed_out=verdict.get("verifier_timed_out"),
+                    duration_seconds=(verifier_end_ns - verifier_start_ns) / 1e9,
+                )
         
         # Write verdict
         verdict_path = run_dir / "verdict.json"
