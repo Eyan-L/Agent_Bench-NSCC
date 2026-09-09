@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import re
+import signal
 import shlex
 import shutil
 import subprocess
@@ -335,27 +336,35 @@ class OpenClawAgentCondition:
         # `openclaw.tool.call` spans from the archived session trajectory so
         # downstream analysis sees per-tool spans regardless.
         if spans_path is not None:
-            self._maybe_synthesize_tool_call_spans(spans_path, run_dir, run_dir.name)
+            try:
+                self._maybe_synthesize_tool_call_spans(
+                    spans_path, run_dir, run_dir.name
+                )
+            except Exception as exc:  # noqa: BLE001 - telemetry is non-critical
+                logger.warning("tool span synthesis failed: %s", exc)
 
         # 3e. Prefer per-request model usage spans from the raw response log.
         # The older agentMeta.usage fallback is run-level aggregate data, so it
         # is intentionally used only when the per-request log is unavailable.
         if spans_path is not None:
-            raw_usage_spans = self._maybe_synthesize_model_usage_spans_from_raw_log(
-                spans_path, run_dir, run_dir.name,
-            )
-            cache_usage_spans = 0
-            if raw_usage_spans == 0:
-                cache_usage_spans = self._maybe_synthesize_model_usage_spans_from_cache_trace(
+            try:
+                raw_usage_spans = self._maybe_synthesize_model_usage_spans_from_raw_log(
                     spans_path, run_dir, run_dir.name,
                 )
-            if raw_usage_spans == 0 and cache_usage_spans == 0:
-                self._maybe_synthesize_model_usage_span(
-                    spans_path, payload,
-                    run_id=run_dir.name,
-                    start_ns=step_start_ns,
-                    end_ns=step_end_ns,
-                )
+                cache_usage_spans = 0
+                if raw_usage_spans == 0:
+                    cache_usage_spans = self._maybe_synthesize_model_usage_spans_from_cache_trace(
+                        spans_path, run_dir, run_dir.name,
+                    )
+                if raw_usage_spans == 0 and cache_usage_spans == 0:
+                    self._maybe_synthesize_model_usage_span(
+                        spans_path, payload,
+                        run_id=run_dir.name,
+                        start_ns=step_start_ns,
+                        end_ns=step_end_ns,
+                    )
+            except Exception as exc:  # noqa: BLE001 - telemetry is non-critical
+                logger.warning("model usage span synthesis failed: %s", exc)
 
         measurement: Dict = {}
         try:
@@ -577,6 +586,62 @@ class OpenClawAgentCondition:
     # OpenClaw CLI invocation
     # ------------------------------------------------------------------
 
+    def _watch_durable_invocation_terminal(self) -> bool:
+        """Whether this benchmark has a durable logical-session lifecycle."""
+        return False
+
+    def _durable_invocation_terminal_evidence(
+        self,
+    ) -> Optional[Tuple[Tuple, str, str]]:
+        """Return (stable identity, completion status, error), if terminal."""
+        return None
+
+    def _communicate_with_durable_watch(
+        self,
+        proc: subprocess.Popen,
+        timeout_seconds: float,
+    ) -> Tuple[str, str, Optional[Tuple[str, str]]]:
+        """Wait for a CLI while allowing durable fatal state to end the wait."""
+        deadline = time.monotonic() + timeout_seconds
+        candidate = None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(proc.args, timeout_seconds)
+            try:
+                stdout, stderr = proc.communicate(
+                    timeout=min(2.0, remaining)
+                )
+                return stdout or "", stderr or "", None
+            except subprocess.TimeoutExpired:
+                evidence = self._durable_invocation_terminal_evidence()
+                if evidence is None:
+                    candidate = None
+                    continue
+                signature, status, error = evidence
+                if candidate != signature:
+                    candidate = signature
+                    continue
+
+                logger.warning(
+                    "  interrupting openclaw CLI after stable durable "
+                    "terminal evidence: %s",
+                    error,
+                )
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    proc.terminate()
+                try:
+                    stdout, stderr = proc.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        proc.kill()
+                    stdout, stderr = proc.communicate()
+                return stdout or "", stderr or "", (status, error)
+
     def _invoke_agent(
         self,
         container_id: Optional[str],
@@ -685,12 +750,51 @@ class OpenClawAgentCondition:
                 inner[:200] + ("..." if len(inner) > 200 else ""),
             )
         dispatch_t0 = time.time()
+        durable_interrupt = None
         try:
+            if self._watch_durable_invocation_terminal():
+                if argv is None:
+                    handle = self._handle(container_id)
+                    if self.container is None or handle is None:
+                        command = [
+                            "docker", "exec", container_id, "bash", "-lc", inner
+                        ]
+                        running = subprocess.Popen(
+                            command,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            start_new_session=True,
+                            **run_kwargs,
+                        )
+                    else:
+                        running = self.container.popen_exec(
+                            handle, ["bash", "-lc", inner]
+                        )
+                else:
+                    running = subprocess.Popen(
+                        argv,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        start_new_session=True,
+                        **run_kwargs,
+                    )
+                stdout, stderr, durable_interrupt = (
+                    self._communicate_with_durable_watch(
+                        running, subprocess_timeout
+                    )
+                )
+                proc = subprocess.CompletedProcess(
+                    running.args, running.returncode, stdout, stderr
+                )
             if argv is None:
                 # In-container path. Route through the Container abstraction
                 # so docker and singularity backends share one call site.
                 handle = self._handle(container_id)
-                if self.container is None or handle is None:
+                if self._watch_durable_invocation_terminal():
+                    pass
+                elif self.container is None or handle is None:
                     # Legacy fallback — driver hasn't been updated to inject
                     # self.container, but we still have a docker container id.
                     argv = ["docker", "exec", container_id, "bash", "-lc", inner]
@@ -707,7 +811,7 @@ class OpenClawAgentCondition:
                         check=False,
                         timeout=subprocess_timeout,
                     )
-            else:
+            elif not self._watch_durable_invocation_terminal():
                 proc = subprocess.run(
                     argv,
                     capture_output=True,
@@ -742,6 +846,12 @@ class OpenClawAgentCondition:
 
         self._last_stdout = stdout
         self._last_stderr = stderr
+
+        if durable_interrupt is not None:
+            status, error = durable_interrupt
+            self._last_completion_status = status
+            self._last_completion_error = error
+            return None, error
 
         payload = self._extract_last_json(stderr)
         if payload is None:
@@ -1317,7 +1427,11 @@ class OpenClawAgentCondition:
 
         assistant_messages = [
             m for m in final_snapshot.get("messages", []) or []
-            if isinstance(m, dict) and m.get("role") == "assistant" and m.get("usage")
+            if (
+                isinstance(m, dict)
+                and m.get("role") == "assistant"
+                and isinstance(m.get("usage"), dict)
+            )
         ]
         if not assistant_messages:
             return 0

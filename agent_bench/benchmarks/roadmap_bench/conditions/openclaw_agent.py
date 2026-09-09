@@ -50,6 +50,49 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     # watcher reads before accepting a non-DONE stop as logical completion.
     terminal_stop_confirmation_seconds = 4.0
 
+    def _watch_durable_invocation_terminal(self) -> bool:
+        return True
+
+    def _durable_invocation_terminal_evidence(
+        self,
+    ) -> Optional[Tuple[Tuple, str, str]]:
+        sessions_dir = self._live_sessions_dir()
+        if sessions_dir is None:
+            return None
+        snapshot = self._read_yield_snapshot(sessions_dir)
+        if not snapshot:
+            return None
+        parent_status = str(
+            snapshot.get("parent_session_status") or "unknown"
+        )
+        if parent_status not in {
+            "cancelled", "canceled", "error", "failed", "killed",
+            "timed_out", "timeout",
+        }:
+            return None
+        prompt_error = str(
+            snapshot.get("post_yield_prompt_error") or ""
+        ).strip()
+        completion_status = (
+            self.CONTEXT_OVERFLOW
+            if self._is_context_overflow_text(prompt_error)
+            else self.RUNTIME_ERROR
+        )
+        error = prompt_error or (
+            "OpenClaw durable parent session terminated while the CLI was "
+            f"still running (status={parent_status}, "
+            f"session={snapshot['parent_session_id']})"
+        )
+        signature = (
+            snapshot.get("parent_session_id"),
+            parent_status,
+            snapshot.get("message_count"),
+            snapshot.get("transcript_size_bytes"),
+            snapshot.get("latest_parent_event"),
+            error,
+        )
+        return signature, completion_status, error
+
     def run(
         self,
         instance_data: Dict,

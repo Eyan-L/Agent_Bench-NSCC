@@ -340,6 +340,37 @@ class SingularityContainer(Container):
             )
         return r
 
+    def popen_exec(
+        self,
+        h: ContainerHandle,
+        argv: list[str],
+        *,
+        workdir: Optional[str] = None,
+        env: Optional[dict[str, str]] = None,
+    ) -> subprocess.Popen:
+        cmd: list[str] = ["singularity", "exec"]
+        if workdir:
+            cmd += ["--pwd", workdir]
+        merged: dict[str, str] = {}
+        stashed = self._handle_env.get(h.name)
+        if stashed:
+            merged.update(stashed)
+        if env:
+            merged.update(env)
+        exec_env = _subprocess_env()
+        for key, value in merged.items():
+            _set_singularity_env(exec_env, key, value)
+        cmd += [f"instance://{h.name}", *argv]
+        return subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+            env=exec_env,
+        )
+
     def exec_background(
         self,
         h: ContainerHandle,

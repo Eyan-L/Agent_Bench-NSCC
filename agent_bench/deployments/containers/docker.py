@@ -277,6 +277,30 @@ class DockerContainer(Container):
             )
         return r
 
+    def popen_exec(
+        self,
+        h: ContainerHandle,
+        argv: list[str],
+        *,
+        workdir: Optional[str] = None,
+        env: Optional[dict[str, str]] = None,
+    ) -> subprocess.Popen:
+        cmd: list[str] = ["docker", "exec"]
+        if workdir:
+            cmd += ["-w", workdir]
+        if env:
+            for key, value in env.items():
+                cmd += ["-e", f"{key}={value}"]
+        cmd += [h.id, *argv]
+        return subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+
     def exec_background(
         self,
         h: ContainerHandle,

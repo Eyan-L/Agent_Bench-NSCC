@@ -412,6 +412,15 @@ def _build_sglang_plan(
         "AB_SERVING_MAX_NUM_SEQS",
         default=serving.max_num_seqs,
     )
+    # OpenClaw keeps its pinned HTTP dispatcher idle for 60 seconds. SGLang's
+    # default Uvicorn keep-alive is 5 seconds, which leaves a large window in
+    # which the client can reuse a server-closed socket and fail with EPIPE.
+    timeout_keep_alive = _env_int(
+        env,
+        "SGLANG_TIMEOUT_KEEP_ALIVE",
+        "AB_SERVING_HTTP_KEEP_ALIVE_SECONDS",
+        default=300,
+    )
     flashinfer_workspace_base = _env_optional(
         env,
         "FLASHINFER_WORKSPACE_BASE",
@@ -459,6 +468,7 @@ def _build_sglang_plan(
         "SGLANG_KV_MEMTRACE": "0",
         "SGLANG_KV_MEMTRACE_STRICT": "0",
         "SGLANG_MAX_RUNNING_REQUESTS": str(max_running_requests),
+        "SGLANG_TIMEOUT_KEEP_ALIVE": str(timeout_keep_alive),
     }
     if flashinfer_workspace_base:
         base_launch_env["FLASHINFER_WORKSPACE_BASE"] = flashinfer_workspace_base
@@ -474,6 +484,7 @@ def _build_sglang_plan(
         "page_size": page_size,
         "mode": mode,
         "max_running_requests": str(max_running_requests),
+        "timeout_keep_alive_seconds": str(timeout_keep_alive),
     }
 
     if pd_enabled:
@@ -512,6 +523,9 @@ def _build_sglang_plan(
     launch_env = {"CUDA_VISIBLE_DEVICES": cuda_devices, **base_launch_env}
     if mode == "singularity":
         launch_env["SINGULARITYENV_CUDA_VISIBLE_DEVICES"] = cuda_devices
+        launch_env["SINGULARITYENV_SGLANG_TIMEOUT_KEEP_ALIVE"] = str(
+            timeout_keep_alive
+        )
 
     if mode == "native":
         python_bin = _env_str(env, "SGLANG_PYTHON", "AB_SERVING_PYTHON", default=sys.executable)
@@ -545,6 +559,9 @@ def _build_sglang_plan(
             docker_args.append("-d")
         else:
             docker_args.extend(["--rm", "-it"])
+        docker_args.extend([
+            "-e", f"SGLANG_TIMEOUT_KEEP_ALIVE={timeout_keep_alive}",
+        ])
         docker_args.extend(shlex.split(env.get("SGLANG_EXTRA_DOCKER_ARGS", "")))
         argv = ("docker", *docker_args, image, "python3", "-m", "sglang.launch_server", *server_flags)
         metadata["container_name"] = container
