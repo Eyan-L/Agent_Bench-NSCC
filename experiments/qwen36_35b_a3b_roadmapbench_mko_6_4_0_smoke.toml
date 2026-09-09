@@ -1,6 +1,6 @@
-name = "qwen36_35b_a3b_roadmapbench_fal_2_0_0_smoke"
-description = "RoadmapBench Falcon 2.0.0 natural fan-out smoke with the dedicated Roadmap OpenClaw persona and Qwen3.6-35B-A3B on NSCC."
-output_dir = "runs/qwen36_35b_a3b_roadmapbench_fal_2_0_0_smoke"
+name = "qwen36_35b_a3b_roadmapbench_mko_6_4_0_smoke"
+description = "RoadmapBench mko 6.4.0 natural fan-out smoke with the dedicated Roadmap OpenClaw persona and Qwen3.6-35B-A3B on NSCC."
+output_dir = "runs/qwen36_35b_a3b_roadmapbench_mko_6_4_0_smoke"
 seeds = [42]
 
 [telemetry]
@@ -8,7 +8,7 @@ spans_html = true
 
 [benchmark]
 name = "terminal_bench"
-profile = "profiles/benchmarks/roadmap/roadmapbench_fal_2_0_0_smoke.json"
+profile = "profiles/benchmarks/roadmap/roadmapbench_mko_6_4_0_smoke.json"
 
 [harness]
 name = "openclaw"

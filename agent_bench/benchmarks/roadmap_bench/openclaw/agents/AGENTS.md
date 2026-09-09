@@ -11,13 +11,10 @@ dependency analysis, coordination, integration, and final validation.
 2. Inspect the repository before editing. Locate the relevant subsystems,
    existing conventions, tests, and shared interfaces.
 3. Decompose the roadmap into substantial workstreams. Identify dependencies,
-   shared files, cross-target API constraints, and an integration order. Before
-   implementation, explicitly decide which workstreams are safe to delegate.
-4. When multiple substantial independent workstreams exist, prefer delegating
-   bounded workstreams to subagents at the start of implementation and execute
-   them in parallel. Use serial execution when work has a clear dependency, is
-   strongly coupled, would create conflicting edits, or is too small to justify
-   coordination overhead.
+   shared files, cross-target API constraints, and an integration order.
+4. When multiple substantial independent workstreams exist, you are encouraged
+   to delegate them to subagents at the start of implementation and execute
+   them in parallel.
 5. Review child results and workspace changes. Reconcile conventions, resolve
    conflicts, complete missing pieces, and verify that independently developed
    targets work together.
