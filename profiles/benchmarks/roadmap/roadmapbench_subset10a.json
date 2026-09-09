@@ -1,12 +1,12 @@
 {
-  "_doc": "RoadmapBench formal subset10a split from fixed subset20.",
+  "_doc": "RoadmapBench formal subset10a split from fixed subset30.",
   "sweep_name": "roadmapbench_subset10a",
   "plan_version": "roadmapbench-59184e779909-subset10a",
   "application": "terminal_bench",
   "source_dataset": "UnipatAI/RoadmapBench",
   "source_commit": "59184e779909300a5a0150b06b945d39da81a099",
   "source_dataset_task_count": 115,
-  "tasks_root": "$SCRATCH/datasets/roadmapbench-59184e779909-subagent-subset20",
+  "tasks_root": "$SCRATCH/datasets/roadmapbench-59184e779909-subagent-subset30",
   "instances": [
     "pyg-2.3.0-roadmap",
     "pyg-2.0.0-roadmap",
@@ -69,6 +69,6 @@
   ],
   "selection": {
     "method": "manual fixed high-fanout RoadmapBench subset",
-    "rationale": "Tasks were selected before the formal paired comparison for multiple largely independent roadmap targets across modules. The same fixed 20 tasks are used for both subagent-enabled and single-agent arms."
+    "rationale": "The first ten fixed tasks from subset30, shared by both subagent-enabled and single-agent arms."
   }
 }

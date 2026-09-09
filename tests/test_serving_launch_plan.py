@@ -86,6 +86,28 @@ def test_sglang_native_and_singularity_launch_plans() -> None:
 
     assert singularity.argv[:4] == ("singularity", "exec", "--nv", "--containall")
     assert "/tmp/sglang.sif" in singularity.argv
+    assert singularity.env["SGLANG_TIMEOUT_KEEP_ALIVE"] == "300"
+    assert singularity.env[
+        "SINGULARITYENV_SGLANG_TIMEOUT_KEEP_ALIVE"
+    ] == "300"
+    assert singularity.metadata["timeout_keep_alive_seconds"] == "300"
+
+
+def test_sglang_keep_alive_override_is_effective() -> None:
+    plan = _plan(
+        "profiles/models/qwen35_9b.json",
+        "profiles/serving/sglang/default.yaml",
+        backend="sglang",
+        mode="singularity",
+        env={
+            "AB_SERVING_SIF": "/tmp/sglang.sif",
+            "AB_SERVING_HTTP_KEEP_ALIVE_SECONDS": "420",
+        },
+    )
+
+    assert plan.env["SGLANG_TIMEOUT_KEEP_ALIVE"] == "420"
+    assert plan.env["SINGULARITYENV_SGLANG_TIMEOUT_KEEP_ALIVE"] == "420"
+    assert plan.metadata["timeout_keep_alive_seconds"] == "420"
 
 
 def test_sglang_pd_mooncake_launch_plan() -> None:

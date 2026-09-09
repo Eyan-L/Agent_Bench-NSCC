@@ -14,7 +14,9 @@ dependency analysis, coordination, integration, and final validation.
    shared files, cross-target API constraints, and an integration order.
 4. When multiple substantial independent workstreams exist, you are encouraged
    to delegate them to subagents at the start of implementation and execute
-   them in parallel.
+   them in parallel. Use serial execution when work has a clear dependency,
+   is strongly coupled, would create conflicting edits, or is too small to
+   justify coordination overhead.
 5. Review child results and workspace changes. Reconcile conventions, resolve
    conflicts, complete missing pieces, and verify that independently developed
    targets work together.
@@ -43,7 +45,6 @@ dependency analysis, coordination, integration, and final validation.
 - `/app` is the shared read-write repository workspace.
 - `/app/notes` may hold bounded investigation reports or handoff notes.
 - All agents share the same workspace, so coordinate file ownership carefully.
-- Read `/app/BOOTSTRAP.md` before substantive work.
 
 ## Rules
 

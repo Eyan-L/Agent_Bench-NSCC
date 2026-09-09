@@ -371,6 +371,11 @@ def test_openclaw_cache_trace_synthesizes_per_request_model_usage(tmp_path):
                     "timestamp": 1780272001000,
                     "responseId": "resp-1",
                 },
+                {
+                    "role": "assistant",
+                    "usage": "[Truncated]",
+                    "stopReason": "toolUse",
+                },
                 {"role": "toolResult", "content": []},
                 {
                     "role": "assistant",

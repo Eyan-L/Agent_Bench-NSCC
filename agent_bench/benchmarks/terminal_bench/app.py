@@ -1370,6 +1370,11 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
             Mount(app_dir, task_workspace),
             Mount(logs_dir, "/logs/verifier"),
         ]
+        if task_workspace == "/app":
+            # OpenClaw cannot mount the task over its own /app installation,
+            # so its durable session uses /workspace. Mirror that alias in the
+            # task runtime to keep default cwd and relative tool paths valid.
+            task_mounts.append(Mount(app_dir, "/workspace"))
         if self.container.backend_id == "singularity":
             task_mounts.append(Mount(tests_dir, "/tests"))
         workspace_prepare_start_ns = time.time_ns()

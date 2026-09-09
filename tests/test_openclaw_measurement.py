@@ -70,6 +70,39 @@ def test_normal_run_has_no_loop_termination_metadata(tmp_path):
     assert result["runtime_observability"]["loop_detections"] == []
 
 
+def test_measurement_records_length_as_terminal_assistant_stop(tmp_path):
+    sessions = tmp_path / "conversation" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "sessions.json").write_text(json.dumps({
+        "agent:roadmap_bench:main": {
+            "sessionId": "parent-id",
+            "sessionFile": "parent.jsonl",
+            "status": "done",
+        },
+    }))
+    _write_jsonl(sessions / "parent.jsonl", [{
+        "type": "message",
+        "message": {
+            "role": "assistant",
+            "timestamp": 10,
+            "stopReason": "length",
+            "content": [{"type": "text", "text": "partial final text"}],
+        },
+    }])
+
+    build_openclaw_measurement(tmp_path, agent_id="roadmap_bench")
+
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()
+    ]
+    terminal = [event for event in events if event["event_type"] == "assistant_stop"]
+    assert len(terminal) == 1
+    assert terminal[0]["stop_reason"] == "length"
+    assert terminal[0]["text"] == "partial final text"
+    assert not any(event["event_type"] == "done" for event in events)
+
+
 def test_openclaw_measurement_captures_trajectory_and_both_token_layers(tmp_path):
     sessions = tmp_path / "conversation" / "sessions"
     sessions.mkdir(parents=True)

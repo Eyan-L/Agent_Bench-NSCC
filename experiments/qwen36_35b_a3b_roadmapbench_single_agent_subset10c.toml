@@ -1,0 +1,27 @@
+name = "qwen36_35b_a3b_roadmapbench_single_agent_subset10c"
+description = "Ten fixed high-fanout RoadmapBench tasks for the formal single-agent Qwen3.6-35B-A3B control experiment on NSCC."
+output_dir = "runs/qwen36_35b_a3b_roadmapbench_single_agent_subset10c"
+seeds = [42]
+
+[telemetry]
+spans_html = true
+
+[benchmark]
+name = "terminal_bench"
+profile = "profiles/benchmarks/roadmap/roadmapbench_subset10c.json"
+
+[harness]
+name = "openclaw"
+profile = "profiles/harnesses/openclaw_roadmapbench_single_agent.yaml"
+
+[model]
+profile = "profiles/models/qwen36_35b_a3b.json"
+
+[serving]
+profile = "profiles/serving/sglang/nscc_tp4.yaml"
+
+[deployment]
+profile = "profiles/deployments/nscc_pbs_4gpu_24h.toml"
+
+[limits]
+max_workers = 1

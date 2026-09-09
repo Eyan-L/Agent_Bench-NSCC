@@ -165,6 +165,16 @@ def test_terminal_bench_openclaw_singularity_returns_runtime_handle(tmp_path, mo
     assert container.specs[1].env["OPENCLAW_BYPASS_ENSURE_SANDBOX"] == "1"
     assert container.specs[1].env["OPENCLAW_DISABLE_BONJOUR"] == "1"
 
+    task_workspace_mounts = [
+        mount
+        for mount in container.specs[0].mounts
+        if mount.container in {"/app", "/workspace"}
+    ]
+    assert {mount.container for mount in task_workspace_mounts} == {
+        "/app", "/workspace"
+    }
+    assert len({Path(mount.host) for mount in task_workspace_mounts}) == 1
+
     # NSCC runtime hardening.
     assert tb_app.TerminalBenchOpenClawHarness._GATEWAY_READY_TIMEOUT_SECONDS == 600
     assert container.specs[1].env["OPENCLAW_PLUGIN_STAGE_DIR"] == (
@@ -355,6 +365,17 @@ def test_roadmapbench_materializes_all_prompt_assets_in_resolved_workspace(
         assert "/app" not in path.read_text()
 
 
+def test_roadmap_agents_do_not_reread_seed_once_bootstrap() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    agents_root = (
+        repo_root / "agent_bench/benchmarks/roadmap_bench/openclaw"
+    )
+
+    for variant in ("agents", "agents_single_agent"):
+        prompt = (agents_root / variant / "AGENTS.md").read_text()
+        assert "Read `/app/BOOTSTRAP.md`" not in prompt
+
+
 def test_terminal_bench_workspace_seed_defaults_to_bootstrap_only(
     tmp_path, monkeypatch
 ):
@@ -498,13 +519,13 @@ def _yield_event(message="waiting"):
     }
 
 
-def _assistant_event(text):
+def _assistant_event(text, *, stop_reason="stop"):
     return {
         "type": "message",
         "message": {
             "role": "assistant",
             "content": [{"type": "text", "text": text}],
-            "stopReason": "stop",
+            "stopReason": stop_reason,
         },
     }
 
@@ -576,7 +597,7 @@ def test_roadmap_no_yield_terminal_done_reconciles_to_normal(tmp_path):
     )
 
 
-def test_roadmap_no_yield_terminal_stop_without_done_is_blocked(tmp_path):
+def test_roadmap_no_yield_durable_terminal_without_done_is_normal(tmp_path):
     sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
     _write_roadmap_session_state(
         sessions_dir,
@@ -592,8 +613,8 @@ def test_roadmap_no_yield_terminal_stop_without_done_is_blocked(tmp_path):
         deadline=time.monotonic() + 10,
     )
 
-    assert "without DONE" in error
-    assert condition._last_completion_status == "blocked_incomplete"
+    assert error == ""
+    assert condition._last_completion_status == "normal_completion"
 
 
 def test_roadmap_running_parent_empty_stop_is_not_terminal(tmp_path):
@@ -615,6 +636,196 @@ def test_roadmap_running_parent_empty_stop_is_not_terminal(tmp_path):
     assert snapshot["parent_session_terminal"] is False
     assert snapshot["post_yield_parent_terminal"] is False
     assert snapshot["parent_terminal"] is False
+
+
+def test_roadmap_invocation_watch_ignores_active_parent(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_assistant_event("")],
+        child_statuses=(),
+        parent_status="running",
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+
+    assert condition._watch_durable_invocation_terminal() is True
+    assert condition._durable_invocation_terminal_evidence() is None
+
+
+def test_roadmap_invocation_watch_classifies_durable_failure(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    error = "Session transcript keyed user is outside the current turn"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_prompt_error_event(error)],
+        child_statuses=("done",),
+        parent_status="failed",
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+
+    signature, status, observed_error = (
+        condition._durable_invocation_terminal_evidence()
+    )
+
+    assert signature[1] == "failed"
+    assert status == "runtime_error"
+    assert observed_error == error
+
+
+def test_roadmap_invocation_watch_accepts_stable_length_termination(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_assistant_event("", stop_reason="length")],
+        child_statuses=(),
+        parent_status="done",
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+
+    signature, status, diagnostic = (
+        condition._durable_invocation_terminal_evidence()
+    )
+    payload = condition._payload_for_durable_invocation_terminal(
+        status, diagnostic
+    )
+
+    assert signature[1] == "done"
+    assert status == "normal_completion"
+    assert payload["result"]["meta"]["done_marker"] is False
+    assert payload["result"]["meta"]["stopReason"] == "length"
+    assert condition._classify_completion(payload) == (
+        "normal_completion", ""
+    )
+
+
+def test_roadmap_invocation_watch_waits_for_pending_child(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_assistant_event("", stop_reason="length")],
+        child_statuses=("running",),
+        parent_status="done",
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+
+    assert condition._durable_invocation_terminal_evidence() is None
+
+
+def test_roadmap_invocation_watch_rejects_nonstandard_stop_reasons(
+    tmp_path
+):
+    for stop_reason in ("completed", "done"):
+        case_root = tmp_path / stop_reason
+        sessions_dir = case_root / "agents" / "roadmap_bench" / "sessions"
+        _write_roadmap_session_state(
+            sessions_dir,
+            [_assistant_event("", stop_reason=stop_reason)],
+            child_statuses=(),
+            parent_status="done",
+        )
+        condition = _roadmap_condition_for_state(case_root)
+
+        assert condition._durable_invocation_terminal_evidence() is None
+
+
+def test_roadmap_invocation_watch_interrupts_stable_normal_terminal(
+    tmp_path, monkeypatch
+):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_assistant_event("", stop_reason="length")],
+        child_statuses=(),
+        parent_status="done",
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+    killed = []
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.conditions.openclaw_agent.os.killpg",
+        lambda pid, sig: killed.append((pid, sig)),
+    )
+
+    class HangingProcess:
+        args = ["openclaw", "agent"]
+        pid = 1234
+        returncode = None
+
+        def __init__(self):
+            self.calls = 0
+
+        def communicate(self, timeout=None):
+            self.calls += 1
+            if self.calls <= 2:
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            self.returncode = -15
+            return "", "terminated"
+
+        def terminate(self):
+            raise AssertionError("killpg should be used")
+
+        def kill(self):
+            raise AssertionError("SIGKILL should not be needed")
+
+    stdout, stderr, interrupted = condition._communicate_with_durable_watch(
+        HangingProcess(), 30
+    )
+
+    assert len(killed) == 1
+    assert stdout == ""
+    assert stderr == "terminated"
+    assert interrupted[0] == "normal_completion"
+    assert "status=done" in interrupted[1]
+
+
+def test_durable_invocation_watch_requires_stable_evidence(monkeypatch):
+    condition = object.__new__(RoadmapBenchOpenClawCondition)
+    evidence = iter([
+        (("parent", "failed", 1), "runtime_error", "first"),
+        (("parent", "failed", 2), "runtime_error", "changed"),
+        (("parent", "failed", 2), "runtime_error", "changed"),
+    ])
+    monkeypatch.setattr(
+        condition,
+        "_durable_invocation_terminal_evidence",
+        lambda: next(evidence),
+    )
+    killed = []
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.conditions.openclaw_agent.os.killpg",
+        lambda pid, sig: killed.append((pid, sig)),
+    )
+
+    class HangingProcess:
+        args = ["openclaw", "agent"]
+        pid = 1234
+        returncode = None
+
+        def __init__(self):
+            self.calls = 0
+
+        def communicate(self, timeout=None):
+            self.calls += 1
+            if self.calls <= 3:
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            self.returncode = -15
+            return "", "terminated"
+
+        def terminate(self):
+            raise AssertionError("killpg should be used")
+
+        def kill(self):
+            raise AssertionError("SIGKILL should not be needed")
+
+    process = HangingProcess()
+    stdout, stderr, interrupted = condition._communicate_with_durable_watch(
+        process, 30
+    )
+
+    assert process.calls == 4
+    assert len(killed) == 1
+    assert stdout == ""
+    assert stderr == "terminated"
+    assert interrupted == ("runtime_error", "changed")
 
 
 def test_roadmap_running_parent_empty_stop_waits_instead_of_terminating(
@@ -759,12 +970,14 @@ def test_roadmap_done_parent_non_done_stop_requires_stable_confirmation(
 
     lifecycle = payload["result"]["meta"]["agentBenchLifecycle"]
     assert clock[0] >= condition.terminal_stop_confirmation_seconds
-    assert "without DONE" in error
-    assert condition._last_completion_status == "blocked_incomplete"
+    assert error == ""
+    assert condition._last_completion_status == "normal_completion"
     assert lifecycle["parentSessionStatusAtTerminal"] == "done"
     assert lifecycle["terminalEvidence"] == (
         "durable_session_terminal_assistant_stop"
     )
+    assert lifecycle["done_marker"] is False
+    assert lifecycle["stopReason"] == "stop"
 
 
 def test_roadmap_explicit_done_is_terminal_while_parent_status_running(
@@ -1016,34 +1229,45 @@ def test_roadmap_parent_done_without_child_needs_no_quiescence(tmp_path):
     assert lifecycle["orphanCancellationAttempted"] is False
 
 
-def test_roadmap_blocked_parent_quiesces_running_child_before_verifier(tmp_path):
+def test_roadmap_durable_parent_stop_waits_for_running_child(
+    tmp_path, monkeypatch
+):
     sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
     _write_roadmap_session_state(
         sessions_dir,
         [_assistant_event("Implementation incomplete")],
         child_statuses=("running",),
     )
-    order = []
+    clock = [0.0]
 
     class Harness:
         def quiesce_orphan_children(self, _env_info):
-            order.append("quiesce")
+            clock.append("quiesce")
             return {"workspaceQuiesced": True}
 
     condition = _roadmap_condition_for_state(tmp_path, Harness())
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.monotonic",
+        lambda: clock[0],
+    )
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
     payload, error = condition._await_post_turn_lifecycle(
         {"result": {"meta": {"livenessState": "working"}}},
         "stale",
-        deadline=time.monotonic() + 10,
+        deadline=4.0,
     )
-    order.append("verifier")
 
-    assert "without DONE" in error
-    assert condition._last_completion_status == "blocked_incomplete"
+    assert "total agent timeout" in error
+    assert condition._last_completion_status == "timeout"
     assert payload["result"]["meta"]["agentBenchLifecycle"][
         "workspaceQuiesced"
     ] is True
-    assert order == ["quiesce", "verifier"]
+    assert clock[-1] == "quiesce"
 
 
 def test_roadmap_orphan_quiescence_failure_is_explicit(tmp_path):
@@ -1753,7 +1977,7 @@ def test_roadmap_quiet_active_parent_waits_for_total_deadline(
     assert clock[0] >= 6.0
 
 
-def test_roadmap_child_done_and_parent_active_without_done_is_blocked(
+def test_roadmap_child_done_and_durable_parent_without_done_is_normal(
     tmp_path, monkeypatch
 ):
     sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
@@ -1782,9 +2006,9 @@ def test_roadmap_child_done_and_parent_active_without_done_is_blocked(
         deadline=10.0,
     )
 
-    assert "returned without DONE" in error
+    assert error == ""
     assert condition._last_exit_code == 0
-    assert condition._last_completion_status == "blocked_incomplete"
+    assert condition._last_completion_status == "normal_completion"
 
 
 def test_roadmap_yield_wait_ends_only_at_timeout(tmp_path, monkeypatch):
@@ -2191,3 +2415,35 @@ def test_roadmap_heartbeat_after_yield_is_not_parent_terminal(tmp_path):
     assert snapshot["done_text"] == ""
     assert snapshot["parent_waiting"] is True
     assert snapshot["latest_parent_event"] == "heartbeat_response"
+    assert snapshot["latest_assistant_stop_reason"] == ""
+
+
+def test_roadmap_heartbeat_is_not_durable_terminal_without_children(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    heartbeat_request = {
+        "type": "message",
+        "message": {
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": (
+                    "Read HEARTBEAT.md if it exists. "
+                    "If nothing needs attention, reply HEARTBEAT_OK"
+                ),
+            }],
+        },
+    }
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_yield_event(), heartbeat_request, _assistant_event("HEARTBEAT_OK")],
+        child_statuses=(),
+        parent_status="done",
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+
+    snapshot = condition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot["latest_parent_event"] == "heartbeat_response"
+    assert snapshot["latest_assistant_stop_reason"] == ""
+    assert condition._terminal_stop_signature(snapshot) is None
+    assert condition._durable_invocation_terminal_evidence() is None

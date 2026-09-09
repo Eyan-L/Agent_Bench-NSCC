@@ -33,7 +33,6 @@ dependency analysis, implementation, integration, and final validation.
 
 - `/app` is the read-write repository workspace.
 - `/app/notes` may hold bounded planning or investigation notes.
-- Read `/app/BOOTSTRAP.md` before substantive work.
 
 ## Rules
 

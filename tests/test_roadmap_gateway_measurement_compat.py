@@ -183,6 +183,34 @@ def test_runtime_failure_keeps_verifier_measurement_but_is_benchmark_invalid():
     assert verdict["test_pass_rate"] == 0.4
 
 
+def test_roadmap_harness_trajectory_events_are_machine_readable(tmp_path):
+    trajectory = tmp_path / "trajectory.jsonl"
+    trajectory.touch()
+
+    driver._append_roadmap_trajectory_event(
+        tmp_path,
+        "verifier_start",
+        timestamp_ns=100,
+        candidate_patch_bytes=42,
+    )
+    driver._append_roadmap_trajectory_event(
+        tmp_path,
+        "verifier_result",
+        timestamp_ns=200,
+        status="FAIL",
+        reward=0.4,
+    )
+
+    events = [json.loads(line) for line in trajectory.read_text().splitlines()]
+    assert [event["event_type"] for event in events] == [
+        "verifier_start", "verifier_result",
+    ]
+    assert events[0]["timestamp_ns"] == 100
+    assert events[0]["candidate_patch_bytes"] == 42
+    assert events[1]["status"] == "FAIL"
+    assert events[1]["reward"] == 0.4
+
+
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
