@@ -1433,6 +1433,7 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
                 "OPENCLAW_RAW_RESPONSE_LOG": "/root/.openclaw/logs/llm-raw-responses.jsonl",
                 "OTEL_RESOURCE_ATTRIBUTES": f"oc.run_id={run_id}",
                 "OPENCLAW_DISABLE_BONJOUR": "1",
+                "OPENCLAW_AGENT_BENCH_SHARED_WORKSPACE": "1",
                 "NPM_CONFIG_REGISTRY": os.environ.get(
                     "AB_NPM_REGISTRY", "https://registry.npmmirror.com"
                 ),

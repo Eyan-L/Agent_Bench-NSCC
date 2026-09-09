@@ -15,6 +15,7 @@ from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     LITELLM_PRICING_URL,
     OPENROUTER_PRICING_URL,
     SANDBOX_MARKER,
+    SHARED_WORKSPACE_SPAWN_MARKER,
     patch_runtime_tree,
     verify_runtime_tree,
 )
@@ -48,6 +49,15 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "  const prefix = params.cfg.docker.containerPrefix;\n"
         "  const containerName = buildSandboxContainerName(prefix, slug);\n"
         "  return await sandboxContainerLifecycleQueue.enqueue(containerName, async () => containerName);\n"
+        "}\n"
+    )
+
+    (dist / "sessions-spawn-tool-test.js").write_text(
+        "async function maybeSpawnVisibleSession(params) {\n"
+        "  const worktree = params.raw.worktree === true;\n"
+        "  const worktreeName = readToolStringParam(params.raw, 'worktreeName');\n"
+        "  const worktreeBaseRef = readToolStringParam(params.raw, 'worktreeBaseRef');\n"
+        "  return { worktree, worktreeName, worktreeBaseRef };\n"
         "}\n"
     )
 
@@ -91,11 +101,17 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
 
     exec_text = (root / "dist/bash-tools.exec-runtime-test.js").read_text()
     docker_text = (root / "dist/docker-test.js").read_text()
+    spawn_text = (root / "dist/sessions-spawn-tool-test.js").read_text()
     fs_text = (root / "dist/fs-bridge-test.js").read_text()
     pricing_text = (root / "dist/pricing-test.js").read_text()
 
     assert EXEC_MARKER in exec_text
     assert SANDBOX_MARKER in docker_text
+    assert SHARED_WORKSPACE_SPAWN_MARKER in spawn_text
+    assert "OPENCLAW_AGENT_BENCH_SHARED_WORKSPACE" in spawn_text
+    assert "params.raw.worktree === true && !sharedWorkspaceSpawn" in spawn_text
+    assert "worktreeName = sharedWorkspaceSpawn ? void 0" in spawn_text
+    assert "worktreeBaseRef = sharedWorkspaceSpawn ? void 0" in spawn_text
     for marker in (
         FS_HELPER_MARKER,
         FS_RUN_MARKER,
@@ -120,6 +136,7 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     second = patch_runtime_tree(root)
     assert second["exec_bridge_files_changed"] == []
     assert second["sandbox_bypass_files_changed"] == []
+    assert second["shared_workspace_spawn_files_changed"] == []
     assert second["fs_bridge_files_changed"] == []
     assert second["openrouter_pricing_url_replacements"] == 0
     assert second["litellm_pricing_url_replacements"] == 0
@@ -154,6 +171,8 @@ def test_v2026_9_2_builder_does_not_reapply_legacy_runtime_patches():
     assert "v2026_9_2_patch.py" in script
     assert "audit_oc_v2026_9_2.sh" in script
     assert ".agent-bench-v2026.9.2.json" in script
+    assert "shared_workspace_spawn" in script
+    assert 'mkdir -p "$(dirname "$OUT_SIF")" "${HOME}/agent-bench-sif-build"' in script
     assert "apply_patch.py apply" not in script
     assert "runtime_compat_patch.py" not in script
     assert "--session-patch-timeout-ms" not in script

@@ -35,6 +35,9 @@ FS_RUN_MARKER = "AB_HARNESS_OPENCLAW_V2026_9_2_FS_BRIDGE_RUN_BEGIN"
 FS_WRITE_MARKER = "AB_HARNESS_OPENCLAW_V2026_9_2_FS_BRIDGE_WRITE_BEGIN"
 FS_READ_MARKER = "AB_HARNESS_OPENCLAW_V2026_9_2_FS_BRIDGE_READ_BEGIN"
 FS_CHECK_MARKER = "AB_HARNESS_OPENCLAW_V2026_9_2_FS_BRIDGE_CHECK_BEGIN"
+SHARED_WORKSPACE_SPAWN_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_SHARED_WORKSPACE_SPAWN_BEGIN"
+)
 
 OPENROUTER_PRICING_URL = "https://openrouter.ai/api/v1/models"
 LITELLM_PRICING_URL = (
@@ -147,6 +150,43 @@ def _patch_sandbox_bypass(root: Path) -> list[str]:
         updated, count = pattern.subn(lambda m: m.group(1) + insert, text, count=1)
         if count != 1:
             raise RuntimeError(f"sandbox bypass anchor was not unique in {path}")
+        _write(path, updated)
+        changed.append(str(path.relative_to(root)))
+    return changed
+
+
+def _patch_shared_workspace_spawns(root: Path) -> list[str]:
+    """Keep visible Roadmap children in the harness-owned shared workspace."""
+    changed: list[str] = []
+    candidates = sorted((root / "dist").glob("sessions-spawn-tool-*.js"))
+    anchor = re.compile(
+        r"(?P<indent>[ \t]*)const worktree = params\.raw\.worktree === true;\n"
+        r"(?P=indent)const worktreeName = readToolStringParam\(params\.raw, [\"']worktreeName[\"']\);\n"
+        r"(?P=indent)const worktreeBaseRef = readToolStringParam\(params\.raw, [\"']worktreeBaseRef[\"']\);"
+    )
+    targets = [path for path in candidates if anchor.search(_read(path))]
+    already_patched = [
+        path for path in candidates if SHARED_WORKSPACE_SPAWN_MARKER in _read(path)
+    ]
+    if not targets and not already_patched:
+        raise RuntimeError("v2026.9.2 visible sessions_spawn worktree anchor not found")
+
+    def replacement(match: re.Match[str]) -> str:
+        indent = match.group("indent")
+        return (
+            f"{indent}/* {SHARED_WORKSPACE_SPAWN_MARKER} */\n"
+            f'{indent}const sharedWorkspaceSpawn = process.env.OPENCLAW_AGENT_BENCH_SHARED_WORKSPACE === "1";\n'
+            f'{indent}if (sharedWorkspaceSpawn && params.raw.worktree === true) console.error("[agent-bench] ignoring sessions_spawn worktree=true; children share the benchmark workspace");\n'
+            f"{indent}const worktree = params.raw.worktree === true && !sharedWorkspaceSpawn;\n"
+            f'{indent}const worktreeName = sharedWorkspaceSpawn ? void 0 : readToolStringParam(params.raw, "worktreeName");\n'
+            f'{indent}const worktreeBaseRef = sharedWorkspaceSpawn ? void 0 : readToolStringParam(params.raw, "worktreeBaseRef");\n'
+            f"{indent}/* AB_HARNESS_OPENCLAW_V2026_9_2_SHARED_WORKSPACE_SPAWN_END */"
+        )
+    for path in targets:
+        text = _read(path)
+        updated, count = anchor.subn(replacement, text, count=1)
+        if count != 1:
+            raise RuntimeError(f"shared-workspace spawn anchor missing in {path}")
         _write(path, updated)
         changed.append(str(path.relative_to(root)))
     return changed
@@ -371,6 +411,7 @@ def patch_runtime_tree(root: Path) -> dict[str, Any]:
 
     exec_files = _patch_exec_bridge(root)
     sandbox_files = _patch_sandbox_bypass(root)
+    shared_workspace_spawn_files = _patch_shared_workspace_spawns(root)
     fs_files = _patch_fs_bridge(root)
     pricing = _patch_pricing(root)
 
@@ -386,6 +427,7 @@ def patch_runtime_tree(root: Path) -> dict[str, Any]:
         "raw_response_patch_applied": False,
         "exec_bridge_files_changed": exec_files,
         "sandbox_bypass_files_changed": sandbox_files,
+        "shared_workspace_spawn_files_changed": shared_workspace_spawn_files,
         "fs_bridge_files_changed": fs_files,
         **pricing,
     }
@@ -401,6 +443,10 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
     checks = {
         "exec_bridge": ("dist/bash-tools.exec-runtime-*.js", EXEC_MARKER),
         "sandbox_bypass": ("dist/docker-*.js", SANDBOX_MARKER),
+        "shared_workspace_spawn": (
+            "dist/sessions-spawn-tool-*.js",
+            SHARED_WORKSPACE_SPAWN_MARKER,
+        ),
         "fs_helper": ("dist/fs-bridge-*.js", FS_HELPER_MARKER),
         "fs_run": ("dist/fs-bridge-*.js", FS_RUN_MARKER),
         "fs_write": ("dist/fs-bridge-*.js", FS_WRITE_MARKER),
