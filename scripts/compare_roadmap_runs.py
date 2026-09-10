@@ -121,6 +121,12 @@ def _runtime_observability(record) -> tuple[dict[str, Any], Path | None]:
 
 
 def _child_intervals(record) -> list[dict[str, Any]]:
+    """Return observable child lifetimes, including right-censored children.
+
+    Naturally completed children use ``terminal_timestamp_ns``. A child that is
+    still active when the parent reaches its terminal boundary instead uses the
+    harness-observed ``interval_end_timestamp_ns`` as a censored endpoint.
+    """
     obs, _path = _runtime_observability(record)
     children = obs.get("child_runtime_by_session") or {}
     if not isinstance(children, dict):
@@ -130,23 +136,50 @@ def _child_intervals(record) -> list[dict[str, Any]]:
     for session_key, child in children.items():
         if not isinstance(child, dict):
             continue
+
         start_ns = _impl._number(child.get("start_timestamp_ns"))
-        end_ns = _impl._number(child.get("terminal_timestamp_ns"))
+        terminal_ns = _impl._number(child.get("terminal_timestamp_ns"))
+        interval_end_ns = _impl._number(child.get("interval_end_timestamp_ns"))
+
+        if terminal_ns is not None:
+            end_ns = terminal_ns
+            end_source = child.get("terminal_timestamp_source")
+            end_quality = child.get("terminal_timestamp_quality")
+        else:
+            end_ns = interval_end_ns
+            end_source = child.get("interval_end_timestamp_source")
+            end_quality = child.get("interval_end_timestamp_quality")
+
         if start_ns is None or end_ns is None or end_ns < start_ns:
             continue
+
         intervals.append(
             {
                 "session_key": str(session_key),
+                "session_id": str(child.get("session_id") or ""),
+                "label": str(child.get("label") or session_key),
+                "status": str(child.get("status") or "unknown"),
                 "start_timestamp_ns": int(start_ns),
-                "terminal_timestamp_ns": int(end_ns),
+                "end_timestamp_ns": int(end_ns),
+                "terminal_timestamp_ns": (
+                    int(terminal_ns) if terminal_ns is not None else None
+                ),
+                "interval_end_timestamp_ns": (
+                    int(interval_end_ns) if interval_end_ns is not None else None
+                ),
                 "runtime_seconds": _impl._number(child.get("runtime_seconds")),
+                "runtime_complete": bool(child.get("runtime_complete")),
+                "runtime_censored": bool(child.get("runtime_censored")),
+                "end_timestamp_source": end_source,
+                "end_timestamp_quality": end_quality,
             }
         )
+
     return sorted(
         intervals,
         key=lambda item: (
             item["start_timestamp_ns"],
-            item["terminal_timestamp_ns"],
+            item["end_timestamp_ns"],
             item["session_key"],
         ),
     )
@@ -530,7 +563,11 @@ def _plot_subagent_concurrency_trajectory(
             if not isinstance(interval, dict):
                 continue
             child_start = _impl._number(interval.get("start_timestamp_ns"))
-            child_end = _impl._number(interval.get("terminal_timestamp_ns"))
+            child_end = _impl._number(
+                interval.get("end_timestamp_ns")
+                if interval.get("end_timestamp_ns") is not None
+                else interval.get("terminal_timestamp_ns")
+            )
             if (
                 child_start is None
                 or child_end is None
@@ -573,6 +610,138 @@ def _plot_subagent_concurrency_trajectory(
     ax.set_title("Actual child concurrency over the agent trajectory")
     colorbar = fig.colorbar(image, ax=ax)
     colorbar.set_label("Active materialized subagents")
+    fig.tight_layout()
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+
+def _plot_agent_subagent_timeline(
+    plt: Any,
+    rows: Sequence[dict[str, Any]],
+    path: Path,
+    dpi: int,
+) -> bool:
+    """Plot parent and materialized-child lifetimes as horizontal timelines."""
+    tracks: list[dict[str, Any]] = []
+    child_track_count = 0
+
+    for row in sorted(rows, key=lambda item: str(item["instance_id"])):
+        instance_id = str(row["instance_id"])
+        parent_start = _impl._number(
+            row.get("subagent_agent_execution_start_ns")
+        )
+        parent_end = _impl._number(
+            row.get("subagent_agent_execution_end_ns")
+        )
+        if (
+            parent_start is None
+            or parent_end is None
+            or parent_end <= parent_start
+        ):
+            continue
+
+        parent_seconds = (parent_end - parent_start) / 1e9
+        tracks.append(
+            {
+                "label": f"{instance_id} / Parent",
+                "start": 0.0,
+                "end": parent_seconds,
+                "censored": False,
+                "parent": True,
+            }
+        )
+
+        intervals = row.get("subagent_child_intervals") or []
+        for index, interval in enumerate(intervals, start=1):
+            if not isinstance(interval, dict):
+                continue
+
+            child_start = _impl._number(interval.get("start_timestamp_ns"))
+            child_end = _impl._number(
+                interval.get("end_timestamp_ns")
+                if interval.get("end_timestamp_ns") is not None
+                else interval.get("terminal_timestamp_ns")
+            )
+            if (
+                child_start is None
+                or child_end is None
+                or child_end < child_start
+            ):
+                continue
+
+            start_seconds = (child_start - parent_start) / 1e9
+            end_seconds = (child_end - parent_start) / 1e9
+            censored = bool(interval.get("runtime_censored"))
+            child_label = str(
+                interval.get("label")
+                or interval.get("session_key")
+                or f"Child {index}"
+            )
+            suffix = " [censored]" if censored else ""
+
+            tracks.append(
+                {
+                    "label": (
+                        f"{instance_id} / Child {index}: "
+                        f"{child_label}{suffix}"
+                    ),
+                    "start": start_seconds,
+                    "end": end_seconds,
+                    "censored": censored,
+                    "parent": False,
+                }
+            )
+            child_track_count += 1
+
+    if not tracks or child_track_count == 0:
+        return False
+
+    fig, ax = plt.subplots(
+        figsize=(12, max(5.0, 0.58 * len(tracks) + 1.8))
+    )
+
+    for y, track in enumerate(tracks):
+        start = float(track["start"])
+        end = float(track["end"])
+        censored = bool(track["censored"])
+        is_parent = bool(track["parent"])
+
+        ax.hlines(
+            y,
+            start,
+            end,
+            linewidth=6 if is_parent else 4,
+            linestyles="--" if censored else "-",
+        )
+        ax.scatter([start], [y], marker="|", s=90)
+
+        if censored:
+            ax.scatter([end], [y], marker="x", s=45)
+        else:
+            ax.scatter([end], [y], marker="|", s=90)
+
+        duration = end - start
+        ax.annotate(
+            f"{duration:.1f}s",
+            (end, y),
+            xytext=(5, 0),
+            textcoords="offset points",
+            va="center",
+            fontsize=7,
+        )
+
+    ax.set_yticks(
+        range(len(tracks)),
+        [str(track["label"]) for track in tracks],
+        fontsize=8,
+    )
+    ax.invert_yaxis()
+    ax.axvline(0.0, linewidth=0.8, alpha=0.4)
+    ax.set_xlabel("Seconds since parent agent start")
+    ax.set_title("Parent and materialized-subagent execution timeline")
+    ax.grid(axis="x", alpha=0.2)
     fig.tight_layout()
     fig.savefig(path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
@@ -626,6 +795,12 @@ def generate_plots(
                 plt, rows, path, dpi
             ),
         ),
+        (
+            output_dir / f"{basename}-agent-subagent-timeline.png",
+            lambda path: _plot_agent_subagent_timeline(
+                plt, rows, path, dpi
+            ),
+        ),
     ]
 
     generated: list[Path] = []
@@ -655,6 +830,7 @@ globals().update(
         "render_markdown": render_markdown,
         "generate_plots": generate_plots,
         "generate_subagent_concurrency_plot": _plot_subagent_concurrency_trajectory,
+        "generate_agent_subagent_timeline_plot": _plot_agent_subagent_timeline,
     }
 )
 

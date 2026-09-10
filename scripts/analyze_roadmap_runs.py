@@ -311,6 +311,15 @@ def generate_single_arm_plots(
                 dpi,
             ),
         ),
+        (
+            output_dir / f"{basename}-agent-subagent-timeline.png",
+            lambda path: base.generate_agent_subagent_timeline_plot(
+                plt,
+                _concurrency_rows(rows),
+                path,
+                dpi,
+            ),
+        ),
     ]
 
     generated: list[Path] = []
