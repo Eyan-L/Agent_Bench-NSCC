@@ -1493,15 +1493,27 @@ def _is_normal_completion(record: RunRecord) -> bool:
     )
 
 
+def _materialized_subagent_count(record: RunRecord) -> int:
+    """Return the number of actually materialized child sessions."""
+    try:
+        row = record_to_dict(record)
+        value = _number(row.get("materialized_subagent_count"))
+    except Exception:
+        value = None
+
+    return int(value) if value is not None else 0
+
+
 def _filter_normal_completion_pairs(
     subagent: Sequence[RunRecord],
     single_agent: Sequence[RunRecord],
 ) -> tuple[list[RunRecord], list[RunRecord]]:
-    """Keep only task+seed pairs that completed normally in both arms.
+    """Keep only valid paired runs with actual subagent execution.
 
-    If either arm is missing or is not ``normal_completion``, the entire pair
-    is excluded from all comparison summaries, tables, CSVs, trajectories, and
-    figures.
+    A task+seed pair is eligible only when both arms reached
+    ``normal_completion`` and the subagent arm materialized at least one real
+    child session. Otherwise both arms are excluded from all comparison
+    summaries, tables, CSVs, trajectories, and figures.
     """
     sub_map = {record.key: record for record in subagent}
     single_map = {record.key: record for record in single_agent}
@@ -1511,6 +1523,7 @@ def _filter_normal_completion_pairs(
         for key in (set(sub_map) & set(single_map))
         if _is_normal_completion(sub_map[key])
         and _is_normal_completion(single_map[key])
+        and _materialized_subagent_count(sub_map[key]) > 0
     }
 
     return (
