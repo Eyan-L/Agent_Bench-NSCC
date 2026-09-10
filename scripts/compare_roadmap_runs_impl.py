@@ -1485,6 +1485,40 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return args
 
 
+def _is_normal_completion(record: RunRecord) -> bool:
+    """Return True only for a logically normal agent completion."""
+    return (
+        str(record.manifest.get("agent_execution_outcome") or "").strip()
+        == "normal_completion"
+    )
+
+
+def _filter_normal_completion_pairs(
+    subagent: Sequence[RunRecord],
+    single_agent: Sequence[RunRecord],
+) -> tuple[list[RunRecord], list[RunRecord]]:
+    """Keep only task+seed pairs that completed normally in both arms.
+
+    If either arm is missing or is not ``normal_completion``, the entire pair
+    is excluded from all comparison summaries, tables, CSVs, trajectories, and
+    figures.
+    """
+    sub_map = {record.key: record for record in subagent}
+    single_map = {record.key: record for record in single_agent}
+
+    keep_keys = {
+        key
+        for key in (set(sub_map) & set(single_map))
+        if _is_normal_completion(sub_map[key])
+        and _is_normal_completion(single_map[key])
+    }
+
+    return (
+        [record for record in subagent if record.key in keep_keys],
+        [record for record in single_agent if record.key in keep_keys],
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     runs_root = Path(args.runs_root).expanduser().resolve()
@@ -1502,6 +1536,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         subagent, sub_duplicates = select_best_records(raw_sub)
         single_agent, single_duplicates = select_best_records(raw_single)
+
+        # Paired-comparison policy: a task is eligible only when both arms
+        # reached normal logical completion. If either side failed/timed out
+        # or is missing, remove the task from both arms before any statistics
+        # or output artifacts are produced.
+        subagent, single_agent = _filter_normal_completion_pairs(
+            subagent,
+            single_agent,
+        )
+
         sub_summary = summarize_arm(subagent)
         single_summary = summarize_arm(single_agent)
         paired_summary, paired_rows = compare_paired(
