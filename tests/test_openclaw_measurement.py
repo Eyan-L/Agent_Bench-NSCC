@@ -44,6 +44,9 @@ def test_post_compaction_loop_guard_is_machine_readable(tmp_path):
         "detector": "compaction_loop_persisted",
         "tool_name": "read",
         "count": 3,
+        "level": None,
+        "action": None,
+        "terminal": True,
     }]
 
     trajectory = [
@@ -57,6 +60,39 @@ def test_post_compaction_loop_guard_is_machine_readable(tmp_path):
     assert loop_events[0]["detector"] == "compaction_loop_persisted"
     assert loop_events[0]["tool_name"] == "read"
     assert loop_events[0]["count"] == 3
+
+
+def test_native_tool_loop_warning_is_observable_but_not_terminal(tmp_path):
+    (tmp_path / "openclaw_gateway.log").write_text(
+        "2026-09-10T03:08:02.168+08:00 [diagnostic] tool loop: "
+        "sessionId=parent-id sessionKey=agent:roadmap_bench:explicit:parent-id "
+        "tool=exec level=warning action=warn detector=generic_repeat count=10 "
+        'message="WARNING: repeated call"\n'
+    )
+
+    result = build_openclaw_measurement(tmp_path, agent_id="roadmap_bench")
+
+    assert "termination_reason" not in result
+    assert result["runtime_observability"]["loop_detection_count"] == 1
+    assert result["runtime_observability"]["loop_detections"] == [{
+        "timestamp": "2026-09-09T19:08:02.168000+00:00",
+        "detector": "generic_repeat",
+        "tool_name": "exec",
+        "count": 10,
+        "level": "warning",
+        "action": "warn",
+        "terminal": False,
+    }]
+
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()
+    ]
+    loop = [event for event in events if event["event_type"] == "loop_detected"]
+    assert len(loop) == 1
+    assert loop[0]["session_id"] == "parent-id"
+    assert loop[0]["session_key"] == "agent:roadmap_bench:explicit:parent-id"
+    assert loop[0]["terminal"] is False
 
 
 def test_normal_run_has_no_loop_termination_metadata(tmp_path):

@@ -719,9 +719,34 @@ def _gateway_events(run_dir: Path) -> list[dict]:
             fields["age_seconds"] = _int(age.group(1)) if age else None
         elif "context-overflow-diag" in lowered:
             event_type = "context_overflow"
+        elif "tool loop:" in lowered:
+            event_type = "loop_detected"
+            session_id = re.search(r"\bsessionId=([^\s]+)", text)
+            session_key = re.search(r"\bsessionKey=([^\s]+)", text)
+            detector = re.search(r"\bdetector=([^\s]+)", text)
+            tool = re.search(r"\btool=([^\s]+)", text)
+            count = re.search(r"\bcount=(\d+)", text)
+            level = re.search(r"\blevel=([^\s]+)", text)
+            action = re.search(r"\baction=([^\s]+)", text)
+            parsed_action = action.group(1).lower() if action else None
+            fields.update({
+                "detector": detector.group(1) if detector else "tool_loop",
+                "tool_name": tool.group(1) if tool else None,
+                "count": _int(count.group(1)) if count else None,
+                "level": level.group(1).lower() if level else None,
+                "action": parsed_action,
+                "terminal": parsed_action in {
+                    "abort", "block", "error", "stop", "terminate",
+                },
+            })
+            if session_key:
+                fields["session_key"] = session_key.group(1)
+            if session_id:
+                fields["session_id"] = session_id.group(1)
         elif "compaction_loop_persisted" in lowered:
             event_type = "loop_detected"
             fields["detector"] = "compaction_loop_persisted"
+            fields["terminal"] = True
             tool = re.search(r"\btool=([^\s]+)", text)
             count = re.search(r"\bcount=(\d+)", text)
             fields["tool_name"] = tool.group(1) if tool else None
@@ -730,7 +755,8 @@ def _gateway_events(run_dir: Path) -> list[dict]:
             event_type = "compaction"
         if event_type:
             _append(
-                events, timestamp_ns=timestamp_ns, session_id="",
+                events, timestamp_ns=timestamp_ns,
+                session_id=str(fields.pop("session_id", "") or ""),
                 session_key=str(fields.pop("session_key", "") or ""),
                 role="runtime", event_type=event_type, **fields,
             )
@@ -998,7 +1024,9 @@ def _active_intervals(run_dir: Path) -> list[dict]:
 
 def _loop_termination(events: list[dict]) -> dict:
     loop_events = [
-        event for event in events if event.get("event_type") == "loop_detected"
+        event for event in events
+        if event.get("event_type") == "loop_detected"
+        and event.get("terminal") is True
     ]
     if not loop_events:
         return {}
@@ -1127,6 +1155,9 @@ def _runtime_observability(
                 "detector": event.get("detector"),
                 "tool_name": event.get("tool_name"),
                 "count": event.get("count"),
+                "level": event.get("level"),
+                "action": event.get("action"),
+                "terminal": event.get("terminal", False),
             }
             for event in loop_events
         ],
