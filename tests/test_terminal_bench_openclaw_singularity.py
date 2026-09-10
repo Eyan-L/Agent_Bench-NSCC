@@ -519,15 +519,132 @@ def _yield_event(message="waiting"):
     }
 
 
-def _assistant_event(text, *, stop_reason="stop"):
+def _assistant_event(
+    text,
+    *,
+    stop_reason="stop",
+    run_id=None,
+    error_message=None,
+):
+    message = {
+        "role": "assistant",
+        "content": [{"type": "text", "text": text}],
+        "stopReason": stop_reason,
+    }
+    if run_id is not None:
+        message["__openclaw"] = {"runId": run_id}
+    if error_message is not None:
+        message["errorMessage"] = error_message
     return {
         "type": "message",
-        "message": {
-            "role": "assistant",
-            "content": [{"type": "text", "text": text}],
-            "stopReason": stop_reason,
-        },
+        "message": message,
     }
+
+
+def test_roadmap_snapshot_preserves_done_across_post_terminal_settle_error(
+    tmp_path,
+):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    settle_run = (
+        "announce:requester-settle:roadmap_bench:"
+        "agent:roadmap_bench:explicit:parent-session:child:yield-1:retry-1"
+    )
+    _write_roadmap_session_state(
+        sessions_dir,
+        [
+            _assistant_event("Integrated and validated.\n\nDONE", run_id=settle_run),
+            _assistant_event(
+                "",
+                stop_reason="error",
+                run_id=settle_run.replace("retry-1", "retry-2"),
+                error_message=(
+                    "Session transcript keyed user is outside the current turn"
+                ),
+            ),
+        ],
+        child_statuses=("running",),
+        parent_status="failed",
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot is not None
+    assert snapshot["done_text"].endswith("DONE")
+    assert snapshot["latest_assistant_stop_reason"] == "stop"
+    assert snapshot["latest_parent_event"] == "post_terminal_settle_error"
+    assert "outside the current turn" in snapshot["post_terminal_settle_error"]
+
+
+def test_roadmap_snapshot_does_not_hide_regular_error_after_done(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [
+            _assistant_event("DONE"),
+            _assistant_event(
+                "",
+                stop_reason="error",
+                run_id="ordinary-parent-run",
+                error_message="provider failed",
+            ),
+        ],
+        child_statuses=(),
+        parent_status="failed",
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot is not None
+    assert snapshot["done_text"] == ""
+    assert snapshot["latest_assistant_stop_reason"] == "error"
+
+
+def test_roadmap_post_terminal_settle_error_quiesces_then_completes(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    settle_run = (
+        "announce:requester-settle:roadmap_bench:"
+        "agent:roadmap_bench:explicit:parent-session:child:yield-1:retry-1"
+    )
+    _write_roadmap_session_state(
+        sessions_dir,
+        [
+            _assistant_event("Integrated.\n\nDONE", run_id=settle_run),
+            _assistant_event(
+                "",
+                stop_reason="error",
+                run_id=settle_run.replace("retry-1", "retry-2"),
+                error_message=(
+                    "Session transcript keyed user is outside the current turn"
+                ),
+            ),
+        ],
+        child_statuses=("running",),
+        parent_status="failed",
+    )
+    calls = []
+
+    class Harness:
+        def quiesce_orphan_children(self, _env_info):
+            calls.append("quiesce")
+            return {"workspaceQuiesced": True, "taskRuntimeRestarted": True}
+
+    condition = _roadmap_condition_for_state(tmp_path, Harness())
+    payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "stale CLI state",
+        deadline=time.monotonic() + 10,
+    )
+
+    lifecycle = payload["result"]["meta"]["agentBenchLifecycle"]
+    assert error == ""
+    assert condition._last_completion_status == "normal_completion"
+    assert payload["result"]["meta"]["finalAssistantVisibleText"].endswith(
+        "DONE"
+    )
+    assert lifecycle["terminalEvidence"] == "explicit_done"
+    assert "outside the current turn" in lifecycle["postTerminalSettleError"]
+    assert lifecycle["pendingChildrenAtParentTerminal"] == 1
+    assert calls == ["quiesce"]
 
 
 def test_roadmap_snapshot_supports_explicit_parent_session_key(tmp_path):
@@ -698,7 +815,9 @@ def test_roadmap_invocation_watch_accepts_stable_length_termination(tmp_path):
     )
 
 
-def test_roadmap_invocation_watch_waits_for_pending_child(tmp_path):
+def test_roadmap_invocation_watch_accepts_terminal_parent_with_orphan_child(
+    tmp_path,
+):
     sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
     _write_roadmap_session_state(
         sessions_dir,
@@ -708,7 +827,13 @@ def test_roadmap_invocation_watch_waits_for_pending_child(tmp_path):
     )
     condition = _roadmap_condition_for_state(tmp_path)
 
-    assert condition._durable_invocation_terminal_evidence() is None
+    signature, status, _diagnostic = (
+        condition._durable_invocation_terminal_evidence()
+    )
+
+    assert signature[1] == "done"
+    assert signature[6] == 1
+    assert status == "normal_completion"
 
 
 def test_roadmap_invocation_watch_rejects_nonstandard_stop_reasons(
@@ -1113,6 +1238,9 @@ def test_roadmap_spawn_without_yield_waits_for_running_child(
 
     assert clock[0] >= 4.0
     assert "total agent timeout" in error
+    assert "parent_status=done" in error
+    assert "pending_children=1" in error
+    assert "completed_children=0" in error
 
 
 def test_roadmap_no_yield_children_done_then_parent_resumes_to_done(
@@ -1229,7 +1357,7 @@ def test_roadmap_parent_done_without_child_needs_no_quiescence(tmp_path):
     assert lifecycle["orphanCancellationAttempted"] is False
 
 
-def test_roadmap_durable_parent_stop_waits_for_running_child(
+def test_roadmap_durable_parent_stop_quiesces_running_child(
     tmp_path, monkeypatch
 ):
     sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
@@ -1259,14 +1387,15 @@ def test_roadmap_durable_parent_stop_waits_for_running_child(
     payload, error = condition._await_post_turn_lifecycle(
         {"result": {"meta": {"livenessState": "working"}}},
         "stale",
-        deadline=4.0,
+        deadline=10.0,
     )
 
-    assert "total agent timeout" in error
-    assert condition._last_completion_status == "timeout"
-    assert payload["result"]["meta"]["agentBenchLifecycle"][
-        "workspaceQuiesced"
-    ] is True
+    lifecycle = payload["result"]["meta"]["agentBenchLifecycle"]
+    assert error == ""
+    assert condition._last_completion_status == "normal_completion"
+    assert lifecycle["pendingChildrenAtParentTerminal"] == 1
+    assert lifecycle["orphanCancellationAttempted"] is True
+    assert lifecycle["workspaceQuiesced"] is True
     assert clock[-1] == "quiesce"
 
 
@@ -1713,6 +1842,17 @@ def test_openclaw_runtime_mode_detects_gateway_and_embedded_fallback():
     )
     condition._last_exit_code = 1
     assert condition._detect_agent_runtime_mode(None) == "unknown"
+
+    condition._last_exit_code = 0
+    selected = condition._detect_agent_runtime_mode(
+        {"result": {"meta": {}}}
+    )
+    condition._selected_agent_runtime_mode = selected
+    condition._last_exit_code = -1
+    assert condition._detect_agent_runtime_mode(None) == "gateway"
+
+    condition._selected_agent_runtime_mode = "embedded_fallback"
+    assert condition._detect_agent_runtime_mode(None) == "embedded_fallback"
 
     condition._last_stderr = (
         "[agent-bench] Roadmap gateway RPC ready; gateway execution selected\n"

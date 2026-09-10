@@ -176,6 +176,7 @@ class OpenClawAgentCondition:
         self._env_info = env_info or {}
         self._last_completion_status = self.RUNTIME_ERROR
         self._last_completion_error = "OpenClaw invocation did not complete"
+        self._selected_agent_runtime_mode = None
         instance_id = instance_data["instance_id"]
         logger.info("Running OpenClaw agent (%s) for %s", self.agent_id, instance_id)
 
@@ -222,6 +223,9 @@ class OpenClawAgentCondition:
                 message=message,
                 timeout_seconds=timeout_seconds,
             )
+            initial_runtime_mode = self._detect_agent_runtime_mode(payload)
+            if initial_runtime_mode != "unknown":
+                self._selected_agent_runtime_mode = initial_runtime_mode
             payload, err = self._await_post_turn_lifecycle(
                 payload,
                 err,
@@ -966,6 +970,9 @@ class OpenClawAgentCondition:
             "gateway execution selected"
         ) in stderr:
             return "gateway"
+        selected = getattr(self, "_selected_agent_runtime_mode", None)
+        if selected in {"gateway", "embedded_fallback"}:
+            return str(selected)
         if payload is None or getattr(self, "_last_exit_code", 0) not in (0, None):
             return "unknown"
         return "gateway"

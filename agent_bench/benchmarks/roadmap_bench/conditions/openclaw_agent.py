@@ -735,7 +735,11 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
 
         message = (
             "Roadmap trajectory remained nonterminal until the total agent timeout "
-            f"(session={parent_session_id})"
+            f"(session={parent_session_id} "
+            f"parent_status={last_snapshot.get('parent_session_status', 'unknown')} "
+            f"pending_children={int(last_snapshot.get('pending_children') or 0)} "
+            f"completed_children={int(last_snapshot.get('completed_children') or 0)} "
+            f"yields={int(last_snapshot.get('yield_count') or 0)})"
         )
         self._last_exit_code = -1
         self._last_completion_status = self.TIMEOUT
@@ -827,11 +831,16 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
 
     @classmethod
     def _is_durable_assistant_stop_terminal(cls, snapshot: Dict) -> bool:
-        """Whether a quiescent durable requester has a terminal assistant turn."""
+        """Whether the durable requester has a terminal assistant turn.
+
+        Children that remain active after the requester itself is durably
+        terminal are orphans. They are fenced by ``_quiesce_with_timing``;
+        requiring them to finish here can deadlock when a child yielded and
+        is waiting for a requester that can no longer resume it.
+        """
         return bool(
             snapshot.get("parent_session_status")
             in cls._NORMAL_DURABLE_PARENT_STATES
-            and int(snapshot.get("pending_children") or 0) == 0
             and snapshot.get("latest_parent_event") == "assistant_stop"
             and snapshot.get("latest_assistant_stop_reason")
             in cls._DURABLE_ASSISTANT_STOP_REASONS
@@ -1013,6 +1022,9 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 "parent_session_status", "unknown"
             ),
             "terminalEvidence": snapshot.get("terminal_evidence", "unknown"),
+            "postTerminalSettleError": snapshot.get(
+                "post_terminal_settle_error"
+            ) or None,
             "done_marker": bool(snapshot.get("done_text")),
             "stopReason": snapshot.get("latest_assistant_stop_reason") or None,
             "parentTerminalObservedNs": snapshot.get("parent_terminal_observed_ns"),
@@ -1161,6 +1173,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         post_yield_prompt_error = ""
         latest_event_kind = ""
         latest_assistant_stop_reason = ""
+        post_terminal_settle_error = ""
         heartbeat_turn = False
 
         for event in messages[latest_yield + 1:]:
@@ -1242,6 +1255,33 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                     heartbeat_turn = False
                 continue
 
+            openclaw_meta = message.get("__openclaw") or {}
+            run_id = str(
+                openclaw_meta.get("runId") or ""
+                if isinstance(openclaw_meta, dict)
+                else ""
+            )
+            has_tool_payload = any(
+                isinstance(item, dict)
+                and item.get("type") in {"toolCall", "toolUse"}
+                for item in message.get("content") or []
+            )
+            if (
+                done_text
+                and stop_reason == "error"
+                and not text
+                and not has_tool_payload
+                and run_id.startswith("announce:requester-settle:")
+            ):
+                # A requester-settle retry can race with the terminal turn and
+                # append an empty transport error after a durable DONE. It is
+                # post-terminal evidence, not a new logical parent turn.
+                post_terminal_settle_error = str(
+                    message.get("errorMessage") or "requester-settle error"
+                )
+                latest_event_kind = "post_terminal_settle_error"
+                continue
+
             latest_assistant_stop_reason = stop_reason
             post_yield_parent_activity = True
             post_yield_parent_terminal = (
@@ -1305,6 +1345,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 )
             ),
             "post_yield_prompt_error": post_yield_prompt_error,
+            "post_terminal_settle_error": post_terminal_settle_error,
             "done_text": done_text,
             "parent_active": bool(
                 (
