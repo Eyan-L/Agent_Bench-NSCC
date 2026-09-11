@@ -46,6 +46,7 @@ import math
 from pathlib import Path
 import random
 import re
+import shutil
 import statistics
 from typing import Any, Callable, Iterable, Sequence
 
@@ -1532,6 +1533,151 @@ def _filter_normal_completion_pairs(
     )
 
 
+def _artifact_task_dir(record: RunRecord) -> str:
+    """Stable directory name for one selected task+seed."""
+    return f"{_safe_name(record.instance_id)}__seed{record.seed}"
+
+
+BUNDLE_SUBDIRS = (
+    "01_durable_session_records",
+    "02_timeline_model_trace",
+    "03_execution_evidence",
+    "04_final_workspace_score",
+    "05_figures",
+)
+
+
+def _prepare_bundle_dir(output_dir: Path, basename: str) -> Path:
+    """Create an empty bundle and remove outputs from the legacy flat layout."""
+    bundle_dir = output_dir / basename
+    if bundle_dir.exists():
+        shutil.rmtree(bundle_dir)
+    bundle_dir.mkdir(parents=True)
+    for name in BUNDLE_SUBDIRS:
+        (bundle_dir / name).mkdir()
+
+    legacy_files = (
+        output_dir / f"{basename}.json",
+        output_dir / f"{basename}.md",
+        output_dir / f"{basename}-tasks.csv",
+        output_dir / f"{basename}-trajectories.json",
+        output_dir / f"{basename}-paired.csv",
+    )
+    for path in legacy_files:
+        if path.is_file():
+            path.unlink()
+    for path in output_dir.glob(f"{basename}-*.png"):
+        if path.is_file():
+            path.unlink()
+    return bundle_dir
+
+
+def _copy_file_if_present(src: Path, dst: Path) -> bool:
+    if not src.is_file():
+        return False
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    return True
+
+
+def _copy_selected_task_artifacts(
+    records: Sequence[RunRecord],
+    bundle_dir: Path,
+) -> list[dict[str, Any]]:
+    """Copy reconstruction artifacts for selected comparison records only."""
+    copied_index: list[dict[str, Any]] = []
+
+    for record in records:
+        task_dir = _artifact_task_dir(record)
+        arm = record.arm
+        run_dir = record.run_dir
+
+        copied: list[str] = []
+
+        # 1. Durable session records.
+        src_sessions = run_dir / "conversation" / "sessions"
+        dst_sessions = (
+            bundle_dir
+            / "01_durable_session_records"
+            / arm
+            / task_dir
+            / "conversation"
+            / "sessions"
+        )
+
+        if src_sessions.is_dir():
+            dst_sessions.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(
+                src_sessions,
+                dst_sessions,
+                dirs_exist_ok=True,
+            )
+            for path in sorted(dst_sessions.rglob("*")):
+                if path.is_file():
+                    copied.append(str(path.relative_to(bundle_dir)))
+
+        # 2. Standardized timeline + model trace.
+        dst_timeline = (
+            bundle_dir
+            / "02_timeline_model_trace"
+            / arm
+            / task_dir
+        )
+
+        for name in (
+            "trajectory.jsonl",
+            "spans.jsonl",
+        ):
+            dst = dst_timeline / name
+            if _copy_file_if_present(run_dir / name, dst):
+                copied.append(str(dst.relative_to(bundle_dir)))
+
+        # 3. Execution evidence.
+        dst_exec = (
+            bundle_dir
+            / "03_execution_evidence"
+            / arm
+            / task_dir
+        )
+
+        for name in (
+            "openclaw_exec_bridge.jsonl",
+            "openclaw_gateway.log",
+        ):
+            dst = dst_exec / name
+            if _copy_file_if_present(run_dir / name, dst):
+                copied.append(str(dst.relative_to(bundle_dir)))
+
+        # 4. Final workspace + score.
+        dst_final = (
+            bundle_dir
+            / "04_final_workspace_score"
+            / arm
+            / task_dir
+        )
+
+        for name in (
+            "candidate.patch",
+            "verdict.json",
+        ):
+            dst = dst_final / name
+            if _copy_file_if_present(run_dir / name, dst):
+                copied.append(str(dst.relative_to(bundle_dir)))
+
+        copied_index.append(
+            {
+                "arm": arm,
+                "instance_id": record.instance_id,
+                "seed": record.seed,
+                "job_id": record.job_id,
+                "source_run_dir": str(record.run_dir),
+                "copied_files": copied,
+            }
+        )
+
+    return copied_index
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     runs_root = Path(args.runs_root).expanduser().resolve()
@@ -1576,15 +1722,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         duplicate_count = sum(len(group) - 1 for group in duplicates.values())
         basename = _safe_name(args.name or _default_name(subagent, single_agent))
         selected = [*subagent, *single_agent]
+        bundle_dir = _prepare_bundle_dir(output_dir, basename)
 
         if not args.no_plots:
             figure_paths = generate_plots(
                 paired_rows,
-                output_dir,
+                bundle_dir / "05_figures",
                 basename,
                 dpi=args.plot_dpi,
             )
-        figure_names = [path.name for path in figure_paths]
+        figure_names = [
+            str(path.relative_to(bundle_dir)) for path in figure_paths
+        ]
 
         report = {
             "schema_version": 2,
@@ -1623,6 +1772,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         duplicate_count = sum(len(group) - 1 for group in duplicates.values())
         basename = _safe_name(args.name or _default_name(subagent))
         selected = list(subagent)
+        bundle_dir = _prepare_bundle_dir(output_dir, basename)
         paired_rows: list[dict[str, Any]] = []
         report = {
             "schema_version": 2,
@@ -1639,10 +1789,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             duplicate_count=duplicate_count,
         )
 
-    json_path = output_dir / f"{basename}.json"
-    md_path = output_dir / f"{basename}.md"
-    tasks_csv = output_dir / f"{basename}-tasks.csv"
-    trajectories_json = output_dir / f"{basename}-trajectories.json"
+    json_path = bundle_dir / f"{basename}.json"
+    md_path = bundle_dir / f"{basename}.md"
+    tasks_csv = bundle_dir / f"{basename}-tasks.csv"
+    trajectories_json = bundle_dir / f"{basename}-trajectories.json"
+    artifact_index_path = bundle_dir / f"{basename}-artifact-index.json"
+
+    copied_index = _copy_selected_task_artifacts(selected, bundle_dir)
+    report["artifact_bundle"] = {
+        "subdirectories": list(BUNDLE_SUBDIRS),
+        "artifact_index": artifact_index_path.name,
+        "selected_task_count": len(selected),
+    }
 
     json_path.write_text(json.dumps(report, indent=2) + "\n")
     md_path.write_text(markdown)
@@ -1650,10 +1808,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     trajectories_json.write_text(
         json.dumps(_trajectory_index(selected), indent=2) + "\n"
     )
+    artifact_index_path.write_text(json.dumps(copied_index, indent=2) + "\n")
 
-    generated = [json_path, md_path, tasks_csv, trajectories_json]
+    generated = [
+        json_path,
+        md_path,
+        tasks_csv,
+        trajectories_json,
+        artifact_index_path,
+    ]
     if comparison:
-        paired_csv = output_dir / f"{basename}-paired.csv"
+        paired_csv = bundle_dir / f"{basename}-paired.csv"
         _write_csv(paired_csv, paired_rows)
         generated.append(paired_csv)
     generated.extend(figure_paths)

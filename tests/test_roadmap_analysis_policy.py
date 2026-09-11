@@ -242,3 +242,74 @@ def test_roadmap_profiles_use_builtin_env_secret_provider():
         profile = (root / "profiles" / "harnesses" / name).read_text()
         assert "source: env\n        provider: default" in profile
         assert "provider: env" not in profile
+
+
+def test_comparison_bundle_copies_selected_trajectory_evidence(tmp_path):
+    record = _record(tmp_path, instance_id="task/selected")
+    run_dir = record.run_dir
+    sessions = run_dir / "conversation" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "sessions.json").write_text("{}\n")
+    (sessions / "parent.jsonl").write_text('{"type":"session"}\n')
+
+    expected = {
+        "trajectory.jsonl": '{"event_type":"resume"}\n',
+        "spans.jsonl": '{"name":"model"}\n',
+        "openclaw_exec_bridge.jsonl": '{"event":"exec"}\n',
+        "openclaw_gateway.log": "gateway ready\n",
+        "candidate.patch": "diff --git a/a b/a\n",
+        "verdict.json": '{"reward":1.0}\n',
+    }
+    for name, content in expected.items():
+        (run_dir / name).write_text(content)
+
+    output_dir = tmp_path / "reports"
+    output_dir.mkdir()
+    (output_dir / "comparison.json").write_text("legacy")
+    (output_dir / "comparison-old.png").write_text("legacy")
+    stale = output_dir / "comparison" / "01_durable_session_records" / "stale"
+    stale.mkdir(parents=True)
+    (stale / "old-task.jsonl").write_text("stale")
+
+    bundle = compare._impl._prepare_bundle_dir(output_dir, "comparison")
+    copied = compare._impl._copy_selected_task_artifacts([record], bundle)
+
+    assert {path.name for path in bundle.iterdir()} == set(
+        compare._impl.BUNDLE_SUBDIRS
+    )
+    assert not (output_dir / "comparison.json").exists()
+    assert not (output_dir / "comparison-old.png").exists()
+    assert not stale.exists()
+    task_dir = "task_selected__seed42"
+    assert (
+        bundle
+        / "01_durable_session_records"
+        / "subagent"
+        / task_dir
+        / "conversation"
+        / "sessions"
+        / "parent.jsonl"
+    ).is_file()
+    assert (
+        bundle
+        / "02_timeline_model_trace"
+        / "subagent"
+        / task_dir
+        / "trajectory.jsonl"
+    ).is_file()
+    assert (
+        bundle
+        / "03_execution_evidence"
+        / "subagent"
+        / task_dir
+        / "openclaw_exec_bridge.jsonl"
+    ).is_file()
+    assert (
+        bundle
+        / "04_final_workspace_score"
+        / "subagent"
+        / task_dir
+        / "candidate.patch"
+    ).is_file()
+    assert len(copied) == 1
+    assert copied[0]["instance_id"] == "task/selected"
