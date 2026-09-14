@@ -515,6 +515,7 @@ def _write_roadmap_session_state(
     parent_session_id="parent-session",
     parent_status="done",
     parent_key="agent:roadmap_bench:main",
+    parent_error=None,
 ):
     sessions_dir.mkdir(parents=True, exist_ok=True)
     index = {
@@ -523,6 +524,8 @@ def _write_roadmap_session_state(
             "status": parent_status,
         }
     }
+    if parent_error is not None:
+        index[parent_key]["lastRunError"] = parent_error
     for i, status in enumerate(child_statuses):
         index[f"agent:roadmap_bench:subagent:{i}"] = {
             "sessionId": f"child-{i}",
@@ -811,6 +814,121 @@ def test_roadmap_invocation_watch_classifies_durable_failure(tmp_path):
     assert signature[1] == "failed"
     assert status == "runtime_error"
     assert observed_error == error
+
+
+def test_roadmap_post_turn_watch_quiesces_stable_durable_failure(
+    tmp_path, monkeypatch
+):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    failure = "Agent could not generate a response after settled tool calls"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_yield_event(), _assistant_event("", stop_reason="length")],
+        child_statuses=("done",),
+        parent_status="failed",
+        parent_error=failure,
+    )
+    calls = []
+
+    class Harness:
+        def quiesce_orphan_children(self, _env_info):
+            calls.append("quiesce")
+            return {"workspaceQuiesced": True}
+
+    condition = _roadmap_condition_for_state(tmp_path, Harness())
+    clock = [0.0]
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.monotonic",
+        lambda: clock[0],
+    )
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+
+    payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "stale CLI turn",
+        deadline=10.0,
+    )
+
+    lifecycle = payload["result"]["meta"]["agentBenchLifecycle"]
+    assert clock[0] >= condition.terminal_stop_confirmation_seconds
+    assert clock[0] < 10.0
+    assert error == failure
+    assert condition._last_completion_status == "runtime_error"
+    assert lifecycle["terminalEvidence"] == (
+        "durable_session_terminal_failure"
+    )
+    assert lifecycle["parentSessionStatusAtTerminal"] == "failed"
+    assert lifecycle["parentSessionErrorAtTerminal"] == failure
+    assert lifecycle["workspaceQuiesced"] is True
+    assert calls == ["quiesce"]
+
+
+def test_roadmap_post_turn_watch_does_not_freeze_transient_failure(
+    tmp_path, monkeypatch
+):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    empty_length = _assistant_event("", stop_reason="length")
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_yield_event(), empty_length],
+        child_statuses=("done",),
+        parent_status="failed",
+        parent_error="transient failure",
+    )
+
+    class Harness:
+        def quiesce_orphan_children(self, _env_info):
+            return {"workspaceQuiesced": True}
+
+    condition = _roadmap_condition_for_state(tmp_path, Harness())
+    clock = [0.0]
+    sleeps = [0]
+
+    def advance(seconds):
+        clock[0] += seconds
+        sleeps[0] += 1
+        if sleeps[0] == 1:
+            _write_roadmap_session_state(
+                sessions_dir,
+                [_yield_event(), empty_length],
+                child_statuses=("done",),
+                parent_status="running",
+            )
+        elif sleeps[0] == 2:
+            _write_roadmap_session_state(
+                sessions_dir,
+                [_yield_event(), empty_length, _assistant_event("DONE")],
+                child_statuses=("done",),
+                parent_status="done",
+            )
+
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.monotonic",
+        lambda: clock[0],
+    )
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.sleep",
+        advance,
+    )
+
+    payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "stale CLI turn",
+        deadline=10.0,
+    )
+
+    assert error == ""
+    assert condition._last_completion_status == "normal_completion"
+    assert payload["result"]["meta"]["agentBenchLifecycle"][
+        "terminalEvidence"
+    ] == "explicit_done"
 
 
 def test_roadmap_invocation_watch_accepts_stable_length_termination(tmp_path):

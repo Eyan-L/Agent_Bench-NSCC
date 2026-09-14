@@ -46,6 +46,11 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         "failed", "killed", "timed_out", "timeout",
     })
     _NORMAL_DURABLE_PARENT_STATES = frozenset({"completed", "done"})
+    _FATAL_DURABLE_PARENT_STATES = frozenset({
+        "abandoned", "cancelled", "canceled", "error", "failed", "killed",
+        "timed_out", "timeout",
+    })
+    _TIMEOUT_DURABLE_PARENT_STATES = frozenset({"timed_out", "timeout"})
     _DURABLE_ASSISTANT_STOP_REASONS = frozenset({"stop", "length"})
     # A turn-level stop can precede an OpenClaw retry/resume. Require the
     # durable session and transcript to remain terminal across multiple
@@ -67,39 +72,24 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         parent_status = str(
             snapshot.get("parent_session_status") or "unknown"
         )
-        fatal_states = {
-            "abandoned", "cancelled", "canceled", "error", "failed", "killed",
-            "timed_out", "timeout",
-        }
         normal_terminal_states = self._NORMAL_DURABLE_PARENT_STATES
-        if parent_status not in fatal_states | normal_terminal_states:
+        failure = self._durable_parent_failure_evidence(snapshot)
+        if failure is not None:
+            self._durable_invocation_snapshot = snapshot
+            return failure
+        if parent_status not in normal_terminal_states:
             return None
         if (
             parent_status in normal_terminal_states
             and not self._is_durable_assistant_stop_terminal(snapshot)
         ):
             return None
-        prompt_error = str(
-            snapshot.get("post_yield_prompt_error") or ""
-        ).strip()
-        if parent_status in normal_terminal_states:
-            completion_status = self.NORMAL_COMPLETION
-            diagnostic = (
-                "OpenClaw durable parent session completed while the CLI was "
-                f"still running (status={parent_status}, "
-                f"session={snapshot['parent_session_id']})"
-            )
-        else:
-            completion_status = (
-                self.CONTEXT_OVERFLOW
-                if self._is_context_overflow_text(prompt_error)
-                else self.RUNTIME_ERROR
-            )
-            diagnostic = prompt_error or (
-                "OpenClaw durable parent session terminated while the CLI was "
-                f"still running (status={parent_status}, "
-                f"session={snapshot['parent_session_id']})"
-            )
+        completion_status = self.NORMAL_COMPLETION
+        diagnostic = (
+            "OpenClaw durable parent session completed while the CLI was "
+            f"still running (status={parent_status}, "
+            f"session={snapshot['parent_session_id']})"
+        )
         signature = (
             snapshot.get("parent_session_id"),
             parent_status,
@@ -111,6 +101,45 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             diagnostic,
         )
         self._durable_invocation_snapshot = snapshot
+        return signature, completion_status, diagnostic
+
+    @classmethod
+    def _durable_parent_failure_evidence(
+        cls, snapshot: Dict
+    ) -> Optional[Tuple[Tuple, str, str]]:
+        """Classify a durable failed requester independently of CLI state."""
+        parent_status = str(
+            snapshot.get("parent_session_status") or "unknown"
+        )
+        if parent_status not in cls._FATAL_DURABLE_PARENT_STATES:
+            return None
+
+        diagnostic = str(
+            snapshot.get("post_yield_prompt_error")
+            or snapshot.get("parent_session_error")
+            or (
+                "OpenClaw durable parent session terminated "
+                f"(status={parent_status}, "
+                f"session={snapshot.get('parent_session_id')})"
+            )
+        ).strip()
+        if cls._is_context_overflow_text(diagnostic):
+            completion_status = cls.CONTEXT_OVERFLOW
+        elif parent_status in cls._TIMEOUT_DURABLE_PARENT_STATES:
+            completion_status = cls.TIMEOUT
+        else:
+            completion_status = cls.RUNTIME_ERROR
+
+        signature = (
+            snapshot.get("parent_session_id"),
+            parent_status,
+            snapshot.get("message_count"),
+            snapshot.get("transcript_size_bytes"),
+            snapshot.get("latest_parent_event"),
+            snapshot.get("latest_assistant_stop_reason"),
+            snapshot.get("pending_children"),
+            diagnostic,
+        )
         return signature, completion_status, diagnostic
 
     def _payload_for_durable_invocation_terminal(
@@ -580,6 +609,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             or snapshot.get("parent_session_active")
             or self._terminal_stop_signature(snapshot) is not None
             or snapshot.get("assistant_stop_candidate")
+            or self._durable_parent_failure_evidence(snapshot) is not None
         )
         if not should_watch:
             return payload, error
@@ -601,6 +631,13 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         terminal_stop_signature = self._terminal_stop_signature(snapshot)
         terminal_stop_since = (
             time.monotonic() if terminal_stop_signature is not None else None
+        )
+        durable_failure = self._durable_parent_failure_evidence(snapshot)
+        durable_failure_signature = (
+            durable_failure[0] if durable_failure is not None else None
+        )
+        durable_failure_since = (
+            time.monotonic() if durable_failure is not None else None
         )
 
         while time.monotonic() < deadline:
@@ -660,6 +697,35 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 reconciled = self._reconcile_terminal_snapshot(payload, snapshot)
                 if reconciled is not None:
                     return reconciled
+
+                # A resumed requester can fail after the original CLI turn
+                # has already returned (for example after sessions_yield).
+                # Confirm the durable failure is stable before fencing agent
+                # writers and allowing artifact freeze/verifier execution.
+                durable_failure = self._durable_parent_failure_evidence(snapshot)
+                now = time.monotonic()
+                if durable_failure is None:
+                    durable_failure_signature = None
+                    durable_failure_since = None
+                elif durable_failure[0] != durable_failure_signature:
+                    durable_failure_signature = durable_failure[0]
+                    durable_failure_since = now
+                elif (
+                    durable_failure_since is not None
+                    and now - durable_failure_since
+                    >= self.terminal_stop_confirmation_seconds
+                ):
+                    _signature, status, failure_error = durable_failure
+                    snapshot = dict(
+                        snapshot,
+                        terminal_evidence="durable_session_terminal_failure",
+                    )
+                    self._last_completion_status = status
+                    self._last_completion_error = failure_error
+                    payload = self._quiesce_abnormal_terminal_payload(
+                        payload, snapshot
+                    )
+                    return payload, failure_error
 
                 terminal_signature = self._terminal_stop_signature(snapshot)
                 now = time.monotonic()
@@ -1021,6 +1087,9 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             "parentSessionStatusAtTerminal": snapshot.get(
                 "parent_session_status", "unknown"
             ),
+            "parentSessionErrorAtTerminal": snapshot.get(
+                "parent_session_error"
+            ) or None,
             "terminalEvidence": snapshot.get("terminal_evidence", "unknown"),
             "postTerminalSettleError": snapshot.get(
                 "post_terminal_settle_error"
@@ -1094,6 +1163,16 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         parent_session_status = str(
             parent.get("status") or "unknown"
         ).strip().lower()
+        raw_parent_error = parent.get("lastRunError") or parent.get("error")
+        if isinstance(raw_parent_error, dict):
+            parent_session_error = str(
+                raw_parent_error.get("message")
+                or raw_parent_error.get("error")
+                or raw_parent_error.get("reason")
+                or json.dumps(raw_parent_error, sort_keys=True)
+            ).strip()
+        else:
+            parent_session_error = str(raw_parent_error or "").strip()
         parent_session_active = (
             parent_session_status in cls._ACTIVE_PARENT_STATES
         )
@@ -1318,6 +1397,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             "parent_session_key": str(parent_key),
             "parent_session_id": str(parent_session_id),
             "parent_session_status": parent_session_status,
+            "parent_session_error": parent_session_error,
             "parent_session_active": parent_session_active,
             "parent_session_terminal": parent_session_terminal,
             "total_children": len(child_entries),
