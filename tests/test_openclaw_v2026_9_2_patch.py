@@ -14,6 +14,7 @@ from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     FS_RUN_MARKER,
     FS_WRITE_MARKER,
     LITELLM_PRICING_URL,
+    LOOP_VETO_RECOVERY_PROBE_MARKER,
     OPENROUTER_PRICING_URL,
     ROADMAP_CONTINUATION_INSTRUCTION,
     SANDBOX_MARKER,
@@ -125,6 +126,15 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "  maxEmptyResponseRetryAttempts: 1,\n"
         "};\n"
     )
+    (dist / "tool-loop-detection-test.js").write_text(
+        "function detectToolCallLoop(state, toolName, params, config, scope) {\n"
+        "  if (!config?.enabled) return { stuck: false };\n"
+        "  const history = selectHistoryForScope(state.toolCallHistory ?? [], scope);\n"
+        "  const currentHash = hashToolCall(toolName, params);\n"
+        "  const noProgress = getNoProgressStreak(history, toolName, currentHash);\n"
+        "  return noProgress.count >= 20 ? { stuck: true } : { stuck: false };\n"
+        "}\n"
+    )
     return root
 
 
@@ -141,6 +151,9 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     pricing_text = (root / "dist/pricing-test.js").read_text()
     builtin_text = (root / "dist/builtin-openclaw-test.js").read_text()
     embedded_text = (root / "dist/embedded-agent-test.js").read_text()
+    loop_detection_text = (
+        root / "dist/tool-loop-detection-test.js"
+    ).read_text()
 
     assert EXEC_MARKER in exec_text
     assert SANDBOX_MARKER in docker_text
@@ -180,6 +193,12 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert EMPTY_STOP_RETRY_LIMIT_MARKER in embedded_text
     assert "if (raw === void 0 || raw === \"\") return 1" in embedded_text
     assert "Math.min(parsed, 16)" in embedded_text
+    assert LOOP_VETO_RECOVERY_PROBE_MARKER in loop_detection_text
+    assert "OPENCLAW_AGENT_BENCH_LOOP_VETO_RECOVERY_PROBE" in (
+        loop_detection_text
+    )
+    assert 'record.outcomeKind === "tool-loop-veto"' in loop_detection_text
+    assert "return { stuck: false }" in loop_detection_text
     # Skipping isolated finalization leaves the existing outer, tools-enabled
     # empty-response retry path intact.
     assert (
@@ -214,6 +233,7 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert second["sandbox_bypass_files_changed"] == []
     assert second["shared_workspace_spawn_files_changed"] == []
     assert second["settled_tool_continuation"]["files_changed"] == []
+    assert second["loop_veto_recovery_probe_files_changed"] == []
     assert second["fs_bridge_files_changed"] == []
     assert second["openrouter_pricing_url_replacements"] == 0
     assert second["litellm_pricing_url_replacements"] == 0
@@ -300,6 +320,18 @@ def test_v2026_9_2_patcher_fails_closed_when_retry_eligibility_anchor_moves(
         patch_runtime_tree(root)
 
 
+def test_v2026_9_2_patcher_fails_closed_when_loop_recovery_anchor_moves(
+    tmp_path,
+):
+    root = _runtime_tree(tmp_path)
+    (root / "dist/tool-loop-detection-test.js").write_text(
+        "function detectToolCallLoop() { return { stuck: false }; }\n"
+    )
+
+    with pytest.raises(RuntimeError, match="loop-veto recovery anchor"):
+        patch_runtime_tree(root)
+
+
 def test_v2026_9_2_patcher_rejects_stale_stop_only_continuation(tmp_path):
     root = _runtime_tree(tmp_path)
     path = root / "dist/builtin-openclaw-test.js"
@@ -339,3 +371,4 @@ def test_v2026_9_2_builder_does_not_reapply_legacy_runtime_patches():
     assert SETTLED_CONTINUATION_RETRY_MARKER in audit
     assert SETTLED_CONTINUATION_LENGTH_MARKER in audit
     assert EMPTY_STOP_RETRY_LIMIT_MARKER in audit
+    assert LOOP_VETO_RECOVERY_PROBE_MARKER in audit

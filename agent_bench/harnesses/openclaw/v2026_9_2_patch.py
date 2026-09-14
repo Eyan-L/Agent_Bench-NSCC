@@ -54,9 +54,15 @@ SETTLED_CONTINUATION_LENGTH_MARKER = (
 EMPTY_STOP_RETRY_LIMIT_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_EMPTY_STOP_RETRY_LIMIT_BEGIN"
 )
+LOOP_VETO_RECOVERY_PROBE_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_LOOP_VETO_RECOVERY_PROBE_BEGIN"
+)
 
 SETTLED_TOOL_POLICY_ENV = "OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY"
 EMPTY_STOP_RETRIES_ENV = "OPENCLAW_AGENT_BENCH_EMPTY_STOP_RETRIES"
+LOOP_VETO_RECOVERY_PROBE_ENV = (
+    "OPENCLAW_AGENT_BENCH_LOOP_VETO_RECOVERY_PROBE"
+)
 ROADMAP_CONTINUATION_INSTRUCTION = (
     "The previous assistant turn was empty after its tool calls completed. "
     "Continue the assigned task from the current state. "
@@ -442,6 +448,61 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
     }
 
 
+def _patch_loop_veto_recovery_probe(root: Path) -> list[str]:
+    """Allow one real probe after a native critical loop veto.
+
+    Native v9.2 records the blocked call as ``tool-loop-veto`` while retaining
+    the outcomes that triggered the block. Without a probe, the same call is
+    rejected again before it can observe workspace progress made during the
+    recovery turn, making the detector state self-latching.
+    """
+    changed: list[str] = []
+    dist_files = sorted(_js_files(root / "dist"))
+    anchor = re.compile(
+        r"(?P<indent>[ \t]*)const history = selectHistoryForScope\("
+        r"state\.toolCallHistory \?\? \[\], scope\);\n"
+        r"(?P=indent)const currentHash = hashToolCall\(toolName, params\);"
+    )
+    targets = [
+        path
+        for path in dist_files
+        if anchor.search(_read(path))
+        or LOOP_VETO_RECOVERY_PROBE_MARKER in _read(path)
+    ]
+    if not targets:
+        raise RuntimeError("v2026.9.2 loop-veto recovery anchor not found")
+
+    def replacement(match: re.Match[str]) -> str:
+        indent = match.group("indent")
+        return match.group(0) + f'''\n{indent}/* {LOOP_VETO_RECOVERY_PROBE_MARKER} */
+{indent}if (process.env.{LOOP_VETO_RECOVERY_PROBE_ENV} === "1") {{
+{indent}\tfor (let i = history.length - 1; i >= 0; i -= 1) {{
+{indent}\t\tconst record = history[i];
+{indent}\t\tif (!record || record.toolName !== toolName || record.argsHash !== currentHash) continue;
+{indent}\t\tif (record.outcomeKind === "tool-loop-veto") return {{ stuck: false }};
+{indent}\t\tbreak;
+{indent}\t}}
+{indent}}}
+{indent}/* AB_HARNESS_OPENCLAW_V2026_9_2_LOOP_VETO_RECOVERY_PROBE_END */'''
+
+    for path in targets:
+        text = _read(path)
+        if LOOP_VETO_RECOVERY_PROBE_MARKER in text:
+            continue
+        if len(anchor.findall(text)) != 1:
+            raise RuntimeError(
+                f"loop-veto recovery anchor missing/ambiguous in {path}"
+            )
+        updated, count = anchor.subn(replacement, text, count=1)
+        if count != 1:
+            raise RuntimeError(
+                f"loop-veto recovery anchor missing/ambiguous in {path}"
+            )
+        _write(path, updated)
+        changed.append(str(path.relative_to(root)))
+    return changed
+
+
 def _fs_helper_source() -> str:
     return f'''/* {FS_HELPER_MARKER} */
 const __abFsBridgeRun = (params) => {{
@@ -663,6 +724,7 @@ def patch_runtime_tree(root: Path) -> dict[str, Any]:
     sandbox_files = _patch_sandbox_bypass(root)
     shared_workspace_spawn_files = _patch_shared_workspace_spawns(root)
     settled_continuation = _patch_settled_tool_continuation(root)
+    loop_veto_recovery_probe_files = _patch_loop_veto_recovery_probe(root)
     fs_files = _patch_fs_bridge(root)
     pricing = _patch_pricing(root)
 
@@ -680,6 +742,9 @@ def patch_runtime_tree(root: Path) -> dict[str, Any]:
         "sandbox_bypass_files_changed": sandbox_files,
         "shared_workspace_spawn_files_changed": shared_workspace_spawn_files,
         "settled_tool_continuation": settled_continuation,
+        "loop_veto_recovery_probe_files_changed": (
+            loop_veto_recovery_probe_files
+        ),
         "fs_bridge_files_changed": fs_files,
         **pricing,
     }
@@ -714,6 +779,10 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
         "empty_stop_retry_limit": (
             "dist/**/*.js",
             EMPTY_STOP_RETRY_LIMIT_MARKER,
+        ),
+        "loop_veto_recovery_probe": (
+            "dist/**/*",
+            LOOP_VETO_RECOVERY_PROBE_MARKER,
         ),
         "fs_helper": ("dist/fs-bridge-*.js", FS_HELPER_MARKER),
         "fs_run": ("dist/fs-bridge-*.js", FS_RUN_MARKER),

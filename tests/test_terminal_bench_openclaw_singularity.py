@@ -289,6 +289,7 @@ def test_roadmap_v9_enables_tools_capable_empty_turn_continuation(
     assert tb_app._roadmap_v9_continuation_env("roadmap_bench") == {
         "OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY": "continue",
         "OPENCLAW_AGENT_BENCH_EMPTY_STOP_RETRIES": "4",
+        "OPENCLAW_AGENT_BENCH_LOOP_VETO_RECOVERY_PROBE": "1",
     }
     assert tb_app._roadmap_v9_continuation_env("terminal_bench") == {}
 

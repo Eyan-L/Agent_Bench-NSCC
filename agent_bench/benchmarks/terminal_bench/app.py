@@ -155,6 +155,7 @@ def _roadmap_v9_continuation_env(agent_id: str) -> Dict[str, str]:
     return {
         "OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY": "continue",
         "OPENCLAW_AGENT_BENCH_EMPTY_STOP_RETRIES": "4",
+        "OPENCLAW_AGENT_BENCH_LOOP_VETO_RECOVERY_PROBE": "1",
     }
 
 
