@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
+    EMPTY_STOP_RETRY_LIMIT_MARKER,
     EXEC_MARKER,
     FS_CHECK_MARKER,
     FS_HELPER_MARKER,
@@ -14,7 +15,10 @@ from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     FS_WRITE_MARKER,
     LITELLM_PRICING_URL,
     OPENROUTER_PRICING_URL,
+    ROADMAP_CONTINUATION_INSTRUCTION,
     SANDBOX_MARKER,
+    SETTLED_CONTINUATION_INSTRUCTION_MARKER,
+    SETTLED_CONTINUATION_POLICY_MARKER,
     SHARED_WORKSPACE_SPAWN_MARKER,
     patch_runtime_tree,
     verify_runtime_tree,
@@ -90,6 +94,30 @@ def _runtime_tree(tmp_path: Path) -> Path:
         f"const a = '{OPENROUTER_PRICING_URL}';\n"
         f"const b = '{LITELLM_PRICING_URL}';\n"
     )
+    (dist / "builtin-openclaw-test.js").write_text(
+        "const EMPTY_RESPONSE_RETRY_INSTRUCTION = "
+        '"The previous attempt did not produce a user-visible answer. Continue '
+        "from the current state and produce the visible answer now. Do not "
+        'restart from scratch.";\n'
+        "function resolveSettledTurnFinalizationRequest(input) {\n"
+        "  const terminalAssistant = resolveCurrentAttemptAssistant(input.attempt);\n"
+        "  return terminalAssistant ? 'isolated-finalization' : null;\n"
+        "}\n"
+    )
+    (dist / "embedded-agent-test.js").write_text(
+        "async function prepareTerminalWithSettledTurnFinalization(input) {\n"
+        "  return input;\n"
+        "}\n"
+        "function resolveEmbeddedRunTerminal(input) {\n"
+        "  const nextEmptyResponseRetryInstruction = "
+        "input.settledTurnFinalizationAttempted ? null : "
+        "resolveEmptyResponseRetryInstruction(input);\n"
+        "  if (nextEmptyResponseRetryInstruction) return { action: 'retry' };\n"
+        "}\n"
+        "const retryOptions = {\n"
+        "  maxEmptyResponseRetryAttempts: 1,\n"
+        "};\n"
+    )
     return root
 
 
@@ -104,6 +132,8 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     spawn_text = (root / "dist/sessions-spawn-tool-test.js").read_text()
     fs_text = (root / "dist/fs-bridge-test.js").read_text()
     pricing_text = (root / "dist/pricing-test.js").read_text()
+    builtin_text = (root / "dist/builtin-openclaw-test.js").read_text()
+    embedded_text = (root / "dist/embedded-agent-test.js").read_text()
 
     assert EXEC_MARKER in exec_text
     assert SANDBOX_MARKER in docker_text
@@ -112,6 +142,24 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert "params.raw.worktree === true && !sharedWorkspaceSpawn" in spawn_text
     assert "worktreeName = sharedWorkspaceSpawn ? void 0" in spawn_text
     assert "worktreeBaseRef = sharedWorkspaceSpawn ? void 0" in spawn_text
+    assert SETTLED_CONTINUATION_POLICY_MARKER in builtin_text
+    assert (
+        'OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY === "continue") return null'
+        in builtin_text
+    )
+    assert SETTLED_CONTINUATION_INSTRUCTION_MARKER in builtin_text
+    assert ROADMAP_CONTINUATION_INSTRUCTION in builtin_text
+    assert EMPTY_STOP_RETRY_LIMIT_MARKER in embedded_text
+    assert "if (raw === void 0 || raw === \"\") return 1" in embedded_text
+    assert "Math.min(parsed, 16)" in embedded_text
+    # Skipping isolated finalization leaves the existing outer, tools-enabled
+    # empty-response retry path intact.
+    assert (
+        "settledTurnFinalizationAttempted ? null : "
+        "resolveEmptyResponseRetryInstruction"
+    ) in embedded_text
+    assert "return { action: 'retry' }" in embedded_text
+    assert "disableTools" not in embedded_text
     for marker in (
         FS_HELPER_MARKER,
         FS_RUN_MARKER,
@@ -137,6 +185,7 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert second["exec_bridge_files_changed"] == []
     assert second["sandbox_bypass_files_changed"] == []
     assert second["shared_workspace_spawn_files_changed"] == []
+    assert second["settled_tool_continuation"]["files_changed"] == []
     assert second["fs_bridge_files_changed"] == []
     assert second["openrouter_pricing_url_replacements"] == 0
     assert second["litellm_pricing_url_replacements"] == 0
@@ -162,6 +211,20 @@ def test_v2026_9_2_patcher_fails_closed_when_exec_anchor_moves(tmp_path):
         patch_runtime_tree(root)
 
 
+def test_v2026_9_2_patcher_fails_closed_when_continuation_anchor_moves(
+    tmp_path,
+):
+    root = _runtime_tree(tmp_path)
+    (root / "dist/builtin-openclaw-test.js").write_text(
+        "const movedSettledFinalization = true;\n"
+    )
+
+    with pytest.raises(
+        RuntimeError, match="settled-turn finalization anchor"
+    ):
+        patch_runtime_tree(root)
+
+
 def test_v2026_9_2_builder_does_not_reapply_legacy_runtime_patches():
     repo_root = Path(__file__).resolve().parents[1]
     script = (
@@ -172,7 +235,15 @@ def test_v2026_9_2_builder_does_not_reapply_legacy_runtime_patches():
     assert "audit_oc_v2026_9_2.sh" in script
     assert ".agent-bench-v2026.9.2.json" in script
     assert "shared_workspace_spawn" in script
+    assert "settled_tool_continuation" in script
     assert 'mkdir -p "$(dirname "$OUT_SIF")" "${HOME}/agent-bench-sif-build"' in script
     assert "apply_patch.py apply" not in script
     assert "runtime_compat_patch.py" not in script
     assert "--session-patch-timeout-ms" not in script
+
+    audit = (
+        repo_root / "agent_bench/deployments/pbs/audit_oc_v2026_9_2.sh"
+    ).read_text()
+    assert SETTLED_CONTINUATION_POLICY_MARKER in audit
+    assert SETTLED_CONTINUATION_INSTRUCTION_MARKER in audit
+    assert EMPTY_STOP_RETRY_LIMIT_MARKER in audit

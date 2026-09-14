@@ -8,6 +8,7 @@ keeps the v2026.9.2 customization surface small:
 * route sandbox bash exec through OPENCLAW_EXEC_BRIDGE;
 * bypass OpenClaw-owned Docker lifecycle when the harness owns the sandbox;
 * route sandbox filesystem operations through the same exec bridge;
+* keep Roadmap empty post-tool turns in the tools-enabled outer agent loop;
 * replace legacy public model-pricing endpoints if they are present.
 
 OpenClaw v2026.9.2 already provides native rolling/post-compaction loop
@@ -37,6 +38,30 @@ FS_READ_MARKER = "AB_HARNESS_OPENCLAW_V2026_9_2_FS_BRIDGE_READ_BEGIN"
 FS_CHECK_MARKER = "AB_HARNESS_OPENCLAW_V2026_9_2_FS_BRIDGE_CHECK_BEGIN"
 SHARED_WORKSPACE_SPAWN_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_SHARED_WORKSPACE_SPAWN_BEGIN"
+)
+SETTLED_CONTINUATION_POLICY_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_POLICY_BEGIN"
+)
+SETTLED_CONTINUATION_INSTRUCTION_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_INSTRUCTION_BEGIN"
+)
+EMPTY_STOP_RETRY_LIMIT_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_EMPTY_STOP_RETRY_LIMIT_BEGIN"
+)
+
+SETTLED_TOOL_POLICY_ENV = "OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY"
+EMPTY_STOP_RETRIES_ENV = "OPENCLAW_AGENT_BENCH_EMPTY_STOP_RETRIES"
+ROADMAP_CONTINUATION_INSTRUCTION = (
+    "The previous assistant turn was empty after its tool calls completed. "
+    "Continue the assigned task from the current state. "
+    "Use tools for any remaining implementation or validation work. "
+    "Only produce the final answer when the task is complete. "
+    "Do not restart from scratch or repeat completed work."
+)
+_UPSTREAM_EMPTY_RESPONSE_RETRY_INSTRUCTION = (
+    "The previous attempt did not produce a user-visible answer. Continue "
+    "from the current state and produce the visible answer now. Do not "
+    "restart from scratch."
 )
 
 OPENROUTER_PRICING_URL = "https://openrouter.ai/api/v1/models"
@@ -190,6 +215,138 @@ def _patch_shared_workspace_spawns(root: Path) -> list[str]:
         _write(path, updated)
         changed.append(str(path.relative_to(root)))
     return changed
+
+
+def _patch_settled_tool_continuation(root: Path) -> dict[str, list[str]]:
+    """Route Roadmap empty post-tool stops through the normal outer retry.
+
+    Upstream v2026.9.2 runs a tools-disabled isolated finalization when a
+    settled tool batch is followed by an empty assistant stop. Under the
+    explicit Agent_Bench policy, skipping that finalization leaves its outcome
+    as ``not-attempted`` so OpenClaw's existing tools-enabled empty-response
+    retry path remains eligible.
+    """
+    changed: set[Path] = set()
+    dist_files = sorted(_js_files(root / "dist"))
+
+    policy_anchor = re.compile(
+        r"(function\s+resolveSettledTurnFinalizationRequest\(input\)\s*\{\s*)"
+    )
+    policy_targets = [
+        path for path in dist_files
+        if policy_anchor.search(_read(path))
+        or SETTLED_CONTINUATION_POLICY_MARKER in _read(path)
+    ]
+    if not policy_targets:
+        raise RuntimeError("v2026.9.2 settled-turn finalization anchor not found")
+
+    policy_insert = f'''/* {SETTLED_CONTINUATION_POLICY_MARKER} */
+\tif (process.env.{SETTLED_TOOL_POLICY_ENV} === "continue") return null;
+\t/* AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_POLICY_END */
+\t'''
+    for path in policy_targets:
+        text = _read(path)
+        if SETTLED_CONTINUATION_POLICY_MARKER not in text:
+            if len(policy_anchor.findall(text)) != 1:
+                raise RuntimeError(
+                    f"settled-turn policy anchor missing/ambiguous in {path}"
+                )
+            text, count = policy_anchor.subn(
+                lambda match: match.group(1) + policy_insert,
+                text,
+                count=1,
+            )
+            if count != 1:
+                raise RuntimeError(
+                    f"settled-turn policy anchor missing/ambiguous in {path}"
+                )
+            _write(path, text)
+            changed.add(path)
+
+    instruction_anchor = re.compile(
+        r'const\s+EMPTY_RESPONSE_RETRY_INSTRUCTION\s*=\s*'
+        + re.escape(json.dumps(_UPSTREAM_EMPTY_RESPONSE_RETRY_INSTRUCTION))
+        + r";"
+    )
+    instruction_targets = [
+        path for path in dist_files
+        if instruction_anchor.search(_read(path))
+        or SETTLED_CONTINUATION_INSTRUCTION_MARKER in _read(path)
+    ]
+    if not instruction_targets:
+        raise RuntimeError("v2026.9.2 empty-response instruction anchor not found")
+
+    instruction_replacement = f'''/* {SETTLED_CONTINUATION_INSTRUCTION_MARKER} */
+const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} === "continue"
+\t? {json.dumps(ROADMAP_CONTINUATION_INSTRUCTION)}
+\t: {json.dumps(_UPSTREAM_EMPTY_RESPONSE_RETRY_INSTRUCTION)};
+/* AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_INSTRUCTION_END */'''
+    for path in instruction_targets:
+        text = _read(path)
+        if SETTLED_CONTINUATION_INSTRUCTION_MARKER not in text:
+            if len(instruction_anchor.findall(text)) != 1:
+                raise RuntimeError(
+                    f"empty-response instruction anchor missing/ambiguous in {path}"
+                )
+            text, count = instruction_anchor.subn(
+                instruction_replacement,
+                text,
+                count=1,
+            )
+            if count != 1:
+                raise RuntimeError(
+                    f"empty-response instruction anchor missing/ambiguous in {path}"
+                )
+            _write(path, text)
+            changed.add(path)
+
+    retry_anchor = re.compile(r"maxEmptyResponseRetryAttempts:\s*1,")
+    retry_targets = [
+        path for path in dist_files
+        if (
+            "prepareTerminalWithSettledTurnFinalization" in _read(path)
+            and retry_anchor.search(_read(path))
+        )
+        or EMPTY_STOP_RETRY_LIMIT_MARKER in _read(path)
+    ]
+    if not retry_targets:
+        raise RuntimeError("v2026.9.2 empty-response retry-limit anchor not found")
+
+    retry_replacement = f'''/* {EMPTY_STOP_RETRY_LIMIT_MARKER} */
+\t\t\t\tmaxEmptyResponseRetryAttempts: (() => {{
+\t\t\t\t\tconst raw = process.env.{EMPTY_STOP_RETRIES_ENV};
+\t\t\t\t\tif (raw === void 0 || raw === "") return 1;
+\t\t\t\t\tconst parsed = Number.parseInt(raw, 10);
+\t\t\t\t\treturn Number.isSafeInteger(parsed) && parsed >= 0
+\t\t\t\t\t\t? Math.min(parsed, 16)
+\t\t\t\t\t\t: 1;
+\t\t\t\t}})(),
+\t\t\t\t/* AB_HARNESS_OPENCLAW_V2026_9_2_EMPTY_STOP_RETRY_LIMIT_END */'''
+    for path in retry_targets:
+        text = _read(path)
+        if EMPTY_STOP_RETRY_LIMIT_MARKER not in text:
+            if len(retry_anchor.findall(text)) != 1:
+                raise RuntimeError(
+                    f"empty-response retry-limit anchor missing/ambiguous in {path}"
+                )
+            text, count = retry_anchor.subn(retry_replacement, text, count=1)
+            if count != 1:
+                raise RuntimeError(
+                    f"empty-response retry-limit anchor missing/ambiguous in {path}"
+                )
+            _write(path, text)
+            changed.add(path)
+
+    return {
+        "policy_files": [str(path.relative_to(root)) for path in policy_targets],
+        "instruction_files": [
+            str(path.relative_to(root)) for path in instruction_targets
+        ],
+        "retry_limit_files": [
+            str(path.relative_to(root)) for path in retry_targets
+        ],
+        "files_changed": [str(path.relative_to(root)) for path in sorted(changed)],
+    }
 
 
 def _fs_helper_source() -> str:
@@ -412,6 +569,7 @@ def patch_runtime_tree(root: Path) -> dict[str, Any]:
     exec_files = _patch_exec_bridge(root)
     sandbox_files = _patch_sandbox_bypass(root)
     shared_workspace_spawn_files = _patch_shared_workspace_spawns(root)
+    settled_continuation = _patch_settled_tool_continuation(root)
     fs_files = _patch_fs_bridge(root)
     pricing = _patch_pricing(root)
 
@@ -428,6 +586,7 @@ def patch_runtime_tree(root: Path) -> dict[str, Any]:
         "exec_bridge_files_changed": exec_files,
         "sandbox_bypass_files_changed": sandbox_files,
         "shared_workspace_spawn_files_changed": shared_workspace_spawn_files,
+        "settled_tool_continuation": settled_continuation,
         "fs_bridge_files_changed": fs_files,
         **pricing,
     }
@@ -446,6 +605,18 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
         "shared_workspace_spawn": (
             "dist/sessions-spawn-tool-*.js",
             SHARED_WORKSPACE_SPAWN_MARKER,
+        ),
+        "settled_continuation_policy": (
+            "dist/**/*.js",
+            SETTLED_CONTINUATION_POLICY_MARKER,
+        ),
+        "settled_continuation_instruction": (
+            "dist/**/*.js",
+            SETTLED_CONTINUATION_INSTRUCTION_MARKER,
+        ),
+        "empty_stop_retry_limit": (
+            "dist/**/*.js",
+            EMPTY_STOP_RETRY_LIMIT_MARKER,
         ),
         "fs_helper": ("dist/fs-bridge-*.js", FS_HELPER_MARKER),
         "fs_run": ("dist/fs-bridge-*.js", FS_RUN_MARKER),

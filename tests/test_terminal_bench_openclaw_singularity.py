@@ -164,6 +164,12 @@ def test_terminal_bench_openclaw_singularity_returns_runtime_handle(tmp_path, mo
     assert container.specs[1].env["HOME"] == "/root"
     assert container.specs[1].env["OPENCLAW_BYPASS_ENSURE_SANDBOX"] == "1"
     assert container.specs[1].env["OPENCLAW_DISABLE_BONJOUR"] == "1"
+    assert "OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY" not in (
+        container.specs[1].env
+    )
+    assert "OPENCLAW_AGENT_BENCH_EMPTY_STOP_RETRIES" not in (
+        container.specs[1].env
+    )
 
     task_workspace_mounts = [
         mount
@@ -273,6 +279,24 @@ def test_roadmap_v9_starts_runtime_sqlite_session_exporter(tmp_path, monkeypatch
     ]
     assert len(exporter_calls) == 1
     assert "openclaw-agent.sqlite" in str(exporter_calls[0])
+
+
+def test_roadmap_v9_enables_tools_capable_empty_turn_continuation(
+    monkeypatch,
+):
+    monkeypatch.setenv("AB_AGENT_RUNTIME_VERSION", "2026.9.2")
+
+    assert tb_app._roadmap_v9_continuation_env("roadmap_bench") == {
+        "OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY": "continue",
+        "OPENCLAW_AGENT_BENCH_EMPTY_STOP_RETRIES": "4",
+    }
+    assert tb_app._roadmap_v9_continuation_env("terminal_bench") == {}
+
+
+def test_roadmap_v4_does_not_enable_v9_empty_turn_continuation(monkeypatch):
+    monkeypatch.setenv("AB_AGENT_RUNTIME_VERSION", "2026.4.22")
+
+    assert tb_app._roadmap_v9_continuation_env("roadmap_bench") == {}
 
 
 def test_driver_routes_terminal_bench_openclaw_to_generic_harness():

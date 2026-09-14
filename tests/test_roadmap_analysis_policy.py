@@ -221,7 +221,7 @@ def test_roadmap_profile_and_prompt_allow_sixteen_concurrent_subagents():
     assert "MUST spawn" not in prompt
 
 
-def test_roadmap_profiles_disable_unconfigured_memory_plugin():
+def test_roadmap_profiles_enable_builtin_memory_plugin():
     root = Path(__file__).resolve().parents[1]
 
     for name in (
@@ -229,7 +229,7 @@ def test_roadmap_profiles_disable_unconfigured_memory_plugin():
         "openclaw_roadmapbench_single_agent.yaml",
     ):
         profile = (root / "profiles" / "harnesses" / name).read_text()
-        assert "memory-core:\n        enabled: false" in profile
+        assert "memory-core:\n        enabled: true" in profile
 
 
 def test_roadmap_profiles_use_builtin_env_secret_provider():

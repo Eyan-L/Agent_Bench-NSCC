@@ -147,6 +147,17 @@ def _terminal_bench_agent_assets_dir(
     ) or (_THIS_DIR / "openclaw" / "agents")
 
 
+def _roadmap_v9_continuation_env(agent_id: str) -> Dict[str, str]:
+    """Enable tools-capable empty-turn recovery only for Roadmap on v9.2."""
+    version = str(os.environ.get("AB_AGENT_RUNTIME_VERSION") or "").lstrip("v")
+    if agent_id != "roadmap_bench" or version != "2026.9.2":
+        return {}
+    return {
+        "OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY": "continue",
+        "OPENCLAW_AGENT_BENCH_EMPTY_STOP_RETRIES": "4",
+    }
+
+
 def _normalize_container_path(raw: Optional[str], default: str = "/app") -> str:
     path = (raw or "").strip() or default
     if not path.startswith("/"):
@@ -1439,6 +1450,7 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
                 "OTEL_RESOURCE_ATTRIBUTES": f"oc.run_id={run_id}",
                 "OPENCLAW_DISABLE_BONJOUR": "1",
                 "OPENCLAW_AGENT_BENCH_SHARED_WORKSPACE": "1",
+                **_roadmap_v9_continuation_env(agent_id),
                 "NPM_CONFIG_REGISTRY": os.environ.get(
                     "AB_NPM_REGISTRY", "https://registry.npmmirror.com"
                 ),
