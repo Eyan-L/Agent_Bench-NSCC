@@ -48,6 +48,9 @@ SETTLED_CONTINUATION_INSTRUCTION_MARKER = (
 SETTLED_CONTINUATION_RETRY_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_RETRY_BEGIN"
 )
+SETTLED_CONTINUATION_LENGTH_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_LENGTH_BEGIN"
+)
 EMPTY_STOP_RETRY_LIMIT_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_EMPTY_STOP_RETRY_LIMIT_BEGIN"
 )
@@ -311,6 +314,7 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
         path for path in dist_files
         if retry_eligibility_anchor.search(_read(path))
         or SETTLED_CONTINUATION_RETRY_MARKER in _read(path)
+        or SETTLED_CONTINUATION_LENGTH_MARKER in _read(path)
     ]
     if not retry_eligibility_targets:
         raise RuntimeError(
@@ -320,6 +324,16 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
     def retry_eligibility_replacement(match: re.Match[str]) -> str:
         param = match.group("param")
         return match.group(1) + f'''/* {SETTLED_CONTINUATION_RETRY_MARKER} */
+	/* {SETTLED_CONTINUATION_LENGTH_MARKER} */
+	const __abAssistantState = classifyAssistantTurn({param});
+	const __abEmptyLength =
+		__abAssistantState.assistant?.stopReason === "length"
+		&& __abAssistantState.visibleText.length === 0
+		&& !__abAssistantState.reasoningOnly
+		&& {param}.payloadCount === 0;
+	const __abRoadmapContinuationEligible =
+		__abAssistantState.emptyResponse || __abEmptyLength;
+	/* AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_LENGTH_END */
 	const __abSettledToolEvidence = resolveSettledToolBatchEvidence({param}.attempt);
 	if (process.env.{SETTLED_TOOL_POLICY_ENV} === "continue"
 		&& !{param}.aborted
@@ -331,7 +345,7 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
 		&& !{param}.attempt.didSendDeterministicApprovalPrompt
 		&& !{param}.attempt.hasToolMediaBlockReply
 		&& !hasCompletedMessagingToolDeliveryEvidence({param}.attempt)
-		&& classifyAssistantTurn({param}).emptyResponse
+		&& __abRoadmapContinuationEligible
 		&& __abSettledToolEvidence.allToolsProvenSettled
 		&& !__abSettledToolEvidence.hasUnsettledToolError
 		&& !__abSettledToolEvidence.intentionalTermination
@@ -342,9 +356,21 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
 	/* AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_RETRY_END */
 	'''
 
+    stale_retry_targets = [
+        path for path in retry_eligibility_targets
+        if SETTLED_CONTINUATION_RETRY_MARKER in _read(path)
+        and SETTLED_CONTINUATION_LENGTH_MARKER not in _read(path)
+    ]
+    if stale_retry_targets:
+        raise RuntimeError(
+            "settled continuation patch predates empty-length support; "
+            "rebuild from the clean v2026.9.2 base: "
+            + ", ".join(str(path) for path in stale_retry_targets)
+        )
+
     for path in retry_eligibility_targets:
         text = _read(path)
-        if SETTLED_CONTINUATION_RETRY_MARKER not in text:
+        if SETTLED_CONTINUATION_LENGTH_MARKER not in text:
             if len(retry_eligibility_anchor.findall(text)) != 1:
                 raise RuntimeError(
                     "empty-response retry eligibility anchor "
@@ -683,7 +709,7 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
         ),
         "settled_continuation_retry": (
             "dist/**/*",
-            SETTLED_CONTINUATION_RETRY_MARKER,
+            SETTLED_CONTINUATION_LENGTH_MARKER,
         ),
         "empty_stop_retry_limit": (
             "dist/**/*.js",

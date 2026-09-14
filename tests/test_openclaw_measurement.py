@@ -62,6 +62,27 @@ def test_post_compaction_loop_guard_is_machine_readable(tmp_path):
     assert loop_events[0]["count"] == 3
 
 
+def test_gateway_compaction_event_requires_positive_count(tmp_path):
+    (tmp_path / "openclaw_gateway.log").write_text(
+        "2026-09-01T05:45:00Z [agent] run complete compactions=0\n"
+        "2026-09-01T05:46:00Z [agent] context-overflow-diag "
+        "compactionAttempts=0\n"
+        "2026-09-01T05:47:00Z [agent] run complete compactions=2\n"
+    )
+
+    build_openclaw_measurement(tmp_path, agent_id="roadmap_bench")
+
+    trajectory = [
+        json.loads(line)
+        for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()
+    ]
+    compactions = [
+        event for event in trajectory if event["event_type"] == "compaction"
+    ]
+    assert len(compactions) == 1
+    assert compactions[0]["count"] == 2
+
+
 def test_native_tool_loop_warning_is_observable_but_not_terminal(tmp_path):
     (tmp_path / "openclaw_gateway.log").write_text(
         "2026-09-10T03:08:02.168+08:00 [diagnostic] tool loop: "

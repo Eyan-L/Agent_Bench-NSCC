@@ -210,6 +210,7 @@ def stderr_recovery_events(run_dir: Path) -> list[dict]:
                         "compaction",
                         text,
                         source=source,
+                        count=1,
                         outcome="completed",
                     )
                 )

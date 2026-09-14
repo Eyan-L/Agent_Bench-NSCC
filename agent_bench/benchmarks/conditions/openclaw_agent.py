@@ -47,6 +47,13 @@ from agent_bench.deployments.containers.base import Container, ContainerHandle
 
 logger = logging.getLogger(__name__)
 
+_GATEWAY_EXECUTION_MARKER = (
+    "[agent-bench] OpenClaw gateway execution selected"
+)
+_ROADMAP_GATEWAY_EXECUTION_MARKER = (
+    "[agent-bench] Roadmap gateway RPC ready; gateway execution selected"
+)
+
 
 def _otlp_attrs(items) -> Dict:
     """OTLP attribute list -> flat dict (first scalar value of each entry)."""
@@ -748,6 +755,7 @@ class OpenClawAgentCondition:
             inner = (
                 "mkdir -p /root/.openclaw/logs && "
                 "source /tmp/oc_gateway_env && "
+                f"echo {shlex.quote(_GATEWAY_EXECUTION_MARKER)} >&2 && "
                 "exec openclaw agent "
                 f"--agent {shlex.quote(self.agent_id)} "
                 f"--session-id {shlex.quote(session_id)} "
@@ -966,16 +974,17 @@ class OpenClawAgentCondition:
         ):
             return "embedded_fallback"
         if (
-            "[agent-bench] Roadmap gateway RPC ready; "
-            "gateway execution selected"
-        ) in stderr:
+            _GATEWAY_EXECUTION_MARKER in stderr
+            or _ROADMAP_GATEWAY_EXECUTION_MARKER in stderr
+        ):
             return "gateway"
         selected = getattr(self, "_selected_agent_runtime_mode", None)
         if selected in {"gateway", "embedded_fallback"}:
             return str(selected)
-        if payload is None or getattr(self, "_last_exit_code", 0) not in (0, None):
-            return "unknown"
-        return "gateway"
+        # A successful CLI response is not evidence of which execution path
+        # produced it, and a non-zero rc does not erase an already selected
+        # Gateway path. Only explicit path evidence is authoritative here.
+        return "unknown"
 
     def _archive_gateway_log(self, run_dir: Path) -> None:
         raw_path = self._env_info.get("gateway_log_path")

@@ -752,7 +752,16 @@ def _gateway_events(run_dir: Path) -> list[dict]:
             fields["tool_name"] = tool.group(1) if tool else None
             fields["count"] = _int(count.group(1)) if count else None
         elif "compaction" in lowered:
-            event_type = "compaction"
+            count_match = re.search(
+                r"\b(?:compactions|compactionAttempts|compactionCount|"
+                r"compaction_count)\s*[=:]\s*(\d+)",
+                text,
+                re.IGNORECASE,
+            )
+            compaction_count = _int(count_match.group(1)) if count_match else 0
+            if compaction_count > 0:
+                event_type = "compaction"
+                fields["count"] = compaction_count
         if event_type:
             _append(
                 events, timestamp_ns=timestamp_ns,
@@ -762,12 +771,14 @@ def _gateway_events(run_dir: Path) -> list[dict]:
             )
             if event_type == "context_overflow" and "compaction" in lowered:
                 attempts = re.search(r"compactionAttempts=(\d+)", text)
-                _append(
-                    events, timestamp_ns=timestamp_ns, session_id="",
-                    session_key="", role="runtime", event_type="compaction",
-                    attempts=_int(attempts.group(1)) if attempts else None,
-                    message=text,
-                )
+                attempt_count = _int(attempts.group(1)) if attempts else 0
+                if attempt_count > 0:
+                    _append(
+                        events, timestamp_ns=timestamp_ns, session_id="",
+                        session_key="", role="runtime", event_type="compaction",
+                        attempts=attempt_count, count=attempt_count,
+                        message=text,
+                    )
     return events
 
 

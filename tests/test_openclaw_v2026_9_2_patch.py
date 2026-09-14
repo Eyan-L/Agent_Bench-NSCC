@@ -18,6 +18,7 @@ from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     ROADMAP_CONTINUATION_INSTRUCTION,
     SANDBOX_MARKER,
     SETTLED_CONTINUATION_INSTRUCTION_MARKER,
+    SETTLED_CONTINUATION_LENGTH_MARKER,
     SETTLED_CONTINUATION_POLICY_MARKER,
     SETTLED_CONTINUATION_RETRY_MARKER,
     SHARED_WORKSPACE_SPAWN_MARKER,
@@ -156,9 +157,18 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert SETTLED_CONTINUATION_INSTRUCTION_MARKER in builtin_text
     assert ROADMAP_CONTINUATION_INSTRUCTION in builtin_text
     assert SETTLED_CONTINUATION_RETRY_MARKER in builtin_text
+    assert SETTLED_CONTINUATION_LENGTH_MARKER in builtin_text
     assert "__abSettledToolEvidence.allToolsProvenSettled" in builtin_text
     assert "!__abSettledToolEvidence.hasUnsettledToolError" in builtin_text
-    assert "classifyAssistantTurn(params).emptyResponse" in builtin_text
+    assert "const __abAssistantState = classifyAssistantTurn(params)" in builtin_text
+    assert '__abAssistantState.assistant?.stopReason === "length"' in builtin_text
+    assert "__abAssistantState.visibleText.length === 0" in builtin_text
+    assert "!__abAssistantState.reasoningOnly" in builtin_text
+    assert "params.payloadCount === 0" in builtin_text
+    assert (
+        "__abAssistantState.emptyResponse || __abEmptyLength" in builtin_text
+    )
+    assert "&& __abRoadmapContinuationEligible" in builtin_text
     assert 'params.attempt?.terminal?.kind !== "timeout"' in builtin_text
     assert "!hasCompletedMessagingToolDeliveryEvidence(params.attempt)" in (
         builtin_text
@@ -213,6 +223,35 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     }
 
 
+def test_v2026_9_2_empty_stop_and_length_share_bounded_retry_path(tmp_path):
+    root = _runtime_tree(tmp_path)
+
+    patch_runtime_tree(root)
+
+    builtin = (root / "dist/builtin-openclaw-test.js").read_text()
+    embedded = (root / "dist/embedded-agent-test.js").read_text()
+    assert "__abAssistantState.emptyResponse || __abEmptyLength" in builtin
+    assert '__abAssistantState.assistant?.stopReason === "length"' in builtin
+    assert builtin.count("return EMPTY_RESPONSE_RETRY_INSTRUCTION;") == 1
+    assert "maxEmptyResponseRetryAttempts" in embedded
+    assert f"process.env.OPENCLAW_AGENT_BENCH_EMPTY_STOP_RETRIES" in embedded
+    assert "Math.min(parsed, 16)" in embedded
+
+    safety_guards = (
+        "!params.aborted",
+        "!params.timedOut",
+        'params.attempt?.terminal?.kind !== "failed"',
+        'params.attempt?.terminal?.kind !== "timeout"',
+        "!params.attempt.clientToolCalls",
+        "!params.attempt.yieldDetected",
+        "!hasCompletedMessagingToolDeliveryEvidence(params.attempt)",
+        "__abSettledToolEvidence.allToolsProvenSettled",
+        "!__abSettledToolEvidence.hasUnsettledToolError",
+        "!hasAsyncActivity(params.attempt.toolMetas)",
+    )
+    assert all(guard in builtin for guard in safety_guards)
+
+
 def test_v2026_9_2_patcher_fails_closed_on_wrong_version(tmp_path):
     root = _runtime_tree(tmp_path)
     (root / "package.json").write_text(json.dumps({"version": "2026.4.22"}))
@@ -261,6 +300,21 @@ def test_v2026_9_2_patcher_fails_closed_when_retry_eligibility_anchor_moves(
         patch_runtime_tree(root)
 
 
+def test_v2026_9_2_patcher_rejects_stale_stop_only_continuation(tmp_path):
+    root = _runtime_tree(tmp_path)
+    path = root / "dist/builtin-openclaw-test.js"
+    path.write_text(
+        path.read_text().replace(
+            "function resolveEmptyResponseRetryInstruction(params) {",
+            "function resolveEmptyResponseRetryInstruction(params) {\n"
+            f"/* {SETTLED_CONTINUATION_RETRY_MARKER} */",
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="predates empty-length support"):
+        patch_runtime_tree(root)
+
+
 def test_v2026_9_2_builder_does_not_reapply_legacy_runtime_patches():
     repo_root = Path(__file__).resolve().parents[1]
     script = (
@@ -283,4 +337,5 @@ def test_v2026_9_2_builder_does_not_reapply_legacy_runtime_patches():
     assert SETTLED_CONTINUATION_POLICY_MARKER in audit
     assert SETTLED_CONTINUATION_INSTRUCTION_MARKER in audit
     assert SETTLED_CONTINUATION_RETRY_MARKER in audit
+    assert SETTLED_CONTINUATION_LENGTH_MARKER in audit
     assert EMPTY_STOP_RETRY_LIMIT_MARKER in audit

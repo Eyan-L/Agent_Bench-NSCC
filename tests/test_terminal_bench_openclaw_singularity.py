@@ -1849,7 +1849,7 @@ def test_openclaw_runtime_mode_detects_gateway_and_embedded_fallback():
     condition._last_stderr = ""
     condition._last_exit_code = 0
     assert condition._detect_agent_runtime_mode({"result": {"meta": {}}}) == (
-        "gateway"
+        "unknown"
     )
 
     condition._last_stderr = (
@@ -1862,16 +1862,12 @@ def test_openclaw_runtime_mode_detects_gateway_and_embedded_fallback():
         "result": {"meta": {"executionTrace": {"runner": "embedded"}}}
     }
     assert condition._detect_agent_runtime_mode(embedded_payload) == (
-        "gateway"
+        "unknown"
     )
     condition._last_exit_code = 1
     assert condition._detect_agent_runtime_mode(None) == "unknown"
 
-    condition._last_exit_code = 0
-    selected = condition._detect_agent_runtime_mode(
-        {"result": {"meta": {}}}
-    )
-    condition._selected_agent_runtime_mode = selected
+    condition._selected_agent_runtime_mode = "gateway"
     condition._last_exit_code = -1
     assert condition._detect_agent_runtime_mode(None) == "gateway"
 
@@ -1886,6 +1882,14 @@ def test_openclaw_runtime_mode_detects_gateway_and_embedded_fallback():
 
     condition._last_stderr += "\nfalling back to embedded"
     assert condition._detect_agent_runtime_mode(None) == "embedded_fallback"
+
+    condition._selected_agent_runtime_mode = None
+    condition._last_exit_code = 1
+    condition._last_stderr = (
+        "[agent-bench] OpenClaw gateway execution selected\n"
+        "LLM request failed"
+    )
+    assert condition._detect_agent_runtime_mode(None) == "gateway"
 
 
 def test_roadmap_child_completion_resumes_same_parent_and_finishes(tmp_path):
