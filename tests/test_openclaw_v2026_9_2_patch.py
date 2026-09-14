@@ -19,6 +19,7 @@ from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     SANDBOX_MARKER,
     SETTLED_CONTINUATION_INSTRUCTION_MARKER,
     SETTLED_CONTINUATION_POLICY_MARKER,
+    SETTLED_CONTINUATION_RETRY_MARKER,
     SHARED_WORKSPACE_SPAWN_MARKER,
     patch_runtime_tree,
     verify_runtime_tree,
@@ -103,6 +104,11 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "  const terminalAssistant = resolveCurrentAttemptAssistant(input.attempt);\n"
         "  return terminalAssistant ? 'isolated-finalization' : null;\n"
         "}\n"
+        "function resolveEmptyResponseRetryInstruction(params) {\n"
+        "  if (shouldSkipNonVisibleTurnRetry(params)) return null;\n"
+        "  return classifyAssistantTurn(params).emptyResponse\n"
+        "    ? EMPTY_RESPONSE_RETRY_INSTRUCTION : null;\n"
+        "}\n"
     )
     (dist / "embedded-agent-test.js").write_text(
         "async function prepareTerminalWithSettledTurnFinalization(input) {\n"
@@ -149,6 +155,18 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     )
     assert SETTLED_CONTINUATION_INSTRUCTION_MARKER in builtin_text
     assert ROADMAP_CONTINUATION_INSTRUCTION in builtin_text
+    assert SETTLED_CONTINUATION_RETRY_MARKER in builtin_text
+    assert "__abSettledToolEvidence.allToolsProvenSettled" in builtin_text
+    assert "!__abSettledToolEvidence.hasUnsettledToolError" in builtin_text
+    assert "classifyAssistantTurn(params).emptyResponse" in builtin_text
+    assert 'params.attempt?.terminal?.kind !== "timeout"' in builtin_text
+    assert "!hasCompletedMessagingToolDeliveryEvidence(params.attempt)" in (
+        builtin_text
+    )
+    assert "!hasAsyncActivity(params.attempt.toolMetas)" in builtin_text
+    assert builtin_text.index(SETTLED_CONTINUATION_RETRY_MARKER) < (
+        builtin_text.index("shouldSkipNonVisibleTurnRetry(params)")
+    )
     assert EMPTY_STOP_RETRY_LIMIT_MARKER in embedded_text
     assert "if (raw === void 0 || raw === \"\") return 1" in embedded_text
     assert "Math.min(parsed, 16)" in embedded_text
@@ -225,6 +243,24 @@ def test_v2026_9_2_patcher_fails_closed_when_continuation_anchor_moves(
         patch_runtime_tree(root)
 
 
+def test_v2026_9_2_patcher_fails_closed_when_retry_eligibility_anchor_moves(
+    tmp_path,
+):
+    root = _runtime_tree(tmp_path)
+    path = root / "dist/builtin-openclaw-test.js"
+    path.write_text(
+        path.read_text().replace(
+            "function resolveEmptyResponseRetryInstruction(params)",
+            "function movedEmptyResponseRetryInstruction(params)",
+        )
+    )
+
+    with pytest.raises(
+        RuntimeError, match="empty-response retry eligibility anchor"
+    ):
+        patch_runtime_tree(root)
+
+
 def test_v2026_9_2_builder_does_not_reapply_legacy_runtime_patches():
     repo_root = Path(__file__).resolve().parents[1]
     script = (
@@ -246,4 +282,5 @@ def test_v2026_9_2_builder_does_not_reapply_legacy_runtime_patches():
     ).read_text()
     assert SETTLED_CONTINUATION_POLICY_MARKER in audit
     assert SETTLED_CONTINUATION_INSTRUCTION_MARKER in audit
+    assert SETTLED_CONTINUATION_RETRY_MARKER in audit
     assert EMPTY_STOP_RETRY_LIMIT_MARKER in audit

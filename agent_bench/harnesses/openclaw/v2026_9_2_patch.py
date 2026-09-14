@@ -45,6 +45,9 @@ SETTLED_CONTINUATION_POLICY_MARKER = (
 SETTLED_CONTINUATION_INSTRUCTION_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_INSTRUCTION_BEGIN"
 )
+SETTLED_CONTINUATION_RETRY_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_RETRY_BEGIN"
+)
 EMPTY_STOP_RETRY_LIMIT_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_EMPTY_STOP_RETRY_LIMIT_BEGIN"
 )
@@ -300,6 +303,66 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
             _write(path, text)
             changed.add(path)
 
+    retry_eligibility_anchor = re.compile(
+        r"(function\s+resolveEmptyResponseRetryInstruction\("
+        r"(?P<param>[A-Za-z_$][\w$]*)\)\s*\{\s*)"
+    )
+    retry_eligibility_targets = [
+        path for path in dist_files
+        if retry_eligibility_anchor.search(_read(path))
+        or SETTLED_CONTINUATION_RETRY_MARKER in _read(path)
+    ]
+    if not retry_eligibility_targets:
+        raise RuntimeError(
+            "v2026.9.2 empty-response retry eligibility anchor not found"
+        )
+
+    def retry_eligibility_replacement(match: re.Match[str]) -> str:
+        param = match.group("param")
+        return match.group(1) + f'''/* {SETTLED_CONTINUATION_RETRY_MARKER} */
+	const __abSettledToolEvidence = resolveSettledToolBatchEvidence({param}.attempt);
+	if (process.env.{SETTLED_TOOL_POLICY_ENV} === "continue"
+		&& !{param}.aborted
+		&& !{param}.timedOut
+		&& {param}.attempt?.terminal?.kind !== "failed"
+		&& {param}.attempt?.terminal?.kind !== "timeout"
+		&& !{param}.attempt.clientToolCalls
+		&& !{param}.attempt.yieldDetected
+		&& !{param}.attempt.didSendDeterministicApprovalPrompt
+		&& !{param}.attempt.hasToolMediaBlockReply
+		&& !hasCompletedMessagingToolDeliveryEvidence({param}.attempt)
+		&& classifyAssistantTurn({param}).emptyResponse
+		&& __abSettledToolEvidence.allToolsProvenSettled
+		&& !__abSettledToolEvidence.hasUnsettledToolError
+		&& !__abSettledToolEvidence.intentionalTermination
+		&& !__abSettledToolEvidence.parkedCodeModeRun
+		&& !hasAsyncActivity({param}.attempt.toolMetas)) {{
+		return EMPTY_RESPONSE_RETRY_INSTRUCTION;
+	}}
+	/* AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_RETRY_END */
+	'''
+
+    for path in retry_eligibility_targets:
+        text = _read(path)
+        if SETTLED_CONTINUATION_RETRY_MARKER not in text:
+            if len(retry_eligibility_anchor.findall(text)) != 1:
+                raise RuntimeError(
+                    "empty-response retry eligibility anchor "
+                    f"missing/ambiguous in {path}"
+                )
+            text, count = retry_eligibility_anchor.subn(
+                retry_eligibility_replacement,
+                text,
+                count=1,
+            )
+            if count != 1:
+                raise RuntimeError(
+                    "empty-response retry eligibility anchor "
+                    f"missing/ambiguous in {path}"
+                )
+            _write(path, text)
+            changed.add(path)
+
     retry_anchor = re.compile(r"maxEmptyResponseRetryAttempts:\s*1,")
     retry_targets = [
         path for path in dist_files
@@ -341,6 +404,10 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
         "policy_files": [str(path.relative_to(root)) for path in policy_targets],
         "instruction_files": [
             str(path.relative_to(root)) for path in instruction_targets
+        ],
+        "retry_eligibility_files": [
+            str(path.relative_to(root))
+            for path in retry_eligibility_targets
         ],
         "retry_limit_files": [
             str(path.relative_to(root)) for path in retry_targets
@@ -613,6 +680,10 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
         "settled_continuation_instruction": (
             "dist/**/*.js",
             SETTLED_CONTINUATION_INSTRUCTION_MARKER,
+        ),
+        "settled_continuation_retry": (
+            "dist/**/*",
+            SETTLED_CONTINUATION_RETRY_MARKER,
         ),
         "empty_stop_retry_limit": (
             "dist/**/*.js",
