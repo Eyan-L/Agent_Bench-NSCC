@@ -34,6 +34,97 @@ def test_manifest_round_trip_preserves_agent_phase_timing():
     assert restored.phase_timing == {"verifier_seconds": 30.0}
 
 
+def test_explicit_parent_and_runtime_waits_are_measured_separately(tmp_path):
+    sessions = tmp_path / "conversation" / "sessions"
+    sessions.mkdir(parents=True)
+    parent_key = "agent:roadmap_bench:explicit:run"
+    (sessions / "sessions.json").write_text(json.dumps({
+        parent_key: {
+            "sessionId": "parent-id",
+            "sessionFile": "parent.jsonl",
+            "status": "done",
+        },
+    }))
+    _write_jsonl(sessions / "parent.jsonl", [
+        {
+            "type": "message",
+            "timestamp": "1970-01-01T00:00:02Z",
+            "message": {
+                "role": "assistant",
+                "timestamp": "1970-01-01T00:00:02Z",
+                "responseId": "initial",
+                "stopReason": "toolUse",
+                "usage": {"input": 10, "output": 2},
+                "content": [],
+            },
+        },
+        {
+            "type": "custom_message",
+            "customType": "openclaw.sessions_yield",
+            "timestamp": "1970-01-01T00:00:03Z",
+        },
+        {
+            "type": "message",
+            "timestamp": "1970-01-01T00:00:09Z",
+            "message": {
+                "role": "user",
+                "timestamp": "1970-01-01T00:00:09Z",
+                "content": [{"type": "text", "text": "children settled"}],
+            },
+        },
+        {
+            "type": "message",
+            "timestamp": "1970-01-01T00:00:10Z",
+            "message": {
+                "role": "assistant",
+                "timestamp": "1970-01-01T00:00:10Z",
+                "responseId": "final",
+                "stopReason": "stop",
+                "usage": {"input": 20, "output": 3},
+                "content": [{"type": "text", "text": "DONE"}],
+            },
+        },
+    ])
+    _write_jsonl(tmp_path / "spans.jsonl", [
+        {
+            "name": "openclaw.model.usage",
+            "start_unix_nano": 2_000_000_000,
+            "end_unix_nano": 4_000_000_000,
+            "duration_ms": 2000,
+            "attrs": {"openclaw.span.source": "raw_response_log"},
+        },
+        {
+            "name": "openclaw.tool.call",
+            "start_unix_nano": 5_000_000_000,
+            "end_unix_nano": 6_000_000_000,
+            "duration_ms": 1000,
+            "attrs": {"openclaw.tool.name": "exec"},
+        },
+    ])
+
+    result = build_openclaw_measurement(
+        tmp_path,
+        agent_id="roadmap_bench",
+        execution_start_ns=1_000_000_000,
+        execution_end_ns=11_000_000_000,
+    )
+
+    assert result["trajectory_tokens"]["parent"] == {
+        "input": 30,
+        "output": 5,
+        "cache_read": 0,
+        "turn_count": 2,
+        "resumed_turns": 0,
+    }
+    timing = result["runtime_observability"]["execution_time"]
+    assert timing["agent_end_to_end_seconds"] == 10.0
+    assert timing["observed_operation_union_seconds"] == 3.0
+    assert timing["observed_model_union_seconds"] == 2.0
+    assert timing["observed_tool_union_seconds"] == 1.0
+    assert timing["parent_yield_wait_seconds"] == 6.0
+    assert timing["unattributed_orchestration_seconds"] == 7.0
+
+
 def test_roadmap_quiescence_timing_separates_parent_terminal(monkeypatch, tmp_path):
     class Harness:
         def quiesce_orphan_children(self, _env_info):

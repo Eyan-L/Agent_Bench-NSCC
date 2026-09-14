@@ -26,6 +26,23 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
 
+def test_measurement_compat_forwards_execution_bounds(tmp_path):
+    from agent_bench.benchmarks.conditions.openclaw_measurement import (
+        build_openclaw_measurement,
+    )
+
+    result = build_openclaw_measurement(
+        tmp_path,
+        agent_id="roadmap_bench",
+        execution_start_ns=1_000_000_000,
+        execution_end_ns=3_000_000_000,
+    )
+
+    assert result["runtime_observability"]["execution_time"][
+        "agent_end_to_end_seconds"
+    ] == 2.0
+
+
 def test_runtime_patch_relaxes_only_sessions_patch_and_disables_public_pricing(
     tmp_path,
 ):

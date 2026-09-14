@@ -509,3 +509,27 @@ def test_heartbeat_is_not_resume_or_terminal_but_tokens_still_count(tmp_path):
     assert parent["turn_count"] == 1
     assert parent["input"] == 10
     assert parent["output"] == 1
+
+
+def test_requester_settle_deadline_is_recorded_as_announce_timeout(tmp_path):
+    (tmp_path / "openclaw_gateway.log").write_text(
+        "2026-09-14T21:20:59.851+08:00 requester settle wake attempt 1 "
+        "failed; retrying in 30s: gateway request timeout for agent\n"
+    )
+
+    result = build_openclaw_measurement(tmp_path, agent_id="roadmap_bench")
+    observability = result["runtime_observability"]
+
+    assert observability["announce_attempt_count"] == 1
+    assert observability["announce_timeout_count"] == 1
+    assert observability["announce_retry_count"] == 1
+    assert observability["announce_success_count"] == 0
+    event = next(
+        json.loads(line)
+        for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()
+        if '"event_type": "announce_timeout"' in line
+    )
+    assert event["announce_kind"] == "requester_settle_wake"
+    assert event["retry_attempt"] == 1
+    assert event["retry_delay_seconds"] == 30
+    assert event["latency_ms"] is None

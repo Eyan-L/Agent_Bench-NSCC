@@ -22,6 +22,7 @@ from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     SETTLED_CONTINUATION_LENGTH_MARKER,
     SETTLED_CONTINUATION_POLICY_MARKER,
     SETTLED_CONTINUATION_RETRY_MARKER,
+    SETTLED_CONTINUATION_TOOL_ERROR_MARKER,
     SHARED_WORKSPACE_SPAWN_MARKER,
     patch_runtime_tree,
     verify_runtime_tree,
@@ -171,8 +172,9 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert ROADMAP_CONTINUATION_INSTRUCTION in builtin_text
     assert SETTLED_CONTINUATION_RETRY_MARKER in builtin_text
     assert SETTLED_CONTINUATION_LENGTH_MARKER in builtin_text
+    assert SETTLED_CONTINUATION_TOOL_ERROR_MARKER in builtin_text
     assert "__abSettledToolEvidence.allToolsProvenSettled" in builtin_text
-    assert "!__abSettledToolEvidence.hasUnsettledToolError" in builtin_text
+    assert "!__abSettledToolEvidence.hasUnsettledToolError" not in builtin_text
     assert "const __abAssistantState = classifyAssistantTurn(params)" in builtin_text
     assert '__abAssistantState.assistant?.stopReason === "length"' in builtin_text
     assert "__abAssistantState.visibleText.length === 0" in builtin_text
@@ -266,10 +268,11 @@ def test_v2026_9_2_empty_stop_and_length_share_bounded_retry_path(tmp_path):
         "!params.attempt.yieldDetected",
         "!hasCompletedMessagingToolDeliveryEvidence(params.attempt)",
         "__abSettledToolEvidence.allToolsProvenSettled",
-        "!__abSettledToolEvidence.hasUnsettledToolError",
         "!hasAsyncActivity(params.attempt.toolMetas)",
     )
     assert all(guard in builtin for guard in safety_guards)
+    assert SETTLED_CONTINUATION_TOOL_ERROR_MARKER in builtin
+    assert "!__abSettledToolEvidence.hasUnsettledToolError" not in builtin
 
 
 def test_v2026_9_2_patcher_fails_closed_on_wrong_version(tmp_path):
@@ -343,7 +346,7 @@ def test_v2026_9_2_patcher_rejects_stale_stop_only_continuation(tmp_path):
         )
     )
 
-    with pytest.raises(RuntimeError, match="predates empty-length support"):
+    with pytest.raises(RuntimeError, match="predates empty-length or"):
         patch_runtime_tree(root)
 
 
@@ -370,5 +373,6 @@ def test_v2026_9_2_builder_does_not_reapply_legacy_runtime_patches():
     assert SETTLED_CONTINUATION_INSTRUCTION_MARKER in audit
     assert SETTLED_CONTINUATION_RETRY_MARKER in audit
     assert SETTLED_CONTINUATION_LENGTH_MARKER in audit
+    assert SETTLED_CONTINUATION_TOOL_ERROR_MARKER in audit
     assert EMPTY_STOP_RETRY_LIMIT_MARKER in audit
     assert LOOP_VETO_RECOVERY_PROBE_MARKER in audit

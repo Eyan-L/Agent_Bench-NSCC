@@ -221,6 +221,17 @@ def test_roadmap_profile_and_prompt_allow_sixteen_concurrent_subagents():
     assert "MUST spawn" not in prompt
 
 
+def test_roadmap_profile_uses_only_the_benchmark_execution_deadline():
+    root = Path(__file__).resolve().parents[1]
+    profile = (
+        root / "profiles" / "harnesses" / "openclaw_roadmapbench.yaml"
+    ).read_text()
+
+    assert "runTimeoutSeconds: 0" in profile
+    assert "announceTimeoutMs: 7200000" in profile
+    assert "archiveAfterMinutes: 0" in profile
+
+
 def test_roadmap_profiles_enable_builtin_memory_plugin():
     root = Path(__file__).resolve().parents[1]
 

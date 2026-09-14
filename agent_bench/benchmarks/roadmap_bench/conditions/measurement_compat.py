@@ -659,8 +659,19 @@ def install_roadmap_measurement_compat() -> None:
     if getattr(current, "_roadmap_measurement_compat", False):
         return
 
-    def wrapped(run_dir: Path, *, agent_id: str) -> dict:
-        result = current(run_dir, agent_id=agent_id)
+    def wrapped(
+        run_dir: Path,
+        *,
+        agent_id: str,
+        execution_start_ns: int = 0,
+        execution_end_ns: int = 0,
+    ) -> dict:
+        result = current(
+            run_dir,
+            agent_id=agent_id,
+            execution_start_ns=execution_start_ns,
+            execution_end_ns=execution_end_ns,
+        )
         if agent_id != "roadmap_bench":
             return result
         return augment_roadmap_measurement(Path(run_dir), result)

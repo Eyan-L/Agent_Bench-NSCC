@@ -68,7 +68,11 @@ openclaw:
       workspace: /app
       subagents:
         maxConcurrent: 16
-        runTimeoutSeconds: 2400
+        # The benchmark-wide 7200s lifecycle deadline is the sole execution
+        # fence. Shorter nested deadlines can abort a healthy resumed parent.
+        runTimeoutSeconds: 0
+        announceTimeoutMs: 7200000
+        archiveAfterMinutes: 0
     list:
     - id: roadmap_bench
       default: true

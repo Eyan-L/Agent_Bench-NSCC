@@ -384,11 +384,36 @@ class OpenClawAgentCondition:
             )
 
             measurement = build_openclaw_measurement(
-                run_dir, agent_id=self.agent_id
+                run_dir,
+                agent_id=self.agent_id,
+                execution_start_ns=step_start_ns,
+                execution_end_ns=step_end_ns,
             )
         except Exception as exc:  # noqa: BLE001 - preserve the benchmark run
             logger.exception("OpenClaw measurement artifact generation failed")
             measurement = {"measurement_error": str(exc)}
+
+        execution_time = (
+            (measurement.get("runtime_observability") or {}).get(
+                "execution_time"
+            )
+            if isinstance(measurement, dict)
+            else None
+        )
+        if isinstance(execution_time, dict):
+            for source, destination in (
+                ("observed_operation_union_seconds", "observed_operation_seconds"),
+                ("observed_model_union_seconds", "observed_model_seconds"),
+                ("observed_tool_union_seconds", "observed_tool_seconds"),
+                ("parent_yield_wait_seconds", "parent_yield_wait_seconds"),
+                (
+                    "unattributed_orchestration_seconds",
+                    "unattributed_orchestration_seconds",
+                ),
+            ):
+                value = execution_time.get(source)
+                if isinstance(value, (int, float)):
+                    phase_timing[destination] = float(value)
 
         agent_lifecycle = (
             (self._unwrap(payload).get("meta") or {}).get(

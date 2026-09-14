@@ -41,8 +41,21 @@ def install_roadmap_sqlite_measurement_compat() -> None:
 
     current_runtime: Callable[..., dict] = openclaw_measurement._runtime_observability
     if not getattr(current_runtime, "_roadmap_v9_runtime_metadata_compat", False):
-        def runtime_observability(run_dir: Path, events: list[dict], agent_id: str):
-            result = current_runtime(run_dir, events, agent_id)
+        def runtime_observability(
+            run_dir: Path,
+            events: list[dict],
+            agent_id: str,
+            *,
+            execution_start_ns: int = 0,
+            execution_end_ns: int = 0,
+        ):
+            result = current_runtime(
+                run_dir,
+                events,
+                agent_id,
+                execution_start_ns=execution_start_ns,
+                execution_end_ns=execution_end_ns,
+            )
             if agent_id != "roadmap_bench" or _runtime_version() != "v2026.9.2":
                 return result
             attribution = result.get("announce_attribution")

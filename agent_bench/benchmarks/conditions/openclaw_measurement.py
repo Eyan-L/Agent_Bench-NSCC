@@ -59,6 +59,15 @@ def _is_heartbeat_request(text: str) -> bool:
     )
 
 
+def _session_role(session_key: str, entry: dict, agent_id: str) -> str:
+    """Classify indexed sessions without assuming the parent uses ``:main``."""
+    if entry.get("spawnedBy"):
+        return "child"
+    if session_key == f"agent:{agent_id}:main" or entry:
+        return "parent"
+    return "child"
+
+
 def _session_file_name(entry: dict) -> str:
     raw = str(entry.get("sessionFile") or "").strip()
     if raw:
@@ -256,7 +265,7 @@ def _session_events(run_dir: Path, agent_id: str) -> list[dict]:
 
     for path, session_key, entry in _session_sources(sessions_dir):
         session_id = str(entry.get("sessionId") or path.stem)
-        role = "parent" if session_key == f"agent:{agent_id}:main" else "child"
+        role = _session_role(session_key, entry, agent_id)
         session_state = str(entry.get("status") or "unknown")
         seen_assistant: set[str] = set()
         seen_tool_results: set[str] = set()
@@ -700,13 +709,32 @@ def _gateway_events(run_dir: Path) -> list[dict]:
                 child_session_key = remainder.rsplit(":", 1)[0]
         if child_session_key:
             fields["child_session_key"] = child_session_key
-        if "subagent announce completion" in lowered and "timeout" in lowered:
+        requester_settle_timeout = (
+            "requester settle wake" in lowered
+            and "gateway request timeout for agent" in lowered
+        )
+        if (
+            "subagent announce completion" in lowered and "timeout" in lowered
+        ) or requester_settle_timeout:
             event_type = "announce_timeout"
             timeout = re.search(r"timeout after (\d+)ms", lowered)
             fields["latency_ms"] = _int(timeout.group(1)) if timeout else None
             retry = re.search(r"retrying (\d+)/(\d+)", lowered)
-            fields["retry_attempt"] = _int(retry.group(1)) if retry else None
+            settle_attempt = re.search(
+                r"requester settle wake attempt (\d+) failed", lowered
+            )
+            fields["retry_attempt"] = (
+                _int(retry.group(1))
+                if retry
+                else _int(settle_attempt.group(1)) if settle_attempt else None
+            )
             fields["max_attempts"] = _int(retry.group(2)) if retry else None
+            retry_delay = re.search(r"retrying in (\d+)s", lowered)
+            fields["retry_delay_seconds"] = (
+                _int(retry_delay.group(1)) if retry_delay else None
+            )
+            if requester_settle_timeout:
+                fields["announce_kind"] = "requester_settle_wake"
         elif "runid=announce:" in lowered and "res ✓ agent" in lowered:
             event_type = "announce"
             latency = re.search(r"agent\s+(\d+)ms", lowered)
@@ -810,7 +838,7 @@ def _logical_tokens_from_transcripts(
 
     for path, session_key, entry in _session_sources(sessions_dir):
         session_id = str(entry.get("sessionId") or path.stem)
-        role = "parent" if session_key == f"agent:{agent_id}:main" else "child"
+        role = _session_role(session_key, entry, agent_id)
         seen_responses: set[str] = set()
         try:
             lines = path.read_text(errors="replace").splitlines()
@@ -838,7 +866,12 @@ def _logical_tokens_from_transcripts(
             output_tokens = _int(
                 usage.get("output") or usage.get("completion_tokens")
             )
-            bucket = sessions[session_key or f"session:{session_id}"]
+            bucket_key = (
+                f"agent:{agent_id}:main"
+                if role == "parent"
+                else session_key or f"session:{session_id}"
+            )
+            bucket = sessions[bucket_key]
             bucket["input"] += input_tokens
             bucket["output"] += output_tokens
             bucket["cache_read"] += cache_read
@@ -875,8 +908,8 @@ def _parent_resume_count(run_dir: Path, agent_id: str) -> int:
         return 0
     messages: list[str] = []
     seen: set[str] = set()
-    for path, session_key, _entry in _session_sources(sessions_dir):
-        if session_key != f"agent:{agent_id}:main":
+    for path, session_key, entry in _session_sources(sessions_dir):
+        if _session_role(session_key, entry, agent_id) != "parent":
             continue
         try:
             lines = path.read_text(errors="replace").splitlines()
@@ -1033,6 +1066,110 @@ def _active_intervals(run_dir: Path) -> list[dict]:
     return intervals
 
 
+def _interval_union_seconds(
+    intervals: Iterable[dict], start_ns: int, end_ns: int
+) -> float:
+    clipped = []
+    for interval in intervals:
+        start = max(start_ns, _int(interval.get("start")))
+        end = min(end_ns, _int(interval.get("end")))
+        if start and end > start:
+            clipped.append((start, end))
+    if not clipped:
+        return 0.0
+    merged: list[list[int]] = []
+    for start, end in sorted(clipped):
+        if not merged or start > merged[-1][1]:
+            merged.append([start, end])
+        else:
+            merged[-1][1] = max(merged[-1][1], end)
+    return sum(end - start for start, end in merged) / 1e9
+
+
+def _execution_time_observability(
+    run_dir: Path,
+    events: list[dict],
+    execution_start_ns: int,
+    execution_end_ns: int,
+) -> dict:
+    """Separate observed work from orchestration gaps without hiding latency."""
+    if not execution_start_ns or execution_end_ns <= execution_start_ns:
+        return {}
+
+    intervals = _active_intervals(run_dir)
+    model_intervals = [
+        interval for interval in intervals
+        if interval.get("activity") == "model_request"
+    ]
+    tool_intervals = [
+        interval for interval in intervals
+        if str(interval.get("activity") or "").startswith("tool:")
+    ]
+    observed_seconds = _interval_union_seconds(
+        intervals, execution_start_ns, execution_end_ns
+    )
+    wall_seconds = (execution_end_ns - execution_start_ns) / 1e9
+
+    parent_events = sorted(
+        (
+            event for event in events
+            if event.get("role") == "parent"
+            and event.get("event_type") in {"yield", "resume"}
+            and _int(event.get("timestamp_ns"))
+        ),
+        key=lambda event: _int(event.get("timestamp_ns")),
+    )
+    yield_wait_intervals = []
+    waiting_since = 0
+    for event in parent_events:
+        timestamp_ns = _int(event.get("timestamp_ns"))
+        if event.get("event_type") == "yield":
+            if not waiting_since:
+                waiting_since = timestamp_ns
+        elif waiting_since and timestamp_ns >= waiting_since:
+            yield_wait_intervals.append({
+                "start": waiting_since,
+                "end": timestamp_ns,
+            })
+            waiting_since = 0
+    if waiting_since:
+        yield_wait_intervals.append({
+            "start": waiting_since,
+            "end": execution_end_ns,
+        })
+
+    return {
+        "agent_end_to_end_seconds": wall_seconds,
+        "observed_operation_union_seconds": observed_seconds,
+        "observed_model_union_seconds": _interval_union_seconds(
+            model_intervals, execution_start_ns, execution_end_ns
+        ),
+        "observed_tool_union_seconds": _interval_union_seconds(
+            tool_intervals, execution_start_ns, execution_end_ns
+        ),
+        "parent_yield_wait_seconds": _interval_union_seconds(
+            yield_wait_intervals, execution_start_ns, execution_end_ns
+        ),
+        "unattributed_orchestration_seconds": max(
+            0.0, wall_seconds - observed_seconds
+        ),
+        "policy": {
+            "primary_latency": (
+                "agent_end_to_end_seconds includes yield, queue, continuation, "
+                "retry, and quiescence overhead"
+            ),
+            "active_latency": (
+                "union of observed model-request and tool-call intervals "
+                "across parent and children"
+            ),
+            "unattributed_warning": (
+                "not a pure idle metric; it also includes runtime activity "
+                "missing from available spans"
+            ),
+        },
+    }
+
+
 def _loop_termination(events: list[dict]) -> dict:
     loop_events = [
         event for event in events
@@ -1052,7 +1189,12 @@ def _loop_termination(events: list[dict]) -> dict:
 
 
 def _runtime_observability(
-    run_dir: Path, events: list[dict], agent_id: str
+    run_dir: Path,
+    events: list[dict],
+    agent_id: str,
+    *,
+    execution_start_ns: int = 0,
+    execution_end_ns: int = 0,
 ) -> dict:
     child_timing = _child_runtime_observability(run_dir, agent_id)
     spawn_attempt_count = sum(
@@ -1130,6 +1272,9 @@ def _runtime_observability(
     )
     return {
         **child_timing,
+        "execution_time": _execution_time_observability(
+            run_dir, events, execution_start_ns, execution_end_ns
+        ),
         "spawn_attempt_count": spawn_attempt_count,
         "unmaterialized_spawn_attempt_count": max(
             0, spawn_attempt_count - child_timing["child_session_count"]
@@ -1189,6 +1334,8 @@ def build_openclaw_measurement(
     run_dir: Path,
     *,
     agent_id: str,
+    execution_start_ns: int = 0,
+    execution_end_ns: int = 0,
 ) -> dict:
     """Write trajectory/token artifacts and return their manifest payload."""
     logical, usage_events = _logical_tokens(run_dir, agent_id)
@@ -1198,7 +1345,11 @@ def build_openclaw_measurement(
     events.extend(usage_events)
     events.extend(request_events)
     runtime_observability = _runtime_observability(
-        run_dir, events, agent_id
+        run_dir,
+        events,
+        agent_id,
+        execution_start_ns=execution_start_ns,
+        execution_end_ns=execution_end_ns,
     )
     termination = _loop_termination(events)
     events.sort(key=lambda event: (event.get("timestamp_ns") or 0, event["event_type"]))
