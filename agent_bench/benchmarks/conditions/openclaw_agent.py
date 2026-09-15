@@ -721,7 +721,7 @@ class OpenClawAgentCondition:
 
         Two modes:
           - container_id given → in-container via Gateway (sources
-            /tmp/oc_gateway_env so OPENCLAW_GATEWAY_URL/_TOKEN reach the CLI).
+            the harness-provided gateway env file so URL/token reach the CLI).
           - container_id is None → singularity / host-local mode. Gateway +
             state dir come from env_info (set by the harness).
 
@@ -769,6 +769,10 @@ class OpenClawAgentCondition:
                 )
             run_kwargs = {"cwd": workspace_root, "env": env}
         else:
+            gateway_env_path = str(
+                (getattr(self, "_env_info", {}) or {}).get("gateway_env_path")
+                or "/tmp/oc_gateway_env"
+            )
             # Tee stderr live to a state_dir-side log so we can tail it from
             # the host while the agent is running — `subprocess.run` with
             # capture_output only flushes when the child exits, which makes
@@ -779,7 +783,7 @@ class OpenClawAgentCondition:
             # exclusively to parse, no need to split.
             inner = (
                 "mkdir -p /root/.openclaw/logs && "
-                "source /tmp/oc_gateway_env && "
+                f"source {shlex.quote(gateway_env_path)} && "
                 f"echo {shlex.quote(_GATEWAY_EXECUTION_MARKER)} >&2 && "
                 "exec openclaw agent "
                 f"--agent {shlex.quote(self.agent_id)} "
@@ -814,8 +818,9 @@ class OpenClawAgentCondition:
             )
         else:
             logger.info(
-                "    in-container inner=%r (token comes from /tmp/oc_gateway_env)",
+                "    in-container inner=%r (token comes from %s)",
                 inner[:200] + ("..." if len(inner) > 200 else ""),
+                gateway_env_path,
             )
         dispatch_t0 = time.time()
         durable_interrupt = None

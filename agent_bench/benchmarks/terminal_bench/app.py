@@ -47,8 +47,10 @@ import os
 import posixpath
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -96,6 +98,45 @@ _OPENCLAW_WARMUP_SEM = threading.BoundedSemaphore(
 
 _THIS_DIR = Path(__file__).resolve().parent
 _OPENAI_CHAT_COMPLETIONS_API = "openai-completions"
+_GATEWAY_ENV_CONTAINER_PATH = "/root/.openclaw/agent-bench/oc_gateway_env"
+
+
+def _materialize_gateway_env(
+    state_dir: Path,
+    *,
+    gateway_url: str,
+    gateway_token: str,
+    run_id: str,
+    cli_plugin_stage_dir: Optional[str] = None,
+) -> Path:
+    """Atomically write per-run CLI gateway settings into mounted state."""
+    target = state_dir / "agent-bench" / "oc_gateway_env"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    exports = {
+        "OPENCLAW_GATEWAY_URL": gateway_url,
+        "OPENCLAW_GATEWAY_TOKEN": gateway_token,
+        "OPENCLAW_RUN_ID": run_id,
+    }
+    if cli_plugin_stage_dir:
+        exports["OPENCLAW_PLUGIN_STAGE_DIR"] = cli_plugin_stage_dir
+    content = "".join(
+        f"export {key}={shlex.quote(str(value))}\n"
+        for key, value in exports.items()
+    )
+
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=".oc_gateway_env.", dir=str(target.parent), text=True
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(content)
+        temporary.chmod(0o600)
+        os.replace(temporary, target)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return target
 
 
 def _terminal_bench_profile_section() -> Dict:
@@ -1498,20 +1539,16 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
                 "  [warmup] gateway ready; slot released (run=%s)", run_id
             )
             gateway_url = f"ws://127.0.0.1:{gateway_port}"
-            cli_stage_export = ""
+            cli_plugin_stage_dir = None
             if self.container.backend_id == "singularity":
-                cli_stage_export = (
-                    "export OPENCLAW_PLUGIN_STAGE_DIR="
-                    f"/tmp/oc-plugin-deps/{run_id}-cli\n"
-                )
-            self.container.exec(oc_handle, ["bash", "-c", (
-                "cat > /tmp/oc_gateway_env <<'EOF'\n"
-                f"export OPENCLAW_GATEWAY_URL={gateway_url}\n"
-                f"export OPENCLAW_GATEWAY_TOKEN={gateway_token}\n"
-                f"export OPENCLAW_RUN_ID={run_id}\n"
-                f"{cli_stage_export}"
-                "EOF"
-            )])
+                cli_plugin_stage_dir = f"/tmp/oc-plugin-deps/{run_id}-cli"
+            gateway_env_host_path = _materialize_gateway_env(
+                state_dir,
+                gateway_url=gateway_url,
+                gateway_token=gateway_token,
+                run_id=run_id,
+                cli_plugin_stage_dir=cli_plugin_stage_dir,
+            )
             session_exporter_pid = self._start_roadmap_session_exporter(
                 oc_handle=oc_handle,
                 state_dir=state_dir,
@@ -1543,6 +1580,8 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
                 "gateway_port": gateway_port,
                 "gateway_token": gateway_token,
                 "gateway_url": gateway_url,
+                "gateway_env_path": _GATEWAY_ENV_CONTAINER_PATH,
+                "gateway_env_host_path": str(gateway_env_host_path),
                 "session_exporter_pid": session_exporter_pid,
                 "gateway_log_path": (
                     str(oc_handle.log_path) if oc_handle.log_path else None

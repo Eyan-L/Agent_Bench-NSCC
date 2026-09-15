@@ -420,6 +420,7 @@ def test_nonzero_openclaw_exit_preserves_structured_error_payload():
     condition = object.__new__(RoadmapBenchOpenClawCondition)
     condition.container = ErrorContainer()
     condition._env_info = {}
+    condition._watch_durable_invocation_terminal = lambda: False
 
     result, error = condition._invoke_agent(
         "oc-runtime", "/workspace", "run", "task", 60

@@ -220,15 +220,22 @@ def test_terminal_bench_openclaw_singularity_returns_runtime_handle(tmp_path, mo
     assert "oc-eval-net-run-1" in container.removed_networks
     assert "oc-eval-net-run-1" in container.created_networks
 
-    # Gateway and CLI use separate node-local plugin staging directories.
-    gateway_env_writes = [
-        args[1]
-        for args, _kwargs in container.exec_calls
-        if len(args) >= 2 and isinstance(args[1], list)
-    ]
-    assert any(
-        "/tmp/oc-plugin-deps/run-1-cli" in str(argv)
-        for argv in gateway_env_writes
+    # Gateway settings live under this run's mounted state, never shared /tmp.
+    assert env_info["gateway_env_path"] == (
+        "/root/.openclaw/agent-bench/oc_gateway_env"
+    )
+    gateway_env_host_path = Path(env_info["gateway_env_host_path"])
+    assert gateway_env_host_path == (
+        harness.state_base / "run-1" / "agent-bench" / "oc_gateway_env"
+    )
+    gateway_env = gateway_env_host_path.read_text()
+    assert "OPENCLAW_GATEWAY_URL=ws://127.0.0.1:" in gateway_env
+    assert "OPENCLAW_GATEWAY_TOKEN=" in gateway_env
+    assert "OPENCLAW_RUN_ID=run-1" in gateway_env
+    assert "OPENCLAW_PLUGIN_STAGE_DIR=/tmp/oc-plugin-deps/run-1-cli" in gateway_env
+    assert gateway_env_host_path.stat().st_mode & 0o777 == 0o600
+    assert not any(
+        "/tmp/oc_gateway_env" in str(call) for call in container.exec_calls
     )
 
     monkeypatch.setattr(harness, "_wait_for_process_exit", lambda *_a, **_k: None)
@@ -246,6 +253,44 @@ def test_terminal_bench_openclaw_singularity_returns_runtime_handle(tmp_path, mo
         "singularity",
     ))
     assert env_info["agent_runtime_quiesced"] is True
+
+
+def test_openclaw_condition_sources_harness_gateway_env_path():
+    class CaptureContainer:
+        backend_id = "singularity"
+
+        def __init__(self):
+            self.argv = None
+
+        def exec(self, _handle, argv, **_kwargs):
+            self.argv = argv
+            payload = {
+                "payloads": [{"text": "complete"}],
+                "meta": {
+                    "agentMeta": {},
+                    "stopReason": "stop",
+                    "finalAssistantVisibleText": "complete",
+                },
+            }
+            return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+
+    container = CaptureContainer()
+    condition = object.__new__(TerminalBenchOpenClawCondition)
+    condition.container = container
+    condition._env_info = {
+        "gateway_env_path": "/root/.openclaw/agent-bench/gateway env",
+    }
+
+    result, error = condition._invoke_agent(
+        "oc-runtime", "/workspace", "run", "task", 60
+    )
+
+    assert result is not None
+    assert error == ""
+    assert container.argv is not None
+    inner = container.argv[-1]
+    assert "source '/root/.openclaw/agent-bench/gateway env'" in inner
+    assert "/tmp/oc_gateway_env" not in inner
 
 
 def test_roadmap_v9_starts_runtime_sqlite_session_exporter(tmp_path, monkeypatch):
