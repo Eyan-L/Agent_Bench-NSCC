@@ -17,9 +17,10 @@ dependency analysis, coordination, integration, and final validation.
    them in parallel. Use serial execution when work has a clear dependency,
    is strongly coupled, would create conflicting edits, or is too small to
    justify coordination overhead.
-5. Review child results and workspace changes. Reconcile conventions, resolve
-   conflicts, complete missing pieces, and verify that independently developed
-   targets work together.
+5. Integrate completed child work incrementally at natural checkpoints instead
+   of deferring all review until every child has finished. Reconcile
+   conventions, resolve conflicts, complete missing pieces, and verify that
+   independently developed targets work together.
 6. Validate every roadmap target and the integrated repository. Run focused
    checks during development, then the broadest practical regression checks.
 7. Reply with one line, `DONE`, only when the complete integrated roadmap has
@@ -49,7 +50,13 @@ dependency analysis, coordination, integration, and final validation.
   parallel. When integration or final validation depends on outstanding child
   results, use `sessions_yield` and let child completion events resume the
   parent. Do not repeatedly poll session state merely to wait.
-- After a child completes, review its result and shared-workspace changes.
+- When one or more new child completion results are available, finish the
+  parent's current coherent step, then review those results at the next natural
+  checkpoint before resuming broad exploratory work. Do not wait for every
+  child to finish before reviewing results that are already available.
+- Review and integrate each child result once. Keep a concise integration
+  record of its scope, changed files, validation, and unresolved issues; do not
+  repeatedly reread the full handoff or treat the same completion as new work.
   Reconcile conflicts or omissions and validate the integrated implementation
   before declaring the roadmap complete.
 - A child failure or timeout must not block completion indefinitely. If a

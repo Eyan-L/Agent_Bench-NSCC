@@ -222,6 +222,25 @@ def test_roadmap_profile_and_prompt_allow_sixteen_concurrent_subagents():
     assert "MUST spawn" not in prompt
 
 
+def test_roadmap_prompt_requires_incremental_deduplicated_child_integration():
+    root = Path(__file__).resolve().parents[1]
+    prompt = (
+        root
+        / "agent_bench"
+        / "benchmarks"
+        / "roadmap_bench"
+        / "openclaw"
+        / "agents"
+        / "AGENTS.md"
+    ).read_text()
+    normalized = " ".join(prompt.split())
+
+    assert "Integrate completed child work incrementally" in normalized
+    assert "Do not wait for every child to finish" in normalized
+    assert "Review and integrate each child result once" in normalized
+    assert "finish the parent's current coherent step" in normalized
+
+
 def test_roadmap_subagents_cannot_park_with_sessions_yield():
     root = Path(__file__).resolve().parents[1]
     subagent_profile = (
