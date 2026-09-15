@@ -1,5 +1,5 @@
 {
-  "_doc": "RoadmapBench formal subset10c containing the fixed subset30 extension.",
+  "_doc": "RoadmapBench formal subset10c containing the remaining fixed subset30 extension tasks.",
   "sweep_name": "roadmapbench_subset10c",
   "plan_version": "roadmapbench-59184e779909-subset10c",
   "application": "terminal_bench",
@@ -10,10 +10,7 @@
   "instances": [
     "mko-6.0.0-roadmap",
     "mko-6.6.0-roadmap",
-    "fbr-2.37.0-roadmap",
-    "ktx-0.6.0-roadmap",
     "fal-4.1.0-roadmap",
-    "fyn-2.1.0-roadmap",
     "fbr-2.40.0-roadmap",
     "ktx-0.9.0-roadmap",
     "opt-3.0.0-roadmap",
@@ -22,10 +19,7 @@
   "repo_mapping": {
     "mko-6.0.0-roadmap": {"repo_id": "roadmapbench/mko-6.0.0-roadmap", "base_commit": "59184e779909300a5a0150b06b945d39da81a099"},
     "mko-6.6.0-roadmap": {"repo_id": "roadmapbench/mko-6.6.0-roadmap", "base_commit": "59184e779909300a5a0150b06b945d39da81a099"},
-    "fbr-2.37.0-roadmap": {"repo_id": "roadmapbench/fbr-2.37.0-roadmap", "base_commit": "59184e779909300a5a0150b06b945d39da81a099"},
-    "ktx-0.6.0-roadmap": {"repo_id": "roadmapbench/ktx-0.6.0-roadmap", "base_commit": "59184e779909300a5a0150b06b945d39da81a099"},
     "fal-4.1.0-roadmap": {"repo_id": "roadmapbench/fal-4.1.0-roadmap", "base_commit": "59184e779909300a5a0150b06b945d39da81a099"},
-    "fyn-2.1.0-roadmap": {"repo_id": "roadmapbench/fyn-2.1.0-roadmap", "base_commit": "59184e779909300a5a0150b06b945d39da81a099"},
     "fbr-2.40.0-roadmap": {"repo_id": "roadmapbench/fbr-2.40.0-roadmap", "base_commit": "59184e779909300a5a0150b06b945d39da81a099"},
     "ktx-0.9.0-roadmap": {"repo_id": "roadmapbench/ktx-0.9.0-roadmap", "base_commit": "59184e779909300a5a0150b06b945d39da81a099"},
     "opt-3.0.0-roadmap": {"repo_id": "roadmapbench/opt-3.0.0-roadmap", "base_commit": "59184e779909300a5a0150b06b945d39da81a099"},
@@ -37,6 +31,6 @@
   "seeds": [42],
   "selection": {
     "method": "fixed high-fanout RoadmapBench subset30 extension",
-    "rationale": "The third ten fixed tasks from subset30, shared by both subagent-enabled and single-agent arms."
+    "rationale": "The seven remaining extension tasks after three stable tasks moved to subset10a; shared by both arms."
   }
 }

@@ -10,12 +10,12 @@
   "instances": [
     "pyg-2.3.0-roadmap",
     "pyg-2.0.0-roadmap",
-    "mko-7.0.0-roadmap",
+    "ktx-0.6.0-roadmap",
     "fbr-3.0.0-roadmap",
-    "fal-2.0.0-roadmap",
+    "fbr-2.37.0-roadmap",
     "pyg-1.7.2-roadmap",
     "plr-1.18.0-roadmap",
-    "plr-1.36.0-roadmap",
+    "fyn-2.1.0-roadmap",
     "mko-5.0.0-roadmap",
     "fyn-2.2.0-roadmap"
   ],
@@ -28,16 +28,16 @@
       "repo_id": "roadmapbench/pyg-2.0.0-roadmap",
       "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
     },
-    "mko-7.0.0-roadmap": {
-      "repo_id": "roadmapbench/mko-7.0.0-roadmap",
+    "ktx-0.6.0-roadmap": {
+      "repo_id": "roadmapbench/ktx-0.6.0-roadmap",
       "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
     },
     "fbr-3.0.0-roadmap": {
       "repo_id": "roadmapbench/fbr-3.0.0-roadmap",
       "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
     },
-    "fal-2.0.0-roadmap": {
-      "repo_id": "roadmapbench/fal-2.0.0-roadmap",
+    "fbr-2.37.0-roadmap": {
+      "repo_id": "roadmapbench/fbr-2.37.0-roadmap",
       "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
     },
     "pyg-1.7.2-roadmap": {
@@ -48,8 +48,8 @@
       "repo_id": "roadmapbench/plr-1.18.0-roadmap",
       "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
     },
-    "plr-1.36.0-roadmap": {
-      "repo_id": "roadmapbench/plr-1.36.0-roadmap",
+    "fyn-2.1.0-roadmap": {
+      "repo_id": "roadmapbench/fyn-2.1.0-roadmap",
       "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
     },
     "mko-5.0.0-roadmap": {
@@ -69,6 +69,6 @@
   ],
   "selection": {
     "method": "manual fixed high-fanout RoadmapBench subset",
-    "rationale": "The first ten fixed tasks from subset30, shared by both subagent-enabled and single-agent arms."
+    "rationale": "Ten fixed tasks shared by both arms after replacing three chronically unstable tasks with stable tasks from subset10c."
   }
 }
