@@ -64,6 +64,8 @@ openclaw:
   agents:
     defaults:
       workspace: /app
+      # Agent_Bench's 7200s condition deadline is the parent execution fence.
+      timeoutSeconds: 0
     list:
     - id: roadmap_bench
       default: true

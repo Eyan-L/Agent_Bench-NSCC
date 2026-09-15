@@ -241,13 +241,21 @@ def test_roadmap_subagents_cannot_park_with_sessions_yield():
 
 def test_roadmap_profile_uses_only_the_benchmark_execution_deadline():
     root = Path(__file__).resolve().parents[1]
-    profile = (
+    subagent_profile = (
         root / "profiles" / "harnesses" / "openclaw_roadmapbench.yaml"
     ).read_text()
+    single_agent_profile = (
+        root
+        / "profiles"
+        / "harnesses"
+        / "openclaw_roadmapbench_single_agent.yaml"
+    ).read_text()
 
-    assert "runTimeoutSeconds: 0" in profile
-    assert "announceTimeoutMs: 7200000" in profile
-    assert "archiveAfterMinutes: 0" in profile
+    assert "timeoutSeconds: 0" in subagent_profile
+    assert "timeoutSeconds: 0" in single_agent_profile
+    assert "runTimeoutSeconds: 0" in subagent_profile
+    assert "announceTimeoutMs: 7200000" in subagent_profile
+    assert "archiveAfterMinutes: 0" in subagent_profile
 
 
 def test_roadmap_profiles_enable_builtin_memory_plugin():

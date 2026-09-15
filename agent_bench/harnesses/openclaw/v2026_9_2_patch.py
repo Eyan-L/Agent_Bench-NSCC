@@ -8,7 +8,7 @@ keeps the v2026.9.2 customization surface small:
 * route sandbox bash exec through OPENCLAW_EXEC_BRIDGE;
 * bypass OpenClaw-owned Docker lifecycle when the harness owns the sandbox;
 * route sandbox filesystem operations through the same exec bridge;
-* keep Roadmap empty post-tool turns in the tools-enabled outer agent loop;
+* keep Roadmap incomplete post-tool turns in the tools-enabled outer loop;
 * replace legacy public model-pricing endpoints if they are present.
 
 OpenClaw v2026.9.2 already provides native rolling/post-compaction loop
@@ -51,6 +51,12 @@ SETTLED_CONTINUATION_RETRY_MARKER = (
 SETTLED_CONTINUATION_LENGTH_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_LENGTH_BEGIN"
 )
+NONEMPTY_LENGTH_ELIGIBILITY_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_NONEMPTY_LENGTH_ELIGIBILITY_BEGIN"
+)
+UNBOUNDED_LENGTH_CONTINUATION_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_UNBOUNDED_LENGTH_CONTINUATION_BEGIN"
+)
 SETTLED_CONTINUATION_TOOL_ERROR_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_TOOL_ERROR_BEGIN"
 )
@@ -67,7 +73,7 @@ LOOP_VETO_RECOVERY_PROBE_ENV = (
     "OPENCLAW_AGENT_BENCH_LOOP_VETO_RECOVERY_PROBE"
 )
 ROADMAP_CONTINUATION_INSTRUCTION = (
-    "The previous assistant turn was empty after its tool calls completed. "
+    "The previous assistant turn ended before the assigned task was complete. "
     "Continue the assigned task from the current state. "
     "Use tools for any remaining implementation or validation work. "
     "Only produce the final answer when the task is complete. "
@@ -233,13 +239,14 @@ def _patch_shared_workspace_spawns(root: Path) -> list[str]:
 
 
 def _patch_settled_tool_continuation(root: Path) -> dict[str, list[str]]:
-    """Route Roadmap empty post-tool stops through the normal outer retry.
+    """Route Roadmap incomplete post-tool turns through the normal retry.
 
     Upstream v2026.9.2 runs a tools-disabled isolated finalization when a
-    settled tool batch is followed by an empty assistant stop. Under the
-    explicit Agent_Bench policy, skipping that finalization leaves its outcome
-    as ``not-attempted`` so OpenClaw's existing tools-enabled empty-response
-    retry path remains eligible.
+    settled tool batch is followed by an empty assistant stop. It can also
+    finalize a length-truncated assistant turn that still promises more work.
+    Under the explicit Agent_Bench policy, the existing tools-enabled retry
+    path remains eligible; length retries are fenced by the benchmark deadline
+    rather than the empty-stop retry count.
     """
     changed: set[Path] = set()
     dist_files = sorted(_js_files(root / "dist"))
@@ -335,14 +342,16 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
         param = match.group("param")
         return match.group(1) + f'''/* {SETTLED_CONTINUATION_RETRY_MARKER} */
 	/* {SETTLED_CONTINUATION_LENGTH_MARKER} */
+	/* {NONEMPTY_LENGTH_ELIGIBILITY_MARKER} */
 	const __abAssistantState = classifyAssistantTurn({param});
-	const __abEmptyLength =
+	const __abExplicitDone =
+		/(?:^|\\n)\\s*DONE\\s*(?:\\n|$)/.test(__abAssistantState.visibleText);
+	const __abIncompleteLength =
 		__abAssistantState.assistant?.stopReason === "length"
-		&& __abAssistantState.visibleText.length === 0
 		&& !__abAssistantState.reasoningOnly
-		&& {param}.payloadCount === 0;
+		&& !__abExplicitDone;
 	const __abRoadmapContinuationEligible =
-		__abAssistantState.emptyResponse || __abEmptyLength;
+		__abAssistantState.emptyResponse || __abIncompleteLength;
 	/* AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_LENGTH_END */
 	const __abSettledToolEvidence = resolveSettledToolBatchEvidence({param}.attempt);
 	if (process.env.{SETTLED_TOOL_POLICY_ENV} === "continue"
@@ -374,6 +383,7 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
         and (
             SETTLED_CONTINUATION_LENGTH_MARKER not in _read(path)
             or SETTLED_CONTINUATION_TOOL_ERROR_MARKER not in _read(path)
+            or NONEMPTY_LENGTH_ELIGIBILITY_MARKER not in _read(path)
         )
     ]
     if stale_retry_targets:
@@ -401,6 +411,77 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
                 raise RuntimeError(
                     "empty-response retry eligibility anchor "
                     f"missing/ambiguous in {path}"
+                )
+            _write(path, text)
+            changed.add(path)
+
+    ident = r"[A-Za-z_$][\w$]*"
+    length_budget_readable_anchor = re.compile(
+        rf'''(?P<indent>[ \t]*)if \(!(?P<reason>{ident}) && (?P<instruction>{ident}) && (?P<state>{ident})\.emptyResponseAttempts < (?P<input>{ident})\.maxEmptyResponseRetryAttempts\) \{{\s*
+(?P=indent)[ \t]+(?P=state)\.emptyResponseAttempts \+= 1;\s*
+(?P=indent)[ \t]+(?P=input)\.activateInternalPrompt\((?P=instruction)\);\s*
+(?P=indent)[ \t]+(?P<logger>{ident})\.warn\(`empty response detected:[^`]*with visible-answer continuation`\);\s*
+(?P=indent)[ \t]+return \{{ action: ["']retry["'] \}};\s*
+(?P=indent)\}}'''
+    )
+    length_budget_minified_anchor = re.compile(
+        rf'''if\(!(?P<reason>{ident})&&(?P<instruction>{ident})&&(?P<state>{ident})\.emptyResponseAttempts<(?P<input>{ident})\.maxEmptyResponseRetryAttempts\)return (?P=state)\.emptyResponseAttempts\+=1,(?P=input)\.activateInternalPrompt\((?P=instruction)\),(?P<logger>{ident})\.warn\(`empty response detected:[^`]*with visible-answer continuation`\),\{{action:`retry`\}};'''
+    )
+    length_budget_targets = [
+        path for path in dist_files
+        if length_budget_readable_anchor.search(_read(path))
+        or length_budget_minified_anchor.search(_read(path))
+        or UNBOUNDED_LENGTH_CONTINUATION_MARKER in _read(path)
+    ]
+    if not length_budget_targets:
+        raise RuntimeError(
+            "v2026.9.2 empty-response retry counter anchor not found"
+        )
+
+    def length_budget_replacement(match: re.Match[str]) -> str:
+        indent = match.groupdict().get("indent") or ""
+        reason = match.group("reason")
+        instruction = match.group("instruction")
+        state = match.group("state")
+        input_name = match.group("input")
+        logger = match.group("logger")
+        return f'''{indent}/* {UNBOUNDED_LENGTH_CONTINUATION_MARKER} */
+{indent}const __abLengthContinuation =
+{indent}\tprocess.env.{SETTLED_TOOL_POLICY_ENV} === "continue"
+{indent}\t&& {input_name}.attemptAssistant?.stopReason === "length"
+{indent}\t&& {instruction};
+{indent}if (!{reason} && {instruction}
+{indent}\t&& (__abLengthContinuation
+{indent}\t\t|| {state}.emptyResponseAttempts < {input_name}.maxEmptyResponseRetryAttempts)) {{
+{indent}\t{input_name}.activateInternalPrompt({instruction});
+{indent}\tif (__abLengthContinuation) {{
+{indent}\t\t{logger}.warn(`length-truncated response detected: runId=${{{input_name}.runParams.runId}} sessionId=${{{input_name}.runParams.sessionId}} provider=${{{input_name}.activeErrorContext.provider}}/${{{input_name}.activeErrorContext.model}} — continuing under the enclosing benchmark deadline`);
+{indent}\t}} else {{
+{indent}\t\t{state}.emptyResponseAttempts += 1;
+{indent}\t\t{logger}.warn(`empty response detected: runId=${{{input_name}.runParams.runId}} sessionId=${{{input_name}.runParams.sessionId}} provider=${{{input_name}.activeErrorContext.provider}}/${{{input_name}.activeErrorContext.model}} — retrying ${{{state}.emptyResponseAttempts}}/${{{input_name}.maxEmptyResponseRetryAttempts}} with visible-answer continuation`);
+{indent}\t}}
+{indent}\treturn {{ action: "retry" }};
+{indent}}}
+{indent}/* AB_HARNESS_OPENCLAW_V2026_9_2_UNBOUNDED_LENGTH_CONTINUATION_END */'''
+
+    for path in length_budget_targets:
+        text = _read(path)
+        if UNBOUNDED_LENGTH_CONTINUATION_MARKER not in text:
+            readable_count = len(length_budget_readable_anchor.findall(text))
+            minified_count = len(length_budget_minified_anchor.findall(text))
+            if readable_count + minified_count != 1:
+                raise RuntimeError(
+                    f"empty-response retry counter anchor missing/ambiguous in {path}"
+                )
+            anchor = (
+                length_budget_readable_anchor
+                if readable_count
+                else length_budget_minified_anchor
+            )
+            text, count = anchor.subn(length_budget_replacement, text, count=1)
+            if count != 1:
+                raise RuntimeError(
+                    f"empty-response retry counter anchor missing/ambiguous in {path}"
                 )
             _write(path, text)
             changed.add(path)
@@ -450,6 +531,9 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
         "retry_eligibility_files": [
             str(path.relative_to(root))
             for path in retry_eligibility_targets
+        ],
+        "length_budget_files": [
+            str(path.relative_to(root)) for path in length_budget_targets
         ],
         "retry_limit_files": [
             str(path.relative_to(root)) for path in retry_targets
@@ -785,6 +869,14 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
         "settled_continuation_retry": (
             "dist/**/*",
             SETTLED_CONTINUATION_LENGTH_MARKER,
+        ),
+        "nonempty_length_eligibility": (
+            "dist/**/*",
+            NONEMPTY_LENGTH_ELIGIBILITY_MARKER,
+        ),
+        "unbounded_length_continuation": (
+            "dist/**/*",
+            UNBOUNDED_LENGTH_CONTINUATION_MARKER,
         ),
         "settled_continuation_tool_error": (
             "dist/**/*",

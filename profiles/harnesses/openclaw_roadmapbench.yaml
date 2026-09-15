@@ -70,6 +70,8 @@ openclaw:
   agents:
     defaults:
       workspace: /app
+      # Agent_Bench's 7200s condition deadline is the parent execution fence.
+      timeoutSeconds: 0
       subagents:
         maxConcurrent: 16
         maxChildrenPerAgent: 16

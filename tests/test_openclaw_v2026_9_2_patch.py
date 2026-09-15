@@ -15,6 +15,7 @@ from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     FS_WRITE_MARKER,
     LITELLM_PRICING_URL,
     LOOP_VETO_RECOVERY_PROBE_MARKER,
+    NONEMPTY_LENGTH_ELIGIBILITY_MARKER,
     OPENROUTER_PRICING_URL,
     ROADMAP_CONTINUATION_INSTRUCTION,
     SANDBOX_MARKER,
@@ -24,6 +25,7 @@ from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     SETTLED_CONTINUATION_RETRY_MARKER,
     SETTLED_CONTINUATION_TOOL_ERROR_MARKER,
     SHARED_WORKSPACE_SPAWN_MARKER,
+    UNBOUNDED_LENGTH_CONTINUATION_MARKER,
     patch_runtime_tree,
     verify_runtime_tree,
 )
@@ -126,6 +128,31 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "const retryOptions = {\n"
         "  maxEmptyResponseRetryAttempts: 1,\n"
         "};\n"
+        "function retryTerminal(input, retryState, nextReasoningOnlyRetryInstruction, "
+        "nextEmptyResponseRetryInstruction) {\n"
+        "  const runParams = input.runParams;\n"
+        "  if (!nextReasoningOnlyRetryInstruction && nextEmptyResponseRetryInstruction "
+        "&& retryState.emptyResponseAttempts < input.maxEmptyResponseRetryAttempts) {\n"
+        "    retryState.emptyResponseAttempts += 1;\n"
+        "    input.activateInternalPrompt(nextEmptyResponseRetryInstruction);\n"
+        "    log$3.warn(`empty response detected: runId=${runParams.runId} "
+        "sessionId=${runParams.sessionId} provider=${input.activeErrorContext.provider}/"
+        "${input.activeErrorContext.model} — retrying "
+        "${retryState.emptyResponseAttempts}/${input.maxEmptyResponseRetryAttempts} "
+        "with visible-answer continuation`);\n"
+        "    return { action: \"retry\" };\n"
+        "  }\n"
+        "}\n"
+    )
+    (dist / "worker-test.mjs").write_text(
+        "function retryMinified(Ot,Dn,mi,Si){"
+        "if(!mi&&Si&&Dn.emptyResponseAttempts<Ot.maxEmptyResponseRetryAttempts)"
+        "return Dn.emptyResponseAttempts+=1,Ot.activateInternalPrompt(Si),"
+        "log$190.warn(`empty response detected: runId=${Zt.runId} "
+        "sessionId=${Zt.sessionId} provider=${Ot.activeErrorContext.provider}/"
+        "${Ot.activeErrorContext.model} — retrying ${Dn.emptyResponseAttempts}/"
+        "${Ot.maxEmptyResponseRetryAttempts} with visible-answer continuation`),"
+        "{action:`retry`};}\n"
     )
     (dist / "tool-loop-detection-test.js").write_text(
         "function detectToolCallLoop(state, toolName, params, config, scope) {\n"
@@ -152,6 +179,7 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     pricing_text = (root / "dist/pricing-test.js").read_text()
     builtin_text = (root / "dist/builtin-openclaw-test.js").read_text()
     embedded_text = (root / "dist/embedded-agent-test.js").read_text()
+    worker_text = (root / "dist/worker-test.mjs").read_text()
     loop_detection_text = (
         root / "dist/tool-loop-detection-test.js"
     ).read_text()
@@ -172,16 +200,17 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert ROADMAP_CONTINUATION_INSTRUCTION in builtin_text
     assert SETTLED_CONTINUATION_RETRY_MARKER in builtin_text
     assert SETTLED_CONTINUATION_LENGTH_MARKER in builtin_text
+    assert NONEMPTY_LENGTH_ELIGIBILITY_MARKER in builtin_text
     assert SETTLED_CONTINUATION_TOOL_ERROR_MARKER in builtin_text
     assert "__abSettledToolEvidence.allToolsProvenSettled" in builtin_text
     assert "!__abSettledToolEvidence.hasUnsettledToolError" not in builtin_text
     assert "const __abAssistantState = classifyAssistantTurn(params)" in builtin_text
     assert '__abAssistantState.assistant?.stopReason === "length"' in builtin_text
-    assert "__abAssistantState.visibleText.length === 0" in builtin_text
+    assert "const __abExplicitDone" in builtin_text
+    assert "!__abExplicitDone" in builtin_text
     assert "!__abAssistantState.reasoningOnly" in builtin_text
-    assert "params.payloadCount === 0" in builtin_text
     assert (
-        "__abAssistantState.emptyResponse || __abEmptyLength" in builtin_text
+        "__abAssistantState.emptyResponse || __abIncompleteLength" in builtin_text
     )
     assert "&& __abRoadmapContinuationEligible" in builtin_text
     assert 'params.attempt?.terminal?.kind !== "timeout"' in builtin_text
@@ -193,6 +222,13 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
         builtin_text.index("shouldSkipNonVisibleTurnRetry(params)")
     )
     assert EMPTY_STOP_RETRY_LIMIT_MARKER in embedded_text
+    assert UNBOUNDED_LENGTH_CONTINUATION_MARKER in embedded_text
+    assert UNBOUNDED_LENGTH_CONTINUATION_MARKER in worker_text
+    assert 'Ot.attemptAssistant?.stopReason === "length"' in worker_text
+    assert 'input.attemptAssistant?.stopReason === "length"' in embedded_text
+    assert "if (__abLengthContinuation)" in embedded_text
+    assert "continuing under the enclosing benchmark deadline" in embedded_text
+    assert "if (!__abLengthContinuation)" not in embedded_text
     assert "if (raw === void 0 || raw === \"\") return 1" in embedded_text
     assert "Math.min(parsed, 16)" in embedded_text
     assert LOOP_VETO_RECOVERY_PROBE_MARKER in loop_detection_text
@@ -228,7 +264,8 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
 
     snapshot = {
         path.name: path.read_text()
-        for path in (root / "dist").glob("*.js")
+        for path in (root / "dist").iterdir()
+        if path.suffix in {".js", ".mjs", ".cjs"}
     }
     second = patch_runtime_tree(root)
     assert second["exec_bridge_files_changed"] == []
@@ -241,23 +278,31 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert second["litellm_pricing_url_replacements"] == 0
     assert snapshot == {
         path.name: path.read_text()
-        for path in (root / "dist").glob("*.js")
+        for path in (root / "dist").iterdir()
+        if path.suffix in {".js", ".mjs", ".cjs"}
     }
 
 
-def test_v2026_9_2_empty_stop_and_length_share_bounded_retry_path(tmp_path):
+def test_v2026_9_2_length_continues_without_consuming_empty_stop_budget(tmp_path):
     root = _runtime_tree(tmp_path)
 
     patch_runtime_tree(root)
 
     builtin = (root / "dist/builtin-openclaw-test.js").read_text()
     embedded = (root / "dist/embedded-agent-test.js").read_text()
-    assert "__abAssistantState.emptyResponse || __abEmptyLength" in builtin
+    assert "__abAssistantState.emptyResponse || __abIncompleteLength" in builtin
     assert '__abAssistantState.assistant?.stopReason === "length"' in builtin
+    assert "!__abExplicitDone" in builtin
     assert builtin.count("return EMPTY_RESPONSE_RETRY_INSTRUCTION;") == 1
     assert "maxEmptyResponseRetryAttempts" in embedded
     assert f"process.env.OPENCLAW_AGENT_BENCH_EMPTY_STOP_RETRIES" in embedded
     assert "Math.min(parsed, 16)" in embedded
+    assert UNBOUNDED_LENGTH_CONTINUATION_MARKER in embedded
+    assert "__abLengthContinuation" in embedded
+    assert "retryState.emptyResponseAttempts += 1" in embedded
+    assert embedded.index("if (__abLengthContinuation)") < embedded.index(
+        "retryState.emptyResponseAttempts += 1"
+    )
 
     safety_guards = (
         "!params.aborted",
@@ -323,6 +368,25 @@ def test_v2026_9_2_patcher_fails_closed_when_retry_eligibility_anchor_moves(
         patch_runtime_tree(root)
 
 
+def test_v2026_9_2_patcher_fails_closed_when_retry_counter_anchor_moves(
+    tmp_path,
+):
+    root = _runtime_tree(tmp_path)
+    for name in ("embedded-agent-test.js", "worker-test.mjs"):
+        path = root / "dist" / name
+        path.write_text(
+            path.read_text().replace(
+                "emptyResponseAttempts",
+                "movedEmptyResponseAttempts",
+            )
+        )
+
+    with pytest.raises(
+        RuntimeError, match="empty-response retry counter anchor"
+    ):
+        patch_runtime_tree(root)
+
+
 def test_v2026_9_2_patcher_fails_closed_when_loop_recovery_anchor_moves(
     tmp_path,
 ):
@@ -373,6 +437,8 @@ def test_v2026_9_2_builder_does_not_reapply_legacy_runtime_patches():
     assert SETTLED_CONTINUATION_INSTRUCTION_MARKER in audit
     assert SETTLED_CONTINUATION_RETRY_MARKER in audit
     assert SETTLED_CONTINUATION_LENGTH_MARKER in audit
+    assert NONEMPTY_LENGTH_ELIGIBILITY_MARKER in audit
+    assert UNBOUNDED_LENGTH_CONTINUATION_MARKER in audit
     assert SETTLED_CONTINUATION_TOOL_ERROR_MARKER in audit
     assert EMPTY_STOP_RETRY_LIMIT_MARKER in audit
     assert LOOP_VETO_RECOVERY_PROBE_MARKER in audit
