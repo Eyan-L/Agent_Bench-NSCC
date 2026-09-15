@@ -512,46 +512,11 @@ def _measurement_parent_key(run_dir: Path, agent_id: str) -> str:
 
 
 def _count_parent_resumes(run_dir: Path, parent_key: str) -> int:
-    sessions_dir = run_dir / "conversation" / "sessions"
-    try:
-        index = json.loads((sessions_dir / "sessions.json").read_text(errors="replace"))
-    except (OSError, json.JSONDecodeError):
-        return 0
-    entry = index.get(parent_key) if isinstance(index, dict) else None
-    if not isinstance(entry, dict):
-        return 0
-    name = str(entry.get("sessionFile") or "")
-    if not name or Path(name).name != name:
-        return 0
-    path = sessions_dir / name
-    seen: set[str] = set()
-    count = 0
-    try:
-        lines = path.read_text(errors="replace").splitlines()
-    except OSError:
-        return 0
-    for line in lines:
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        message = item.get("message") or {}
-        if item.get("type") != "message" or message.get("role") != "user":
-            continue
-        parts = [
-            str(part.get("text") or "")
-            for part in message.get("content") or []
-            if isinstance(part, dict) and part.get("type") == "text"
-        ]
-        text = "\n".join(part for part in parts if part)
-        normalized = " ".join(text.lower().split())
-        if "read heartbeat.md" in normalized and "heartbeat_ok" in normalized:
-            continue
-        if text in seen:
-            continue
-        seen.add(text)
-        count += 1
-    return max(0, count - 1)
+    return openclaw_measurement._parent_resume_count(
+        run_dir,
+        "roadmap_bench",
+        parent_session_key=parent_key,
+    )
 
 
 def _runtime_version() -> str:

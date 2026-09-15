@@ -41,6 +41,10 @@ openclaw:
     exec:
       host: gateway
       security: full
+    subagents:
+      tools:
+        deny:
+        - sessions_yield
     loopDetection:
       enabled: true
     alsoAllow:
@@ -68,6 +72,7 @@ openclaw:
       workspace: /app
       subagents:
         maxConcurrent: 16
+        maxChildrenPerAgent: 16
         # The benchmark-wide 7200s lifecycle deadline is the sole execution
         # fence. Shorter nested deadlines can abort a healthy resumed parent.
         runTimeoutSeconds: 0

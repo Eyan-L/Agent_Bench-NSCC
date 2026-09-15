@@ -215,10 +215,28 @@ def test_roadmap_profile_and_prompt_allow_sixteen_concurrent_subagents():
     ).read_text()
 
     assert "maxConcurrent: 16" in profile
+    assert "maxChildrenPerAgent: 16" in profile
     assert "Up to sixteen subagents may run concurrently." in prompt
-    assert "explicitly decide which workstreams are safe to delegate" in prompt
-    assert "prefer delegating" in prompt
+    assert "you are encouraged" in prompt
+    assert "Delegation is preferred" in prompt
     assert "MUST spawn" not in prompt
+
+
+def test_roadmap_subagents_cannot_park_with_sessions_yield():
+    root = Path(__file__).resolve().parents[1]
+    subagent_profile = (
+        root / "profiles" / "harnesses" / "openclaw_roadmapbench.yaml"
+    ).read_text()
+    single_agent_profile = (
+        root
+        / "profiles"
+        / "harnesses"
+        / "openclaw_roadmapbench_single_agent.yaml"
+    ).read_text()
+
+    assert "subagents:\n      tools:\n        deny:\n        - sessions_yield" in subagent_profile
+    assert "subagents:\n      tools:\n        deny:\n        - sessions_yield" not in single_agent_profile
+    assert "    - sessions_yield" in subagent_profile
 
 
 def test_roadmap_profile_uses_only_the_benchmark_execution_deadline():

@@ -43,19 +43,27 @@ def _iso_from_ns(value: int) -> Optional[str]:
 
 
 def _message_text(message: dict) -> str:
+    content = message.get("content") or []
+    if isinstance(content, str):
+        return content
     parts = []
-    for item in message.get("content") or []:
+    for item in content:
         if isinstance(item, dict) and item.get("type") == "text":
             parts.append(str(item.get("text") or ""))
     return "\n".join(part for part in parts if part)
 
 
-def _is_heartbeat_request(text: str) -> bool:
+def _is_heartbeat_request(text: str, message: Optional[dict] = None) -> bool:
     """Recognize OpenClaw heartbeat requester turns."""
     normalized = " ".join(str(text or "").lower().split())
+    provenance = (message or {}).get("provenance") or {}
     return (
-        "read heartbeat.md" in normalized
-        and "heartbeat_ok" in normalized
+        ("read heartbeat.md" in normalized and "heartbeat_ok" in normalized)
+        or normalized == "[openclaw heartbeat poll]"
+        or (
+            isinstance(provenance, dict)
+            and str(provenance.get("sourceTool") or "").lower() == "heartbeat"
+        )
     )
 
 
@@ -143,6 +151,59 @@ def _transcript_time_bounds(path: Path) -> tuple[int, int]:
         first = timestamp_ns if not first else min(first, timestamp_ns)
         last = max(last, timestamp_ns)
     return first, last
+
+
+def _parent_start_time(
+    entry: dict, transcript_first_ns: int
+) -> tuple[int, str]:
+    """Prefer immutable creation/transcript evidence over mutable startedAt."""
+    created_ns, created_field = _entry_time(
+        entry, ("createdAt", "created_at")
+    )
+    candidates = [
+        (created_ns, created_field),
+        (
+            transcript_first_ns,
+            "transcript_first_event" if transcript_first_ns else "",
+        ),
+    ]
+    candidates = [(value, source) for value, source in candidates if value]
+    if candidates:
+        return min(candidates, key=lambda item: item[0])
+    return _entry_time(
+        entry,
+        ("startedAt", "started_at", "sessionStartedAt", "session_started_at"),
+    )
+
+
+def _transcript_explicit_done_time(path: Path) -> int:
+    """Return the timestamp when the final durable assistant turn says DONE."""
+    if not path.is_file():
+        return 0
+    done_ns = 0
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return 0
+    for line in lines:
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = item.get("message") or {}
+        if item.get("type") != "message" or message.get("role") != "assistant":
+            continue
+        timestamp_ns = _timestamp_ns(
+            message.get("timestamp") or item.get("timestamp")
+        )
+        is_done = (
+            str(message.get("stopReason") or "").lower() in {"stop", "length"}
+            and bool(re.search(
+                r"(?im)^\s*DONE(?:\s*$|\b)", _message_text(message)
+            ))
+        )
+        done_ns = timestamp_ns if is_done else 0
+    return done_ns
 
 
 def _child_start_time(
@@ -322,7 +383,7 @@ def _session_events(run_dir: Path, agent_id: str) -> list[dict]:
             message_role = str(message.get("role") or "")
             if message_role == "user":
                 text = _message_text(message)
-                if role == "parent" and _is_heartbeat_request(text):
+                if role == "parent" and _is_heartbeat_request(text, message):
                     heartbeat_turn = True
                     _append(
                         events, timestamp_ns=timestamp_ns,
@@ -574,22 +635,23 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
             _transcript_time_bounds(parent_transcript)
             if parent_transcript is not None else (0, 0)
         )
-        parent_start_ns, parent_start_source = _entry_time(
-            parent_entry,
-            (
-                "startedAt", "started_at", "sessionStartedAt",
-                "session_started_at", "createdAt", "created_at",
-            ),
+        parent_start_ns, parent_start_source = _parent_start_time(
+            parent_entry, parent_first_ns
         )
-        if not parent_start_ns:
-            parent_start_ns = parent_first_ns
-            parent_start_source = "transcript_first_event" if parent_first_ns else ""
         parent_status = str(parent_entry.get("status") or "unknown").lower()
-        parent_terminal = parent_status in terminal_states
-        if parent_terminal:
+        explicit_done_ns = (
+            _transcript_explicit_done_time(parent_transcript)
+            if parent_transcript is not None else 0
+        )
+        parent_terminal = parent_status in terminal_states or bool(explicit_done_ns)
+        if parent_status in terminal_states:
             parent_end_ns, parent_end_source, parent_end_quality = (
                 _child_terminal_time(parent_entry, parent_last_ns)
             )
+        elif explicit_done_ns:
+            parent_end_ns = explicit_done_ns
+            parent_end_source = "transcript_explicit_done"
+            parent_end_quality = "transcript_terminal_evidence"
         else:
             parent_end_ns = observation_end_ns
             parent_end_source = observation_end_source
@@ -894,22 +956,28 @@ def _logical_tokens_from_transcripts(
     return dict(sessions), usage_events
 
 
-def _parent_resume_count(run_dir: Path, agent_id: str) -> int:
+def _parent_resume_count(
+    run_dir: Path,
+    agent_id: str,
+    *,
+    parent_session_key: Optional[str] = None,
+) -> int:
     """Count requester episodes after the initial parent request.
 
-    Compaction can replay the initial requester message at a new timestamp, so
-    text, rather than timestamp, is the durable identity used here. OpenClaw
-    v2026.4.22 does not persist a stable id on requester messages; two genuine
-    byte-identical resumes are therefore indistinguishable and intentionally
-    collapse until the runtime exposes a durable event identity.
+    OpenClaw v9 persists a stable event id, which distinguishes genuine
+    byte-identical resumes while deduplicating replay. Older transcripts lack
+    that id, so their text remains the best available fallback identity.
     """
     sessions_dir = run_dir / "conversation" / "sessions"
     if not sessions_dir.is_dir():
         return 0
-    messages: list[str] = []
-    seen: set[str] = set()
+    requester_episodes = 0
+    seen: set[tuple[str, str]] = set()
     for path, session_key, entry in _session_sources(sessions_dir):
-        if _session_role(session_key, entry, agent_id) != "parent":
+        if parent_session_key is not None:
+            if session_key != parent_session_key:
+                continue
+        elif _session_role(session_key, entry, agent_id) != "parent":
             continue
         try:
             lines = path.read_text(errors="replace").splitlines()
@@ -924,13 +992,15 @@ def _parent_resume_count(run_dir: Path, agent_id: str) -> int:
             if item.get("type") != "message" or message.get("role") != "user":
                 continue
             text = _message_text(message)
-            if _is_heartbeat_request(text):
+            if _is_heartbeat_request(text, message):
                 continue
-            if text in seen:
+            event_id = str(item.get("id") or message.get("id") or "").strip()
+            identity = ("id", event_id) if event_id else ("text", text)
+            if identity in seen:
                 continue
-            seen.add(text)
-            messages.append(text)
-    return max(0, len(messages) - 1)
+            seen.add(identity)
+            requester_episodes += 1
+    return max(0, requester_episodes - 1)
 
 
 def _logical_tokens(run_dir: Path, agent_id: str) -> tuple[dict, list[dict]]:

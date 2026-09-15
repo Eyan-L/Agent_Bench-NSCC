@@ -125,6 +125,115 @@ def test_explicit_parent_and_runtime_waits_are_measured_separately(tmp_path):
     assert timing["unattributed_orchestration_seconds"] == 7.0
 
 
+def test_parent_timeline_and_resumes_use_durable_v9_transcript(tmp_path):
+    sessions = tmp_path / "conversation" / "sessions"
+    sessions.mkdir(parents=True)
+    parent_key = "agent:roadmap_bench:main"
+    (sessions / "sessions.json").write_text(json.dumps({
+        parent_key: {
+            "sessionId": "parent-id",
+            "sessionFile": "parent.jsonl",
+            "status": "running",
+            # OpenClaw updates this field when it resumes the same session.
+            "startedAt": 8_000,
+        },
+    }))
+    initial = {
+        "type": "message",
+        "id": "initial-request",
+        "timestamp": 1,
+        "message": {
+            "role": "user",
+            "timestamp": 1,
+            "content": "implement roadmap",
+        },
+    }
+    first_resume = {
+        "type": "message",
+        "id": "resume-one",
+        "timestamp": 4,
+        "message": {
+            "role": "user",
+            "timestamp": 4,
+            "content": "children settled",
+        },
+    }
+    _write_jsonl(sessions / "parent.jsonl", [
+        initial,
+        {
+            "type": "message",
+            "timestamp": 2,
+            "message": {
+                "role": "assistant",
+                "timestamp": 2,
+                "responseId": "first-turn",
+                "stopReason": "toolUse",
+                "usage": {"input": 10, "output": 2},
+                "content": [],
+            },
+        },
+        {
+            "type": "custom_message",
+            "customType": "openclaw.sessions_yield",
+            "timestamp": 3,
+        },
+        first_resume,
+        # A durable replay has the same event identity and is not a new resume.
+        first_resume,
+        {
+            "type": "message",
+            "id": "heartbeat",
+            "timestamp": 5,
+            "message": {
+                "role": "user",
+                "timestamp": 5,
+                "content": "[OpenClaw heartbeat poll]",
+                "provenance": {
+                    "kind": "internal_system",
+                    "sourceTool": "heartbeat",
+                },
+            },
+        },
+        {
+            "type": "message",
+            "id": "resume-two",
+            "timestamp": 7,
+            "message": {
+                "role": "user",
+                "timestamp": 7,
+                # Identical text is a distinct durable event in v9.
+                "content": "children settled",
+            },
+        },
+        {
+            "type": "message",
+            "timestamp": 9,
+            "message": {
+                "role": "assistant",
+                "timestamp": 9,
+                "responseId": "final-turn",
+                "stopReason": "stop",
+                "usage": {"input": 20, "output": 3},
+                "content": "DONE\nIntegrated.",
+            },
+        },
+    ])
+
+    result = build_openclaw_measurement(
+        tmp_path, agent_id="roadmap_bench"
+    )
+
+    assert result["trajectory_tokens"]["parent"]["resumed_turns"] == 2
+    parent = result["runtime_observability"]["agent_timeline"]["agents"][0]
+    assert parent["role"] == "parent"
+    assert parent["start_timestamp_ns"] == 1_000_000_000
+    assert parent["start_timestamp_source"] == "transcript_first_event"
+    assert parent["end_timestamp_ns"] == 9_000_000_000
+    assert parent["end_timestamp_source"] == "transcript_explicit_done"
+    assert parent["duration_seconds"] == 8.0
+    assert parent["runtime_censored"] is False
+
+
 def test_roadmap_quiescence_timing_separates_parent_terminal(monkeypatch, tmp_path):
     class Harness:
         def quiesce_orphan_children(self, _env_info):
