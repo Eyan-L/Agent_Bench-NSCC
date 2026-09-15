@@ -244,6 +244,138 @@ def _event_messages(raw_events: list[str]) -> list[dict]:
     return messages
 
 
+def _transcript_recovery_state(path: Path) -> tuple[object, object, str]:
+    """Return durable time bounds and a conservative terminal state."""
+    first_timestamp: object = None
+    last_timestamp: object = None
+    status = "unknown"
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return first_timestamp, last_timestamp, status
+
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        message = event.get("message") or {}
+        timestamp = message.get("timestamp") or event.get("timestamp")
+        if timestamp is not None:
+            if first_timestamp is None:
+                first_timestamp = timestamp
+            last_timestamp = timestamp
+
+        if (
+            event.get("type") == "custom"
+            and event.get("customType") == "openclaw:prompt-error"
+        ):
+            status = "error"
+            continue
+        if event.get("type") != "message":
+            continue
+
+        role = str(message.get("role") or "")
+        if role in {"user", "toolResult"}:
+            status = "unknown"
+        elif role == "assistant":
+            stop_reason = str(message.get("stopReason") or "").lower()
+            status = "done" if stop_reason in {"stop", "length"} else "unknown"
+
+    return first_timestamp, last_timestamp, status
+
+
+def _cache_trace_child_identities(
+    conversation_dir: Path, agent_id: str,
+) -> dict[str, str]:
+    """Map archived child session ids to keys using durable cache-trace data."""
+    path = conversation_dir / "cache-trace.jsonl"
+    if not path.is_file():
+        return {}
+    prefix = f"agent:{agent_id}:subagent:"
+    identities: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for line in path.read_text(errors="replace").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        session_id = str(event.get("sessionId") or "").strip()
+        session_key = str(event.get("sessionKey") or "").strip()
+        if not session_id or not session_key.startswith(prefix):
+            continue
+        previous = identities.get(session_id)
+        if previous is not None and previous != session_key:
+            ambiguous.add(session_id)
+            continue
+        identities[session_id] = session_key
+    for session_id in ambiguous:
+        identities.pop(session_id, None)
+    return identities
+
+
+def _restore_archived_child_index(sessions_dir: Path, agent_id: str) -> int:
+    """Merge completed children removed from the live index back into its archive.
+
+    OpenClaw may clean up a completed subagent's ``sessions.json`` node while
+    retaining its transcript and cache trace. Measurement needs both artifacts:
+    the trace supplies the durable session identity, and the transcript supplies
+    the execution record. Missing or ambiguous identities are never inferred.
+    """
+    index_path = sessions_dir / "sessions.json"
+    try:
+        index = json.loads(index_path.read_text(errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    if not isinstance(index, dict):
+        return 0
+
+    run_dir = sessions_dir.parents[1]
+    parent_key = _measurement_parent_key(run_dir, agent_id)
+    if not parent_key:
+        return 0
+    identities = _cache_trace_child_identities(sessions_dir.parent, agent_id)
+    restored = 0
+    for session_id, session_key in identities.items():
+        if session_key in index:
+            continue
+        transcript_name = _safe_transcript_name(session_id)
+        transcript = sessions_dir / transcript_name
+        if not transcript.is_file():
+            continue
+        first_timestamp, last_timestamp, status = _transcript_recovery_state(
+            transcript
+        )
+        entry = {
+            "sessionId": session_id,
+            "sessionFile": transcript_name,
+            "status": status,
+            "spawnedBy": parent_key,
+            "parentSessionKey": parent_key,
+        }
+        if first_timestamp is not None:
+            entry["createdAt"] = first_timestamp
+            entry["startedAt"] = first_timestamp
+        if last_timestamp is not None:
+            entry["updatedAt"] = last_timestamp
+            if status in _TERMINAL_CHILD_STATES:
+                entry["endedAt"] = last_timestamp
+        index[session_key] = entry
+        restored += 1
+
+    if restored:
+        temporary = index_path.with_name(f".{index_path.name}.tmp")
+        temporary.write_text(
+            json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        os.replace(temporary, index_path)
+    return restored
+
+
 def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
     store = _read_sqlite_store(_agent_db_from_sessions_dir(sessions_dir))
     if store is None:
@@ -556,20 +688,34 @@ def install_roadmap_sqlite_session_compat() -> None:
             current_archive(self, container_id, run_dir, session_id)
             if getattr(self, "agent_id", "") != "roadmap_bench":
                 return
+            out_dir = run_dir / "conversation"
+            sessions_out = out_dir / "sessions"
             env_info = getattr(self, "_env_info", {}) or {}
             state_dir = env_info.get("state_dir") or env_info.get("host_state_dir")
-            if not state_dir:
-                return
-            db_path = _agent_db_from_state_dir(Path(state_dir), self.agent_id)
-            if not db_path.is_file():
-                return
-            out_dir = run_dir / "conversation"
             try:
-                sessions_out = out_dir / "sessions"
-                if not (sessions_out / "sessions.json").is_file():
+                db_path = (
+                    _agent_db_from_state_dir(Path(state_dir), self.agent_id)
+                    if state_dir else None
+                )
+                if (
+                    db_path is not None
+                    and db_path.is_file()
+                    and not (sessions_out / "sessions.json").is_file()
+                ):
                     if _export_sqlite_store(db_path, sessions_out):
                         logger.info("  archived OpenClaw SQLite session projection")
-                _archive_sqlite_database(db_path, out_dir / "openclaw-agent.sqlite")
+                restored = _restore_archived_child_index(
+                    sessions_out, self.agent_id
+                )
+                if restored:
+                    logger.info(
+                        "  restored %d archived OpenClaw child session(s)",
+                        restored,
+                    )
+                if db_path is not None and db_path.is_file():
+                    _archive_sqlite_database(
+                        db_path, out_dir / "openclaw-agent.sqlite"
+                    )
             except Exception as exc:  # noqa: BLE001 - measurement remains best-effort
                 logger.warning("OpenClaw SQLite session archive failed: %s", exc)
 

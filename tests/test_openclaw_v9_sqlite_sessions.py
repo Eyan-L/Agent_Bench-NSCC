@@ -12,6 +12,7 @@ from agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent import (
 from agent_bench.benchmarks.roadmap_bench.conditions.sqlite_session_compat import (
     _archive_sqlite_database,
     _export_sqlite_store,
+    _restore_archived_child_index,
     _runtime_version,
 )
 
@@ -238,6 +239,111 @@ def test_sqlite_projection_preserves_explicit_parent_for_measurement(tmp_path: P
     ]
     assert parent_events
     assert all(event["role"] == "parent" for event in parent_events)
+
+
+def test_archived_child_is_restored_from_durable_cache_trace(tmp_path: Path):
+    run_dir = tmp_path / "archived-child-run"
+    conversation = run_dir / "conversation"
+    sessions = conversation / "sessions"
+    sessions.mkdir(parents=True)
+    parent_key = f"agent:roadmap_bench:explicit:{run_dir.name}"
+    child_key = "agent:roadmap_bench:subagent:child-1"
+    (sessions / "sessions.json").write_text(json.dumps({
+        parent_key: {
+            "sessionId": run_dir.name,
+            "sessionFile": f"{run_dir.name}.jsonl",
+            "status": "done",
+        }
+    }))
+    parent_events = [
+        {
+            "type": "message",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "message": {
+                "role": "assistant",
+                "stopReason": "toolUse",
+                "content": [{
+                    "type": "toolCall",
+                    "id": "spawn-1",
+                    "name": "sessions_spawn",
+                    "arguments": {"task": "child work"},
+                }],
+            },
+        },
+        {
+            "type": "message",
+            "timestamp": "2026-01-01T00:00:06Z",
+            "message": {
+                "role": "assistant",
+                "stopReason": "stop",
+                "content": [{"type": "text", "text": "DONE"}],
+            },
+        },
+    ]
+    (sessions / f"{run_dir.name}.jsonl").write_text(
+        "".join(json.dumps(event) + "\n" for event in parent_events)
+    )
+    child_events = [
+        {
+            "type": "message",
+            "timestamp": "2026-01-01T00:00:02Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "child work"}],
+            },
+        },
+        {
+            "type": "message",
+            "timestamp": "2026-01-01T00:00:05Z",
+            "message": {
+                "role": "assistant",
+                "stopReason": "stop",
+                "responseId": "child-response",
+                "usage": {"input": 11, "cacheRead": 3, "output": 5},
+                "content": [{"type": "text", "text": "child complete"}],
+            },
+        },
+    ]
+    (sessions / "child-session.jsonl").write_text(
+        "".join(json.dumps(event) + "\n" for event in child_events)
+    )
+    (conversation / "cache-trace.jsonl").write_text(json.dumps({
+        "sessionId": "child-session",
+        "sessionKey": child_key,
+        "stage": "session:loaded",
+    }) + "\n")
+
+    assert _restore_archived_child_index(sessions, "roadmap_bench") == 1
+    assert _restore_archived_child_index(sessions, "roadmap_bench") == 0
+
+    index = json.loads((sessions / "sessions.json").read_text())
+    assert index[child_key]["spawnedBy"] == parent_key
+    assert index[child_key]["sessionId"] == "child-session"
+    assert index[child_key]["status"] == "done"
+
+    result = openclaw_measurement.build_openclaw_measurement(
+        run_dir, agent_id="roadmap_bench"
+    )
+    runtime = result["runtime_observability"]
+    assert runtime["child_session_count"] == 1
+    assert runtime["child_runtime_complete_count"] == 1
+    assert runtime["unmaterialized_spawn_attempt_count"] == 0
+    assert runtime["max_concurrent_children"] == 1
+    assert result["trajectory_tokens"]["children"][child_key] == {
+        "input": 14,
+        "output": 5,
+        "cache_read": 3,
+        "turn_count": 1,
+    }
+    trajectory = [
+        json.loads(line)
+        for line in (run_dir / "trajectory.jsonl").read_text().splitlines()
+    ]
+    assert any(
+        event["event_type"] == "child_completion"
+        and event["session_key"] == child_key
+        for event in trajectory
+    )
 
 
 def test_runtime_observability_version_uses_active_runtime(monkeypatch):
