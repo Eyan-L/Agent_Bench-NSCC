@@ -54,11 +54,8 @@ SETTLED_CONTINUATION_LENGTH_MARKER = (
 NONEMPTY_LENGTH_ELIGIBILITY_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_NONEMPTY_LENGTH_ELIGIBILITY_BEGIN"
 )
-CHAINED_CONTINUATION_STATE_MARKER = (
-    "AB_HARNESS_OPENCLAW_V2026_9_2_CHAINED_CONTINUATION_STATE_BEGIN"
-)
-SHARED_CONTINUATION_BUDGET_MARKER = (
-    "AB_HARNESS_OPENCLAW_V2026_9_2_SHARED_CONTINUATION_BUDGET_BEGIN"
+UNBOUNDED_LENGTH_CONTINUATION_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_UNBOUNDED_LENGTH_CONTINUATION_BEGIN"
 )
 SETTLED_CONTINUATION_TOOL_ERROR_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_TOOL_ERROR_BEGIN"
@@ -248,9 +245,8 @@ def _patch_settled_tool_continuation(root: Path) -> dict[str, list[str]]:
     settled tool batch is followed by an empty assistant stop. It can also
     finalize a length-truncated assistant turn that still promises more work.
     Under the explicit Agent_Bench policy, the existing tools-enabled retry
-    path remains eligible. The first retry must follow a proven-settled tool
-    batch; subsequent empty retries may continue the same recovery sequence.
-    Empty stop and incomplete length turns share one bounded retry budget.
+    path remains eligible; length retries are fenced by the benchmark deadline
+    rather than the empty-stop retry count.
     """
     changed: set[Path] = set()
     dist_files = sorted(_js_files(root / "dist"))
@@ -358,14 +354,6 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
 		__abAssistantState.emptyResponse || __abIncompleteLength;
 	/* AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_LENGTH_END */
 	const __abSettledToolEvidence = resolveSettledToolBatchEvidence({param}.attempt);
-	const __abChainedContinuation =
-		{param}.allowChainedContinuation === true
-		&& ({param}.attempt.toolMetas?.length ?? 0) === 0
-		&& ({param}.attempt.itemLifecycle?.startedCount ?? 0) === 0
-		&& ({param}.attempt.itemLifecycle?.completedCount ?? 0) === 0
-		&& ({param}.attempt.itemLifecycle?.activeCount ?? 0) === 0
-		&& !{param}.attempt.lastToolError
-		&& ({param}.attempt.acceptedSessionSpawns?.length ?? 0) === 0;
 	if (process.env.{SETTLED_TOOL_POLICY_ENV} === "continue"
 		&& !{param}.aborted
 		&& !{param}.timedOut
@@ -377,8 +365,7 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
 		&& !{param}.attempt.hasToolMediaBlockReply
 		&& !hasCompletedMessagingToolDeliveryEvidence({param}.attempt)
 		&& __abRoadmapContinuationEligible
-		&& (__abSettledToolEvidence.allToolsProvenSettled
-			|| __abChainedContinuation)
+		&& __abSettledToolEvidence.allToolsProvenSettled
 		/* {SETTLED_CONTINUATION_TOOL_ERROR_MARKER} */
 		/* Settled tool errors are recoverable model feedback, not runtime fatality. */
 		/* AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_TOOL_ERROR_END */
@@ -428,58 +415,6 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
             _write(path, text)
             changed.add(path)
 
-    chained_call_anchor = re.compile(
-        r"resolveEmptyResponseRetryInstruction\(\{"
-    )
-    chained_call_targets = [
-        path for path in dist_files
-        if (
-            chained_call_anchor.search(_read(path))
-            and "function resolveEmbeddedRunTerminal" in _read(path)
-        )
-        or CHAINED_CONTINUATION_STATE_MARKER in _read(path)
-    ]
-    if not chained_call_targets:
-        raise RuntimeError(
-            "v2026.9.2 empty-response retry call-site anchor not found"
-        )
-
-    for path in chained_call_targets:
-        text = _read(path)
-        if CHAINED_CONTINUATION_STATE_MARKER in text:
-            continue
-        call_matches = list(chained_call_anchor.finditer(text))
-        if len(call_matches) != 1:
-            raise RuntimeError(
-                f"empty-response retry call-site anchor missing/ambiguous in {path}"
-            )
-        call = call_matches[0]
-        function_start = text.rfind("function resolveEmbeddedRunTerminal", 0, call.start())
-        if function_start < 0:
-            raise RuntimeError(
-                f"empty-response retry owner missing in {path}"
-            )
-        owner_prefix = text[function_start:call.start()]
-        retry_state_matches = list(re.finditer(
-            r"retryState(?:\s*:\s*(?P<alias>[A-Za-z_$][\w$]*))?",
-            owner_prefix,
-        ))
-        if not retry_state_matches:
-            raise RuntimeError(
-                f"empty-response retry state anchor missing in {path}"
-            )
-        retry_state = retry_state_matches[0].group("alias") or "retryState"
-        insertion = (
-            "resolveEmptyResponseRetryInstruction({"
-            f"/* {CHAINED_CONTINUATION_STATE_MARKER} */"
-            "allowChainedContinuation:"
-            f"{retry_state}.emptyResponseAttempts > 0,"
-            "/* AB_HARNESS_OPENCLAW_V2026_9_2_CHAINED_CONTINUATION_STATE_END */"
-        )
-        text = text[:call.start()] + insertion + text[call.end():]
-        _write(path, text)
-        changed.add(path)
-
     ident = r"[A-Za-z_$][\w$]*"
     length_budget_readable_anchor = re.compile(
         rf'''(?P<indent>[ \t]*)if \(!(?P<reason>{ident}) && (?P<instruction>{ident}) && (?P<state>{ident})\.emptyResponseAttempts < (?P<input>{ident})\.maxEmptyResponseRetryAttempts\) \{{\s*
@@ -496,7 +431,7 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
         path for path in dist_files
         if length_budget_readable_anchor.search(_read(path))
         or length_budget_minified_anchor.search(_read(path))
-        or SHARED_CONTINUATION_BUDGET_MARKER in _read(path)
+        or UNBOUNDED_LENGTH_CONTINUATION_MARKER in _read(path)
     ]
     if not length_budget_targets:
         raise RuntimeError(
@@ -510,19 +445,28 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
         state = match.group("state")
         input_name = match.group("input")
         logger = match.group("logger")
-        return f'''{indent}/* {SHARED_CONTINUATION_BUDGET_MARKER} */
+        return f'''{indent}/* {UNBOUNDED_LENGTH_CONTINUATION_MARKER} */
+{indent}const __abLengthContinuation =
+{indent}\tprocess.env.{SETTLED_TOOL_POLICY_ENV} === "continue"
+{indent}\t&& {input_name}.attemptAssistant?.stopReason === "length"
+{indent}\t&& {instruction};
 {indent}if (!{reason} && {instruction}
-{indent}\t&& {state}.emptyResponseAttempts < {input_name}.maxEmptyResponseRetryAttempts) {{
-{indent}\t{state}.emptyResponseAttempts += 1;
+{indent}\t&& (__abLengthContinuation
+{indent}\t\t|| {state}.emptyResponseAttempts < {input_name}.maxEmptyResponseRetryAttempts)) {{
 {indent}\t{input_name}.activateInternalPrompt({instruction});
-{indent}\t{logger}.warn(`incomplete response detected: runId=${{{input_name}.runParams.runId}} sessionId=${{{input_name}.runParams.sessionId}} provider=${{{input_name}.activeErrorContext.provider}}/${{{input_name}.activeErrorContext.model}} — retrying ${{{state}.emptyResponseAttempts}}/${{{input_name}.maxEmptyResponseRetryAttempts}} with tools-enabled continuation`);
+{indent}\tif (__abLengthContinuation) {{
+{indent}\t\t{logger}.warn(`length-truncated response detected: runId=${{{input_name}.runParams.runId}} sessionId=${{{input_name}.runParams.sessionId}} provider=${{{input_name}.activeErrorContext.provider}}/${{{input_name}.activeErrorContext.model}} — continuing under the enclosing benchmark deadline`);
+{indent}\t}} else {{
+{indent}\t\t{state}.emptyResponseAttempts += 1;
+{indent}\t\t{logger}.warn(`empty response detected: runId=${{{input_name}.runParams.runId}} sessionId=${{{input_name}.runParams.sessionId}} provider=${{{input_name}.activeErrorContext.provider}}/${{{input_name}.activeErrorContext.model}} — retrying ${{{state}.emptyResponseAttempts}}/${{{input_name}.maxEmptyResponseRetryAttempts}} with visible-answer continuation`);
+{indent}\t}}
 {indent}\treturn {{ action: "retry" }};
 {indent}}}
-{indent}/* AB_HARNESS_OPENCLAW_V2026_9_2_SHARED_CONTINUATION_BUDGET_END */'''
+{indent}/* AB_HARNESS_OPENCLAW_V2026_9_2_UNBOUNDED_LENGTH_CONTINUATION_END */'''
 
     for path in length_budget_targets:
         text = _read(path)
-        if SHARED_CONTINUATION_BUDGET_MARKER not in text:
+        if UNBOUNDED_LENGTH_CONTINUATION_MARKER not in text:
             readable_count = len(length_budget_readable_anchor.findall(text))
             minified_count = len(length_budget_minified_anchor.findall(text))
             if readable_count + minified_count != 1:
@@ -587,9 +531,6 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
         "retry_eligibility_files": [
             str(path.relative_to(root))
             for path in retry_eligibility_targets
-        ],
-        "chained_continuation_files": [
-            str(path.relative_to(root)) for path in chained_call_targets
         ],
         "length_budget_files": [
             str(path.relative_to(root)) for path in length_budget_targets
@@ -933,13 +874,9 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
             "dist/**/*",
             NONEMPTY_LENGTH_ELIGIBILITY_MARKER,
         ),
-        "chained_continuation_state": (
+        "unbounded_length_continuation": (
             "dist/**/*",
-            CHAINED_CONTINUATION_STATE_MARKER,
-        ),
-        "shared_continuation_budget": (
-            "dist/**/*",
-            SHARED_CONTINUATION_BUDGET_MARKER,
+            UNBOUNDED_LENGTH_CONTINUATION_MARKER,
         ),
         "settled_continuation_tool_error": (
             "dist/**/*",

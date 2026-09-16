@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
-    CHAINED_CONTINUATION_STATE_MARKER,
     EMPTY_STOP_RETRY_LIMIT_MARKER,
     EXEC_MARKER,
     FS_CHECK_MARKER,
@@ -26,7 +25,7 @@ from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     SETTLED_CONTINUATION_RETRY_MARKER,
     SETTLED_CONTINUATION_TOOL_ERROR_MARKER,
     SHARED_WORKSPACE_SPAWN_MARKER,
-    SHARED_CONTINUATION_BUDGET_MARKER,
+    UNBOUNDED_LENGTH_CONTINUATION_MARKER,
     patch_runtime_tree,
     verify_runtime_tree,
 )
@@ -121,10 +120,9 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "  return input;\n"
         "}\n"
         "function resolveEmbeddedRunTerminal(input) {\n"
-        "  const { retryState } = input;\n"
         "  const nextEmptyResponseRetryInstruction = "
         "input.settledTurnFinalizationAttempted ? null : "
-        "resolveEmptyResponseRetryInstruction({attempt: input.attempt});\n"
+        "resolveEmptyResponseRetryInstruction(input);\n"
         "  if (nextEmptyResponseRetryInstruction) return { action: 'retry' };\n"
         "}\n"
         "const retryOptions = {\n"
@@ -147,8 +145,6 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "}\n"
     )
     (dist / "worker-test.mjs").write_text(
-        "function resolveEmbeddedRunTerminal(Ot){let{retryState:Dn}=Ot,"
-        "Si=resolveEmptyResponseRetryInstruction({attempt:Ot.attempt});}\n"
         "function retryMinified(Ot,Dn,mi,Si){"
         "if(!mi&&Si&&Dn.emptyResponseAttempts<Ot.maxEmptyResponseRetryAttempts)"
         "return Dn.emptyResponseAttempts+=1,Ot.activateInternalPrompt(Si),"
@@ -226,16 +222,13 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
         builtin_text.index("shouldSkipNonVisibleTurnRetry(params)")
     )
     assert EMPTY_STOP_RETRY_LIMIT_MARKER in embedded_text
-    assert CHAINED_CONTINUATION_STATE_MARKER in embedded_text
-    assert CHAINED_CONTINUATION_STATE_MARKER in worker_text
-    assert "allowChainedContinuation:retryState.emptyResponseAttempts > 0" in (
-        embedded_text
-    )
-    assert "allowChainedContinuation:Dn.emptyResponseAttempts > 0" in worker_text
-    assert SHARED_CONTINUATION_BUDGET_MARKER in embedded_text
-    assert SHARED_CONTINUATION_BUDGET_MARKER in worker_text
-    assert "continuing under the enclosing benchmark deadline" not in embedded_text
-    assert "incomplete response detected" in embedded_text
+    assert UNBOUNDED_LENGTH_CONTINUATION_MARKER in embedded_text
+    assert UNBOUNDED_LENGTH_CONTINUATION_MARKER in worker_text
+    assert 'Ot.attemptAssistant?.stopReason === "length"' in worker_text
+    assert 'input.attemptAssistant?.stopReason === "length"' in embedded_text
+    assert "if (__abLengthContinuation)" in embedded_text
+    assert "continuing under the enclosing benchmark deadline" in embedded_text
+    assert "if (!__abLengthContinuation)" not in embedded_text
     assert "if (raw === void 0 || raw === \"\") return 1" in embedded_text
     assert "Math.min(parsed, 16)" in embedded_text
     assert LOOP_VETO_RECOVERY_PROBE_MARKER in loop_detection_text
@@ -290,7 +283,7 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     }
 
 
-def test_v2026_9_2_stop_and_length_share_bounded_continuation_budget(tmp_path):
+def test_v2026_9_2_length_continues_without_consuming_empty_stop_budget(tmp_path):
     root = _runtime_tree(tmp_path)
 
     patch_runtime_tree(root)
@@ -304,25 +297,12 @@ def test_v2026_9_2_stop_and_length_share_bounded_continuation_budget(tmp_path):
     assert "maxEmptyResponseRetryAttempts" in embedded
     assert f"process.env.OPENCLAW_AGENT_BENCH_EMPTY_STOP_RETRIES" in embedded
     assert "Math.min(parsed, 16)" in embedded
-    assert CHAINED_CONTINUATION_STATE_MARKER in embedded
-    assert SHARED_CONTINUATION_BUDGET_MARKER in embedded
+    assert UNBOUNDED_LENGTH_CONTINUATION_MARKER in embedded
+    assert "__abLengthContinuation" in embedded
     assert "retryState.emptyResponseAttempts += 1" in embedded
-    assert embedded.index("retryState.emptyResponseAttempts += 1") < embedded.index(
-        "input.activateInternalPrompt"
+    assert embedded.index("if (__abLengthContinuation)") < embedded.index(
+        "retryState.emptyResponseAttempts += 1"
     )
-    assert (
-        "retryState.emptyResponseAttempts < "
-        "input.maxEmptyResponseRetryAttempts"
-    ) in embedded
-    assert "allowChainedContinuation:retryState.emptyResponseAttempts > 0" in (
-        embedded
-    )
-    assert "params.allowChainedContinuation === true" in builtin
-    assert "(__abSettledToolEvidence.allToolsProvenSettled" in builtin
-    assert "|| __abChainedContinuation)" in builtin
-    assert "(params.attempt.toolMetas?.length ?? 0) === 0" in builtin
-    assert "!params.attempt.lastToolError" in builtin
-    assert "(params.attempt.acceptedSessionSpawns?.length ?? 0) === 0" in builtin
 
     safety_guards = (
         "!params.aborted",
@@ -458,8 +438,7 @@ def test_v2026_9_2_builder_does_not_reapply_legacy_runtime_patches():
     assert SETTLED_CONTINUATION_RETRY_MARKER in audit
     assert SETTLED_CONTINUATION_LENGTH_MARKER in audit
     assert NONEMPTY_LENGTH_ELIGIBILITY_MARKER in audit
-    assert CHAINED_CONTINUATION_STATE_MARKER in audit
-    assert SHARED_CONTINUATION_BUDGET_MARKER in audit
+    assert UNBOUNDED_LENGTH_CONTINUATION_MARKER in audit
     assert SETTLED_CONTINUATION_TOOL_ERROR_MARKER in audit
     assert EMPTY_STOP_RETRY_LIMIT_MARKER in audit
     assert LOOP_VETO_RECOVERY_PROBE_MARKER in audit
