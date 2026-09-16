@@ -1,5 +1,5 @@
 {
-  "_doc": "RoadmapBench retained evaluation profile: 19 pilot-retained tasks plus 10 replacement tasks.",
+  "_doc": "RoadmapBench retained evaluation profile: 20 pilot-retained tasks plus 6 replacement tasks.",
   "sweep_name": "roadmapbench_subset30",
   "plan_version": "roadmapbench-59184e779909-subset30",
   "application": "terminal_bench",
@@ -27,15 +27,12 @@
     "glz-6.1.0-roadmap",
     "opt-3.0.0-roadmap",
     "dsl-2.2.0-roadmap",
-    "dsl-2.3.0-roadmap",
+    "opt-4.0.0-roadmap",
     "fal-3.0.0-roadmap",
-    "fal-4.0.0-roadmap",
     "fbr-2.42.0-roadmap",
     "fyn-2.5.0-roadmap",
-    "fyn-2.7.0-roadmap",
     "ktx-0.10.0-roadmap",
     "ktx-0.15.1-roadmap",
-    "opt-4.0.0-roadmap",
     "pyg-2.2.0-roadmap"
   ],
   "repo_mapping": {
@@ -115,16 +112,8 @@
       "repo_id": "roadmapbench/dsl-2.2.0-roadmap",
       "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
     },
-    "dsl-2.3.0-roadmap": {
-      "repo_id": "roadmapbench/dsl-2.3.0-roadmap",
-      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
-    },
     "fal-3.0.0-roadmap": {
       "repo_id": "roadmapbench/fal-3.0.0-roadmap",
-      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
-    },
-    "fal-4.0.0-roadmap": {
-      "repo_id": "roadmapbench/fal-4.0.0-roadmap",
       "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
     },
     "fbr-2.42.0-roadmap": {
@@ -133,10 +122,6 @@
     },
     "fyn-2.5.0-roadmap": {
       "repo_id": "roadmapbench/fyn-2.5.0-roadmap",
-      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
-    },
-    "fyn-2.7.0-roadmap": {
-      "repo_id": "roadmapbench/fyn-2.7.0-roadmap",
       "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
     },
     "ktx-0.10.0-roadmap": {

@@ -1,5 +1,5 @@
 {
-  "_doc": "RoadmapBench subset10b retained tasks after pilot-result curation.",
+  "_doc": "Ten RoadmapBench subset10b tasks retained after pilot-result curation.",
   "sweep_name": "roadmapbench_subset10b",
   "plan_version": "roadmapbench-59184e779909-subset10b",
   "application": "terminal_bench",
@@ -16,7 +16,8 @@
     "fbr-2.43.0-roadmap",
     "glz-6.1.0-roadmap",
     "opt-3.0.0-roadmap",
-    "dsl-2.2.0-roadmap"
+    "dsl-2.2.0-roadmap",
+    "opt-4.0.0-roadmap"
   ],
   "repo_mapping": {
     "pyg-2.1.0-roadmap": {
@@ -54,6 +55,10 @@
     "dsl-2.2.0-roadmap": {
       "repo_id": "roadmapbench/dsl-2.2.0-roadmap",
       "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "opt-4.0.0-roadmap": {
+      "repo_id": "roadmapbench/opt-4.0.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
     }
   },
   "container_image": "UNUSED",
@@ -64,6 +69,6 @@
   ],
   "selection": {
     "method": "manual fixed high-fanout RoadmapBench subset",
-    "rationale": "Nine retained tasks after pilot-result curation, preserving the existing subset10b tasks and adding two retained former subset10c tasks."
+    "rationale": "Ten retained tasks after pilot-result curation, including opt-4.0.0 moved from the replacement subset."
   }
 }

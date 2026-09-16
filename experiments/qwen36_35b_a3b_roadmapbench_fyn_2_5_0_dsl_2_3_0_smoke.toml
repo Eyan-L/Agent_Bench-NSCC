@@ -1,0 +1,27 @@
+name = "qwen36_35b_a3b_roadmapbench_fyn_2_5_0_dsl_2_3_0_smoke"
+description = "Two-task RoadmapBench subagent smoke for fyn-2.5.0 and dsl-2.3.0 on NSCC."
+output_dir = "runs/qwen36_35b_a3b_roadmapbench_fyn_2_5_0_dsl_2_3_0_smoke"
+seeds = [42]
+
+[telemetry]
+spans_html = true
+
+[benchmark]
+name = "terminal_bench"
+profile = "profiles/benchmarks/roadmap/roadmapbench_fyn_2_5_0_dsl_2_3_0_smoke.json"
+
+[harness]
+name = "openclaw"
+profile = "profiles/harnesses/openclaw_roadmapbench.yaml"
+
+[model]
+profile = "profiles/models/qwen36_35b_a3b.json"
+
+[serving]
+profile = "profiles/serving/sglang/nscc_tp4.yaml"
+
+[deployment]
+profile = "profiles/deployments/nscc_pbs_4gpu_24h.toml"
+
+[limits]
+max_workers = 1
