@@ -308,6 +308,35 @@ def _terminal_bench_reward(raw: str, *, timed_out: bool) -> tuple[str, Optional[
     return ("PASS" if value >= 1.0 else "FAIL", value)
 
 
+def _roadmap_verifier_infrastructure_error(
+    stdout: str, stderr: str
+) -> Optional[str]:
+    """Recognize verifier failures that cannot measure the candidate.
+
+    Keep this deliberately narrow. Rust compile/test failures are candidate
+    failures; Cargo being unable to use its registry/cache due to the runtime
+    filesystem or dependency transport is verifier infrastructure failure.
+    """
+    output = f"{stdout}\n{stderr}"
+    lower = output.lower()
+    cargo_context = any(token in lower for token in (
+        "/cargo/registry", "cargo_home", "crates.io", "download of ",
+        "failed to get `", "failed to download from",
+    ))
+    filesystem_failure = any(token in lower for token in (
+        "read-only file system", "permission denied", "no space left on device",
+    ))
+    transport_failure = any(token in lower for token in (
+        "could not resolve host", "failed to resolve host",
+        "failed to connect", "operation timed out", "network failure",
+    ))
+    if cargo_context and filesystem_failure:
+        return "Cargo verifier storage was unavailable or read-only"
+    if cargo_context and transport_failure:
+        return "Cargo verifier dependency transport failed"
+    return None
+
+
 def _as_text(value) -> str:
     """Normalize subprocess output for JSON-safe verifier metadata."""
     if value is None:
@@ -1750,10 +1779,23 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
         self.container.copy_into(task, tests_host, "/tests")
         host_logs = self.workspace_base / run_id / "logs" / "verifier"
         reward = _clear_reward_file(host_logs)
+        is_roadmap = (
+            str((instance_data or {}).get("benchmark_variant") or "")
+            == "roadmapbench"
+        )
+        verifier_env = None
+        if is_roadmap:
+            # Task images may expose a read-only system Cargo home. Keep all
+            # Cargo registry/cache writes on the writable verifier mount.
+            (host_logs / "cargo-home").mkdir(parents=True, exist_ok=True)
+            verifier_env = {
+                "CARGO_HOME": "/logs/verifier/cargo-home",
+            }
         try:
             result = self.container.exec(
                 task, ["bash", (instance_data or {}).get("verifier_entrypoint", "/tests/test.sh")],
                 check=False, timeout=timeout, workdir=task_workspace,
+                env=verifier_env,
             )
             timed_out = False
         except subprocess.TimeoutExpired as exc:
@@ -1768,14 +1810,26 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
         status, reward_value = _terminal_bench_reward(
             reward_text, timed_out=timed_out
         )
+        stdout = _as_text(result.stdout)
+        stderr = _as_text(result.stderr)
+        infrastructure_error = (
+            _roadmap_verifier_infrastructure_error(stdout, stderr)
+            if is_roadmap and not timed_out else None
+        )
+        if infrastructure_error:
+            status = "ERROR"
+            reward_value = None
         return {"status": status, "verifier_status": status, "reward": reward_value,
                 "test_pass_rate": reward_value, "passed": int(status == "PASS"),
                 "failed": int(status != "PASS"), "verifier_rc": result.returncode,
                 "verifier_timed_out": timed_out, "verifier_timeout_seconds": timeout,
-                "verifier_stdout_tail": _as_text(result.stdout)[-2000:],
-                "verifier_stderr_tail": _as_text(result.stderr)[-2000:], "reward_raw": reward_text or None,
+                "verifier_stdout_tail": stdout[-2000:],
+                "verifier_stderr_tail": stderr[-2000:], "reward_raw": reward_text or None,
                 "reward_path": str(reward), "evaluation_dir": str(host_logs),
-                "error_message": None if status == "PASS" else f"verifier exit {result.returncode}, reward={reward_text!r}"}
+                "error_message": (
+                    None if status == "PASS" else infrastructure_error
+                    or f"verifier exit {result.returncode}, reward={reward_text!r}"
+                )}
 
     def cleanup(self, container_id: Optional[str] = None, oc_container_id: Optional[str] = None,
                 task_container_id: Optional[str] = None, task_container_name: Optional[str] = None,

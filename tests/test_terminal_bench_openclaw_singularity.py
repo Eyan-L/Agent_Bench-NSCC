@@ -122,6 +122,82 @@ class _FakeDispatcher:
         return {"bridge_socket": "/tmp/bridge.sock", "bridge_pid": self.pid}
 
 
+class _VerifierContainer:
+    backend_id = "docker"
+
+    def __init__(self, reward_path: Path, *, stdout: str = "", stderr: str = ""):
+        self.reward_path = reward_path
+        self.stdout = stdout
+        self.stderr = stderr
+        self.exec_calls = []
+
+    def check_available(self):
+        return None
+
+    def check_image(self, _image):
+        return None
+
+    def exec(self, _handle, argv, **kwargs):
+        self.exec_calls.append((argv, kwargs))
+        if argv and argv[0] == "bash":
+            self.reward_path.parent.mkdir(parents=True, exist_ok=True)
+            self.reward_path.write_text("0\n")
+            return subprocess.CompletedProcess(argv, 0, self.stdout, self.stderr)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def copy_into(self, _handle, _source, _destination):
+        return None
+
+
+def test_roadmap_verifier_uses_writable_cargo_paths_and_reports_infra_error(
+    tmp_path,
+):
+    workspace_base = tmp_path / "workspaces"
+    reward_path = workspace_base / "run-1" / "logs" / "verifier" / "reward.txt"
+    container = _VerifierContainer(
+        reward_path,
+        stderr=(
+            "error: failed to open /usr/local/cargo/registry/cache/pkg.crate\n"
+            "Caused by: Read-only file system"
+        ),
+    )
+    harness = tb_app.TerminalBenchOpenClawHarness(
+        container=container, workspace_base=workspace_base
+    )
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+
+    result = harness.run_tests(
+        None,
+        "task",
+        "/app",
+        60,
+        run_id="run-1",
+        instance_data={
+            "benchmark_variant": "roadmapbench",
+            "tests_host_path": str(tests_dir),
+            "workspace": "/app",
+        },
+    )
+
+    verifier_call = next(call for call in container.exec_calls if call[0][0] == "bash")
+    assert verifier_call[1]["env"] == {
+        "CARGO_HOME": "/logs/verifier/cargo-home",
+    }
+    assert (reward_path.parent / "cargo-home").is_dir()
+    assert result["verifier_status"] == "ERROR"
+    assert result["reward"] is None
+    assert result["reward_raw"] == "0"
+    assert "Cargo verifier storage" in result["error_message"]
+
+
+def test_roadmap_verifier_does_not_misclassify_rust_compile_failure():
+    assert tb_app._roadmap_verifier_infrastructure_error(
+        "",
+        "error[E0308]: mismatched types\nerror: could not compile `project`",
+    ) is None
+
+
 def test_terminal_bench_openclaw_singularity_returns_runtime_handle(tmp_path, monkeypatch):
     _FakeDispatcher.last_start_kwargs = None
     runtime_sif = tmp_path / "openclaw.sif"
@@ -763,6 +839,35 @@ def _roadmap_condition_for_state(tmp_path, harness=None):
     condition._last_completion_status = condition.BLOCKED_INCOMPLETE
     condition._last_completion_error = "stale CLI liveness"
     return condition
+
+
+def test_roadmap_lifecycle_summary_retains_pruned_completed_children(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    events = [_assistant_event("DONE\nIntegrated and validated.")]
+    _write_roadmap_session_state(
+        sessions_dir,
+        events,
+        child_statuses=("done", "completed", "done", "completed"),
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+
+    observed = condition._read_lifecycle_snapshot(sessions_dir)
+    assert observed["total_children"] == 4
+    assert observed["completed_children"] == 4
+
+    # OpenClaw can compact/prune completed child entries from sessions.json.
+    _write_roadmap_session_state(sessions_dir, events, child_statuses=())
+    terminal = condition._read_lifecycle_snapshot(sessions_dir)
+    payload = {}
+    condition._attach_lifecycle_summary(
+        payload, terminal, {"workspaceQuiesced": True}
+    )
+
+    lifecycle = payload["result"]["meta"]["agentBenchLifecycle"]
+    assert terminal["pending_children"] == 0
+    assert lifecycle["totalChildren"] == 4
+    assert lifecycle["completedChildren"] == 4
+    assert len(lifecycle["childStatesAtParentTerminal"]) == 4
 
 
 def test_roadmap_no_yield_terminal_done_reconciles_to_normal(tmp_path):
