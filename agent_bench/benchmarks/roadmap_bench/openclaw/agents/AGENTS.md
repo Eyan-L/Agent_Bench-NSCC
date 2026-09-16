@@ -54,11 +54,12 @@ dependency analysis, coordination, integration, and final validation.
   parent's current coherent step, then review those results at the next natural
   checkpoint before resuming broad exploratory work. Do not wait for every
   child to finish before reviewing results that are already available.
-- Review and integrate each child result once. Keep a concise integration
-  record of its scope, changed files, validation, and unresolved issues; do not
-  repeatedly reread the full handoff or treat the same completion as new work.
-  Reconcile conflicts or omissions and validate the integrated implementation
-  before declaring the roadmap complete.
+- Review each child completion once when it arrives. Keep a concise integration
+  record of its scope, changed files, validation, and unresolved issues. Do not
+  repeatedly reprocess the same handoff unless later integration reveals a
+  concrete dependency, conflict, or regression. Reconcile conflicts or
+  omissions and validate the integrated implementation before declaring the
+  roadmap complete.
 - A child failure or timeout must not block completion indefinitely. If a
   required child fails or times out, take over its unfinished work, reassign
   it when useful, or explicitly abandon it if it is no longer required. The

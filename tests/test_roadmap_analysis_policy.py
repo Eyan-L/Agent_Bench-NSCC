@@ -237,7 +237,11 @@ def test_roadmap_prompt_requires_incremental_deduplicated_child_integration():
 
     assert "Integrate completed child work incrementally" in normalized
     assert "Do not wait for every child to finish" in normalized
-    assert "Review and integrate each child result once" in normalized
+    assert "Review each child completion once when it arrives" in normalized
+    assert (
+        "Do not repeatedly reprocess the same handoff unless later integration "
+        "reveals a concrete dependency, conflict, or regression"
+    ) in normalized
     assert "finish the parent's current coherent step" in normalized
 
 

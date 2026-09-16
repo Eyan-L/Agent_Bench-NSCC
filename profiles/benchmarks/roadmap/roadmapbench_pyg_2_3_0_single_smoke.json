@@ -1,0 +1,27 @@
+{
+  "_doc": "RoadmapBench PyG 2.3.0 single-agent latency smoke from the formal subset30.",
+  "sweep_name": "roadmapbench_pyg_2_3_0_single_smoke",
+  "plan_version": "roadmapbench-59184e779909-pyg-2.3.0-single-smoke",
+  "application": "terminal_bench",
+  "source_dataset": "UnipatAI/RoadmapBench",
+  "source_commit": "59184e779909300a5a0150b06b945d39da81a099",
+  "source_dataset_task_count": 115,
+  "tasks_root": "$SCRATCH/datasets/roadmapbench-59184e779909-subagent-subset30",
+  "instances": [
+    "pyg-2.3.0-roadmap"
+  ],
+  "repo_mapping": {
+    "pyg-2.3.0-roadmap": {
+      "repo_id": "roadmapbench/pyg-2.3.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 7200,
+  "output_dir": "roadmapbench_pyg_2_3_0_single_smoke",
+  "seeds": [42],
+  "selection": {
+    "method": "single-task control smoke",
+    "rationale": "Measure PyG 2.3.0 latency with the formal RoadmapBench single-agent harness and the same seed as subset10a."
+  }
+}

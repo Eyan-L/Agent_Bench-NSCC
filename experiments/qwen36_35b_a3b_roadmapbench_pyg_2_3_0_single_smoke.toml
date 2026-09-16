@@ -1,0 +1,27 @@
+name = "qwen36_35b_a3b_roadmapbench_pyg_2_3_0_single_smoke"
+description = "RoadmapBench PyG 2.3.0 single-agent Qwen3.6-35B-A3B latency smoke on NSCC."
+output_dir = "runs/qwen36_35b_a3b_roadmapbench_pyg_2_3_0_single_smoke"
+seeds = [42]
+
+[telemetry]
+spans_html = true
+
+[benchmark]
+name = "terminal_bench"
+profile = "profiles/benchmarks/roadmap/roadmapbench_pyg_2_3_0_single_smoke.json"
+
+[harness]
+name = "openclaw"
+profile = "profiles/harnesses/openclaw_roadmapbench_single_agent.yaml"
+
+[model]
+profile = "profiles/models/qwen36_35b_a3b.json"
+
+[serving]
+profile = "profiles/serving/sglang/nscc_tp4.yaml"
+
+[deployment]
+profile = "profiles/deployments/nscc_pbs_4gpu.toml"
+
+[limits]
+max_workers = 1
