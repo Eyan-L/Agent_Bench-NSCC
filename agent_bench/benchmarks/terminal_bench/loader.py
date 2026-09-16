@@ -36,18 +36,20 @@ except ImportError:  # pragma: no cover
     import tomli as tomllib  # type: ignore
 
 
-def _tasks_root() -> Path:
+def _tasks_root(tasks_root: str | Path | None = None) -> Path:
     """Vendored TB task tree at `agent_bench/benchmarks/terminal_bench/tasks/`.
-    Override via AB_BENCHMARK_TASKS_ROOT."""
+    Override via an explicit root or AB_BENCHMARK_TASKS_ROOT."""
+    if tasks_root is not None:
+        return Path(tasks_root)
     env = os.environ.get("AB_BENCHMARK_TASKS_ROOT")
     if env:
         return Path(env)
     return Path(__file__).resolve().parent / "tasks"
 
 
-def list_task_ids() -> List[str]:
+def list_task_ids(tasks_root: str | Path | None = None) -> List[str]:
     """Every immediate subdir of tasks/ that has both instruction.md + task.toml."""
-    root = _tasks_root()
+    root = _tasks_root(tasks_root)
     if not root.is_dir():
         return []
     out: List[str] = []
@@ -134,9 +136,15 @@ def _task_workspace(task_dir: Path, env: Dict) -> Tuple[str, str]:
     return "/app", "default"
 
 
-def load_task(task_id: str) -> Dict:
+def load_task(
+    task_id: str,
+    tasks_root: str | Path | None = None,
+    *,
+    benchmark: str = "terminal_bench",
+    benchmark_variant: str | None = None,
+) -> Dict:
     """Build the instance_data dict for a single TB task."""
-    task_dir = _tasks_root() / task_id
+    task_dir = _tasks_root(tasks_root) / task_id
     if not task_dir.is_dir():
         raise FileNotFoundError(f"TB task dir not found: {task_dir}")
 
@@ -147,17 +155,21 @@ def load_task(task_id: str) -> Dict:
     env = meta.get("environment", {}) or {}
     agent_meta = meta.get("agent", {}) or {}
     verifier_meta = meta.get("verifier", {}) or {}
+    task_meta = meta.get("task", {}) or {}
+    legacy_meta = meta.get("metadata", {}) or {}
 
     docker_image = env.get("docker_image")
     if not docker_image:
         raise ValueError(f"task.toml for {task_id}: missing environment.docker_image")
+    variant = benchmark_variant or benchmark
 
     workspace, workspace_source = _task_workspace(task_dir, env)
 
     return {
         "instance_id": task_id,
-        "benchmark": "terminal_bench",
-        "task_name": meta.get("task", {}).get("name", task_id),
+        "benchmark": benchmark,
+        "benchmark_variant": variant,
+        "task_name": task_meta.get("name") or legacy_meta.get("name") or task_id,
         "instruction": instruction,
         "docker_image": docker_image,
         "workspace": workspace,
@@ -177,18 +189,33 @@ def load_task(task_id: str) -> Dict:
         },
         # Echo SWE-bench-shaped fields so downstream code that reads them
         # generically (fairness validator, manifest) doesn't NPE.
-        "repo": meta.get("task", {}).get("name", task_id),
+        "repo": task_meta.get("name") or legacy_meta.get("name") or task_id,
         "base_commit": "tb2",
         "problem_statement": instruction,
     }
 
 
-def materialize_dataset(task_ids: List[str], out_path: Path) -> None:
+def materialize_dataset(
+    task_ids: List[str],
+    out_path: Path,
+    tasks_root: str | Path | None = None,
+    *,
+    benchmark: str = "terminal_bench",
+    benchmark_variant: str | None = None,
+) -> None:
     """Write a JSON file with one entry per task — same shape as SWE-bench's
     verified.json, so the existing driver loader at
     agent_bench/runtime/driver.py:217 picks it up unchanged."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    rows = [load_task(t) for t in task_ids]
+    rows = [
+        load_task(
+            task_id,
+            tasks_root=tasks_root,
+            benchmark=benchmark,
+            benchmark_variant=benchmark_variant,
+        )
+        for task_id in task_ids
+    ]
     with out_path.open("w") as fh:
         json.dump(rows, fh, indent=2)
 

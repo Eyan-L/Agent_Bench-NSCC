@@ -277,6 +277,62 @@ class DockerContainer(Container):
             )
         return r
 
+    def popen_exec(
+        self,
+        h: ContainerHandle,
+        argv: list[str],
+        *,
+        workdir: Optional[str] = None,
+        env: Optional[dict[str, str]] = None,
+    ) -> subprocess.Popen:
+        cmd: list[str] = ["docker", "exec"]
+        if workdir:
+            cmd += ["-w", workdir]
+        if env:
+            for key, value in env.items():
+                cmd += ["-e", f"{key}={value}"]
+        cmd += [h.id, *argv]
+        return subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+
+    def exec_background(
+        self,
+        h: ContainerHandle,
+        argv: list[str],
+        *,
+        workdir: Optional[str] = None,
+        env: Optional[dict[str, str]] = None,
+    ) -> Optional[int]:
+        cmd: list[str] = ["docker", "exec", "-d"]
+        if workdir:
+            cmd += ["-w", workdir]
+        if env:
+            for k, v in env.items():
+                cmd += ["-e", f"{k}={v}"]
+        cmd += [h.id, *argv]
+        result = self._run_traced(
+            "agent_bench.container.exec_background",
+            cmd,
+            attrs={
+                "agent_bench.container.id": h.id,
+                "agent_bench.container.name": h.name,
+                "agent_bench.container.workdir": workdir,
+                "agent_bench.exec.argv_json": preview_json(argv, limit=8000)[0],
+            },
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"docker background exec failed ({argv[0] if argv else ''}): "
+                f"rc={result.returncode}\nstderr: {result.stderr[-500:]}"
+            )
+        return None
+
     def copy_into(self, h: ContainerHandle, src: Path, dst: str) -> None:
         r = self._run_traced(
             "agent_bench.container.copy_into",

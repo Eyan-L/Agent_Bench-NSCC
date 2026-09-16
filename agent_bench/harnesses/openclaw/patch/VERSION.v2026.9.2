@@ -1,0 +1,12 @@
+upstream_repo: https://github.com/openclaw/openclaw
+upstream_version: 2026.9.2
+upstream_commit: 3928bad9badfcb6c7d140530435e806fb8092190
+upstream_tag: v2026.9.2
+release_date: 2026-09-05
+notes: |
+  Runtime supported by the RoadmapBench OpenClaw adapter.
+  OpenClaw v2026.9.2 already contains native rolling tool-loop detection and
+  the post-compaction loop guard, so the Agent_Bench v2026.4.22 loop-guard
+  backport must not be reapplied to this runtime.
+  Apply v2026_9_2_patch.py to an extracted runtime tree and run it again with
+  --verify-only before packaging the runtime image.

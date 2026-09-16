@@ -28,6 +28,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import signal
 import shlex
 import shutil
 import subprocess
@@ -44,6 +46,13 @@ from agent_bench.benchmarks.conditions.util_sampler import UtilSampler
 from agent_bench.deployments.containers.base import Container, ContainerHandle
 
 logger = logging.getLogger(__name__)
+
+_GATEWAY_EXECUTION_MARKER = (
+    "[agent-bench] OpenClaw gateway execution selected"
+)
+_ROADMAP_GATEWAY_EXECUTION_MARKER = (
+    "[agent-bench] Roadmap gateway RPC ready; gateway execution selected"
+)
 
 
 def _otlp_attrs(items) -> Dict:
@@ -73,6 +82,12 @@ class OpenClawAgentCondition:
     # Subclass must set this. Used in `--agent <id>` CLI flag AND the
     # session-archive paths under state_dir/agents/<id>/.
     agent_id: ClassVar[str] = ""
+    NORMAL_COMPLETION: ClassVar[str] = "normal_completion"
+    CONTEXT_OVERFLOW: ClassVar[str] = "context_overflow"
+    BLOCKED_INCOMPLETE: ClassVar[str] = "blocked_incomplete"
+    RUNTIME_ERROR: ClassVar[str] = "runtime_error"
+    TIMEOUT: ClassVar[str] = "timeout"
+    require_done_marker: ClassVar[bool] = False
 
     def __init__(self, model_config, agent_config, container: Optional[Container] = None):
         if not self.agent_id:
@@ -110,6 +125,23 @@ class OpenClawAgentCondition:
         overrides to collect a git diff; TB returns None (driver's
         ``skip_patch_gate`` handles the empty case for terminal_bench)."""
         return None
+
+    def _await_post_turn_lifecycle(
+        self,
+        payload: Optional[Dict],
+        error: str,
+        *,
+        deadline: float,
+    ) -> Tuple[Optional[Dict], str]:
+        """Benchmark hook for runtimes whose logical run spans several turns.
+
+        The default is deliberately a no-op so ordinary OpenClaw benchmarks
+        retain the existing single-CLI-turn behavior. Benchmarks with durable
+        parent/child sessions override
+        this to keep a yielded requester alive while native subagent announce
+        delivery resumes the same parent session.
+        """
+        return payload, error
 
     # ------------------------------------------------------------------
 
@@ -150,6 +182,9 @@ class OpenClawAgentCondition:
         env_info: Optional[Dict] = None,
     ) -> Dict:
         self._env_info = env_info or {}
+        self._last_completion_status = self.RUNTIME_ERROR
+        self._last_completion_error = "OpenClaw invocation did not complete"
+        self._selected_agent_runtime_mode = None
         instance_id = instance_data["instance_id"]
         logger.info("Running OpenClaw agent (%s) for %s", self.agent_id, instance_id)
 
@@ -187,14 +222,33 @@ class OpenClawAgentCondition:
             tools_container=tools_container,
         ):
             step_start_ns = time.time_ns()
+            timeout_seconds = self._resolve_agent_timeout_seconds(instance_data)
+            lifecycle_deadline = time.monotonic() + timeout_seconds
             payload, err = self._invoke_agent(
                 container_id=container_id,
                 workspace_root=workspace_root,
                 session_id=run_dir.name,
                 message=message,
-                timeout_seconds=self._resolve_agent_timeout_seconds(instance_data),
+                timeout_seconds=timeout_seconds,
+            )
+            initial_runtime_mode = self._detect_agent_runtime_mode(payload)
+            if initial_runtime_mode != "unknown":
+                self._selected_agent_runtime_mode = initial_runtime_mode
+            payload, err = self._await_post_turn_lifecycle(
+                payload,
+                err,
+                deadline=lifecycle_deadline,
             )
             step_end_ns = time.time_ns()
+
+        # Reuse the existing logical OpenClaw step boundary instead of
+        # introducing another lifecycle clock. Durable-session benchmarks return from
+        # _await_post_turn_lifecycle only after child/orphan quiescence.
+        phase_timing = {
+            "agent_execution_start_ns": step_start_ns,
+            "agent_execution_end_ns": step_end_ns,
+            "agent_execution_seconds": (step_end_ns - step_start_ns) / 1e9,
+        }
 
         # diagnostics-otel uses BatchSpanProcessor under the hood. Spans only
         # flush on `sdk.shutdown()`, which runs when the gateway process exits.
@@ -219,6 +273,7 @@ class OpenClawAgentCondition:
             except Exception as e:
                 logger.warning("gateway SIGTERM failed: %s", e)
         wait_for_otel_flush()
+        self._archive_gateway_log(run_dir)
         spans_path = snapshot_otel_spans(
             otel_trace_file, pre_offset, run_dir, expected_run_id=run_dir.name,
         )
@@ -247,6 +302,7 @@ class OpenClawAgentCondition:
             "completion_tokens": completion_tokens,
             "exit_code": None,
             "error_type": err or None,
+            "agent_runtime_mode": self._detect_agent_runtime_mode(payload),
             "repo_id": instance_data.get("repo"),
             "instance_id": instance_id,
             "config_id": "openclaw_agent",
@@ -292,37 +348,178 @@ class OpenClawAgentCondition:
         # `openclaw.tool.call` spans from the archived session trajectory so
         # downstream analysis sees per-tool spans regardless.
         if spans_path is not None:
-            self._maybe_synthesize_tool_call_spans(spans_path, run_dir, run_dir.name)
+            try:
+                self._maybe_synthesize_tool_call_spans(
+                    spans_path, run_dir, run_dir.name
+                )
+            except Exception as exc:  # noqa: BLE001 - telemetry is non-critical
+                logger.warning("tool span synthesis failed: %s", exc)
 
         # 3e. Prefer per-request model usage spans from the raw response log.
         # The older agentMeta.usage fallback is run-level aggregate data, so it
         # is intentionally used only when the per-request log is unavailable.
         if spans_path is not None:
-            raw_usage_spans = self._maybe_synthesize_model_usage_spans_from_raw_log(
-                spans_path, run_dir, run_dir.name,
-            )
-            cache_usage_spans = 0
-            if raw_usage_spans == 0:
-                cache_usage_spans = self._maybe_synthesize_model_usage_spans_from_cache_trace(
+            try:
+                raw_usage_spans = self._maybe_synthesize_model_usage_spans_from_raw_log(
                     spans_path, run_dir, run_dir.name,
                 )
-            if raw_usage_spans == 0 and cache_usage_spans == 0:
-                self._maybe_synthesize_model_usage_span(
-                    spans_path, payload,
-                    run_id=run_dir.name,
-                    start_ns=step_start_ns,
-                    end_ns=step_end_ns,
+                cache_usage_spans = 0
+                if raw_usage_spans == 0:
+                    cache_usage_spans = self._maybe_synthesize_model_usage_spans_from_cache_trace(
+                        spans_path, run_dir, run_dir.name,
+                    )
+                if raw_usage_spans == 0 and cache_usage_spans == 0:
+                    self._maybe_synthesize_model_usage_span(
+                        spans_path, payload,
+                        run_id=run_dir.name,
+                        start_ns=step_start_ns,
+                        end_ns=step_end_ns,
+                    )
+            except Exception as exc:  # noqa: BLE001 - telemetry is non-critical
+                logger.warning("model usage span synthesis failed: %s", exc)
+
+        measurement: Dict = {}
+        try:
+            measurement = self._build_measurement(
+                run_dir,
+                execution_start_ns=step_start_ns,
+                execution_end_ns=step_end_ns,
+            )
+        except Exception as exc:  # noqa: BLE001 - preserve the benchmark run
+            logger.exception("OpenClaw measurement artifact generation failed")
+            measurement = {"measurement_error": str(exc)}
+
+        execution_time = (
+            (measurement.get("runtime_observability") or {}).get(
+                "execution_time"
+            )
+            if isinstance(measurement, dict)
+            else None
+        )
+        if isinstance(execution_time, dict):
+            for source, destination in (
+                ("observed_operation_union_seconds", "observed_operation_seconds"),
+                ("observed_model_union_seconds", "observed_model_seconds"),
+                ("observed_tool_union_seconds", "observed_tool_seconds"),
+                ("parent_yield_wait_seconds", "parent_yield_wait_seconds"),
+                (
+                    "unattributed_orchestration_seconds",
+                    "unattributed_orchestration_seconds",
+                ),
+            ):
+                value = execution_time.get(source)
+                if isinstance(value, (int, float)):
+                    phase_timing[destination] = float(value)
+
+        agent_lifecycle = (
+            (self._unwrap(payload).get("meta") or {}).get(
+                "agentBenchLifecycle"
+            )
+            if payload else None
+        )
+        if isinstance(agent_lifecycle, dict):
+            parent_terminal_ns = agent_lifecycle.get("parentTerminalObservedNs")
+            workspace_quiesced_ns = agent_lifecycle.get("workspaceQuiescedNs")
+            if isinstance(parent_terminal_ns, int):
+                phase_timing["parent_terminal_observed_ns"] = parent_terminal_ns
+                phase_timing["parent_terminal_timestamp_quality"] = agent_lifecycle.get("parentTerminalTimestampQuality")
+                phase_timing["parent_execution_seconds"] = max(
+                    0.0, (parent_terminal_ns - step_start_ns) / 1e9
                 )
+            if isinstance(workspace_quiesced_ns, int):
+                phase_timing["workspace_quiesced_ns"] = workspace_quiesced_ns
+                phase_timing["workspace_quiesced_timestamp_quality"] = agent_lifecycle.get("workspaceQuiescedTimestampQuality")
+                phase_timing["agent_execution_end_ns"] = workspace_quiesced_ns
+                phase_timing["agent_execution_seconds"] = max(
+                    0.0, (workspace_quiesced_ns - step_start_ns) / 1e9
+                )
+                if isinstance(parent_terminal_ns, int):
+                    phase_timing["post_parent_quiescence_seconds"] = max(
+                        0.0, (workspace_quiesced_ns - parent_terminal_ns) / 1e9
+                    )
+            try:
+                from agent_bench.benchmarks.conditions.openclaw_measurement import (
+                    append_trajectory_event,
+                )
+
+                append_trajectory_event(
+                    run_dir,
+                    "runtime_termination",
+                    timestamp_ns=parent_terminal_ns,
+                    status=self._last_completion_status,
+                    parent_session_status=agent_lifecycle.get(
+                        "parentSessionStatusAtTerminal"
+                    ),
+                    terminal_evidence=agent_lifecycle.get("terminalEvidence"),
+                    done_marker=bool(agent_lifecycle.get("done_marker")),
+                    stop_reason=agent_lifecycle.get("stopReason"),
+                    pending_children=agent_lifecycle.get(
+                        "pendingChildrenAtParentTerminal"
+                    ),
+                    workspace_quiesced=agent_lifecycle.get("workspaceQuiesced"),
+                )
+            except Exception:
+                logger.exception("trajectory runtime termination event write failed")
+        if (
+            isinstance(agent_lifecycle, dict)
+            and agent_lifecycle.get("pendingChildrenAtParentTerminal", 0)
+        ):
+            try:
+                from agent_bench.benchmarks.conditions.openclaw_measurement import (
+                    append_trajectory_event,
+                )
+
+                append_trajectory_event(
+                    run_dir,
+                    "orphan_cleanup",
+                    status=(
+                        "completed"
+                        if agent_lifecycle.get("workspaceQuiesced") is True
+                        else "error"
+                    ),
+                    lifecycle=agent_lifecycle,
+                )
+            except Exception:
+                logger.exception("trajectory orphan cleanup event write failed")
 
         # 4. Collect benchmark-specific artifacts (patch for SWE-bench; nothing
         #    for TB). Always write candidate.patch — driver gates on its
         #    existence + size, and the empty-patch case is allowed for TB via
         #    skip_patch_gate at driver.py:187.
+        candidate_freeze_start_ns = time.time_ns()
         patch_text = self._collect_artifacts(
             container_id, self._env_info, run_dir, workspace_root,
         ) or ""
         patch_path = run_dir / "candidate.patch"
         patch_path.write_text(patch_text)
+        candidate_freeze_end_ns = time.time_ns()
+        phase_timing.update({
+            "post_agent_before_freeze_seconds": max(
+                0.0, (candidate_freeze_start_ns - step_end_ns) / 1e9
+            ),
+            "candidate_freeze_start_ns": candidate_freeze_start_ns,
+            "candidate_freeze_end_ns": candidate_freeze_end_ns,
+            "candidate_freeze_seconds": (
+                candidate_freeze_end_ns - candidate_freeze_start_ns
+            ) / 1e9,
+        })
+        if self._env_info.get("roadmap_workspace_baseline"):
+            try:
+                from agent_bench.benchmarks.conditions.openclaw_measurement import (
+                    append_trajectory_event,
+                )
+
+                append_trajectory_event(
+                    run_dir,
+                    "candidate_freeze",
+                    patch_path=str(patch_path),
+                    patch_bytes=patch_path.stat().st_size,
+                    workspace_baseline=self._env_info.get(
+                        "roadmap_workspace_baseline"
+                    ),
+                )
+            except Exception:
+                logger.exception("trajectory candidate freeze event write failed")
 
         return {
             "step_trace_path": str(step_trace_path),
@@ -332,7 +529,32 @@ class OpenClawAgentCondition:
             "telemetry_path": str(spans_path) if spans_path else None,
             "exit_code": getattr(self, "_last_exit_code", 0),
             "error_message": err or None,
+            "agent_completion_status": self._last_completion_status,
+            "agent_completion_error": self._last_completion_error or None,
+            "agent_runtime_mode": self._detect_agent_runtime_mode(payload),
+            "agent_lifecycle": agent_lifecycle,
+            "agent_execution_seconds": phase_timing["agent_execution_seconds"],
+            "phase_timing": phase_timing,
+            **measurement,
         }
+
+    def _build_measurement(
+        self,
+        run_dir: Path,
+        *,
+        execution_start_ns: int,
+        execution_end_ns: int,
+    ) -> Dict:
+        from agent_bench.benchmarks.conditions.openclaw_measurement import (
+            build_openclaw_measurement,
+        )
+
+        return build_openclaw_measurement(
+            run_dir,
+            agent_id=self.agent_id,
+            execution_start_ns=execution_start_ns,
+            execution_end_ns=execution_end_ns,
+        )
 
     # ------------------------------------------------------------------
     # OTel span snapshot
@@ -437,6 +659,70 @@ class OpenClawAgentCondition:
     # OpenClaw CLI invocation
     # ------------------------------------------------------------------
 
+    def _watch_durable_invocation_terminal(self) -> bool:
+        """Whether this benchmark has a durable logical-session lifecycle."""
+        return False
+
+    def _durable_invocation_terminal_evidence(
+        self,
+    ) -> Optional[Tuple[Tuple, str, str]]:
+        """Return (stable identity, completion status, error), if terminal."""
+        return None
+
+    def _payload_for_durable_invocation_terminal(
+        self,
+        status: str,
+        diagnostic: str,
+    ) -> Optional[Dict]:
+        """Build a result when a durable session outlives its blocked CLI."""
+        return None
+
+    def _communicate_with_durable_watch(
+        self,
+        proc: subprocess.Popen,
+        timeout_seconds: float,
+    ) -> Tuple[str, str, Optional[Tuple[str, str]]]:
+        """Wait for a CLI while allowing stable durable terminal state to end it."""
+        deadline = time.monotonic() + timeout_seconds
+        candidate = None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(proc.args, timeout_seconds)
+            try:
+                stdout, stderr = proc.communicate(
+                    timeout=min(2.0, remaining)
+                )
+                return stdout or "", stderr or "", None
+            except subprocess.TimeoutExpired:
+                evidence = self._durable_invocation_terminal_evidence()
+                if evidence is None:
+                    candidate = None
+                    continue
+                signature, status, error = evidence
+                if candidate != signature:
+                    candidate = signature
+                    continue
+
+                logger.warning(
+                    "  interrupting openclaw CLI after stable durable "
+                    "terminal evidence: %s",
+                    error,
+                )
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    proc.terminate()
+                try:
+                    stdout, stderr = proc.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        proc.kill()
+                    stdout, stderr = proc.communicate()
+                return stdout or "", stderr or "", (status, error)
+
     def _invoke_agent(
         self,
         container_id: Optional[str],
@@ -449,7 +735,7 @@ class OpenClawAgentCondition:
 
         Two modes:
           - container_id given → in-container via Gateway (sources
-            /tmp/oc_gateway_env so OPENCLAW_GATEWAY_URL/_TOKEN reach the CLI).
+            the harness-provided gateway env file so URL/token reach the CLI).
           - container_id is None → singularity / host-local mode. Gateway +
             state dir come from env_info (set by the harness).
 
@@ -497,6 +783,10 @@ class OpenClawAgentCondition:
                 )
             run_kwargs = {"cwd": workspace_root, "env": env}
         else:
+            gateway_env_path = str(
+                (getattr(self, "_env_info", {}) or {}).get("gateway_env_path")
+                or "/tmp/oc_gateway_env"
+            )
             # Tee stderr live to a state_dir-side log so we can tail it from
             # the host while the agent is running — `subprocess.run` with
             # capture_output only flushes when the child exits, which makes
@@ -507,7 +797,8 @@ class OpenClawAgentCondition:
             # exclusively to parse, no need to split.
             inner = (
                 "mkdir -p /root/.openclaw/logs && "
-                "source /tmp/oc_gateway_env && "
+                f"source {shlex.quote(gateway_env_path)} && "
+                f"echo {shlex.quote(_GATEWAY_EXECUTION_MARKER)} >&2 && "
                 "exec openclaw agent "
                 f"--agent {shlex.quote(self.agent_id)} "
                 f"--session-id {shlex.quote(session_id)} "
@@ -541,16 +832,56 @@ class OpenClawAgentCondition:
             )
         else:
             logger.info(
-                "    in-container inner=%r (token comes from /tmp/oc_gateway_env)",
+                "    in-container inner=%r (token comes from %s)",
                 inner[:200] + ("..." if len(inner) > 200 else ""),
+                gateway_env_path,
             )
         dispatch_t0 = time.time()
+        durable_interrupt = None
         try:
+            if self._watch_durable_invocation_terminal():
+                if argv is None:
+                    handle = self._handle(container_id)
+                    if self.container is None or handle is None:
+                        command = [
+                            "docker", "exec", container_id, "bash", "-lc", inner
+                        ]
+                        running = subprocess.Popen(
+                            command,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            start_new_session=True,
+                            **run_kwargs,
+                        )
+                    else:
+                        running = self.container.popen_exec(
+                            handle, ["bash", "-lc", inner]
+                        )
+                else:
+                    running = subprocess.Popen(
+                        argv,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        start_new_session=True,
+                        **run_kwargs,
+                    )
+                stdout, stderr, durable_interrupt = (
+                    self._communicate_with_durable_watch(
+                        running, subprocess_timeout
+                    )
+                )
+                proc = subprocess.CompletedProcess(
+                    running.args, running.returncode, stdout, stderr
+                )
             if argv is None:
                 # In-container path. Route through the Container abstraction
                 # so docker and singularity backends share one call site.
                 handle = self._handle(container_id)
-                if self.container is None or handle is None:
+                if self._watch_durable_invocation_terminal():
+                    pass
+                elif self.container is None or handle is None:
                     # Legacy fallback — driver hasn't been updated to inject
                     # self.container, but we still have a docker container id.
                     argv = ["docker", "exec", container_id, "bash", "-lc", inner]
@@ -567,7 +898,7 @@ class OpenClawAgentCondition:
                         check=False,
                         timeout=subprocess_timeout,
                     )
-            else:
+            elif not self._watch_durable_invocation_terminal():
                 proc = subprocess.run(
                     argv,
                     capture_output=True,
@@ -584,6 +915,10 @@ class OpenClawAgentCondition:
                 elapsed, subprocess_timeout,
             )
             self._last_exit_code = -1
+            self._last_completion_status = self.TIMEOUT
+            self._last_completion_error = (
+                "openclaw agent wall-clock timeout (subprocess)"
+            )
             return None, "openclaw agent wall-clock timeout (subprocess)"
 
         elapsed = time.time() - dispatch_t0
@@ -596,23 +931,48 @@ class OpenClawAgentCondition:
             proc.returncode, elapsed, len(stdout), len(stderr),
         )
 
-        if proc.returncode != 0:
-            self._last_stdout = stdout
-            self._last_stderr = stderr
-            tail = stderr[-500:] or stdout[-500:]
-            return None, f"openclaw exit {proc.returncode}: {tail}"
-
         self._last_stdout = stdout
         self._last_stderr = stderr
+
+        if durable_interrupt is not None:
+            status, diagnostic = durable_interrupt
+            payload = self._payload_for_durable_invocation_terminal(
+                status, diagnostic
+            )
+            if payload is not None and status == self.NORMAL_COMPLETION:
+                self._last_exit_code = 0
+                self._last_completion_status = status
+                self._last_completion_error = ""
+                return payload, ""
+            self._last_completion_status = status
+            self._last_completion_error = diagnostic
+            return None, diagnostic
 
         payload = self._extract_last_json(stderr)
         if payload is None:
             payload = self._extract_last_json(stdout)
         if payload is None:
             snippet = (stderr or stdout)[-300:]
-            return None, f"no parseable JSON in openclaw output (last 300 chars: {snippet})"
+            error = (
+                f"openclaw exit {proc.returncode}: " if proc.returncode != 0 else ""
+            ) + (
+                "no parseable JSON in openclaw output "
+                f"(last 300 chars: {snippet})"
+            )
+            self._last_completion_status = self.RUNTIME_ERROR
+            self._last_completion_error = error
+            return None, error
 
-        return payload, ""
+        status, error = self._classify_completion(payload)
+        if proc.returncode != 0 and status not in {
+            self.CONTEXT_OVERFLOW, self.TIMEOUT
+        }:
+            status = self.RUNTIME_ERROR
+            if not error:
+                error = f"openclaw exit {proc.returncode}"
+        self._last_completion_status = status
+        self._last_completion_error = error
+        return payload, error
 
     @staticmethod
     def _extract_last_json(text: str) -> Optional[Dict]:
@@ -650,6 +1010,37 @@ class OpenClawAgentCondition:
                 return obj
         return candidates[-1]
 
+    def _detect_agent_runtime_mode(self, payload: Optional[Dict]) -> str:
+        stderr = str(getattr(self, "_last_stderr", "") or "")
+        if (
+            "Gateway agent failed; falling back to embedded" in stderr
+            or "falling back to embedded" in stderr.lower()
+        ):
+            return "embedded_fallback"
+        if (
+            _GATEWAY_EXECUTION_MARKER in stderr
+            or _ROADMAP_GATEWAY_EXECUTION_MARKER in stderr
+        ):
+            return "gateway"
+        selected = getattr(self, "_selected_agent_runtime_mode", None)
+        if selected in {"gateway", "embedded_fallback"}:
+            return str(selected)
+        # A successful CLI response is not evidence of which execution path
+        # produced it, and a non-zero rc does not erase an already selected
+        # Gateway path. Only explicit path evidence is authoritative here.
+        return "unknown"
+
+    def _archive_gateway_log(self, run_dir: Path) -> None:
+        raw_path = self._env_info.get("gateway_log_path")
+        if not raw_path:
+            return
+        source = Path(str(raw_path))
+        try:
+            if source.is_file():
+                shutil.copyfile(source, run_dir / "openclaw_gateway.log")
+        except OSError as exc:
+            logger.warning("gateway log archive failed for %s: %s", source, exc)
+
     # ------------------------------------------------------------------
     # Response parsing
     # ------------------------------------------------------------------
@@ -663,6 +1054,128 @@ class OpenClawAgentCondition:
         if isinstance(payload.get("result"), dict):
             return payload["result"]
         return payload
+
+    @classmethod
+    def _classify_completion(cls, payload: Optional[Dict]) -> Tuple[str, str]:
+        """Classify OpenClaw's semantic result independently of CLI rc.
+
+        OpenClaw can return rc=0 and top-level ``status=ok`` after its tool
+        loop was blocked by a context overflow. The authoritative lifecycle
+        fields are under ``result.meta`` (or top-level ``meta`` in local
+        mode), so inspect those before accepting a successful stop.
+        """
+        run = cls._unwrap(payload)
+        if not run:
+            return cls.RUNTIME_ERROR, "OpenClaw returned no result payload"
+
+        meta = run.get("meta") or {}
+        if not isinstance(meta, dict):
+            return cls.RUNTIME_ERROR, "OpenClaw result meta is malformed"
+
+        # Emitted only by a benchmark durable-session watcher after stable
+        # logical completion when the command-line RPC itself remains stuck.
+        if meta.get("agentBenchDurableRuntimeTermination") is True:
+            return cls.NORMAL_COMPLETION, ""
+
+        raw_error = meta.get("error")
+        if isinstance(raw_error, dict) and raw_error:
+            kind = str(raw_error.get("kind") or "runtime_error").strip().lower()
+            message = str(raw_error.get("message") or kind)
+            if kind == cls.CONTEXT_OVERFLOW or cls._is_context_overflow_text(message):
+                return cls.CONTEXT_OVERFLOW, message
+            return cls.RUNTIME_ERROR, f"{kind}: {message}"
+        if raw_error:
+            message = str(raw_error)
+            if cls._is_context_overflow_text(message):
+                return cls.CONTEXT_OVERFLOW, message
+            return cls.RUNTIME_ERROR, message
+
+        payload_error = cls._payload_error_text(payload)
+        if payload_error:
+            if cls._is_context_overflow_text(payload_error):
+                return cls.CONTEXT_OVERFLOW, payload_error
+            return cls.RUNTIME_ERROR, payload_error
+
+        liveness = str(meta.get("livenessState") or "").strip().lower()
+        if liveness in {
+            "working", "blocked", "incomplete", "aborted", "cancelled", "canceled"
+        }:
+            return (
+                cls.BLOCKED_INCOMPLETE,
+                f"OpenClaw trajectory ended with livenessState={liveness}",
+            )
+
+        if meta.get("replayInvalid"):
+            return (
+                cls.BLOCKED_INCOMPLETE,
+                "OpenClaw trajectory replay is invalid",
+            )
+
+        completion = meta.get("completion") or {}
+        stop_reason = str(
+            meta.get("stopReason")
+            or (completion.get("stopReason") if isinstance(completion, dict) else "")
+            or (completion.get("finishReason") if isinstance(completion, dict) else "")
+            or ""
+        ).strip().lower()
+        final_text = str(meta.get("finalAssistantVisibleText") or cls._parse_text(payload))
+        if stop_reason in {"stop", "completed", "complete", "done"} and final_text.strip():
+            if cls.require_done_marker and not re.search(
+                r"(?im)^\s*DONE(?:\s*$|\b)", final_text
+            ):
+                return (
+                    cls.BLOCKED_INCOMPLETE,
+                    "final response did not explicitly declare DONE",
+                )
+            return cls.NORMAL_COMPLETION, ""
+
+        return (
+            cls.BLOCKED_INCOMPLETE,
+            "OpenClaw returned without an explicit normal completion",
+        )
+
+    @staticmethod
+    def _is_context_overflow_text(text: str) -> bool:
+        normalized = " ".join(str(text).lower().replace("_", "-").split())
+        return any(marker in normalized for marker in (
+            "context-overflow",
+            "context overflow",
+            "context length exceeded",
+            "maximum context length",
+            "context size exceeds",
+        ))
+
+    @classmethod
+    def _payload_error_text(cls, payload: Optional[Dict]) -> str:
+        """Extract explicit error payloads without scanning normal prose."""
+        if not isinstance(payload, dict):
+            return ""
+        run = cls._unwrap(payload)
+        candidates = [payload.get("error"), run.get("error")]
+        for item in run.get("payloads", []) or []:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "").lower()
+            item_text = str(item.get("text") or "")
+            if item.get("isError") or item.get("error") or item_type == "error":
+                candidates.append(item.get("error") or item_text or item)
+            elif cls._is_context_overflow_text(item_text):
+                candidates.append(item_text)
+
+        for candidate in candidates:
+            if not candidate:
+                continue
+            if isinstance(candidate, str):
+                return candidate
+            if isinstance(candidate, dict):
+                return str(
+                    candidate.get("message")
+                    or candidate.get("text")
+                    or candidate.get("kind")
+                    or candidate
+                )
+            return str(candidate)
+        return ""
 
     @classmethod
     def _parse_usage(cls, payload: Optional[Dict]) -> Tuple[int, int]:
@@ -1018,7 +1531,11 @@ class OpenClawAgentCondition:
 
         assistant_messages = [
             m for m in final_snapshot.get("messages", []) or []
-            if isinstance(m, dict) and m.get("role") == "assistant" and m.get("usage")
+            if (
+                isinstance(m, dict)
+                and m.get("role") == "assistant"
+                and isinstance(m.get("usage"), dict)
+            )
         ]
         if not assistant_messages:
             return 0
@@ -1390,9 +1907,10 @@ class OpenClawAgentCondition:
         # OPENCLAW_RAW_RESPONSE_LOG points at it). Each line = one HTTP request.
         raw_resp_subpath = "logs/llm-raw-responses.jsonl"
 
-        if container_id is None:
-            ei = getattr(self, "_env_info", {}) or {}
-            state = Path(ei.get("state_dir") or ei.get("host_state_dir") or os.environ.get(
+        ei = getattr(self, "_env_info", {}) or {}
+        host_state = ei.get("state_dir") or ei.get("host_state_dir")
+        if host_state or container_id is None:
+            state = Path(host_state or os.environ.get(
                 "OPENCLAW_STATE_DIR", os.path.expanduser("~/.openclaw")
             ))
             for src, dst in [

@@ -142,7 +142,96 @@ def _e2e_time_bucket(span: Dict[str, Any], prefer_runtime_tool_spans: bool) -> T
     return name, True, "Span included in E2E time."
 
 
-def render_html(spans: List[Dict[str, Any]], source: Path) -> str:
+def _render_agent_runtime_timeline(agent_timeline: Dict[str, Any] | None) -> str:
+    raw_agents = (agent_timeline or {}).get("agents") or []
+    agents = [
+        agent for agent in raw_agents
+        if int(agent.get("start_timestamp_ns") or 0)
+        and int(agent.get("end_timestamp_ns") or 0)
+        >= int(agent.get("start_timestamp_ns") or 0)
+    ]
+    if not agents:
+        return ""
+
+    min_start = min(int(agent["start_timestamp_ns"]) for agent in agents)
+    max_end = max(int(agent["end_timestamp_ns"]) for agent in agents)
+    total_seconds = max((max_end - min_start) / 1e9, 0.001)
+    left_pad = 360
+    right_pad = 48
+    plot_width = 1080
+    top_pad = 62
+    row_height = 34
+    width = left_pad + plot_width + right_pad
+    height = top_pad + len(agents) * row_height + 48
+
+    def x_for(timestamp_ns: int) -> float:
+        return left_pad + (
+            ((timestamp_ns - min_start) / 1e9) / total_seconds
+        ) * plot_width
+
+    rows = []
+    bars = []
+    for lane, agent in enumerate(agents):
+        start_ns = int(agent["start_timestamp_ns"])
+        end_ns = int(agent["end_timestamp_ns"])
+        y = top_pad + lane * row_height
+        role = str(agent.get("role") or "agent")
+        label = str(agent.get("label") or agent.get("session_id") or "unknown")
+        display_label = f"{role.title()} · {label}"
+        duration = float(agent.get("duration_seconds") or 0.0)
+        censored = bool(agent.get("runtime_censored"))
+        x = x_for(start_ns)
+        bar_width = max(x_for(end_ns) - x, 2.0)
+        color = "#0f766e" if role == "child" else "#1d4ed8"
+        css_class = "agent-runtime-bar censored" if censored else "agent-runtime-bar"
+        title = (
+            f"{display_label}\nstatus: {agent.get('status')}\n"
+            f"duration: {duration:.3f}s\nstart: {_iso(start_ns)}\n"
+            f"end: {_iso(end_ns)}\ncensored: {str(censored).lower()}"
+        )
+        rows.append(
+            f'<text class="agent-runtime-label" x="{left_pad - 14}" '
+            f'y="{y + 20}" text-anchor="end">{html.escape(display_label)}</text>'
+            f'<line class="agent-runtime-rowline" x1="{left_pad}" '
+            f'x2="{left_pad + plot_width}" y1="{y + 12}" y2="{y + 12}" />'
+        )
+        bars.append(
+            f'<rect class="{css_class}" data-agent-role="{html.escape(role)}" '
+            f'x="{x:.2f}" y="{y + 4}" width="{bar_width:.2f}" height="16" '
+            f'rx="4" fill="{color}"><title>{html.escape(title)}</title></rect>'
+        )
+
+    ticks = []
+    for index in range(9):
+        fraction = index / 8
+        x = left_pad + fraction * plot_width
+        seconds = fraction * total_seconds
+        ticks.append(
+            f'<line class="agent-runtime-tick" x1="{x:.2f}" x2="{x:.2f}" '
+            f'y1="42" y2="{height - 38}" />'
+            f'<text class="agent-runtime-ticklabel" x="{x:.2f}" y="{height - 14}" '
+            f'text-anchor="middle">{seconds:.1f}s</text>'
+        )
+
+    return (
+        '<section class="agent-runtime-section" aria-label="Agent runtime timeline">'
+        '<h2>Agent Runtime Timeline</h2>'
+        '<p class="agent-runtime-note">One horizontal interval per parent or child. '
+        'Dashed bars are right-censored at workspace quiescence.</p>'
+        '<div class="agent-runtime-wrap">'
+        f'<svg class="agent-runtime-chart" width="{width}" height="{height}" '
+        f'data-agent-runtime-rows="{len(agents)}" role="img" '
+        'aria-label="Parent and subagent runtime intervals">'
+        f'{"".join(ticks)}{"".join(rows)}{"".join(bars)}'
+        '</svg></div></section>'
+    )
+
+
+def render_html(
+    spans: List[Dict[str, Any]],
+    source: Path,
+    agent_timeline: Dict[str, Any] | None = None,
+) -> str:
     if not spans:
         raise SystemExit(f"no valid spans found in {source}")
 
@@ -312,6 +401,7 @@ def render_html(spans: List[Dict[str, Any]], source: Path) -> str:
         if excluded_time_items else
         '<div class="time-note">No trace-only duplicate tool time excluded.</div>'
     )
+    agent_runtime_timeline = _render_agent_runtime_timeline(agent_timeline)
 
     return f"""<!doctype html>
 <html lang="en">
@@ -344,6 +434,17 @@ h1 {{ margin: 0 0 6px; font-size: 20px; }}
 .time-bar {{ height: 100%; border-radius: 999px; }}
 .time-note {{ margin-top: 10px; padding-top: 9px; border-top: 1px solid #e5e7eb; color: #6b7280; font-size: 12px; line-height: 1.45; }}
 .excluded-time-row {{ display: flex; justify-content: space-between; gap: 12px; margin-top: 4px; font-variant-numeric: tabular-nums; }}
+.agent-runtime-section {{ padding: 16px 24px 0; }}
+.agent-runtime-section h2 {{ margin: 0 0 4px; font-size: 17px; }}
+.agent-runtime-note {{ margin: 0 0 10px; color: #64748b; }}
+.agent-runtime-wrap {{ overflow-x: auto; background: white; border: 1px solid #e5e7eb; }}
+.agent-runtime-chart {{ display: block; background: white; border: 0; }}
+.agent-runtime-label {{ fill: #334155; font-size: 12px; }}
+.agent-runtime-rowline {{ stroke: #e2e8f0; stroke-width: 1; }}
+.agent-runtime-tick {{ stroke: #e2e8f0; stroke-width: 1; }}
+.agent-runtime-ticklabel {{ fill: #64748b; font-size: 11px; }}
+.agent-runtime-bar {{ opacity: 0.92; }}
+.agent-runtime-bar.censored {{ stroke: #b45309; stroke-width: 2; stroke-dasharray: 6 4; }}
 @media (max-width: 1040px) {{
   .stats-panel {{ grid-template-columns: 1fr; }}
 }}
@@ -377,6 +478,7 @@ svg {{ background: white; border: 1px solid #e5e7eb; }}
 <div class="meta">Source: {html.escape(str(source))}<br>
 Spans: {len(spans)} | Window: {_iso(min_start)} to {_iso(max_end)} | Duration: {total_ms:.3f} ms</div>
 </header>
+{agent_runtime_timeline}
 <section class="stats-section" aria-label="Span statistics">
   <div class="stats-panel">
     <div class="count-panel" aria-label="Span count breakdown">

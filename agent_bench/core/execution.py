@@ -330,16 +330,41 @@ def materialize_benchmark_data(
         _set_instance_data_env(target_env, out)
         return out
 
-    if resolved.spec.benchmark_name == "terminal_bench":
-        out = pbs_spec.run_dir / "terminal_bench_tasks.json" if pbs_spec else Path("data/terminal_bench/tasks.json")
-        from agent_bench.benchmarks.terminal_bench import loader
+    if resolved.spec.benchmark_name in {"terminal_bench", "roadmap_bench"}:
+        source_dataset = str(resolved.benchmark.get("source_dataset") or "").lower()
+        is_roadmap = (
+            resolved.spec.benchmark_name == "roadmap_bench"
+            or source_dataset.endswith("/roadmapbench")
+        )
+        output_name = "roadmap_bench_tasks.json" if is_roadmap else "terminal_bench_tasks.json"
+        out = (
+            pbs_spec.run_dir / output_name
+            if pbs_spec
+            else Path("data") / ("roadmap_bench" if is_roadmap else "terminal_bench") / "tasks.json"
+        )
+        if is_roadmap:
+            from agent_bench.benchmarks.roadmap_bench import loader
+        else:
+            from agent_bench.benchmarks.terminal_bench import loader
+
+        configured_root = resolved.benchmark.get("tasks_root")
+        tasks_root = None
+        if configured_root:
+            tasks_root = Path(
+                os.path.expandvars(os.path.expanduser(str(configured_root)))
+            ).resolve()
+            if not tasks_root.is_dir():
+                raise ConfigError(
+                    f"task definition root does not exist: {tasks_root}"
+                )
+            target_env["AB_BENCHMARK_TASKS_ROOT"] = str(tasks_root)
 
         task_ids = [str(item) for item in (resolved.benchmark.get("instances") or [])]
         if not task_ids:
-            task_ids = loader.list_task_ids()
+            task_ids = loader.list_task_ids(tasks_root=tasks_root)
         if not task_ids:
-            raise ConfigError("Terminal-Bench materialization found no task ids")
-        loader.materialize_dataset(task_ids, out)
+            raise ConfigError("task materialization found no task ids")
+        loader.materialize_dataset(task_ids, out, tasks_root=tasks_root)
         out = out.resolve()
         _set_instance_data_env(target_env, out)
         return out
@@ -1060,6 +1085,9 @@ def _write_run_summary_log(ctx: ExecutionContext) -> Path:
             "openclaw_exec_bridge.jsonl",
             "steps.jsonl",
             "candidate.patch",
+            "trajectory.jsonl",
+            "token_accounting.json",
+            "runtime_observability.json",
             "verdict.json",
             "spans.jsonl",
             "spans_timeline.html",

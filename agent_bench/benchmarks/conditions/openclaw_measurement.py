@@ -1,0 +1,1517 @@
+"""Build machine-readable OpenClaw trajectory and token artifacts."""
+from __future__ import annotations
+
+from collections import defaultdict
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import time
+from typing import Any, Iterable, Optional
+
+
+def _int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _timestamp_ns(value: Any) -> int:
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if number > 1e15:
+            return int(number)
+        if number > 1e12:
+            return int(number * 1e6)
+        return int(number * 1e9)
+    if isinstance(value, str) and value:
+        try:
+            return int(
+                datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+                * 1e9
+            )
+        except ValueError:
+            return 0
+    return 0
+
+
+def _iso_from_ns(value: int) -> Optional[str]:
+    if not value:
+        return None
+    return datetime.fromtimestamp(value / 1e9, tz=timezone.utc).isoformat()
+
+
+def _message_text(message: dict) -> str:
+    content = message.get("content") or []
+    if isinstance(content, str):
+        return content
+    parts = []
+    for item in content:
+        if isinstance(item, dict) and item.get("type") == "text":
+            parts.append(str(item.get("text") or ""))
+    return "\n".join(part for part in parts if part)
+
+
+def _is_heartbeat_request(text: str, message: Optional[dict] = None) -> bool:
+    """Recognize OpenClaw heartbeat requester turns."""
+    normalized = " ".join(str(text or "").lower().split())
+    provenance = (message or {}).get("provenance") or {}
+    return (
+        ("read heartbeat.md" in normalized and "heartbeat_ok" in normalized)
+        or normalized == "[openclaw heartbeat poll]"
+        or (
+            isinstance(provenance, dict)
+            and str(provenance.get("sourceTool") or "").lower() == "heartbeat"
+        )
+    )
+
+
+def _session_role(session_key: str, entry: dict, agent_id: str) -> str:
+    """Classify indexed sessions without assuming the parent uses ``:main``."""
+    if entry.get("spawnedBy"):
+        return "child"
+    if session_key == f"agent:{agent_id}:main" or entry:
+        return "parent"
+    return "child"
+
+
+def _session_file_name(entry: dict) -> str:
+    raw = str(entry.get("sessionFile") or "").strip()
+    if raw:
+        return PurePosixPath(raw).name
+    session_id = str(entry.get("sessionId") or "").strip()
+    return f"{session_id}.jsonl" if session_id else ""
+
+
+def _session_index(sessions_dir: Path) -> dict:
+    try:
+        value = json.loads((sessions_dir / "sessions.json").read_text(errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _parent_session_key(run_dir: Path, agent_id: str) -> str:
+    """Resolve the durable root session across OpenClaw store versions."""
+    index = _session_index(run_dir / "conversation" / "sessions")
+    explicit = f"agent:{agent_id}:explicit:{run_dir.name}"
+    entry = index.get(explicit)
+    if (
+        isinstance(entry, dict)
+        and not entry.get("spawnedBy")
+        and not entry.get("parentSessionKey")
+    ):
+        return explicit
+    roots = [
+        str(key)
+        for key, value in index.items()
+        if isinstance(key, str)
+        and key.startswith(f"agent:{agent_id}:")
+        and isinstance(value, dict)
+        and not value.get("spawnedBy")
+        and not value.get("parentSessionKey")
+    ]
+    legacy = f"agent:{agent_id}:main"
+    if legacy in roots:
+        return legacy
+    return roots[0] if len(roots) == 1 else legacy
+
+
+def _session_sources(sessions_dir: Path) -> list[tuple[Path, str, dict]]:
+    """Resolve durable session transcripts without reading replay checkpoints."""
+    index = _session_index(sessions_dir)
+    sources: list[tuple[Path, str, dict]] = []
+    seen: set[Path] = set()
+    for session_key, entry in index.items():
+        if not isinstance(entry, dict):
+            continue
+        name = _session_file_name(entry)
+        if not name:
+            continue
+        path = sessions_dir / name
+        if not path.is_file() or path in seen:
+            continue
+        seen.add(path)
+        sources.append((path, str(session_key), entry))
+    if sources:
+        return sources
+
+    # Older archives may lack sessions.json. Checkpoints and generated
+    # trajectories replay durable messages and must never count as sessions.
+    for path in sorted(sessions_dir.glob("*.jsonl")):
+        if ".checkpoint." in path.name or ".trajectory." in path.name:
+            continue
+        sources.append((path, "", {}))
+    return sources
+
+
+def _entry_time(entry: dict, fields: tuple[str, ...]) -> tuple[int, str]:
+    for field in fields:
+        timestamp_ns = _timestamp_ns(entry.get(field))
+        if timestamp_ns:
+            return timestamp_ns, field
+    return 0, ""
+
+
+def _transcript_time_bounds(path: Path) -> tuple[int, int]:
+    if not path.is_file():
+        return 0, 0
+    first = 0
+    last = 0
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return 0, 0
+    for line in lines:
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = item.get("message") or {}
+        timestamp_ns = _timestamp_ns(
+            message.get("timestamp") or item.get("timestamp")
+        )
+        if not timestamp_ns:
+            continue
+        first = timestamp_ns if not first else min(first, timestamp_ns)
+        last = max(last, timestamp_ns)
+    return first, last
+
+
+def _parent_start_time(
+    entry: dict, transcript_first_ns: int
+) -> tuple[int, str]:
+    """Prefer immutable creation/transcript evidence over mutable startedAt."""
+    created_ns, created_field = _entry_time(
+        entry, ("createdAt", "created_at")
+    )
+    candidates = [
+        (created_ns, created_field),
+        (
+            transcript_first_ns,
+            "transcript_first_event" if transcript_first_ns else "",
+        ),
+    ]
+    candidates = [(value, source) for value, source in candidates if value]
+    if candidates:
+        return min(candidates, key=lambda item: item[0])
+    return _entry_time(
+        entry,
+        ("startedAt", "started_at", "sessionStartedAt", "session_started_at"),
+    )
+
+
+def _transcript_explicit_done_time(path: Path) -> int:
+    """Return the timestamp when the final durable assistant turn says DONE."""
+    if not path.is_file():
+        return 0
+    done_ns = 0
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return 0
+    for line in lines:
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = item.get("message") or {}
+        if item.get("type") != "message" or message.get("role") != "assistant":
+            continue
+        timestamp_ns = _timestamp_ns(
+            message.get("timestamp") or item.get("timestamp")
+        )
+        is_done = (
+            str(message.get("stopReason") or "").lower() in {"stop", "length"}
+            and bool(re.search(
+                r"(?im)^\s*DONE(?:\s*$|\b)", _message_text(message)
+            ))
+        )
+        done_ns = timestamp_ns if is_done else 0
+    return done_ns
+
+
+def _child_start_time(
+    entry: dict, transcript_first_ns: int
+) -> tuple[int, str, str]:
+    timestamp_ns, field = _entry_time(
+        entry, ("startedAt", "started_at", "createdAt", "created_at")
+    )
+    if timestamp_ns:
+        quality = (
+            "session_state"
+            if field in {"startedAt", "started_at"}
+            else "session_state_inferred"
+        )
+        return timestamp_ns, field, quality
+    if transcript_first_ns:
+        return (
+            transcript_first_ns, "transcript_first_event", "transcript_inferred"
+        )
+    return 0, "", "missing"
+
+
+def _child_terminal_time(
+    entry: dict, transcript_last_ns: int
+) -> tuple[int, str, str]:
+    timestamp_ns, field = _entry_time(
+        entry,
+        (
+            "endedAt", "ended_at", "completedAt", "completed_at",
+            "finishedAt", "finished_at",
+        ),
+    )
+    if timestamp_ns:
+        return timestamp_ns, field, "session_state"
+    timestamp_ns, field = _entry_time(entry, ("updatedAt", "updated_at"))
+    if timestamp_ns:
+        return timestamp_ns, field, "session_state_inferred"
+    if transcript_last_ns:
+        return transcript_last_ns, "transcript_last_event", "transcript_inferred"
+    return 0, "", "missing"
+
+
+def _child_state_time(
+    entry: dict, transcript_last_ns: int
+) -> tuple[int, str, str]:
+    timestamp_ns, field = _entry_time(
+        entry, ("updatedAt", "updated_at", "lastActivityAt", "last_activity_at")
+    )
+    if timestamp_ns:
+        return timestamp_ns, field, "session_state"
+    if transcript_last_ns:
+        return transcript_last_ns, "transcript_last_event", "transcript_inferred"
+    return 0, "", "missing"
+
+
+def _lifecycle_observation_boundary(
+    run_dir: Path, fallback_ns: int
+) -> tuple[int, str, str]:
+    """Return the fence after which agent sessions cannot keep running."""
+    path = run_dir / "openclaw_response.json"
+    try:
+        payload = json.loads(path.read_text(errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+
+    lifecycle = None
+    pending = [payload]
+    while pending:
+        value = pending.pop()
+        if not isinstance(value, dict):
+            continue
+        candidate = value.get("agentBenchLifecycle")
+        if isinstance(candidate, dict):
+            lifecycle = candidate
+            break
+        pending.extend(item for item in value.values() if isinstance(item, dict))
+
+    if lifecycle:
+        for field in ("workspaceQuiescedNs", "parentTerminalObservedNs"):
+            timestamp_ns = _timestamp_ns(lifecycle.get(field))
+            if timestamp_ns:
+                quality = (
+                    "harness_observed_censor"
+                    if field == "workspaceQuiescedNs"
+                    else "watcher_observed_censor"
+                )
+                return timestamp_ns, field, quality
+    return fallback_ns, "measurement_observed", "measurement_observed_censor"
+
+
+def _append(
+    events: list[dict],
+    *,
+    timestamp_ns: int,
+    session_id: str,
+    session_key: str,
+    role: str,
+    event_type: str,
+    **fields: Any,
+) -> None:
+    event = {
+        "timestamp": _iso_from_ns(timestamp_ns),
+        "timestamp_ns": timestamp_ns or None,
+        "session_id": session_id or None,
+        "session_key": session_key or None,
+        "role": role,
+        "event_type": event_type,
+    }
+    event.update(fields)
+    events.append(event)
+
+
+def _session_events(run_dir: Path, agent_id: str) -> list[dict]:
+    sessions_dir = run_dir / "conversation" / "sessions"
+    if not sessions_dir.is_dir():
+        return []
+    index = _session_index(sessions_dir)
+    events: list[dict] = []
+    session_bounds: dict[str, tuple[int, int]] = {}
+
+    for path, session_key, entry in _session_sources(sessions_dir):
+        session_id = str(entry.get("sessionId") or path.stem)
+        role = _session_role(session_key, entry, agent_id)
+        session_state = str(entry.get("status") or "unknown")
+        seen_assistant: set[str] = set()
+        seen_tool_results: set[str] = set()
+        seen_resumes: set[tuple[int, str]] = set()
+        heartbeat_turn = False
+        transcript_first_ns = 0
+        transcript_last_ns = 0
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            message = item.get("message") or {}
+            timestamp_ns = _timestamp_ns(
+                message.get("timestamp") or item.get("timestamp")
+            )
+            if timestamp_ns:
+                transcript_first_ns = (
+                    timestamp_ns if not transcript_first_ns
+                    else min(transcript_first_ns, timestamp_ns)
+                )
+                transcript_last_ns = max(transcript_last_ns, timestamp_ns)
+            item_type = item.get("type")
+            custom_type = str(item.get("customType") or "")
+            if item_type == "custom_message" and custom_type == "openclaw.sessions_yield":
+                _append(
+                    events, timestamp_ns=timestamp_ns, session_id=session_id,
+                    session_key=session_key, role=role, event_type="yield",
+                    session_state=session_state,
+                )
+                continue
+            if item_type == "custom" and custom_type == "openclaw:prompt-error":
+                data = item.get("data")
+                error = data.get("error") if isinstance(data, dict) else data
+                error = str(error or "OpenClaw prompt error")
+                event_type = (
+                    "context_overflow"
+                    if "context overflow" in error.lower().replace("_", " ")
+                    else "prompt_error"
+                )
+                _append(
+                    events, timestamp_ns=timestamp_ns, session_id=session_id,
+                    session_key=session_key, role=role, event_type=event_type,
+                    error=error, session_state=session_state,
+                )
+                continue
+            if item_type != "message":
+                continue
+
+            message_role = str(message.get("role") or "")
+            if message_role == "user":
+                text = _message_text(message)
+                if role == "parent" and _is_heartbeat_request(text, message):
+                    heartbeat_turn = True
+                    _append(
+                        events, timestamp_ns=timestamp_ns,
+                        session_id=session_id, session_key=session_key,
+                        role=role, event_type="heartbeat_request",
+                        text=text, session_state=session_state,
+                    )
+                    continue
+
+                if role == "parent":
+                    heartbeat_turn = False
+
+                resume_key = (timestamp_ns, text)
+                if resume_key in seen_resumes:
+                    continue
+                seen_resumes.add(resume_key)
+                _append(
+                    events, timestamp_ns=timestamp_ns, session_id=session_id,
+                    session_key=session_key, role=role, event_type="resume",
+                    text=text, session_state=session_state,
+                )
+                continue
+            if message_role == "toolResult":
+                tool_result_id = str(message.get("toolCallId") or "")
+                if tool_result_id and tool_result_id in seen_tool_results:
+                    continue
+                if tool_result_id:
+                    seen_tool_results.add(tool_result_id)
+                _append(
+                    events, timestamp_ns=timestamp_ns, session_id=session_id,
+                    session_key=session_key, role=role, event_type="tool_result",
+                    tool_name=message.get("toolName"),
+                    tool_call_id=message.get("toolCallId"),
+                    is_error=bool(message.get("isError")),
+                    duration_ms=(message.get("details") or {}).get("durationMs"),
+                    session_state=session_state,
+                )
+                continue
+            if message_role != "assistant":
+                continue
+
+            response_id = str(message.get("responseId") or "")
+            if response_id and response_id in seen_assistant:
+                continue
+            if response_id:
+                seen_assistant.add(response_id)
+
+            text = _message_text(message)
+            for content in message.get("content") or []:
+                if not isinstance(content, dict) or content.get("type") != "toolCall":
+                    continue
+                tool_name = str(content.get("name") or "unknown")
+                event_type = "spawn" if tool_name == "sessions_spawn" else "tool_call"
+                _append(
+                    events, timestamp_ns=timestamp_ns, session_id=session_id,
+                    session_key=session_key, role=role, event_type=event_type,
+                    tool_name=tool_name, tool_call_id=content.get("id"),
+                    arguments=content.get("arguments"), session_state=session_state,
+                )
+            stop_reason = str(message.get("stopReason") or "").lower()
+
+            if role == "parent" and heartbeat_turn:
+                _append(
+                    events, timestamp_ns=timestamp_ns,
+                    session_id=session_id, session_key=session_key,
+                    role=role, event_type="heartbeat_response",
+                    text=text, stop_reason=stop_reason,
+                    session_state=session_state,
+                )
+                if stop_reason == "stop":
+                    heartbeat_turn = False
+                continue
+
+            if stop_reason in {"stop", "length"}:
+                _append(
+                    events, timestamp_ns=timestamp_ns, session_id=session_id,
+                    session_key=session_key, role=role,
+                    event_type="assistant_stop", text=text,
+                    stop_reason=stop_reason, session_state=session_state,
+                )
+                if re.search(r"(?im)^\s*DONE(?:\s*$|\b)", text):
+                    _append(
+                        events, timestamp_ns=timestamp_ns, session_id=session_id,
+                        session_key=session_key, role=role, event_type="done",
+                        text=text, session_state=session_state,
+                    )
+
+        session_bounds[session_key] = (
+            transcript_first_ns, transcript_last_ns
+        )
+
+    for session_key, entry in index.items():
+        if not isinstance(entry, dict) or not entry.get("spawnedBy"):
+            continue
+        status = str(entry.get("status") or "unknown").lower()
+        event_type = {
+            "done": "child_completion",
+            "completed": "child_completion",
+            "timeout": "child_timeout",
+            "timed_out": "child_timeout",
+        }.get(status, "child_state")
+        _first_ns, last_ns = session_bounds.get(str(session_key), (0, 0))
+        if status in {
+            "done", "completed", "failed", "error", "timeout", "timed_out",
+            "cancelled", "canceled",
+        }:
+            source_ns, source_field, timestamp_quality = _child_terminal_time(
+                entry, last_ns
+            )
+        else:
+            source_ns, source_field, timestamp_quality = _child_state_time(
+                entry, last_ns
+            )
+        measurement_observed_ns = time.time_ns()
+        _append(
+            events, timestamp_ns=source_ns,
+            session_id=str(entry.get("sessionId") or ""),
+            session_key=str(session_key), role="child", event_type=event_type,
+            session_state=status, spawned_by=entry.get("spawnedBy"),
+            source_timestamp=_iso_from_ns(source_ns),
+            source_timestamp_ns=source_ns or None,
+            source_timestamp_field=source_field or None,
+            measurement_observed_timestamp=_iso_from_ns(measurement_observed_ns),
+            measurement_observed_timestamp_ns=measurement_observed_ns,
+            timestamp_quality=timestamp_quality,
+        )
+    return events
+
+
+def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
+    sessions_dir = run_dir / "conversation" / "sessions"
+    index = _session_index(sessions_dir) if sessions_dir.is_dir() else {}
+    children: dict[str, dict] = {}
+    intervals: list[tuple[int, int]] = []
+    terminal_states = {
+        "done", "completed", "failed", "error", "timeout", "timed_out",
+        "cancelled", "canceled",
+    }
+    measurement_observed_ns = time.time_ns()
+    observation_end_ns, observation_end_source, observation_end_quality = (
+        _lifecycle_observation_boundary(run_dir, measurement_observed_ns)
+    )
+
+    for session_key, entry in index.items():
+        if not isinstance(entry, dict) or not entry.get("spawnedBy"):
+            continue
+        session_key = str(session_key)
+        name = _session_file_name(entry)
+        transcript = sessions_dir / name if name else None
+        first_ns, last_ns = (
+            _transcript_time_bounds(transcript)
+            if transcript is not None else (0, 0)
+        )
+        start_ns, start_source, start_quality = _child_start_time(entry, first_ns)
+        status = str(entry.get("status") or "unknown").lower()
+        is_terminal = status in terminal_states
+        if is_terminal:
+            end_ns, end_source, end_quality = _child_terminal_time(entry, last_ns)
+        else:
+            end_ns = observation_end_ns
+            end_source = observation_end_source
+            end_quality = observation_end_quality
+
+        runtime_seconds = None
+        if start_ns and end_ns and end_ns >= start_ns:
+            runtime_seconds = (end_ns - start_ns) / 1e9
+            intervals.append((start_ns, end_ns))
+
+        children[session_key] = {
+            "session_id": str(entry.get("sessionId") or "") or None,
+            "spawned_by": entry.get("spawnedBy"),
+            "status": status,
+            "start_timestamp": _iso_from_ns(start_ns),
+            "start_timestamp_ns": start_ns or None,
+            "start_timestamp_source": start_source or None,
+            "start_timestamp_quality": start_quality,
+            "terminal_timestamp": _iso_from_ns(end_ns) if is_terminal else None,
+            "terminal_timestamp_ns": (end_ns or None) if is_terminal else None,
+            "terminal_timestamp_source": (
+                (end_source or None) if is_terminal else None
+            ),
+            "terminal_timestamp_quality": (
+                end_quality if is_terminal else "missing"
+            ),
+            "interval_end_timestamp": _iso_from_ns(end_ns),
+            "interval_end_timestamp_ns": end_ns or None,
+            "interval_end_timestamp_source": end_source or None,
+            "interval_end_timestamp_quality": end_quality,
+            "measurement_observed_timestamp": _iso_from_ns(measurement_observed_ns),
+            "measurement_observed_timestamp_ns": measurement_observed_ns,
+            "runtime_seconds": runtime_seconds,
+            "runtime_complete": is_terminal and runtime_seconds is not None,
+            "runtime_censored": not is_terminal and runtime_seconds is not None,
+            "label": entry.get("label"),
+        }
+
+    complete = [
+        child for child in children.values()
+        if child.get("runtime_complete")
+    ]
+    observed = [
+        child for child in children.values()
+        if child.get("runtime_seconds") is not None
+    ]
+    runtime_sum = sum(float(child["runtime_seconds"]) for child in observed)
+
+    union_ns = 0
+    if intervals:
+        merged: list[list[int]] = []
+        for start_ns, end_ns in sorted(intervals):
+            if not merged or start_ns > merged[-1][1]:
+                merged.append([start_ns, end_ns])
+            else:
+                merged[-1][1] = max(merged[-1][1], end_ns)
+        union_ns = sum(end - start for start, end in merged)
+
+    max_concurrent = 0
+    concurrent = 0
+    overlap_wall_ns = 0
+    concurrency_excess_ns = 0
+    previous_timestamp_ns: Optional[int] = None
+    points: list[tuple[int, int]] = []
+    for start_ns, end_ns in intervals:
+        points.append((start_ns, 1))
+        points.append((end_ns, -1))
+    for timestamp_ns_value, delta in sorted(
+        points, key=lambda item: (item[0], item[1])
+    ):
+        if previous_timestamp_ns is not None and timestamp_ns_value > previous_timestamp_ns:
+            span_ns = timestamp_ns_value - previous_timestamp_ns
+            if concurrent >= 2:
+                overlap_wall_ns += span_ns
+            if concurrent > 1:
+                concurrency_excess_ns += (concurrent - 1) * span_ns
+        concurrent += delta
+        max_concurrent = max(max_concurrent, concurrent)
+        previous_timestamp_ns = timestamp_ns_value
+
+    timeline_agents = []
+    parent_candidates = [
+        (key, entry) for key, entry in index.items()
+        if isinstance(entry, dict) and not entry.get("spawnedBy")
+    ]
+    if parent_candidates:
+        parent_key, parent_entry = parent_candidates[0]
+        parent_name = _session_file_name(parent_entry)
+        parent_transcript = sessions_dir / parent_name if parent_name else None
+        parent_first_ns, parent_last_ns = (
+            _transcript_time_bounds(parent_transcript)
+            if parent_transcript is not None else (0, 0)
+        )
+        parent_start_ns, parent_start_source = _parent_start_time(
+            parent_entry, parent_first_ns
+        )
+        parent_status = str(parent_entry.get("status") or "unknown").lower()
+        explicit_done_ns = (
+            _transcript_explicit_done_time(parent_transcript)
+            if parent_transcript is not None else 0
+        )
+        parent_terminal = parent_status in terminal_states or bool(explicit_done_ns)
+        if parent_status in terminal_states:
+            parent_end_ns, parent_end_source, parent_end_quality = (
+                _child_terminal_time(parent_entry, parent_last_ns)
+            )
+        elif explicit_done_ns:
+            parent_end_ns = explicit_done_ns
+            parent_end_source = "transcript_explicit_done"
+            parent_end_quality = "transcript_terminal_evidence"
+        else:
+            parent_end_ns = observation_end_ns
+            parent_end_source = observation_end_source
+            parent_end_quality = observation_end_quality
+        if parent_start_ns and parent_end_ns >= parent_start_ns:
+            timeline_agents.append({
+                "role": "parent",
+                "label": agent_id,
+                "session_key": str(parent_key),
+                "session_id": str(parent_entry.get("sessionId") or "") or None,
+                "status": parent_status,
+                "start_timestamp": _iso_from_ns(parent_start_ns),
+                "start_timestamp_ns": parent_start_ns,
+                "start_timestamp_source": parent_start_source or None,
+                "end_timestamp": _iso_from_ns(parent_end_ns),
+                "end_timestamp_ns": parent_end_ns,
+                "end_timestamp_source": parent_end_source or None,
+                "end_timestamp_quality": parent_end_quality,
+                "duration_seconds": (parent_end_ns - parent_start_ns) / 1e9,
+                "runtime_censored": not parent_terminal,
+            })
+    for session_key, child in children.items():
+        start_ns = _int(child.get("start_timestamp_ns"))
+        end_ns = _int(child.get("interval_end_timestamp_ns"))
+        if not start_ns or not end_ns or end_ns < start_ns:
+            continue
+        timeline_agents.append({
+            "role": "child",
+            "label": child.get("label") or child.get("session_id") or session_key,
+            "session_key": session_key,
+            "session_id": child.get("session_id"),
+            "status": child.get("status"),
+            "start_timestamp": child.get("start_timestamp"),
+            "start_timestamp_ns": start_ns,
+            "start_timestamp_source": child.get("start_timestamp_source"),
+            "end_timestamp": child.get("interval_end_timestamp"),
+            "end_timestamp_ns": end_ns,
+            "end_timestamp_source": child.get("interval_end_timestamp_source"),
+            "end_timestamp_quality": child.get("interval_end_timestamp_quality"),
+            "duration_seconds": child.get("runtime_seconds"),
+            "runtime_censored": child.get("runtime_censored", False),
+        })
+    timeline_agents.sort(
+        key=lambda item: (
+            0 if item["role"] == "parent" else 1,
+            item["start_timestamp_ns"],
+            str(item["session_key"]),
+        )
+    )
+
+    union_seconds = union_ns / 1e9
+    return {
+        "child_session_count": len(children),
+        "child_runtime_complete_count": len(complete),
+        "child_runtime_observed_count": len(observed),
+        "child_runtime_by_session": children,
+        "child_sum_runtime_seconds": runtime_sum,
+        "child_union_active_seconds": union_seconds,
+        "child_overlap_wall_seconds": overlap_wall_ns / 1e9,
+        "child_concurrency_excess_seconds": concurrency_excess_ns / 1e9,
+        "max_concurrent_children": max_concurrent,
+        "agent_timeline": {
+            "observation_end_timestamp": _iso_from_ns(observation_end_ns),
+            "observation_end_timestamp_ns": observation_end_ns,
+            "observation_end_timestamp_source": observation_end_source,
+            "observation_end_timestamp_quality": observation_end_quality,
+            "agents": timeline_agents,
+        },
+        "child_runtime_policy": {
+            "definition": (
+                "durable child start to terminal time; non-terminal materialized "
+                "children are right-censored at the agent-writer quiescence fence"
+            ),
+            "censored_runtime": (
+                "included in observed runtime and concurrency, excluded from "
+                "child_runtime_complete_count"
+            ),
+            "overlap_wall_definition": (
+                "wall-clock time with at least two child sessions active"
+            ),
+            "concurrency_excess_definition": (
+                "integral of max(active_children - 1, 0) over child-active time"
+            ),
+            "failed_spawn_runtime": None,
+        },
+    }
+
+
+def _gateway_events(run_dir: Path) -> list[dict]:
+    path = run_dir / "openclaw_gateway.log"
+    if not path.is_file():
+        return []
+    events = []
+    line_re = re.compile(r"^(\S+)\s+(.*)$")
+    for line in path.read_text(errors="replace").splitlines():
+        match = line_re.match(line)
+        if not match:
+            continue
+        timestamp_ns = _timestamp_ns(match.group(1))
+        text = match.group(2)
+        lowered = text.lower()
+        event_type = None
+        fields: dict[str, Any] = {"message": text}
+        run_id_match = re.search(r"runId=(announce:\S+)", text, re.IGNORECASE)
+        announce_run_id = run_id_match.group(1) if run_id_match else ""
+        child_match = re.search(r"childSessionKey=(\S+)", text)
+        child_session_key = child_match.group(1) if child_match else ""
+        if announce_run_id:
+            fields["announce_run_id"] = announce_run_id
+            prefix = "announce:v1:"
+            remainder = (
+                announce_run_id[len(prefix):]
+                if announce_run_id.startswith(prefix)
+                else announce_run_id
+            )
+            if ":" in remainder:
+                child_session_key = remainder.rsplit(":", 1)[0]
+        if child_session_key:
+            fields["child_session_key"] = child_session_key
+        requester_settle_timeout = (
+            "requester settle wake" in lowered
+            and "gateway request timeout for agent" in lowered
+        )
+        if (
+            "subagent announce completion" in lowered and "timeout" in lowered
+        ) or requester_settle_timeout:
+            event_type = "announce_timeout"
+            timeout = re.search(r"timeout after (\d+)ms", lowered)
+            fields["latency_ms"] = _int(timeout.group(1)) if timeout else None
+            retry = re.search(r"retrying (\d+)/(\d+)", lowered)
+            settle_attempt = re.search(
+                r"requester settle wake attempt (\d+) failed", lowered
+            )
+            fields["retry_attempt"] = (
+                _int(retry.group(1))
+                if retry
+                else _int(settle_attempt.group(1)) if settle_attempt else None
+            )
+            fields["max_attempts"] = _int(retry.group(2)) if retry else None
+            retry_delay = re.search(r"retrying in (\d+)s", lowered)
+            fields["retry_delay_seconds"] = (
+                _int(retry_delay.group(1)) if retry_delay else None
+            )
+            if requester_settle_timeout:
+                fields["announce_kind"] = "requester_settle_wake"
+        elif "runid=announce:" in lowered and "res ✓ agent" in lowered:
+            event_type = "announce"
+            latency = re.search(r"agent\s+(\d+)ms", lowered)
+            fields["latency_ms"] = _int(latency.group(1)) if latency else None
+        elif "stuck session:" in lowered:
+            event_type = "stuck_session"
+            session = re.search(r"sessionKey=(\S+)", text)
+            age = re.search(r"age=(\d+)s", text)
+            fields["session_key"] = session.group(1) if session else None
+            fields["age_seconds"] = _int(age.group(1)) if age else None
+        elif "context-overflow-diag" in lowered:
+            event_type = "context_overflow"
+        elif "tool loop:" in lowered:
+            event_type = "loop_detected"
+            session_id = re.search(r"\bsessionId=([^\s]+)", text)
+            session_key = re.search(r"\bsessionKey=([^\s]+)", text)
+            detector = re.search(r"\bdetector=([^\s]+)", text)
+            tool = re.search(r"\btool=([^\s]+)", text)
+            count = re.search(r"\bcount=(\d+)", text)
+            level = re.search(r"\blevel=([^\s]+)", text)
+            action = re.search(r"\baction=([^\s]+)", text)
+            parsed_action = action.group(1).lower() if action else None
+            fields.update({
+                "detector": detector.group(1) if detector else "tool_loop",
+                "tool_name": tool.group(1) if tool else None,
+                "count": _int(count.group(1)) if count else None,
+                "level": level.group(1).lower() if level else None,
+                "action": parsed_action,
+                "terminal": parsed_action in {
+                    "abort", "block", "error", "stop", "terminate",
+                },
+            })
+            if session_key:
+                fields["session_key"] = session_key.group(1)
+            if session_id:
+                fields["session_id"] = session_id.group(1)
+        elif "compaction_loop_persisted" in lowered:
+            event_type = "loop_detected"
+            fields["detector"] = "compaction_loop_persisted"
+            fields["terminal"] = True
+            tool = re.search(r"\btool=([^\s]+)", text)
+            count = re.search(r"\bcount=(\d+)", text)
+            fields["tool_name"] = tool.group(1) if tool else None
+            fields["count"] = _int(count.group(1)) if count else None
+        elif "compaction" in lowered:
+            count_match = re.search(
+                r"\b(?:compactions|compactionAttempts|compactionCount|"
+                r"compaction_count)\s*[=:]\s*(\d+)",
+                text,
+                re.IGNORECASE,
+            )
+            compaction_count = _int(count_match.group(1)) if count_match else 0
+            if compaction_count > 0:
+                event_type = "compaction"
+                fields["count"] = compaction_count
+        if event_type:
+            _append(
+                events, timestamp_ns=timestamp_ns,
+                session_id=str(fields.pop("session_id", "") or ""),
+                session_key=str(fields.pop("session_key", "") or ""),
+                role="runtime", event_type=event_type, **fields,
+            )
+            if event_type == "context_overflow" and "compaction" in lowered:
+                attempts = re.search(r"compactionAttempts=(\d+)", text)
+                attempt_count = _int(attempts.group(1)) if attempts else 0
+                if attempt_count > 0:
+                    _append(
+                        events, timestamp_ns=timestamp_ns, session_id="",
+                        session_key="", role="runtime", event_type="compaction",
+                        attempts=attempt_count, count=attempt_count,
+                        message=text,
+                    )
+    return events
+
+
+def _read_spans(run_dir: Path) -> Iterable[dict]:
+    path = run_dir / "spans.jsonl"
+    if not path.is_file():
+        return []
+    rows = []
+    for line in path.read_text(errors="replace").splitlines():
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            rows.append(value)
+    return rows
+
+
+def _logical_tokens_from_transcripts(
+    run_dir: Path, agent_id: str
+) -> tuple[dict, list[dict]]:
+    sessions_dir = run_dir / "conversation" / "sessions"
+    sessions: dict[str, dict] = defaultdict(
+        lambda: {"input": 0, "output": 0, "cache_read": 0, "turn_count": 0}
+    )
+    usage_events: list[dict] = []
+    if not sessions_dir.is_dir():
+        return {}, []
+
+    for path, session_key, entry in _session_sources(sessions_dir):
+        session_id = str(entry.get("sessionId") or path.stem)
+        role = _session_role(session_key, entry, agent_id)
+        seen_responses: set[str] = set()
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            message = item.get("message") or {}
+            if item.get("type") != "message" or message.get("role") != "assistant":
+                continue
+            usage = message.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            response_id = str(message.get("responseId") or "")
+            if response_id and response_id in seen_responses:
+                continue
+            if response_id:
+                seen_responses.add(response_id)
+            uncached_input = _int(usage.get("input") or usage.get("prompt_tokens"))
+            cache_read = _int(usage.get("cacheRead") or usage.get("cache_read"))
+            input_tokens = uncached_input + cache_read
+            output_tokens = _int(
+                usage.get("output") or usage.get("completion_tokens")
+            )
+            bucket_key = (
+                f"agent:{agent_id}:main"
+                if role == "parent"
+                else session_key or f"session:{session_id}"
+            )
+            bucket = sessions[bucket_key]
+            bucket["input"] += input_tokens
+            bucket["output"] += output_tokens
+            bucket["cache_read"] += cache_read
+            bucket["turn_count"] += 1
+            _append(
+                usage_events,
+                timestamp_ns=_timestamp_ns(
+                    message.get("timestamp") or item.get("timestamp")
+                ),
+                session_id=session_id,
+                session_key=session_key,
+                role=role,
+                event_type="model_usage",
+                input_tokens=input_tokens,
+                uncached_input_tokens=uncached_input,
+                cache_read_tokens=cache_read,
+                output_tokens=output_tokens,
+                request_latency_ms=None,
+            )
+    return dict(sessions), usage_events
+
+
+def _parent_resume_count(
+    run_dir: Path,
+    agent_id: str,
+    *,
+    parent_session_key: Optional[str] = None,
+) -> int:
+    """Count requester episodes after the initial parent request.
+
+    OpenClaw v9 persists a stable event id, which distinguishes genuine
+    byte-identical resumes while deduplicating replay. Older transcripts lack
+    that id, so their text remains the best available fallback identity.
+    """
+    sessions_dir = run_dir / "conversation" / "sessions"
+    if not sessions_dir.is_dir():
+        return 0
+    requester_episodes = 0
+    seen: set[tuple[str, str]] = set()
+    for path, session_key, entry in _session_sources(sessions_dir):
+        if parent_session_key is not None:
+            if session_key != parent_session_key:
+                continue
+        elif _session_role(session_key, entry, agent_id) != "parent":
+            continue
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            message = item.get("message") or {}
+            if item.get("type") != "message" or message.get("role") != "user":
+                continue
+            text = _message_text(message)
+            if _is_heartbeat_request(text, message):
+                continue
+            event_id = str(item.get("id") or message.get("id") or "").strip()
+            identity = ("id", event_id) if event_id else ("text", text)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            requester_episodes += 1
+    return max(0, requester_episodes - 1)
+
+
+def _logical_tokens(run_dir: Path, agent_id: str) -> tuple[dict, list[dict]]:
+    transcript_sessions, transcript_events = _logical_tokens_from_transcripts(
+        run_dir, agent_id
+    )
+    if transcript_sessions:
+        sessions = transcript_sessions
+        usage_events = transcript_events
+    else:
+        sessions, usage_events = _logical_tokens_from_spans(run_dir, agent_id)
+
+    parent_key = _parent_session_key(run_dir, agent_id)
+    empty = {
+        "input": 0, "output": 0, "cache_read": 0, "turn_count": 0
+    }
+    parent = dict(sessions.get(parent_key, empty))
+    parent["resumed_turns"] = _parent_resume_count(
+        run_dir, agent_id, parent_session_key=parent_key
+    )
+    children = {
+        key: dict(value) for key, value in sessions.items() if key != parent_key
+    }
+    return {
+        "parent": parent,
+        "children": children,
+        "total_logical_input": parent["input"] + sum(v["input"] for v in children.values()),
+        "total_logical_output": parent["output"] + sum(v["output"] for v in children.values()),
+    }, usage_events
+
+
+def _logical_tokens_from_spans(
+    run_dir: Path, agent_id: str
+) -> tuple[dict, list[dict]]:
+    sessions: dict[str, dict] = defaultdict(
+        lambda: {"input": 0, "output": 0, "turn_count": 0}
+    )
+    usage_events = []
+    recent: dict[tuple, int] = {}
+    parent_key = _parent_session_key(run_dir, agent_id)
+    for span in _read_spans(run_dir):
+        attrs = span.get("attrs") or {}
+        if span.get("name") != "openclaw.model.usage":
+            continue
+        if attrs.get("openclaw.span.source") == "raw_response_log":
+            continue
+        session_key = str(attrs.get("openclaw.sessionKey") or "unknown")
+        session_id = str(attrs.get("openclaw.sessionId") or "")
+        input_tokens = _int(attrs.get("openclaw.tokens.input"))
+        output_tokens = _int(attrs.get("openclaw.tokens.output"))
+        start_ns = _int(span.get("start_unix_nano"))
+        fingerprint = (session_key, session_id, input_tokens, output_tokens)
+        previous = recent.get(fingerprint)
+        if previous is not None and abs(start_ns - previous) <= 5_000_000_000:
+            continue
+        recent[fingerprint] = start_ns
+        bucket = sessions[session_key]
+        bucket["input"] += input_tokens
+        bucket["output"] += output_tokens
+        bucket["turn_count"] += 1
+        role = "parent" if session_key == parent_key else "child"
+        _append(
+            usage_events, timestamp_ns=start_ns, session_id=session_id,
+            session_key=session_key, role=role, event_type="model_usage",
+            input_tokens=input_tokens, output_tokens=output_tokens,
+            request_latency_ms=span.get("duration_ms"),
+        )
+
+    return dict(sessions), usage_events
+
+
+def _serving_tokens(run_dir: Path) -> tuple[dict, list[dict]]:
+    path = run_dir / "conversation" / "llm-raw-responses.jsonl"
+    totals = {"processed_input": 0, "generated_output": 0, "request_count": 0}
+    events = []
+    if not path.is_file():
+        return totals, events
+    for line in path.read_text(errors="replace").splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        response = row.get("response") or {}
+        usage = response.get("usage") or {}
+        prompt = _int(usage.get("prompt_tokens") or usage.get("input_tokens"))
+        completion = _int(
+            usage.get("completion_tokens") or usage.get("output_tokens")
+        )
+        totals["processed_input"] += prompt
+        totals["generated_output"] += completion
+        totals["request_count"] += 1
+        metrics = row.get("metrics") or {}
+        timestamp_ns = _timestamp_ns(row.get("ts"))
+        _append(
+            events, timestamp_ns=timestamp_ns,
+            session_id=str(row.get("sessionId") or ""), session_key="",
+            role="serving", event_type="model_request",
+            input_tokens=prompt, output_tokens=completion,
+            request_latency_ms=metrics.get("total_ms"),
+            http_status=row.get("httpStatus"), model=row.get("model"),
+        )
+    return totals, events
+
+
+def _active_intervals(run_dir: Path) -> list[dict]:
+    intervals = []
+    model_spans = {"openclaw.model.usage", "openclaw.model.call"}
+    tool_spans = {"openclaw.tool.call", "openclaw.tool.execution"}
+    for span in _read_spans(run_dir):
+        name = str(span.get("name") or "")
+        if name not in model_spans | tool_spans:
+            continue
+        attrs = span.get("attrs") or {}
+        duration_ms = float(span.get("duration_ms") or 0)
+        # OpenClaw also emits run-level aggregate model.usage spans whose
+        # interval covers the whole session. They are token summaries, not an
+        # in-flight request, and would classify every stuck diagnostic as
+        # legitimate activity. Per-request synthesized spans are authoritative.
+        if (
+            name == "openclaw.model.usage"
+            and attrs.get("openclaw.span.source") != "raw_response_log"
+            and duration_ms > 300_000
+        ):
+            continue
+        if name == "openclaw.model.call":
+            observation = str(
+                attrs.get("openclaw.model_call.observation_unit") or ""
+            )
+            if observation and observation != "request":
+                continue
+        start = _int(span.get("start_unix_nano"))
+        end = _int(span.get("end_unix_nano"))
+        if not end and start:
+            end = start + int(duration_ms * 1e6)
+        intervals.append({
+            "start": start,
+            "end": end,
+            "session_key": str(attrs.get("openclaw.sessionKey") or ""),
+            "activity": (
+                "model_request"
+                if name in model_spans
+                else "tool:"
+                + str(
+                    attrs.get("openclaw.tool.name")
+                    or attrs.get("openclaw.toolName")
+                    or attrs.get("gen_ai.tool.name")
+                    or "unknown"
+                )
+            ),
+        })
+    return intervals
+
+
+def _interval_union_seconds(
+    intervals: Iterable[dict], start_ns: int, end_ns: int
+) -> float:
+    clipped = []
+    for interval in intervals:
+        start = max(start_ns, _int(interval.get("start")))
+        end = min(end_ns, _int(interval.get("end")))
+        if start and end > start:
+            clipped.append((start, end))
+    if not clipped:
+        return 0.0
+    merged: list[list[int]] = []
+    for start, end in sorted(clipped):
+        if not merged or start > merged[-1][1]:
+            merged.append([start, end])
+        else:
+            merged[-1][1] = max(merged[-1][1], end)
+    return sum(end - start for start, end in merged) / 1e9
+
+
+def _execution_time_observability(
+    run_dir: Path,
+    events: list[dict],
+    execution_start_ns: int,
+    execution_end_ns: int,
+) -> dict:
+    """Separate observed work from orchestration gaps without hiding latency."""
+    if not execution_start_ns or execution_end_ns <= execution_start_ns:
+        return {}
+
+    intervals = _active_intervals(run_dir)
+    model_intervals = [
+        interval for interval in intervals
+        if interval.get("activity") == "model_request"
+    ]
+    tool_intervals = [
+        interval for interval in intervals
+        if str(interval.get("activity") or "").startswith("tool:")
+    ]
+    observed_seconds = _interval_union_seconds(
+        intervals, execution_start_ns, execution_end_ns
+    )
+    wall_seconds = (execution_end_ns - execution_start_ns) / 1e9
+
+    parent_events = sorted(
+        (
+            event for event in events
+            if event.get("role") == "parent"
+            and event.get("event_type") in {"yield", "resume"}
+            and _int(event.get("timestamp_ns"))
+        ),
+        key=lambda event: _int(event.get("timestamp_ns")),
+    )
+    yield_wait_intervals = []
+    waiting_since = 0
+    for event in parent_events:
+        timestamp_ns = _int(event.get("timestamp_ns"))
+        if event.get("event_type") == "yield":
+            if not waiting_since:
+                waiting_since = timestamp_ns
+        elif waiting_since and timestamp_ns >= waiting_since:
+            yield_wait_intervals.append({
+                "start": waiting_since,
+                "end": timestamp_ns,
+            })
+            waiting_since = 0
+    if waiting_since:
+        yield_wait_intervals.append({
+            "start": waiting_since,
+            "end": execution_end_ns,
+        })
+
+    return {
+        "agent_end_to_end_seconds": wall_seconds,
+        "observed_operation_union_seconds": observed_seconds,
+        "observed_model_union_seconds": _interval_union_seconds(
+            model_intervals, execution_start_ns, execution_end_ns
+        ),
+        "observed_tool_union_seconds": _interval_union_seconds(
+            tool_intervals, execution_start_ns, execution_end_ns
+        ),
+        "parent_yield_wait_seconds": _interval_union_seconds(
+            yield_wait_intervals, execution_start_ns, execution_end_ns
+        ),
+        "unattributed_orchestration_seconds": max(
+            0.0, wall_seconds - observed_seconds
+        ),
+        "policy": {
+            "primary_latency": (
+                "agent_end_to_end_seconds includes yield, queue, continuation, "
+                "retry, and quiescence overhead"
+            ),
+            "active_latency": (
+                "union of observed model-request and tool-call intervals "
+                "across parent and children"
+            ),
+            "unattributed_warning": (
+                "not a pure idle metric; it also includes runtime activity "
+                "missing from available spans"
+            ),
+        },
+    }
+
+
+def _loop_termination(events: list[dict]) -> dict:
+    loop_events = [
+        event for event in events
+        if event.get("event_type") == "loop_detected"
+        and event.get("terminal") is True
+    ]
+    if not loop_events:
+        return {}
+    terminal = loop_events[-1]
+    detector = str(terminal.get("detector") or "compaction_loop_persisted")
+    return {
+        "termination_reason": detector,
+        "loop_detector": detector,
+        "loop_tool": terminal.get("tool_name"),
+        "loop_count": terminal.get("count"),
+    }
+
+
+def _runtime_observability(
+    run_dir: Path,
+    events: list[dict],
+    agent_id: str,
+    *,
+    execution_start_ns: int = 0,
+    execution_end_ns: int = 0,
+) -> dict:
+    child_timing = _child_runtime_observability(run_dir, agent_id)
+    spawn_attempt_count = sum(
+        event.get("event_type") == "spawn" for event in events
+    )
+    announce_timeouts = [
+        event for event in events if event["event_type"] == "announce_timeout"
+    ]
+    announces = [event for event in events if event["event_type"] == "announce"]
+    loop_events = [
+        event for event in events if event.get("event_type") == "loop_detected"
+    ]
+    announce_groups: dict[str, dict] = {}
+    for event in [*announce_timeouts, *announces]:
+        group_key = str(
+            event.get("child_session_key")
+            or event.get("announce_run_id")
+            or "unattributed"
+        )
+        group = announce_groups.setdefault(group_key, {
+            "child_session_key": event.get("child_session_key"),
+            "announce_run_ids": [],
+            "attempt_count": 0,
+            "success_count": 0,
+            "timeout_count": 0,
+            "retry_count": 0,
+            "latency_ms": [],
+        })
+        run_id = event.get("announce_run_id")
+        if run_id and run_id not in group["announce_run_ids"]:
+            group["announce_run_ids"].append(run_id)
+        group["attempt_count"] += 1
+        latency = event.get("latency_ms")
+        if latency is not None:
+            group["latency_ms"].append(_int(latency))
+        if event["event_type"] == "announce_timeout":
+            group["timeout_count"] += 1
+            if event.get("retry_attempt") is not None:
+                group["retry_count"] += 1
+        else:
+            group["success_count"] += 1
+
+    intervals = _active_intervals(run_dir)
+    stuck_events = [event for event in events if event["event_type"] == "stuck_session"]
+    stuck_by_session: dict[str, int] = defaultdict(int)
+    classifications: dict[str, int] = defaultdict(int)
+    for event in stuck_events:
+        timestamp_ns = _int(event.get("timestamp_ns"))
+        session_key = str(event.get("session_key") or "")
+        activity = sorted({
+            interval["activity"]
+            for interval in intervals
+            if interval["start"] <= timestamp_ns <= interval["end"]
+            and (
+                not session_key
+                or not interval["session_key"]
+                or interval["session_key"] == session_key
+            )
+        })
+        classification = "active_operation" if activity else "unresolved"
+        event["concurrent_activity"] = activity
+        event["diagnostic_classification"] = classification
+        stuck_by_session[session_key or "unknown"] += 1
+        classifications[classification] += 1
+
+    announce_latencies = [
+        _int(event.get("latency_ms"))
+        for event in [*announce_timeouts, *announces]
+        if event.get("latency_ms") is not None
+    ]
+    unattributed_timeouts = sum(
+        not event.get("child_session_key")
+        and not event.get("announce_run_id")
+        for event in announce_timeouts
+    )
+    return {
+        **child_timing,
+        "execution_time": _execution_time_observability(
+            run_dir, events, execution_start_ns, execution_end_ns
+        ),
+        "spawn_attempt_count": spawn_attempt_count,
+        "unmaterialized_spawn_attempt_count": max(
+            0, spawn_attempt_count - child_timing["child_session_count"]
+        ),
+        "spawn_attempt_attribution": (
+            "best-effort aggregate: durable transcript spawn calls minus "
+            "durable child sessions; no per-attempt child identity inferred"
+        ),
+        "spawn_runtime_policy": (
+            "failed/unmaterialized spawn waits remain in agent_execution_seconds "
+            "but never create child runtime"
+        ),
+        "announce_attempt_count": len(announce_timeouts) + len(announces),
+        "announce_timeout_count": len(announce_timeouts),
+        "announce_retry_count": sum(
+            event.get("retry_attempt") is not None for event in announce_timeouts
+        ),
+        "announce_success_count": len(announces),
+        "announce_latency_ms": announce_latencies,
+        "announce_by_child": announce_groups,
+        "announce_attribution": {
+            "unattributed_timeout_count": unattributed_timeouts,
+            "identity_source": "explicit gateway log fields only",
+            "limitation": (
+                "OpenClaw v2026.4.22 retry warnings omit childSessionKey "
+                "and announce runId; Agent_Bench does not infer identity "
+                "from timing."
+            ),
+        },
+        "loop_detection_count": len(loop_events),
+        "loop_detections": [
+            {
+                "timestamp": event.get("timestamp"),
+                "detector": event.get("detector"),
+                "tool_name": event.get("tool_name"),
+                "count": event.get("count"),
+                "level": event.get("level"),
+                "action": event.get("action"),
+                "terminal": event.get("terminal", False),
+            }
+            for event in loop_events
+        ],
+        "stuck_session_count": len(stuck_events),
+        "stuck_session_by_session": dict(stuck_by_session),
+        "stuck_session_classification": dict(classifications),
+        "stuck_diagnostic_policy": {
+            "runtime_version": (
+                "v" + str(os.environ.get("AB_AGENT_RUNTIME_VERSION") or "2026.4.22").lstrip("v")
+            ),
+            "default_warn_after_ms": 120000,
+            "heartbeat_interval_ms": 30000,
+            "trigger": "session state=processing with no diagnostic activity",
+            "is_failure": False,
+        },
+    }
+
+
+def build_openclaw_measurement(
+    run_dir: Path,
+    *,
+    agent_id: str,
+    execution_start_ns: int = 0,
+    execution_end_ns: int = 0,
+) -> dict:
+    """Write trajectory/token artifacts and return their manifest payload."""
+    logical, usage_events = _logical_tokens(run_dir, agent_id)
+    serving, request_events = _serving_tokens(run_dir)
+    events = _session_events(run_dir, agent_id)
+    events.extend(_gateway_events(run_dir))
+    events.extend(usage_events)
+    events.extend(request_events)
+    runtime_observability = _runtime_observability(
+        run_dir,
+        events,
+        agent_id,
+        execution_start_ns=execution_start_ns,
+        execution_end_ns=execution_end_ns,
+    )
+    termination = _loop_termination(events)
+    events.sort(key=lambda event: (event.get("timestamp_ns") or 0, event["event_type"]))
+
+    trajectory_path = run_dir / "trajectory.jsonl"
+    with trajectory_path.open("w") as stream:
+        for event in events:
+            stream.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    accounting = {
+        "trajectory_tokens": logical,
+        "serving_tokens": serving,
+        "runtime_observability": runtime_observability,
+        "sources": {
+            "trajectory_tokens": (
+                "deduplicated assistant usage in durable session transcripts; "
+                "session-attributed diagnostics OTel fallback"
+            ),
+            "serving_tokens": "raw OpenAI-compatible HTTP responses",
+        },
+    }
+    accounting_path = run_dir / "token_accounting.json"
+    accounting_path.write_text(json.dumps(accounting, indent=2))
+    observability_path = run_dir / "runtime_observability.json"
+    observability_path.write_text(json.dumps(runtime_observability, indent=2))
+    result = {
+        **accounting,
+        "trajectory_path": str(trajectory_path),
+        "token_accounting_path": str(accounting_path),
+        "runtime_observability_path": str(observability_path),
+    }
+    result.update(termination)
+    return result
+
+
+def append_trajectory_event(run_dir: Path, event_type: str, **fields: Any) -> None:
+    path = run_dir / "trajectory.jsonl"
+    event = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp_ns": int(datetime.now(timezone.utc).timestamp() * 1e9),
+        "session_id": None,
+        "session_key": None,
+        "role": "harness",
+        "event_type": event_type,
+        **fields,
+    }
+    with path.open("a") as stream:
+        stream.write(json.dumps(event, ensure_ascii=False) + "\n")

@@ -15,6 +15,11 @@ agent base class, ``_llm_client``, and ``util_sampler``). Two concerns:
      class calls ``wrap_singularity_argv`` inside ``_invoke_agent`` when
      ``env_info["backend"] == "singularity"``.
 
+Benchmarks can require a real authenticated Gateway RPC before the agent may
+start by setting ``OPENCLAW_AGENT_BENCH_REQUIRE_GATEWAY=1``. This prevents a
+transient ``[gateway] ready`` log line from being mistaken for an operational
+Gateway and rejects OpenClaw's automatic embedded fallback.
+
 These functions are NOT SWE-bench specific despite their pre-2026.5 home
 under ``agent_bench/benchmarks/swebench/openclaw/``. Both SWE-bench and TB harnesses
 reach for them.
@@ -22,6 +27,7 @@ reach for them.
 from __future__ import annotations
 
 import os
+import shlex
 import socket
 import threading
 from typing import Dict, List, Optional, Set, Tuple
@@ -80,6 +86,75 @@ def release_gateway_port(port: int) -> None:
 
 # ---------------------------------------------------------------------- singularity
 
+def _gateway_only_requested(env: Dict) -> bool:
+    return str(env.get("OPENCLAW_AGENT_BENCH_REQUIRE_GATEWAY") or "").lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _gateway_guarded_argv(argv: List[str], env: Dict) -> List[str]:
+    """Require the exact configured Gateway RPC and reject embedded fallback.
+
+    OpenClaw v2026.4.22 logs ``[gateway] ready`` before every configured
+    startup dependency is necessarily usable. The low-level ``gateway call``
+    command performs an authenticated WebSocket RPC against the exact URL,
+    avoiding false positives from another localhost Gateway. We retry for a
+    short bounded window because channels/sidecars may still be settling.
+
+    The upstream CLI can automatically continue in embedded mode after a
+    Gateway error. We capture stderr to a file, replay it to Agent_Bench after
+    the command, and force a non-zero exit when that fallback marker appears.
+    Direct redirection avoids a process-substitution flush race before grep.
+    """
+    gateway_url = str(env.get("OPENCLAW_GATEWAY_URL") or "")
+    gateway_token = str(env.get("OPENCLAW_GATEWAY_TOKEN") or "")
+    if not gateway_url or not gateway_token:
+        raise RuntimeError(
+            "gateway-only mode requires OPENCLAW_GATEWAY_URL and "
+            "OPENCLAW_GATEWAY_TOKEN"
+        )
+
+    ready_timeout_s = max(
+        1, int(os.environ.get("AB_OPENCLAW_GATEWAY_RPC_READY_TIMEOUT_SECONDS", "120"))
+    )
+    probe_timeout_ms = max(
+        1000, int(os.environ.get("AB_OPENCLAW_GATEWAY_RPC_PROBE_TIMEOUT_MS", "10000"))
+    )
+    command = shlex.join(argv)
+    script = f"""
+set -u
+ab_probe_log=$(mktemp /tmp/agent-bench-gateway-probe.XXXXXX)
+ab_deadline=$((SECONDS + {ready_timeout_s}))
+while ! openclaw gateway call status \
+  --url {shlex.quote(gateway_url)} \
+  --token {shlex.quote(gateway_token)} \
+  --timeout {probe_timeout_ms} --json >\"$ab_probe_log\" 2>&1; do
+  if (( SECONDS >= ab_deadline )); then
+    echo '[agent-bench] Roadmap gateway RPC readiness failed; refusing embedded fallback' >&2
+    cat \"$ab_probe_log\" >&2
+    rm -f \"$ab_probe_log\"
+    exit 86
+  fi
+  sleep 2
+done
+rm -f \"$ab_probe_log\"
+echo '[agent-bench] Roadmap gateway RPC ready; gateway execution selected' >&2
+
+ab_stderr=$(mktemp /tmp/agent-bench-openclaw-stderr.XXXXXX)
+{command} 2>\"$ab_stderr\"
+ab_rc=$?
+cat \"$ab_stderr\" >&2
+if grep -Fqi 'falling back to embedded' \"$ab_stderr\"; then
+  echo '[agent-bench] embedded fallback detected; Roadmap gateway-only run is invalid' >&2
+  rm -f \"$ab_stderr\"
+  exit 87
+fi
+rm -f \"$ab_stderr\"
+exit \"$ab_rc\"
+""".strip()
+    return ["bash", "-lc", script]
+
+
 def wrap_singularity_argv(
     argv: List[str], env: Dict, binds: List, sif: str, overlay: Optional[str] = None,
 ) -> Tuple[List[str], Dict]:
@@ -92,8 +167,8 @@ def wrap_singularity_argv(
     absolute paths in env vars (OPENCLAW_STATE_DIR etc) resolve identically
     inside the container.
 
-    OPENCLAW_*, OTEL_*, and AB_* env vars are forwarded into the container
-    via the SINGULARITYENV_ prefix.
+    OPENCLAW_*, LITELLM_*, OTEL_*, and AB_* env vars are forwarded into the
+    container via the SINGULARITYENV_ prefix.
     """
     bind_args: List[str] = []
     for src, dst in binds:
@@ -105,11 +180,17 @@ def wrap_singularity_argv(
         # `:ro` keeps the patched layer immutable across concurrent runs.
         overlay_args = ["--overlay", f"{overlay}:ro"]
 
-    new_argv = (
-        ["singularity", "exec"] + overlay_args + bind_args + [sif] + argv
-    )
     new_env = dict(env)
+
+    inner_argv = (
+        _gateway_guarded_argv(argv, new_env)
+        if _gateway_only_requested(new_env)
+        else argv
+    )
+    new_argv = (
+        ["singularity", "exec"] + overlay_args + bind_args + [sif] + inner_argv
+    )
     for k in list(new_env.keys()):
-        if k.startswith(("OPENCLAW_", "OTEL_", "AB_")):
-            new_env[f"SINGULARITYENV_{k}"] = new_env[k]
+        if k.startswith(("OPENCLAW_", "LITELLM_", "OTEL_", "AB_")):
+            new_env[f"SINGULARITYENV_{k}"] = str(new_env[k])
     return new_argv, new_env

@@ -37,6 +37,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _is_roadmap_instance(instance_data: dict) -> bool:
+    """Accept the first-class benchmark and legacy Terminal profile shape."""
+    return instance_data.get("benchmark") == "roadmap_bench" or (
+        instance_data.get("benchmark") == "terminal_bench"
+        and instance_data.get("benchmark_variant") == "roadmapbench"
+    )
+
+
+def _append_roadmap_trajectory_event(
+    run_dir: Path, event_type: str, **fields: Any
+) -> None:
+    """Append best-effort harness events without affecting benchmark results."""
+    try:
+        from agent_bench.benchmarks.conditions.openclaw_measurement import (
+            append_trajectory_event,
+        )
+
+        append_trajectory_event(run_dir, event_type, **fields)
+    except Exception:
+        logger.exception("trajectory %s event write failed", event_type)
+
+
 def _telemetry_bool(value: Any) -> Optional[bool]:
     if isinstance(value, bool):
         return value
@@ -107,8 +129,30 @@ def _maybe_render_spans_timeline(run_dir: Path, telemetry_path: Optional[str]) -
         spans = _load_spans(spans_path)
         if not spans:
             return
+        agent_timeline = None
+        observability_path = run_dir / "runtime_observability.json"
+        if observability_path.is_file():
+            try:
+                import json
+
+                observability = json.loads(
+                    observability_path.read_text(encoding="utf-8")
+                )
+                if isinstance(observability, dict):
+                    candidate = observability.get("agent_timeline")
+                    if isinstance(candidate, dict):
+                        agent_timeline = candidate
+            except (OSError, ValueError):
+                logger.debug(
+                    "could not load agent timeline from %s",
+                    observability_path,
+                    exc_info=True,
+                )
         output_path = run_dir / "spans_timeline.html"
-        output_path.write_text(render_html(spans, spans_path), encoding="utf-8")
+        output_path.write_text(
+            render_html(spans, spans_path, agent_timeline=agent_timeline),
+            encoding="utf-8",
+        )
         logger.info("  spans timeline -> %s", output_path)
     except Exception as exc:  # noqa: BLE001 - best-effort artifact
         logger.warning("spans timeline generation failed for %s: %s", run_dir.name, exc)
@@ -161,6 +205,121 @@ def _protect_cleanup_from_interrupts():
                 pass
 
 
+def _merge_agent_completion_into_verdict(verdict: dict, result: dict) -> dict:
+    """Add execution metadata without changing the verifier result."""
+    merged = dict(verdict)
+    exit_code = result.get("exit_code", 0)
+    completion_status = result.get("agent_completion_status")
+    if not completion_status:
+        completion_status = (
+            "normal_completion" if exit_code in (0, None) else "runtime_error"
+        )
+
+    raw_verifier_status = str(
+        merged.get("verifier_status") or merged.get("status") or "ERROR"
+    ).upper()
+    merged["verifier_status"] = (
+        raw_verifier_status
+        if raw_verifier_status in {"PASS", "FAIL", "TIMEOUT", "ERROR"}
+        else "ERROR"
+    )
+
+    reward = merged.get("reward")
+    if reward is None:
+        raw_reward = merged.get("reward_raw")
+        try:
+            reward = float(raw_reward) if raw_reward not in (None, "") else None
+        except (TypeError, ValueError):
+            reward = None
+    if (
+        reward is None
+        and raw_verifier_status in {"PASS", "FAIL"}
+        and isinstance(merged.get("test_pass_rate"), (int, float))
+    ):
+        reward = float(merged["test_pass_rate"])
+    merged["reward"] = float(reward) if reward is not None else None
+
+    test_pass_rate = merged.get("test_pass_rate")
+    has_valid_verifier_measurement = (
+        reward is not None or raw_verifier_status in {"PASS", "FAIL"}
+    )
+    merged["test_pass_rate"] = (
+        float(test_pass_rate)
+        if has_valid_verifier_measurement
+        and isinstance(test_pass_rate, (int, float))
+        else None
+    )
+
+    merged["agent_completion_status"] = completion_status
+    merged["agent_execution_outcome"] = completion_status
+    merged["agent_exit_code"] = exit_code
+    completion_error = result.get("agent_completion_error") or result.get(
+        "error_message"
+    )
+    if completion_status != "normal_completion" and not completion_error:
+        completion_error = f"agent trajectory ended as {completion_status}"
+    merged["agent_completion_error"] = completion_error or None
+    return merged
+
+
+def _roadmap_lifecycle_verifier_error(result: dict) -> Optional[str]:
+    """Return the safety error that must prevent Roadmap verification."""
+    lifecycle = result.get("agent_lifecycle")
+    if not isinstance(lifecycle, dict):
+        return None
+    if lifecycle.get("workspaceQuiesced") is not False:
+        return None
+    return str(
+        lifecycle.get("lifecycleError")
+        or lifecycle.get("orphanCancellationError")
+        or "Roadmap workspace could not be quiesced before verifier"
+    )
+
+
+def _roadmap_benchmark_invalid_reason(result: dict) -> Optional[str]:
+    """Return why a scored Roadmap sample is ineligible for formal metrics."""
+    runtime_mode = str(result.get("agent_runtime_mode") or "").strip()
+    if runtime_mode and runtime_mode != "gateway":
+        return (
+            "RoadmapBench requires OpenClaw gateway runtime; "
+            f"observed agent_runtime_mode={runtime_mode}"
+        )
+    outcome = str(
+        result.get("agent_execution_outcome")
+        or result.get("agent_completion_status")
+        or ""
+    ).strip().lower()
+    if outcome == "runtime_error":
+        return str(
+            result.get("agent_completion_error")
+            or result.get("error_message")
+            or "Roadmap agent runtime failed"
+        )
+    return None
+
+
+def _finalize_roadmap_verdict(
+    verdict: dict,
+    result: dict,
+    *,
+    verifier_error: Optional[str],
+    benchmark_invalid_reason: Optional[str],
+) -> dict:
+    """Attach orthogonal execution, verifier, and benchmark-validity state."""
+    merged = _merge_agent_completion_into_verdict(verdict, result)
+    if isinstance(result.get("agent_lifecycle"), dict):
+        merged["agent_lifecycle"] = result["agent_lifecycle"]
+    merged["verifier_eligible"] = verifier_error is None
+    merged["benchmark_valid"] = benchmark_invalid_reason is None
+    merged["benchmark_invalid_reason"] = benchmark_invalid_reason
+    if benchmark_invalid_reason:
+        # A verifier result remains useful diagnostically, but this sample
+        # must not be counted as a valid benchmark measurement.
+        merged["status"] = "ERROR"
+        merged["error_message"] = benchmark_invalid_reason
+    return merged
+
+
 def execute_run(run_config: RunConfig, harness: SWEBenchHarness, 
                 instance_data: dict, retry_errors: bool = True) -> RunManifest:
     """Execute a single run."""
@@ -192,6 +351,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
     
     container_id = None
     env_info = None
+    prepare_phase_timing: dict[str, Any] = {}
     harness_spans_path = run_dir / "spans.jsonl"
     trace_container = getattr(harness, "container", None)
     if hasattr(trace_container, "set_trace_path"):
@@ -202,15 +362,27 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         # without re-loading the dataset; SWE-bench harnesses ignore the kwarg.
         # AB_*_CONFIG paths (set in main()) are the authoritative config sources
         # used by harness adapters when rendering per-run runtime config.
-        env_info = harness.prepare_environment(
-            instance_id=run_config.instance_id,
-            repo_id=run_config.repo_id,
-            base_commit=run_config.base_commit,
-            container_image=run_config.container_image,
-            workspace_root=run_config.workspace_root,
-            run_id=run_id,
-            instance_data=instance_data,
-        )
+        environment_prepare_start_ns = time.time_ns()
+        try:
+            env_info = harness.prepare_environment(
+                instance_id=run_config.instance_id,
+                repo_id=run_config.repo_id,
+                base_commit=run_config.base_commit,
+                container_image=run_config.container_image,
+                workspace_root=run_config.workspace_root,
+                run_id=run_id,
+                instance_data=instance_data,
+            )
+        finally:
+            environment_prepare_end_ns = time.time_ns()
+            prepare_phase_timing.update({
+                "environment_prepare_start_ns": environment_prepare_start_ns,
+                "environment_prepare_end_ns": environment_prepare_end_ns,
+                "environment_prepare_seconds": max(0.0, (environment_prepare_end_ns - environment_prepare_start_ns) / 1e9),
+            })
+        if isinstance(env_info, dict):
+            hpt = env_info.get("prepare_phase_timing")
+            if isinstance(hpt, dict): prepare_phase_timing.update(hpt)
 
         # Hand the harness ref to the condition for any host-side helper that
         # needs to reach harness.run_tests / exec_in_container while the agent
@@ -256,7 +428,11 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             # in SWE-bench / TB / DR harness JSONs; instance_data is the
             # discriminator.
             benchmark = instance_data.get("benchmark", "swebench")
-            if benchmark == "terminal_bench":
+            if _is_roadmap_instance(instance_data):
+                from agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent import (
+                    RoadmapBenchOpenClawCondition as _Cls,
+                )
+            elif benchmark == "terminal_bench":
                 from agent_bench.benchmarks.terminal_bench.conditions.openclaw_agent import (
                     TerminalBenchOpenClawCondition as _Cls,
                 )
@@ -393,10 +569,47 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         benchmark_kind = instance_data.get("benchmark", "swebench")
         # TB and DR-Bench have no git-patch artifact — the agent's work lives
         # inside the task container (TB: services + files; DR: /workspace/report.md).
-        skip_patch_gate = benchmark_kind in ("terminal_bench", "deepresearch_bench", "longbench", "request_bench", "swe_atlas_qa")
+        skip_patch_gate = benchmark_kind in (
+            "terminal_bench", "roadmap_bench", "deepresearch_bench",
+            "longbench", "request_bench", "swe_atlas_qa",
+        )
         agent_exit_code = result.get("exit_code", 0)
+        is_roadmapbench = _is_roadmap_instance(instance_data)
+        phase_timing = result.get("phase_timing")
+        if not isinstance(phase_timing, dict):
+            phase_timing = {}
+            result["phase_timing"] = phase_timing
+        phase_timing.update(prepare_phase_timing)
+        agent_start_ns = phase_timing.get("agent_execution_start_ns")
+        environment_prepare_end_ns = phase_timing.get("environment_prepare_end_ns")
+        if isinstance(agent_start_ns, int) and isinstance(environment_prepare_end_ns, int):
+            phase_timing["post_prepare_before_agent_seconds"] = max(0.0, (agent_start_ns - environment_prepare_end_ns) / 1e9)
+        if isinstance(agent_start_ns, int) and manifest.wall_start_ns:
+            phase_timing["pre_agent_seconds"] = max(
+                0.0, (agent_start_ns - manifest.wall_start_ns) / 1e9
+            )
 
-        if agent_exit_code not in (0, None):
+        lifecycle_verifier_error = (
+            _roadmap_lifecycle_verifier_error(result)
+            if is_roadmapbench else None
+        )
+        benchmark_invalid_reason = (
+            _roadmap_benchmark_invalid_reason(result)
+            if is_roadmapbench else None
+        )
+        if lifecycle_verifier_error and not benchmark_invalid_reason:
+            benchmark_invalid_reason = lifecycle_verifier_error
+
+        verifier_start_ns = None
+        verifier_end_ns = None
+        if lifecycle_verifier_error:
+            verdict = {
+                "status": "ERROR",
+                "error_message": lifecycle_verifier_error,
+                "lifecycle_error": lifecycle_verifier_error,
+                "verifier_skipped": True,
+            }
+        elif agent_exit_code not in (0, None) and not is_roadmapbench:
             verdict = {
                 "status": "ERROR",
                 "error_message": result.get("error_message")
@@ -404,21 +617,77 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 "agent_exit_code": agent_exit_code,
             }
         elif skip_patch_gate or (patch_path.exists() and patch_path.stat().st_size > 0):
-            verdict = harness.run_tests(
-                container_id=container_id,
-                instance_id=run_config.instance_id,
-                workspace_root=env_info["workspace_root"],
-                timeout_seconds=run_config.wall_clock_budget_seconds,
-                patch=patch_path.read_text() if patch_path.exists() else "",
-                run_id=run_id,
-                instance_data=instance_data,
-                run_dir=run_dir,
-            )
+            verifier_start_ns = time.time_ns()
+            if is_roadmapbench:
+                _append_roadmap_trajectory_event(
+                    run_dir,
+                    "verifier_start",
+                    timestamp_ns=verifier_start_ns,
+                    instance_id=run_config.instance_id,
+                    candidate_patch_path=str(patch_path),
+                    candidate_patch_bytes=(
+                        patch_path.stat().st_size if patch_path.exists() else 0
+                    ),
+                )
+            try:
+                verdict = harness.run_tests(
+                    container_id=container_id,
+                    instance_id=run_config.instance_id,
+                    workspace_root=env_info["workspace_root"],
+                    timeout_seconds=run_config.wall_clock_budget_seconds,
+                    patch=patch_path.read_text() if patch_path.exists() else "",
+                    run_id=run_id,
+                    instance_data=instance_data,
+                    run_dir=run_dir,
+                )
+            except BaseException as exc:
+                if is_roadmapbench:
+                    _append_roadmap_trajectory_event(
+                        run_dir,
+                        "verifier_result",
+                        timestamp_ns=time.time_ns(),
+                        status="ERROR",
+                        error=str(exc),
+                    )
+                raise
+            finally:
+                verifier_end_ns = time.time_ns()
+                phase_timing.update({
+                    "verifier_start_ns": verifier_start_ns,
+                    "verifier_end_ns": verifier_end_ns,
+                    "verifier_seconds": (
+                        verifier_end_ns - verifier_start_ns
+                    ) / 1e9,
+                })
         else:
             verdict = {
                 "status": "FAIL",
                 "error_message": "No patch generated",
             }
+
+        if is_roadmapbench:
+            verdict = _finalize_roadmap_verdict(
+                verdict,
+                result,
+                verifier_error=lifecycle_verifier_error,
+                benchmark_invalid_reason=benchmark_invalid_reason,
+            )
+            if (
+                isinstance(verifier_end_ns, int)
+                and isinstance(verifier_start_ns, int)
+            ):
+                _append_roadmap_trajectory_event(
+                    run_dir,
+                    "verifier_result",
+                    timestamp_ns=verifier_end_ns,
+                    status=verdict.get("status"),
+                    verifier_status=verdict.get("verifier_status"),
+                    reward=verdict.get("reward"),
+                    test_pass_rate=verdict.get("test_pass_rate"),
+                    verifier_rc=verdict.get("verifier_rc"),
+                    timed_out=verdict.get("verifier_timed_out"),
+                    duration_seconds=(verifier_end_ns - verifier_start_ns) / 1e9,
+                )
         
         # Write verdict
         verdict_path = run_dir / "verdict.json"
@@ -454,6 +723,33 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         manifest.telemetry_path = result.get("telemetry_path")
         manifest.verdict_path = str(verdict_path)
         manifest.exit_code = result.get("exit_code", 0)
+        manifest.agent_runtime_mode = result.get("agent_runtime_mode")
+        manifest.agent_execution_outcome = verdict.get("agent_execution_outcome")
+        manifest.agent_completion_error = verdict.get("agent_completion_error")
+        manifest.agent_lifecycle = verdict.get("agent_lifecycle")
+        manifest.benchmark_valid = verdict.get("benchmark_valid")
+        manifest.benchmark_invalid_reason = verdict.get(
+            "benchmark_invalid_reason"
+        )
+        manifest.verifier_eligible = verdict.get("verifier_eligible")
+        manifest.agent_execution_seconds = result.get("agent_execution_seconds")
+        manifest.phase_timing = result.get("phase_timing")
+        manifest.verifier_status = verdict.get("verifier_status")
+        manifest.reward = verdict.get("reward")
+        manifest.test_pass_rate = verdict.get("test_pass_rate")
+        manifest.trajectory_path = result.get("trajectory_path")
+        manifest.token_accounting_path = result.get("token_accounting_path")
+        manifest.trajectory_tokens = result.get("trajectory_tokens")
+        manifest.serving_tokens = result.get("serving_tokens")
+        manifest.runtime_observability_path = result.get(
+            "runtime_observability_path"
+        )
+        manifest.runtime_observability = result.get("runtime_observability")
+        manifest.error_message = (
+            verdict.get("error_message")
+            if manifest.status in ("ERROR", "TIMEOUT")
+            else None
+        )
         manifest.total_prompt_tokens = result["total_prompt_tokens"]
         manifest.total_completion_tokens = result["total_completion_tokens"]
         
@@ -463,16 +759,13 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         manifest.error_message = str(e)[:500]
     
     finally:
+        # Preserve legacy duration_seconds (pre-cleanup) for historical comparability.
         manifest.wall_end_ns = time.time_ns()
         manifest.duration_seconds = (
             (manifest.wall_end_ns - manifest.wall_start_ns) / 1e9
         )
-        
-        # Cleanup. Forward env_info wholesale so harnesses can grab whichever
-        # keys they need (oc_container_id / task_container_id / network_name
-        # for two-container docker mode; gateway_pid / state_dir for legacy
-        # singularity; etc.). Strip keys that conflict with the positional
-        # argument or carry harness refs.
+        cleanup_error = None
+        cleanup_start_ns = time.time_ns()
         try:
             cleanup_kwargs = dict(env_info or {})
             for k in ("container_id", "_harness"):
@@ -481,7 +774,40 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 harness.cleanup(container_id, **cleanup_kwargs)
         except BaseException:
             logger.exception("cleanup failed")
+            cleanup_error = "harness cleanup failed"
         finally:
+            cleanup_end_ns = time.time_ns()
+            final_phase_timing = dict(manifest.phase_timing) if isinstance(manifest.phase_timing, dict) else {}
+            if isinstance(env_info, dict):
+                hpt = env_info.get("prepare_phase_timing")
+                if isinstance(hpt, dict): final_phase_timing.update(hpt)
+            final_phase_timing.update(prepare_phase_timing)
+            final_phase_timing.update({
+                "cleanup_start_ns": cleanup_start_ns,
+                "cleanup_end_ns": cleanup_end_ns,
+                "cleanup_seconds": max(0.0, (cleanup_end_ns - cleanup_start_ns) / 1e9),
+                "total_instance_end_ns": cleanup_end_ns,
+            })
+            if manifest.wall_start_ns:
+                manifest.total_instance_seconds = max(0.0, (cleanup_end_ns - manifest.wall_start_ns) / 1e9)
+                final_phase_timing["total_instance_seconds"] = manifest.total_instance_seconds
+            manifest.phase_timing = final_phase_timing
+            trajectory_path = run_dir / "trajectory.jsonl"
+            if trajectory_path.exists():
+                try:
+                    from agent_bench.benchmarks.conditions.openclaw_measurement import (
+                        append_trajectory_event,
+                    )
+
+                    append_trajectory_event(
+                        run_dir,
+                        "cleanup",
+                        status="error" if cleanup_error else "completed",
+                        error=cleanup_error,
+                        lifecycle=(result.get("agent_lifecycle") if "result" in locals() else None),
+                    )
+                except Exception:
+                    logger.exception("trajectory cleanup event write failed")
             _maybe_render_spans_timeline(run_dir, manifest.telemetry_path)
             manifest.save(get_manifest_path(run_id, run_config.output_dir))
             if hasattr(trace_container, "set_trace_path"):
@@ -530,13 +856,21 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
     #                            instances). Same isolation model in singularity-land.
     # Terminal-Bench / DR-Bench instances are auto-routed to their respective
     # harnesses regardless of HARNESS_BACKEND (per-instance dispatch in _one below).
-    _NON_SWE_BENCHMARKS = ("terminal_bench", "deepresearch_bench", "longbench", "request_bench", "swebench_pro", "swe_atlas_qa")
+    _NON_SWE_BENCHMARKS = (
+        "terminal_bench", "roadmap_bench", "deepresearch_bench", "longbench",
+        "request_bench", "swebench_pro", "swe_atlas_qa",
+    )
     needs_swe = any(
         inst.get("benchmark", "swebench") not in _NON_SWE_BENCHMARKS
         for inst in instances.values()
     )
     needs_tb = any(
-        inst.get("benchmark") == "terminal_bench" for inst in instances.values()
+        inst.get("benchmark") == "terminal_bench"
+        and not _is_roadmap_instance(inst)
+        for inst in instances.values()
+    )
+    needs_roadmap = any(
+        _is_roadmap_instance(inst) for inst in instances.values()
     )
     needs_dr = any(
         inst.get("benchmark") == "deepresearch_bench" for inst in instances.values()
@@ -713,9 +1047,14 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
     sa_harness = None
     if needs_sa:
         sa_backend = os.environ.get("AB_DEPLOYMENT_CONTAINER_BACKEND", "docker").lower()
-        if sa_backend != "docker":
+        if sa_backend == "docker":
+            sa_container = DockerContainer()
+        elif sa_backend == "singularity":
+            sa_container = SingularityContainer()
+        else:
             raise ValueError(
-                f"swe_atlas_qa only supports AB_DEPLOYMENT_CONTAINER_BACKEND=docker (got {sa_backend!r})."
+                f"Unknown AB_DEPLOYMENT_CONTAINER_BACKEND={sa_backend!r}; "
+                "expected docker|singularity."
             )
         if harness_choice == "openclaw":
             from agent_bench.benchmarks.swe_atlas_qa.openclaw.app import (
@@ -729,19 +1068,39 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
             raise ValueError(
                 f"swe_atlas_qa supports harness=openclaw|hermes (got {harness_choice!r})."
             )
-        from agent_bench.deployments.containers.docker import DockerContainer
-        logger.info("Constructing SWEAtlasQA harness (%s).", harness_choice)
-        sa_harness = sa_cls(benchmark_data_root, container=DockerContainer())
+        logger.info(
+            "Constructing SWEAtlasQA harness (%s) with %s.",
+            harness_choice,
+            type(sa_container).__name__,
+        )
+        sa_harness = sa_cls(
+            benchmark_data_root,
+            container=sa_container,
+        )
 
     # Lazy-build the TB harness only if any instance in this sweep is TB.
     # Harness choice now applies to Terminal-Bench too:
-    #   openclaw  -> TerminalBenchDockerHarness / TerminalBenchSingularityHarness
+    #   openclaw  -> TerminalBenchOpenClawHarness (Docker or Singularity)
     #   openhands -> TerminalBenchOpenHandsHarness (docker)
     #   hermes    -> TerminalBenchHermesHarness (docker)
     tb_harness = None
     if needs_tb:
         tb_backend = os.environ.get("AB_DEPLOYMENT_CONTAINER_BACKEND", "docker").lower()
-        if harness_choice == "openhands":
+        if harness_choice == "openclaw":
+            from agent_bench.benchmarks.terminal_bench.app import (
+                TerminalBenchOpenClawHarness as tb_cls,
+            )
+            if tb_backend == "docker":
+                tb_container = DockerContainer()
+            elif tb_backend == "singularity":
+                tb_container = SingularityContainer()
+            else:
+                raise ValueError(
+                    f"Unknown AB_DEPLOYMENT_CONTAINER_BACKEND={tb_backend!r} for terminal_bench; "
+                    "expected docker|singularity."
+                )
+            tb_harness = tb_cls(benchmark_data_root, container=tb_container)
+        elif harness_choice == "openhands":
             if tb_backend != "docker":
                 raise ValueError(
                     "terminal_bench + openhands currently requires "
@@ -785,6 +1144,39 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
         else:
             logger.info("Constructing %s.", type(tb_harness).__name__)
 
+    roadmap_harness = None
+    if needs_roadmap:
+        roadmap_backend = os.environ.get(
+            "AB_DEPLOYMENT_CONTAINER_BACKEND", "docker"
+        ).lower()
+        if harness_choice != "openclaw":
+            raise ValueError(
+                "roadmap_bench currently requires harness=openclaw "
+                f"(got {harness_choice!r})"
+            )
+        if roadmap_backend == "docker":
+            roadmap_container = DockerContainer()
+        elif roadmap_backend == "singularity":
+            roadmap_container = SingularityContainer()
+        else:
+            raise ValueError(
+                "roadmap_bench requires "
+                "AB_DEPLOYMENT_CONTAINER_BACKEND=docker|singularity "
+                f"(got {roadmap_backend!r})"
+            )
+        from agent_bench.benchmarks.roadmap_bench.app import (
+            RoadmapBenchOpenClawHarness,
+        )
+
+        roadmap_harness = RoadmapBenchOpenClawHarness(
+            benchmark_data_root,
+            container=roadmap_container,
+        )
+        logger.info(
+            "Constructing RoadmapBenchOpenClawHarness with %s.",
+            type(roadmap_container).__name__,
+        )
+
     completed = 0
     failed = 0
     total = len(run_configs)
@@ -793,7 +1185,9 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
         try:
             inst = instances[rc.instance_id]
             bm = inst.get("benchmark")
-            if bm == "terminal_bench":
+            if _is_roadmap_instance(inst):
+                h = roadmap_harness
+            elif bm == "terminal_bench":
                 h = tb_harness
             elif bm == "deepresearch_bench":
                 h = dr_harness

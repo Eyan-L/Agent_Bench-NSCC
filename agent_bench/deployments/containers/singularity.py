@@ -107,6 +107,7 @@ class SingularityContainer(Container):
         self._keepalive_dir.mkdir(parents=True, exist_ok=True)
         # Per-instance bg-exec PIDs, so `stop` can clean them up.
         self._main_pids: dict[str, int] = {}
+        self._aux_processes: dict[str, list[subprocess.Popen]] = {}
         # Per-handle start-time env, replayed on every exec() so the
         # singularity backend matches docker semantics: env set at container
         # creation is visible to subsequent execs. `singularity exec
@@ -267,6 +268,23 @@ class SingularityContainer(Container):
         )
 
     def stop(self, h: ContainerHandle) -> None:
+        for proc in self._aux_processes.pop(h.name, []):
+            if proc.poll() is not None:
+                continue
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=10)
+            except (ProcessLookupError, PermissionError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait(timeout=5)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                except subprocess.TimeoutExpired:
+                    logger.warning(
+                        "auxiliary singularity exec did not exit after SIGKILL: pid=%s",
+                        proc.pid,
+                    )
         # Kill any bg-exec we tracked (e.g. the OC gateway exec).
         pid = self._main_pids.pop(h.name, None)
         if pid:
@@ -322,15 +340,120 @@ class SingularityContainer(Container):
             )
         return r
 
-    def copy_into(self, h: ContainerHandle, src: Path, dst: str) -> None:
-        """Stream src into the instance via stdin → `cat > dst`.
+    def popen_exec(
+        self,
+        h: ContainerHandle,
+        argv: list[str],
+        *,
+        workdir: Optional[str] = None,
+        env: Optional[dict[str, str]] = None,
+    ) -> subprocess.Popen:
+        cmd: list[str] = ["singularity", "exec"]
+        if workdir:
+            cmd += ["--pwd", workdir]
+        merged: dict[str, str] = {}
+        stashed = self._handle_env.get(h.name)
+        if stashed:
+            merged.update(stashed)
+        if env:
+            merged.update(env)
+        exec_env = _subprocess_env()
+        for key, value in merged.items():
+            _set_singularity_env(exec_env, key, value)
+        cmd += [f"instance://{h.name}", *argv]
+        return subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+            env=exec_env,
+        )
 
-        Avoids assuming the destination path lives on a bound host dir.
-        For binary safety we pipe raw bytes and use base64 inside the
-        container to round-trip.
+    def exec_background(
+        self,
+        h: ContainerHandle,
+        argv: list[str],
+        *,
+        workdir: Optional[str] = None,
+        env: Optional[dict[str, str]] = None,
+    ) -> Optional[int]:
+        """Run a persistent auxiliary command tied to the instance lifecycle."""
+        cmd: list[str] = ["singularity", "exec"]
+        if workdir:
+            cmd += ["--pwd", workdir]
+        merged: dict[str, str] = {}
+        stashed = self._handle_env.get(h.name)
+        if stashed:
+            merged.update(stashed)
+        if env:
+            merged.update(env)
+        exec_env = _subprocess_env()
+        for key, value in merged.items():
+            _set_singularity_env(exec_env, key, value)
+        cmd += [f"instance://{h.name}", *argv]
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            env=exec_env,
+        )
+        time.sleep(0.25)
+        returncode = proc.poll()
+        if returncode is not None:
+            raise RuntimeError(
+                f"singularity background exec failed "
+                f"({argv[0] if argv else ''}): rc={returncode}"
+            )
+        self._aux_processes.setdefault(h.name, []).append(proc)
+        return proc.pid
+
+    def copy_into(self, h: ContainerHandle, src: Path, dst: str) -> None:
+        """Copy a file or directory into a running instance.
+
+        Directories use a tar stream so callers can inject Terminal-Bench's
+        private ``/tests`` tree only at scoring time. Files keep the existing
+        base64 path, which avoids assuming the destination is host-bound.
         """
+        src = Path(src)
+        if src.is_dir():
+            producer = subprocess.Popen(
+                ["tar", "-C", str(src), "-cf", "-", "."],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            consumer = subprocess.Popen(
+                ["singularity", "exec", f"instance://{h.name}",
+                 "sh", "-c", f"mkdir -p '{dst}' && tar -C '{dst}' -xf -"],
+                stdin=producer.stdout, stderr=subprocess.PIPE,
+                env=_subprocess_env(),
+            )
+            if producer.stdout is not None:
+                producer.stdout.close()
+            try:
+                consumer_err = consumer.communicate(timeout=300)[1]
+                producer_err = producer.communicate(timeout=10)[1]
+            except subprocess.TimeoutExpired:
+                consumer.kill()
+                producer.kill()
+                raise RuntimeError(f"copy_into timed out copying directory {src} to {dst}")
+            if producer.returncode != 0:
+                raise RuntimeError(
+                    f"copy_into: host tar failed for {src}: "
+                    f"{(producer_err or b'').decode(errors='replace')[-500:]}"
+                )
+            if consumer.returncode != 0:
+                raise RuntimeError(
+                    f"copy_into: in-instance tar failed for {dst}: "
+                    f"{(consumer_err or b'').decode(errors='replace')[-500:]}"
+                )
+            return
+        if not src.is_file():
+            raise FileNotFoundError(f"copy_into source does not exist: {src}")
         import base64
-        data = Path(src).read_bytes()
+        data = src.read_bytes()
         b64 = base64.b64encode(data).decode("ascii")
         # `printf %s` survives shells that mangle echo (dash, ash).
         # Write to dst.tmp then mv to dst — atomic-ish overwrite.
@@ -418,41 +541,116 @@ class SingularityContainer(Container):
         *,
         timeout: float = 600.0,
     ) -> None:
-        """Pipe `tar -cf -` from inside the sif into a host `tar -xf -`."""
+        """Extract a SIF workspace atomically with a progress-aware stall timeout.
+
+        ``timeout`` is an inactivity timeout, not a total copy deadline. Large
+        workspaces may take arbitrarily long as long as the host ``tar`` keeps
+        consuming or writing bytes. Extraction happens in a sibling staging
+        directory so a failed or stalled copy can never expose a partial tree.
+        """
         self.check_image(image)
-        dst_host.mkdir(parents=True, exist_ok=True)
+        dst_host = Path(dst_host)
+        dst_host.parent.mkdir(parents=True, exist_ok=True)
         src = src_in_image.rstrip("/")
-        producer = subprocess.Popen(
-            ["singularity", "exec", image,
-             "tar", "-C", src, "-cf", "-", "."],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=_subprocess_env(),
+        staging = Path(
+            tempfile.mkdtemp(
+                prefix=f".{dst_host.name}.prime-",
+                dir=str(dst_host.parent),
+            )
         )
-        consumer = subprocess.Popen(
-            ["tar", "-C", str(dst_host), "-xf", "-"],
-            stdin=producer.stdout, stderr=subprocess.PIPE,
-        )
-        if producer.stdout is not None:
-            # let consumer own the read end
-            producer.stdout.close()
+        producer: Optional[subprocess.Popen] = None
+        consumer: Optional[subprocess.Popen] = None
+
+        def _io_signature(pid: int) -> Optional[tuple[int, int, int, int]]:
+            try:
+                values: dict[str, int] = {}
+                for line in Path(f"/proc/{pid}/io").read_text().splitlines():
+                    key, _, raw = line.partition(":")
+                    if key in {"rchar", "wchar", "syscr", "syscw"}:
+                        values[key] = int(raw.strip())
+                return tuple(
+                    values.get(key, 0)
+                    for key in ("rchar", "wchar", "syscr", "syscw")
+                )
+            except (OSError, ValueError):
+                return None
+
         try:
-            consumer_err = consumer.communicate(timeout=timeout)[1]
-            producer_err = producer.communicate(timeout=10)[1]
-        except subprocess.TimeoutExpired:
-            consumer.kill()
-            producer.kill()
-            raise RuntimeError(
-                f"copy_from_image timed out after {timeout}s "
-                f"({image}:{src_in_image} → {dst_host})"
+            producer = subprocess.Popen(
+                ["singularity", "exec", image,
+                 "tar", "-C", src, "-cf", "-", "."],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=_subprocess_env(),
             )
-        if consumer.returncode != 0:
-            raise RuntimeError(
-                f"copy_from_image: host tar -x failed: {(consumer_err or b'').decode(errors='replace')[-500:]}"
+            consumer = subprocess.Popen(
+                ["tar", "-C", str(staging), "-xf", "-"],
+                stdin=producer.stdout, stderr=subprocess.PIPE,
             )
-        if producer.returncode != 0:
-            raise RuntimeError(
-                f"copy_from_image: in-sif tar -c failed: {(producer_err or b'').decode(errors='replace')[-500:]}"
-            )
+            if producer.stdout is not None:
+                producer.stdout.close()
+
+            last_progress = time.monotonic()
+            last_signature = _io_signature(consumer.pid)
+            while consumer.poll() is None:
+                time.sleep(5.0)
+                now = time.monotonic()
+                signature = _io_signature(consumer.pid)
+                if signature is None:
+                    # Singularity runs on Linux, where /proc is normally
+                    # available. If it is unavailable, prefer
+                    # waiting over falsely killing a large but healthy copy.
+                    last_progress = now
+                elif last_signature is None or signature != last_signature:
+                    last_progress = now
+                    last_signature = signature
+                elif timeout > 0 and now - last_progress >= timeout:
+                    consumer.kill()
+                    producer.kill()
+                    consumer.communicate()
+                    producer.communicate()
+                    raise RuntimeError(
+                        f"copy_from_image stalled for {timeout}s without I/O progress "
+                        f"({image}:{src_in_image} → {dst_host})"
+                    )
+
+            consumer_err = consumer.communicate()[1]
+            try:
+                producer_err = producer.communicate(timeout=30)[1]
+            except subprocess.TimeoutExpired:
+                producer.kill()
+                producer_err = producer.communicate()[1]
+                raise RuntimeError(
+                    "copy_from_image producer did not exit after extraction "
+                    f"({image}:{src_in_image} → {dst_host})"
+                )
+
+            if consumer.returncode != 0:
+                raise RuntimeError(
+                    "copy_from_image: host tar -x failed: "
+                    f"{(consumer_err or b'').decode(errors='replace')[-500:]}"
+                )
+            if producer.returncode != 0:
+                raise RuntimeError(
+                    "copy_from_image: in-sif tar -c failed: "
+                    f"{(producer_err or b'').decode(errors='replace')[-500:]}"
+                )
+
+            if dst_host.exists():
+                if dst_host.is_dir():
+                    shutil.rmtree(dst_host)
+                else:
+                    dst_host.unlink()
+            os.replace(staging, dst_host)
+            staging = None  # type: ignore[assignment]
+        finally:
+            if consumer is not None and consumer.poll() is None:
+                consumer.kill()
+                consumer.communicate()
+            if producer is not None and producer.poll() is None:
+                producer.kill()
+                producer.communicate()
+            if staging is not None and staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
 
     # ------------------------------------------------------------------
     # Liveness / log waiting
@@ -477,6 +675,27 @@ class SingularityContainer(Container):
             return ""
         return h.log_path.read_text(errors="replace")
 
+    def _poll_tracked_main_process(self, name: str):
+        """Return the tracked command's exit status, or ``None`` if active."""
+        pid = self._main_pids.get(name)
+        if not pid:
+            return None
+        try:
+            waited_pid, status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            self._main_pids.pop(name, None)
+            return "unknown"
+        except OSError:
+            return None
+        if waited_pid == 0:
+            return None
+        self._main_pids.pop(name, None)
+        if os.WIFEXITED(status):
+            return os.WEXITSTATUS(status)
+        if os.WIFSIGNALED(status):
+            return -os.WTERMSIG(status)
+        return "unknown"
+
     def wait_log_pattern(
         self,
         h: ContainerHandle,
@@ -485,13 +704,19 @@ class SingularityContainer(Container):
         *,
         poll_s: float = 2.0,
     ) -> None:
-        deadline = time.time() + timeout_s
+        deadline = time.monotonic() + timeout_s
         last_tail = ""
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             log_text = self.logs(h)
+            last_tail = log_text[-1500:]
+            exit_code = self._poll_tracked_main_process(h.name)
+            if exit_code is not None:
+                raise RuntimeError(
+                    f"singularity main process for {h.name} exited before "
+                    f"readiness (rc={exit_code}). last log:\n{last_tail}"
+                )
             if pattern.search(log_text):
                 return
-            last_tail = log_text[-1500:]
             if not self.is_running(h):
                 raise RuntimeError(
                     f"singularity instance {h.name} exited before log pattern matched. "
@@ -499,8 +724,8 @@ class SingularityContainer(Container):
                 )
             time.sleep(poll_s)
         raise RuntimeError(
-            f"singularity instance {h.name} did not match log pattern within "
-            f"{timeout_s}s. last log:\n{last_tail}"
+            f"timed out waiting {timeout_s}s for log pattern in singularity "
+            f"instance {h.name}. last log:\n{last_tail}"
         )
 
 

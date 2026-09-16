@@ -1,0 +1,80 @@
+# RoadmapBench single-agent control on the shared Terminal-Bench lifecycle.
+# Matches openclaw_roadmapbench.yaml except delegation tools/policy are removed.
+harness: openclaw
+terminal_bench:
+  agent_assets_dir: agent_bench/benchmarks/roadmap_bench/openclaw/agents_single_agent
+  skills_dir: agent_bench/benchmarks/roadmap_bench/openclaw/skills
+  agent_prompt_file: AGENTS.md
+  workspace_bootstrap_file: BOOTSTRAP.md
+  workspace_asset_files:
+  - AGENTS.md
+  - IDENTITY.md
+  - TOOLS.md
+  - BOOTSTRAP.md
+openclaw:
+  gateway:
+    mode: local
+    bind: loopback
+    auth:
+      mode: token
+      token:
+        source: env
+        provider: default
+        id: OPENCLAW_GATEWAY_TOKEN
+  diagnostics:
+    enabled: true
+    otel:
+      enabled: true
+      endpoint: http://localhost:4318
+      protocol: http/protobuf
+      serviceName: agent-bench-openclaw
+      traces: true
+      metrics: true
+      logs: true
+      sampleRate: 1
+      flushIntervalMs: 20
+    cacheTrace:
+      enabled: true
+      includeMessages: true
+      includePrompt: true
+      includeSystem: true
+  tools:
+    exec:
+      host: gateway
+      security: full
+    loopDetection:
+      enabled: true
+    alsoAllow:
+    - sessions_list
+    - sessions_history
+    - sessions_send
+    - session_status
+  skills:
+    load:
+      extraDirs:
+      - /root/.openclaw/skills
+  plugins:
+    entries:
+      vllm:
+        enabled: true
+      memory-core:
+        enabled: false
+      diagnostics-otel:
+        enabled: true
+  agents:
+    defaults:
+      workspace: /app
+      # Agent_Bench's 7200s condition deadline is the parent execution fence.
+      timeoutSeconds: 0
+    list:
+    - id: roadmap_bench
+      default: true
+      name: roadmap-single-agent-engineer
+conditions:
+- condition_id: openclaw_agent
+  condition_type: openclaw_agent
+  description: RoadmapBench single-agent serial control with delegation disabled
+  agent:
+    max_steps: 600
+    max_time_seconds: 7200
+    retry_limit: 5
