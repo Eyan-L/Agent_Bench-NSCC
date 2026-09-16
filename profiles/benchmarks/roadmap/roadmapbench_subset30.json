@@ -1,5 +1,5 @@
 {
-  "_doc": "RoadmapBench subset30 profile with pilot-selected tasks removed and replacements pending.",
+  "_doc": "RoadmapBench retained evaluation profile: 19 pilot-retained tasks plus 10 replacement tasks.",
   "sweep_name": "roadmapbench_subset30",
   "plan_version": "roadmapbench-59184e779909-subset30",
   "application": "terminal_bench",
@@ -10,8 +10,14 @@
   "instances": [
     "pyg-2.3.0-roadmap",
     "fal-2.0.0-roadmap",
+    "ktx-0.6.0-roadmap",
+    "fbr-2.37.0-roadmap",
     "pyg-1.7.2-roadmap",
+    "fyn-2.1.0-roadmap",
     "fyn-2.2.0-roadmap",
+    "fal-4.1.0-roadmap",
+    "fbr-2.40.0-roadmap",
+    "ktx-0.9.0-roadmap",
     "pyg-2.1.0-roadmap",
     "pyg-2.6.0-roadmap",
     "fbr-2.27.0-roadmap",
@@ -19,14 +25,18 @@
     "mko-6.4.0-roadmap",
     "fbr-2.43.0-roadmap",
     "glz-6.1.0-roadmap",
-    "fbr-2.37.0-roadmap",
-    "ktx-0.6.0-roadmap",
-    "fal-4.1.0-roadmap",
-    "fyn-2.1.0-roadmap",
-    "fbr-2.40.0-roadmap",
-    "ktx-0.9.0-roadmap",
     "opt-3.0.0-roadmap",
-    "dsl-2.2.0-roadmap"
+    "dsl-2.2.0-roadmap",
+    "dsl-2.3.0-roadmap",
+    "fal-3.0.0-roadmap",
+    "fal-4.0.0-roadmap",
+    "fbr-2.42.0-roadmap",
+    "fyn-2.5.0-roadmap",
+    "fyn-2.7.0-roadmap",
+    "ktx-0.10.0-roadmap",
+    "ktx-0.15.1-roadmap",
+    "opt-4.0.0-roadmap",
+    "pyg-2.2.0-roadmap"
   ],
   "repo_mapping": {
     "pyg-2.3.0-roadmap": {
@@ -104,6 +114,46 @@
     "dsl-2.2.0-roadmap": {
       "repo_id": "roadmapbench/dsl-2.2.0-roadmap",
       "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "dsl-2.3.0-roadmap": {
+      "repo_id": "roadmapbench/dsl-2.3.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "fal-3.0.0-roadmap": {
+      "repo_id": "roadmapbench/fal-3.0.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "fal-4.0.0-roadmap": {
+      "repo_id": "roadmapbench/fal-4.0.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "fbr-2.42.0-roadmap": {
+      "repo_id": "roadmapbench/fbr-2.42.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "fyn-2.5.0-roadmap": {
+      "repo_id": "roadmapbench/fyn-2.5.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "fyn-2.7.0-roadmap": {
+      "repo_id": "roadmapbench/fyn-2.7.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "ktx-0.10.0-roadmap": {
+      "repo_id": "roadmapbench/ktx-0.10.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "ktx-0.15.1-roadmap": {
+      "repo_id": "roadmapbench/ktx-0.15.1-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "opt-4.0.0-roadmap": {
+      "repo_id": "roadmapbench/opt-4.0.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "pyg-2.2.0-roadmap": {
+      "repo_id": "roadmapbench/pyg-2.2.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
     }
   },
   "container_image": "UNUSED",
@@ -114,6 +164,6 @@
   ],
   "selection": {
     "method": "manual fixed high-fanout RoadmapBench subset",
-    "rationale": "Pilot tasks with repeated floor results, runtime instability, or extreme low-value latency were removed; replacements are intentionally pending."
+    "rationale": "The profile is the ordered concatenation of subset10a, subset10b, and subset10c after pilot-result curation and replacement selection."
   }
 }

@@ -14,7 +14,10 @@
     "fbr-2.37.0-roadmap",
     "pyg-1.7.2-roadmap",
     "fyn-2.1.0-roadmap",
-    "fyn-2.2.0-roadmap"
+    "fyn-2.2.0-roadmap",
+    "fal-4.1.0-roadmap",
+    "fbr-2.40.0-roadmap",
+    "ktx-0.9.0-roadmap"
   ],
   "repo_mapping": {
     "pyg-2.3.0-roadmap": {
@@ -44,6 +47,18 @@
     "fyn-2.2.0-roadmap": {
       "repo_id": "roadmapbench/fyn-2.2.0-roadmap",
       "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "fal-4.1.0-roadmap": {
+      "repo_id": "roadmapbench/fal-4.1.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "fbr-2.40.0-roadmap": {
+      "repo_id": "roadmapbench/fbr-2.40.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "ktx-0.9.0-roadmap": {
+      "repo_id": "roadmapbench/ktx-0.9.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
     }
   },
   "container_image": "UNUSED",
@@ -54,6 +69,6 @@
   ],
   "selection": {
     "method": "manual fixed high-fanout RoadmapBench subset",
-    "rationale": "Retained subset10a tasks after removing pilot tasks with repeated floor results, runtime instability, or extreme low-value latency; replacements are intentionally pending."
+    "rationale": "Ten retained tasks after pilot-result curation, preserving the existing subset10a tasks and adding three retained former subset10c tasks."
   }
 }

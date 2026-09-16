@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-IMAGE_DIR="${1:-$PWD/roadmapbench-subset10d-sifs}"
+IMAGE_DIR="${1:-$PWD/roadmapbench-subset10c-sifs}"
 
 images=(
     znpt/roadmapbench-dsl-2.3.0-roadmap
