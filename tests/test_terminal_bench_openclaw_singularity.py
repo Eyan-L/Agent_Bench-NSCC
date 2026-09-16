@@ -198,6 +198,20 @@ def test_roadmap_verifier_does_not_misclassify_rust_compile_failure():
     ) is None
 
 
+def test_roadmap_verifier_does_not_misclassify_candidate_storage_failure():
+    assert tb_app._roadmap_verifier_infrastructure_error(
+        "",
+        "failed to open /app/.cargo/registry/cache/pkg.crate: Permission denied",
+    ) is None
+
+
+def test_roadmap_verifier_does_not_misclassify_cargo_transport_failure():
+    assert tb_app._roadmap_verifier_infrastructure_error(
+        "",
+        "failed to download from https://crates.io: operation timed out",
+    ) is None
+
+
 def test_terminal_bench_openclaw_singularity_returns_runtime_handle(tmp_path, monkeypatch):
     _FakeDispatcher.last_start_kwargs = None
     runtime_sif = tmp_path / "openclaw.sif"
@@ -847,7 +861,7 @@ def test_roadmap_lifecycle_summary_retains_pruned_completed_children(tmp_path):
     _write_roadmap_session_state(
         sessions_dir,
         events,
-        child_statuses=("done", "completed", "done", "completed"),
+        child_statuses=("done", "completed", "killed", "completed"),
     )
     condition = _roadmap_condition_for_state(tmp_path)
 

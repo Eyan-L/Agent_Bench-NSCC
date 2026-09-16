@@ -40,7 +40,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     _ACTIVE_CHILD_STATES = frozenset({"accepted", "queued", "pending", "running"})
     _TERMINAL_CHILD_STATES = frozenset({
         "done", "completed", "failed", "error", "timeout", "timed_out",
-        "cancelled", "canceled",
+        "cancelled", "canceled", "killed",
     })
     _ACTIVE_PARENT_STATES = frozenset({
         "accepted", "queued", "pending", "processing", "running",

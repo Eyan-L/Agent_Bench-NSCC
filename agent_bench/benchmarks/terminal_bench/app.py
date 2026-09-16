@@ -314,26 +314,21 @@ def _roadmap_verifier_infrastructure_error(
     """Recognize verifier failures that cannot measure the candidate.
 
     Keep this deliberately narrow. Rust compile/test failures are candidate
-    failures; Cargo being unable to use its registry/cache due to the runtime
-    filesystem or dependency transport is verifier infrastructure failure.
+    failures. Only storage failures on the immutable system Cargo home or the
+    harness-owned verifier Cargo home are infrastructure failures. Dependency
+    transport can be caused by candidate dependency changes and is therefore
+    left to the verifier result.
     """
     output = f"{stdout}\n{stderr}"
     lower = output.lower()
-    cargo_context = any(token in lower for token in (
-        "/cargo/registry", "cargo_home", "crates.io", "download of ",
-        "failed to get `", "failed to download from",
+    known_cargo_storage = any(path in lower for path in (
+        "/usr/local/cargo/", "/logs/verifier/cargo-home/",
     ))
     filesystem_failure = any(token in lower for token in (
         "read-only file system", "permission denied", "no space left on device",
     ))
-    transport_failure = any(token in lower for token in (
-        "could not resolve host", "failed to resolve host",
-        "failed to connect", "operation timed out", "network failure",
-    ))
-    if cargo_context and filesystem_failure:
+    if known_cargo_storage and filesystem_failure:
         return "Cargo verifier storage was unavailable or read-only"
-    if cargo_context and transport_failure:
-        return "Cargo verifier dependency transport failed"
     return None
 
 
