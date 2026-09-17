@@ -11,6 +11,7 @@ import pytest
 
 from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     CONSECUTIVE_EMPTY_STOP_RESET_MARKER,
+    CURRENT_ASSISTANT_EMPTY_STOP_MARKER,
     EMPTY_STOP_RETRY_LIMIT_MARKER,
     EXEC_MARKER,
     FS_CHECK_MARKER,
@@ -107,6 +108,29 @@ def _runtime_tree(tmp_path: Path) -> Path:
         f"const b = '{LITELLM_PRICING_URL}';\n"
     )
     (dist / "builtin-openclaw-test.js").write_text(
+        "function classifyAssistantTurn(params) {\n"
+        "  const assistant = params.attempt.currentAttemptAssistant;\n"
+        "  const visibleText = (params.attempt.assistantTexts ?? []).join('');\n"
+        "  return {\n"
+        "    assistant, visibleText, reasoningOnly: false,\n"
+        "    emptyResponse: visibleText.length === 0,\n"
+        "  };\n"
+        "}\n"
+        "function resolveSettledToolBatchEvidence(attempt) {\n"
+        "  return attempt.settledToolEvidence ?? {\n"
+        "    allToolsProvenSettled: false, intentionalTermination: false,\n"
+        "    parkedCodeModeRun: false,\n"
+        "  };\n"
+        "}\n"
+        "function hasCompletedMessagingToolDeliveryEvidence() { return false; }\n"
+        "function hasAsyncActivity(toolMetas) {\n"
+        "  return (toolMetas ?? []).some((entry) => entry.asyncStarted === true);\n"
+        "}\n"
+        "function shouldSkipNonVisibleTurnRetry() { return false; }\n"
+        "function shouldApplyNonVisibleTurnRetryGuard() { return true; }\n"
+        "function isOllamaIncompleteTurnProvider() { return false; }\n"
+        "function hasPositiveOutputTokenUsage() { return false; }\n"
+        "function isZeroUsageEmptyStopAssistantTurn() { return false; }\n"
         "const EMPTY_RESPONSE_RETRY_INSTRUCTION = "
         '"The previous attempt did not produce a user-visible answer. Continue '
         "from the current state and produce the visible answer now. Do not "
@@ -231,6 +255,7 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert SETTLED_CONTINUATION_RETRY_MARKER in builtin_text
     assert SETTLED_CONTINUATION_LENGTH_MARKER in builtin_text
     assert NONEMPTY_LENGTH_ELIGIBILITY_MARKER in builtin_text
+    assert CURRENT_ASSISTANT_EMPTY_STOP_MARKER in builtin_text
     assert SETTLED_CONTINUATION_TOOL_ERROR_MARKER in builtin_text
     assert "__abSettledToolEvidence.allToolsProvenSettled" in builtin_text
     assert "!__abSettledToolEvidence.hasUnsettledToolError" not in builtin_text
@@ -239,9 +264,9 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert "const __abExplicitDone" in builtin_text
     assert "!__abExplicitDone" in builtin_text
     assert "!__abAssistantState.reasoningOnly" in builtin_text
-    assert (
-        "__abAssistantState.emptyResponse || __abIncompleteLength" in builtin_text
-    )
+    assert "__abAssistantState.emptyResponse" in builtin_text
+    assert "|| __abCurrentAssistantEmptyStop" in builtin_text
+    assert "|| __abIncompleteLength" in builtin_text
     assert "&& __abRoadmapContinuationEligible" in builtin_text
     assert 'params.attempt?.terminal?.kind !== "timeout"' in builtin_text
     assert "!hasCompletedMessagingToolDeliveryEvidence(params.attempt)" in (
@@ -326,7 +351,9 @@ def test_v2026_9_2_length_continues_without_consuming_empty_stop_budget(tmp_path
 
     builtin = (root / "dist/builtin-openclaw-test.js").read_text()
     embedded = (root / "dist/embedded-agent-test.js").read_text()
-    assert "__abAssistantState.emptyResponse || __abIncompleteLength" in builtin
+    assert "__abAssistantState.emptyResponse" in builtin
+    assert "|| __abCurrentAssistantEmptyStop" in builtin
+    assert "|| __abIncompleteLength" in builtin
     assert '__abAssistantState.assistant?.stopReason === "length"' in builtin
     assert "!__abExplicitDone" in builtin
     assert builtin.count("return EMPTY_RESPONSE_RETRY_INSTRUCTION;") == 1
@@ -437,6 +464,68 @@ def _node_command() -> list[str]:
         "Node runtime unavailable; set AB_TEST_OPENCLAW_NODE_SIF to run "
         "the transformed-bundle execution contract"
     )
+
+
+def test_v2026_9_2_current_empty_stop_ignores_historical_visible_text(
+    tmp_path,
+):
+    root = _runtime_tree(tmp_path)
+    patch_runtime_tree(root)
+    bundle = root / "dist/builtin-openclaw-test.js"
+    bundle.write_text(bundle.read_text() + r'''
+function params({ content = [], aborted = false, settled = true } = {}) {
+  return {
+    aborted,
+    timedOut: false,
+    attempt: {
+      assistantTexts: ["Historical visible progress before tool calls."],
+      currentAttemptAssistant: { content, stopReason: "stop" },
+      terminal: { kind: "ok" },
+      toolMetas: [],
+      settledToolEvidence: {
+        allToolsProvenSettled: settled,
+        intentionalTermination: false,
+        parkedCodeModeRun: false,
+      },
+    },
+  };
+}
+function assert(value, message) {
+  if (!value) throw new Error(message);
+}
+const historicalThenEmpty = resolveEmptyResponseRetryInstruction(params());
+assert(
+  historicalThenEmpty === EMPTY_RESPONSE_RETRY_INSTRUCTION,
+  "current empty stop must remain eligible despite historical visible text",
+);
+assert(
+  resolveEmptyResponseRetryInstruction(params({
+    content: [{ type: "text", text: "Current final answer" }],
+  })) === null,
+  "current visible text must not be treated as an empty stop",
+);
+assert(
+  resolveEmptyResponseRetryInstruction(params({ settled: false })) === null,
+  "unsettled tools must preserve the existing safety guard",
+);
+assert(
+  resolveEmptyResponseRetryInstruction(params({ aborted: true })) === null,
+  "aborted runs must preserve the existing safety guard",
+);
+process.stdout.write("CURRENT_EMPTY_STOP_CONTRACT_OK\n");
+''')
+    env = dict(os.environ)
+    env["OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY"] = "continue"
+    completed = subprocess.run(
+        [*_node_command(), str(bundle)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "CURRENT_EMPTY_STOP_CONTRACT_OK" in completed.stdout
 
 
 def test_v2026_9_2_transformed_bundle_executes_retry_state_contract(tmp_path):
@@ -674,7 +763,7 @@ def test_v2026_9_2_patcher_rejects_stale_stop_only_continuation(tmp_path):
         )
     )
 
-    with pytest.raises(RuntimeError, match="predates empty-length or"):
+    with pytest.raises(RuntimeError, match="predates current-empty-stop"):
         patch_runtime_tree(root)
 
 
@@ -702,6 +791,7 @@ def test_v2026_9_2_builder_does_not_reapply_legacy_runtime_patches():
     assert SETTLED_CONTINUATION_RETRY_MARKER in audit
     assert SETTLED_CONTINUATION_LENGTH_MARKER in audit
     assert NONEMPTY_LENGTH_ELIGIBILITY_MARKER in audit
+    assert CURRENT_ASSISTANT_EMPTY_STOP_MARKER in audit
     assert UNBOUNDED_LENGTH_CONTINUATION_MARKER in audit
     assert CONSECUTIVE_EMPTY_STOP_RESET_MARKER in audit
     assert SETTLED_CONTINUATION_TOOL_ERROR_MARKER in audit

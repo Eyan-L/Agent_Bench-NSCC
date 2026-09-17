@@ -54,6 +54,9 @@ SETTLED_CONTINUATION_LENGTH_MARKER = (
 NONEMPTY_LENGTH_ELIGIBILITY_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_NONEMPTY_LENGTH_ELIGIBILITY_BEGIN"
 )
+CURRENT_ASSISTANT_EMPTY_STOP_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_ASSISTANT_EMPTY_STOP_BEGIN"
+)
 UNBOUNDED_LENGTH_CONTINUATION_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_UNBOUNDED_LENGTH_CONTINUATION_BEGIN"
 )
@@ -350,6 +353,29 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
 	/* {SETTLED_CONTINUATION_LENGTH_MARKER} */
 	/* {NONEMPTY_LENGTH_ELIGIBILITY_MARKER} */
 	const __abAssistantState = classifyAssistantTurn({param});
+	/* {CURRENT_ASSISTANT_EMPTY_STOP_MARKER} */
+	const __abCurrentAssistantContent = __abAssistantState.assistant?.content;
+	const __abCurrentAssistantVisibleText = (
+		typeof __abCurrentAssistantContent === "string"
+			? __abCurrentAssistantContent
+			: Array.isArray(__abCurrentAssistantContent)
+				? __abCurrentAssistantContent
+					.filter((item) => item?.type === "text" && typeof item.text === "string")
+					.map((item) => item.text)
+					.join("")
+				: ""
+	).trim();
+	const __abCurrentAssistantHasToolCall =
+		Array.isArray(__abCurrentAssistantContent)
+		&& __abCurrentAssistantContent.some(
+			(item) => item?.type === "toolCall" || item?.type === "toolUse"
+		);
+	const __abCurrentAssistantEmptyStop =
+		__abAssistantState.assistant?.stopReason === "stop"
+		&& !__abAssistantState.reasoningOnly
+		&& !__abCurrentAssistantVisibleText
+		&& !__abCurrentAssistantHasToolCall;
+	/* AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_ASSISTANT_EMPTY_STOP_END */
 	const __abExplicitDone =
 		/(?:^|\\n)\\s*DONE\\s*(?:\\n|$)/.test(__abAssistantState.visibleText);
 	const __abIncompleteLength =
@@ -357,7 +383,9 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
 		&& !__abAssistantState.reasoningOnly
 		&& !__abExplicitDone;
 	const __abRoadmapContinuationEligible =
-		__abAssistantState.emptyResponse || __abIncompleteLength;
+		__abAssistantState.emptyResponse
+		|| __abCurrentAssistantEmptyStop
+		|| __abIncompleteLength;
 	/* AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_LENGTH_END */
 	const __abSettledToolEvidence = resolveSettledToolBatchEvidence({param}.attempt);
 	if (process.env.{SETTLED_TOOL_POLICY_ENV} === "continue"
@@ -390,12 +418,13 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
             SETTLED_CONTINUATION_LENGTH_MARKER not in _read(path)
             or SETTLED_CONTINUATION_TOOL_ERROR_MARKER not in _read(path)
             or NONEMPTY_LENGTH_ELIGIBILITY_MARKER not in _read(path)
+            or CURRENT_ASSISTANT_EMPTY_STOP_MARKER not in _read(path)
         )
     ]
     if stale_retry_targets:
         raise RuntimeError(
-            "settled continuation patch predates empty-length or "
-            "recoverable-tool-error support; "
+            "settled continuation patch predates current-empty-stop, "
+            "empty-length, or recoverable-tool-error support; "
             "rebuild from the clean v2026.9.2 base: "
             + ", ".join(str(path) for path in stale_retry_targets)
         )
@@ -1030,6 +1059,10 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
         "nonempty_length_eligibility": (
             "dist/**/*",
             NONEMPTY_LENGTH_ELIGIBILITY_MARKER,
+        ),
+        "current_assistant_empty_stop": (
+            "dist/**/*",
+            CURRENT_ASSISTANT_EMPTY_STOP_MARKER,
         ),
         "unbounded_length_continuation": (
             "dist/**/*",
