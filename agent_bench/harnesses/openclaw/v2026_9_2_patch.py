@@ -371,7 +371,8 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
 			(item) => item?.type === "toolCall" || item?.type === "toolUse"
 		);
 	const __abCurrentAssistantEmptyStop =
-		__abAssistantState.assistant?.stopReason === "stop"
+		{param}.payloadCount === 0
+		&& __abAssistantState.assistant?.stopReason === "stop"
 		&& !__abAssistantState.reasoningOnly
 		&& !__abCurrentAssistantVisibleText
 		&& !__abCurrentAssistantHasToolCall;

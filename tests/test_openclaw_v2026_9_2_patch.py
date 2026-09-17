@@ -473,10 +473,13 @@ def test_v2026_9_2_current_empty_stop_ignores_historical_visible_text(
     patch_runtime_tree(root)
     bundle = root / "dist/builtin-openclaw-test.js"
     bundle.write_text(bundle.read_text() + r'''
-function params({ content = [], aborted = false, settled = true } = {}) {
+function params({
+  content = [], aborted = false, settled = true, payloadCount = 0,
+} = {}) {
   return {
     aborted,
     timedOut: false,
+    payloadCount,
     attempt: {
       assistantTexts: ["Historical visible progress before tool calls."],
       currentAttemptAssistant: { content, stopReason: "stop" },
@@ -503,6 +506,10 @@ assert(
     content: [{ type: "text", text: "Current final answer" }],
   })) === null,
   "current visible text must not be treated as an empty stop",
+);
+assert(
+  resolveEmptyResponseRetryInstruction(params({ payloadCount: 1 })) === null,
+  "an existing terminal payload must suppress current-empty-stop continuation",
 );
 assert(
   resolveEmptyResponseRetryInstruction(params({ settled: false })) === null,
