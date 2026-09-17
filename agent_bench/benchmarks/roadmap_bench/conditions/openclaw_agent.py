@@ -38,10 +38,6 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     # as final after one model idle-timeout window plus margin.
     prompt_error_grace_seconds = 600.0
     _ACTIVE_CHILD_STATES = frozenset({"accepted", "queued", "pending", "running"})
-    _TERMINAL_CHILD_STATES = frozenset({
-        "done", "completed", "failed", "error", "timeout", "timed_out",
-        "cancelled", "canceled", "killed",
-    })
     _ACTIVE_PARENT_STATES = frozenset({
         "accepted", "queued", "pending", "processing", "running",
     })
@@ -70,7 +66,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         sessions_dir = self._live_sessions_dir()
         if sessions_dir is None:
             return None
-        snapshot = self._read_lifecycle_snapshot(sessions_dir)
+        snapshot = self._read_yield_snapshot(sessions_dir)
         if not snapshot:
             return None
         parent_status = str(
@@ -169,7 +165,6 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         container_id: Optional[str],
         env_info: Optional[Dict] = None,
     ) -> Dict:
-        self._observed_child_sessions = {}
         runtime_env = env_info if env_info is not None else {}
         runtime_env["roadmap_workspace_quiesced"] = False
         workspace = Path(str(runtime_env.get("workspace_host_path") or ""))
@@ -556,7 +551,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         # outcome. Abnormal parent termination must quiesce pending children
         # just like DONE / terminal-stop, otherwise they may keep writing the
         # shared workspace while the verifier starts.
-        snapshot = self._read_lifecycle_snapshot(sessions_dir)
+        snapshot = self._read_yield_snapshot(sessions_dir)
 
         if self._is_durable_runtime_termination_payload(payload):
             if not snapshot:
@@ -646,7 +641,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         )
 
         while time.monotonic() < deadline:
-            snapshot = self._read_lifecycle_snapshot(sessions_dir)
+            snapshot = self._read_yield_snapshot(sessions_dir)
             if snapshot:
                 last_snapshot = snapshot
                 if snapshot["parent_session_id"] != parent_session_id:
@@ -1012,7 +1007,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         if quiescence.get("workspaceQuiesced") is True and logical_parent_terminal:
             sessions_dir = self._live_sessions_dir()
             after_snapshot = (
-                self._read_lifecycle_snapshot(sessions_dir)
+                self._read_yield_snapshot(sessions_dir)
                 if sessions_dir is not None else None
             )
             if after_snapshot is None:
@@ -1086,11 +1081,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         run = payload.setdefault("result", {})
         meta = run.setdefault("meta", {})
         pending = list(snapshot.get("pending_child_sessions") or [])
-        child_states = list(
-            snapshot.get("observed_child_states")
-            or snapshot.get("child_states")
-            or []
-        )
+        child_states = list(snapshot.get("child_states") or [])
         lifecycle = {
             "parentState": "terminal",
             "parentSessionStatusAtTerminal": snapshot.get(
@@ -1118,16 +1109,8 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 else None
             ),
             "yieldCount": int(snapshot.get("yield_count") or 0),
-            "totalChildren": int(
-                snapshot.get("observed_total_children")
-                if snapshot.get("observed_total_children") is not None
-                else snapshot.get("total_children") or 0
-            ),
-            "completedChildren": int(
-                snapshot.get("observed_completed_children")
-                if snapshot.get("observed_completed_children") is not None
-                else snapshot.get("completed_children") or 0
-            ),
+            "totalChildren": int(snapshot.get("total_children") or 0),
+            "completedChildren": int(snapshot.get("completed_children") or 0),
             "pendingChildrenAtParentTerminal": len(pending),
             "abandonedChildren": pending,
             "orphanChildIds": [
@@ -1150,60 +1133,6 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         if not state_dir:
             return None
         return Path(state_dir) / "agents" / self.agent_id / "sessions"
-
-    def _read_lifecycle_snapshot(self, sessions_dir: Path) -> Optional[Dict]:
-        """Read current lifecycle state and retain children seen this run.
-
-        OpenClaw may prune completed child entries from ``sessions.json``.
-        The registry is summary-only and invocation-local; current durable
-        state still controls parent terminal and workspace quiescence.
-        """
-        snapshot = self._read_yield_snapshot(sessions_dir)
-        if snapshot is None:
-            return None
-        registry = getattr(self, "_observed_child_sessions", None)
-        if not isinstance(registry, dict):
-            registry = {}
-            self._observed_child_sessions = registry
-
-        for child in snapshot.get("child_states") or []:
-            if not isinstance(child, dict):
-                continue
-            identity = str(
-                child.get("session_id") or child.get("session_key") or ""
-            )
-            if not identity:
-                continue
-            previous = registry.get(identity)
-            current = dict(child)
-            if (
-                isinstance(previous, dict)
-                and str(previous.get("status") or "")
-                in self._TERMINAL_CHILD_STATES
-                and str(current.get("status") or "")
-                in self._ACTIVE_CHILD_STATES
-            ):
-                continue
-            registry[identity] = current
-
-        if not registry:
-            return snapshot
-
-        merged = dict(snapshot)
-        child_states = [dict(child) for child in registry.values()]
-        merged["observed_child_states"] = child_states
-        merged["observed_total_children"] = max(
-            int(snapshot.get("total_children") or 0), len(child_states)
-        )
-        merged["observed_completed_children"] = sum(
-            str(child.get("status") or "") in self._TERMINAL_CHILD_STATES
-            for child in child_states
-        )
-        merged["observed_child_timeout"] = any(
-            str(child.get("status") or "") in {"timeout", "timed_out"}
-            for child in child_states
-        )
-        return merged
 
     @staticmethod
     def _is_heartbeat_request(text: str) -> bool:
@@ -1267,7 +1196,10 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         ]
         pending_children = len(pending_child_sessions)
         completed_children = sum(
-            child["status"] in cls._TERMINAL_CHILD_STATES
+            child["status"] in {
+                "done", "completed", "failed", "error", "timeout",
+                "timed_out", "cancelled", "canceled",
+            }
             for child in child_entries
         )
         child_timeout = any(

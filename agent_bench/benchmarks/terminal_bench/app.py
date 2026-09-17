@@ -308,30 +308,6 @@ def _terminal_bench_reward(raw: str, *, timed_out: bool) -> tuple[str, Optional[
     return ("PASS" if value >= 1.0 else "FAIL", value)
 
 
-def _roadmap_verifier_infrastructure_error(
-    stdout: str, stderr: str
-) -> Optional[str]:
-    """Recognize verifier failures that cannot measure the candidate.
-
-    Keep this deliberately narrow. Rust compile/test failures are candidate
-    failures. Only storage failures on the immutable system Cargo home or the
-    harness-owned verifier Cargo home are infrastructure failures. Dependency
-    transport can be caused by candidate dependency changes and is therefore
-    left to the verifier result.
-    """
-    output = f"{stdout}\n{stderr}"
-    lower = output.lower()
-    known_cargo_storage = any(path in lower for path in (
-        "/usr/local/cargo/", "/logs/verifier/cargo-home/",
-    ))
-    filesystem_failure = any(token in lower for token in (
-        "read-only file system", "permission denied", "no space left on device",
-    ))
-    if known_cargo_storage and filesystem_failure:
-        return "Cargo verifier storage was unavailable or read-only"
-    return None
-
-
 def _as_text(value) -> str:
     """Normalize subprocess output for JSON-safe verifier metadata."""
     if value is None:
@@ -1774,23 +1750,10 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
         self.container.copy_into(task, tests_host, "/tests")
         host_logs = self.workspace_base / run_id / "logs" / "verifier"
         reward = _clear_reward_file(host_logs)
-        is_roadmap = (
-            str((instance_data or {}).get("benchmark_variant") or "")
-            == "roadmapbench"
-        )
-        verifier_env = None
-        if is_roadmap:
-            # Task images may expose a read-only system Cargo home. Keep all
-            # Cargo registry/cache writes on the writable verifier mount.
-            (host_logs / "cargo-home").mkdir(parents=True, exist_ok=True)
-            verifier_env = {
-                "CARGO_HOME": "/logs/verifier/cargo-home",
-            }
         try:
             result = self.container.exec(
                 task, ["bash", (instance_data or {}).get("verifier_entrypoint", "/tests/test.sh")],
                 check=False, timeout=timeout, workdir=task_workspace,
-                env=verifier_env,
             )
             timed_out = False
         except subprocess.TimeoutExpired as exc:
@@ -1805,26 +1768,14 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
         status, reward_value = _terminal_bench_reward(
             reward_text, timed_out=timed_out
         )
-        stdout = _as_text(result.stdout)
-        stderr = _as_text(result.stderr)
-        infrastructure_error = (
-            _roadmap_verifier_infrastructure_error(stdout, stderr)
-            if is_roadmap and not timed_out else None
-        )
-        if infrastructure_error:
-            status = "ERROR"
-            reward_value = None
         return {"status": status, "verifier_status": status, "reward": reward_value,
                 "test_pass_rate": reward_value, "passed": int(status == "PASS"),
                 "failed": int(status != "PASS"), "verifier_rc": result.returncode,
                 "verifier_timed_out": timed_out, "verifier_timeout_seconds": timeout,
-                "verifier_stdout_tail": stdout[-2000:],
-                "verifier_stderr_tail": stderr[-2000:], "reward_raw": reward_text or None,
+                "verifier_stdout_tail": _as_text(result.stdout)[-2000:],
+                "verifier_stderr_tail": _as_text(result.stderr)[-2000:], "reward_raw": reward_text or None,
                 "reward_path": str(reward), "evaluation_dir": str(host_logs),
-                "error_message": (
-                    None if status == "PASS" else infrastructure_error
-                    or f"verifier exit {result.returncode}, reward={reward_text!r}"
-                )}
+                "error_message": None if status == "PASS" else f"verifier exit {result.returncode}, reward={reward_text!r}"}
 
     def cleanup(self, container_id: Optional[str] = None, oc_container_id: Optional[str] = None,
                 task_container_id: Optional[str] = None, task_container_name: Optional[str] = None,
