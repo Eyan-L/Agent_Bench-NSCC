@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 
 import pytest
 
@@ -16,6 +19,7 @@ from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     FS_RUN_MARKER,
     FS_WRITE_MARKER,
     LITELLM_PRICING_URL,
+    LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_MARKER,
     LOOP_VETO_RECOVERY_PROBE_MARKER,
     NONEMPTY_LENGTH_ELIGIBILITY_MARKER,
     OPENROUTER_PRICING_URL,
@@ -118,6 +122,22 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "}\n"
     )
     (dist / "embedded-agent-test.js").write_text(
+        "function resolveSettledToolBatchEvidence(attempt) {\n"
+        "  return attempt.settledToolEvidence ?? { allToolsProvenSettled: false };\n"
+        "}\n"
+        "function hasMessagingToolDeliveryEvidence(attempt) {\n"
+        "  return attempt.didSendViaMessagingTool === true;\n"
+        "}\n"
+        "function hasAsyncActivity(toolMetas) {\n"
+        "  return (toolMetas ?? []).some((entry) => entry.asyncStarted === true);\n"
+        "}\n"
+        "function isEmbeddedRunTerminalAbort(outcome) {\n"
+        "  return outcome === 'abort';\n"
+        "}\n"
+        "function isEmbeddedRunTerminalTimeout(outcome) {\n"
+        "  return outcome === 'timeout';\n"
+        "}\n"
+        "const log$3 = { warn() {} };\n"
         "async function prepareTerminalWithSettledTurnFinalization(input) {\n"
         "  return input;\n"
         "}\n"
@@ -147,6 +167,14 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "}\n"
     )
     (dist / "worker-test.mjs").write_text(
+        "function resolveSettledToolBatchEvidence(attempt){"
+        "return attempt.settledToolEvidence??{allToolsProvenSettled:false}}"
+        "function hasMessagingToolDeliveryEvidence(attempt){"
+        "return attempt.didSendViaMessagingTool===true}"
+        "function hasAsyncActivity(toolMetas){"
+        "return(toolMetas??[]).some((entry)=>entry.asyncStarted===true)}"
+        "function isEmbeddedRunTerminalAbort(outcome){return outcome===`abort`}"
+        "function isEmbeddedRunTerminalTimeout(outcome){return outcome===`timeout`}"
         "function retryMinified(Ot,Dn,mi,Si){"
         "if(!mi&&Si&&Dn.emptyResponseAttempts<Ot.maxEmptyResponseRetryAttempts)"
         "return Dn.emptyResponseAttempts+=1,Ot.activateInternalPrompt(Si),"
@@ -352,6 +380,9 @@ def test_v2026_9_2_empty_stop_budget_is_consecutive(tmp_path):
     assert "__abMeaningfulAssistantProgress" in embedded
     assert "!isEmbeddedRunTerminalAbort(input.terminalState.outcome)" in embedded
     assert "!isEmbeddedRunTerminalTimeout(input.terminalState.outcome)" in embedded
+    assert "classifyAssistantTurn" not in embedded
+    assert "hasCompletedMessagingToolDeliveryEvidence" not in embedded
+    assert "hasMessagingToolDeliveryEvidence(input.attempt)" in embedded
 
     attempts = 0
     exhausted = False
@@ -392,6 +423,90 @@ def test_v2026_9_2_control_activity_does_not_reset_empty_streak(
     assert (attempts, exhausted) == (4, False)
     attempts, exhausted = _advance_empty_stop_streak(attempts, "empty")
     assert (attempts, exhausted) == (4, True)
+
+
+def _node_command() -> list[str]:
+    node = shutil.which("node")
+    if node:
+        return [node]
+    sif = os.environ.get("AB_TEST_OPENCLAW_NODE_SIF")
+    runtime = shutil.which("apptainer") or shutil.which("singularity")
+    if runtime and sif and Path(sif).is_file():
+        return [runtime, "exec", sif, "node"]
+    pytest.skip(
+        "Node runtime unavailable; set AB_TEST_OPENCLAW_NODE_SIF to run "
+        "the transformed-bundle execution contract"
+    )
+
+
+def test_v2026_9_2_transformed_bundle_executes_retry_state_contract(tmp_path):
+    root = _runtime_tree(tmp_path)
+    patch_runtime_tree(root)
+    bundle = root / "dist/embedded-agent-test.js"
+    bundle.write_text(bundle.read_text() + r'''
+function abInput({ progress = "none", outcome = "ok", loopVeto = false } = {}) {
+  const toolProgress = progress === "tool";
+  return {
+    attempt: {
+      terminal: { kind: outcome === "timeout" ? "timeout" : "ok" },
+      messagesSnapshot: loopVeto ? [{
+        role: "toolResult",
+        details: { status: "blocked", deniedReason: "tool-loop" },
+      }] : [],
+      toolMetas: toolProgress ? [{ toolCallId: "call-1" }] : [],
+      settledToolEvidence: { allToolsProvenSettled: toolProgress },
+    },
+    terminalState: { outcome },
+    finalAssistantVisibleText: progress === "assistant" ? "Implemented feature" : "",
+    attemptAssistant: { stopReason: "stop" },
+    maxEmptyResponseRetryAttempts: 4,
+    runParams: { runId: "probe", sessionId: "probe" },
+    activeErrorContext: { provider: "probe", model: "probe" },
+    activateInternalPrompt() {},
+  };
+}
+function empty(state) {
+  return retryTerminal(abInput(), state, null, "continue");
+}
+function assert(value, message) {
+  if (!value) throw new Error(message);
+}
+process.env.OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY = "continue";
+const consecutive = { emptyResponseAttempts: 0 };
+for (let i = 0; i < 4; i += 1) {
+  assert(empty(consecutive)?.action === "retry", "empty retry " + i);
+}
+assert(consecutive.emptyResponseAttempts === 4, "four empties consume budget");
+assert(empty(consecutive) === undefined, "fifth consecutive empty exhausts budget");
+
+const toolReset = { emptyResponseAttempts: 4 };
+retryTerminal(abInput({ progress: "tool" }), toolReset, null, null);
+assert(toolReset.emptyResponseAttempts === 0, "settled tool progress resets streak");
+assert(empty(toolReset)?.action === "retry", "empty after tool progress is allowed");
+assert(toolReset.emptyResponseAttempts === 1, "new tool-progress streak starts at one");
+
+const assistantReset = { emptyResponseAttempts: 3 };
+retryTerminal(abInput({ progress: "assistant" }), assistantReset, null, null);
+assert(assistantReset.emptyResponseAttempts === 0, "assistant progress resets streak");
+
+const veto = { emptyResponseAttempts: 3 };
+retryTerminal(abInput({ progress: "tool", loopVeto: true }), veto, null, null);
+assert(veto.emptyResponseAttempts === 3, "loop veto does not reset streak");
+
+const timeout = { emptyResponseAttempts: 3 };
+retryTerminal(abInput({ progress: "assistant", outcome: "timeout" }), timeout, null, null);
+assert(timeout.emptyResponseAttempts === 3, "timeout does not reset streak");
+process.stdout.write("TRANSFORMED_RETRY_CONTRACT_OK\n");
+''')
+    completed = subprocess.run(
+        [*_node_command(), str(bundle)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "TRANSFORMED_RETRY_CONTRACT_OK" in completed.stdout
 
 
 def test_v2026_9_2_patcher_fails_closed_on_wrong_version(tmp_path):
@@ -470,7 +585,7 @@ def test_v2026_9_2_patcher_upgrades_counter_patch_without_streak_reset(
     old_patch, count = re.subn(
         rf"^[ \t]*/\* {CONSECUTIVE_EMPTY_STOP_RESET_MARKER} \*/.*?"
         r"^[ \t]*/\* AB_HARNESS_OPENCLAW_V2026_9_2_"
-        r"CONSECUTIVE_EMPTY_STOP_RESET_END \*/\n?",
+        r"CONSECUTIVE_EMPTY_STOP_RESET_V2_END \*/\n?",
         "",
         path.read_text(),
         count=1,
@@ -488,6 +603,52 @@ def test_v2026_9_2_patcher_upgrades_counter_patch_without_streak_reset(
     assert patch_runtime_tree(root)["settled_tool_continuation"][
         "files_changed"
     ] == []
+
+
+def test_v2026_9_2_patcher_migrates_legacy_consecutive_reset(tmp_path):
+    root = _runtime_tree(tmp_path)
+    patch_runtime_tree(root)
+    path = root / "dist/embedded-agent-test.js"
+    text = path.read_text().replace(
+        CONSECUTIVE_EMPTY_STOP_RESET_MARKER,
+        LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_MARKER,
+    ).replace(
+        "AB_HARNESS_OPENCLAW_V2026_9_2_CONSECUTIVE_EMPTY_STOP_RESET_V2_END",
+        "AB_HARNESS_OPENCLAW_V2026_9_2_CONSECUTIVE_EMPTY_STOP_RESET_END",
+    )
+    path.write_text(text)
+
+    upgraded = patch_runtime_tree(root)
+
+    updated = path.read_text()
+    assert LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_MARKER not in updated
+    assert CONSECUTIVE_EMPTY_STOP_RESET_MARKER in updated
+    assert "classifyAssistantTurn" not in updated
+    assert str(path.relative_to(root)) in upgraded[
+        "settled_tool_continuation"
+    ]["files_changed"]
+
+
+def test_v2026_9_2_patcher_fails_closed_on_missing_reset_binding(tmp_path):
+    root = _runtime_tree(tmp_path)
+    path = root / "dist/embedded-agent-test.js"
+    path.write_text(
+        path.read_text().replace(
+            "function hasMessagingToolDeliveryEvidence(attempt) {\n"
+            "  return attempt.didSendViaMessagingTool === true;\n"
+            "}\n",
+            "",
+        )
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "consecutive-empty reset lexical bindings missing.*"
+            "hasMessagingToolDeliveryEvidence"
+        ),
+    ):
+        patch_runtime_tree(root)
 
 
 def test_v2026_9_2_patcher_fails_closed_when_loop_recovery_anchor_moves(
@@ -542,6 +703,7 @@ def test_v2026_9_2_builder_does_not_reapply_legacy_runtime_patches():
     assert SETTLED_CONTINUATION_LENGTH_MARKER in audit
     assert NONEMPTY_LENGTH_ELIGIBILITY_MARKER in audit
     assert UNBOUNDED_LENGTH_CONTINUATION_MARKER in audit
+    assert CONSECUTIVE_EMPTY_STOP_RESET_MARKER in audit
     assert SETTLED_CONTINUATION_TOOL_ERROR_MARKER in audit
     assert EMPTY_STOP_RETRY_LIMIT_MARKER in audit
     assert LOOP_VETO_RECOVERY_PROBE_MARKER in audit

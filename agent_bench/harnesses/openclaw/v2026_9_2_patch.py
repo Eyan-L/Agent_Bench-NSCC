@@ -63,8 +63,11 @@ SETTLED_CONTINUATION_TOOL_ERROR_MARKER = (
 EMPTY_STOP_RETRY_LIMIT_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_EMPTY_STOP_RETRY_LIMIT_BEGIN"
 )
-CONSECUTIVE_EMPTY_STOP_RESET_MARKER = (
+LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_CONSECUTIVE_EMPTY_STOP_RESET_BEGIN"
+)
+CONSECUTIVE_EMPTY_STOP_RESET_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_CONSECUTIVE_EMPTY_STOP_RESET_V2_BEGIN"
 )
 LOOP_VETO_RECOVERY_PROBE_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_LOOP_VETO_RECOVERY_PROBE_BEGIN"
@@ -447,48 +450,79 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
         state: str,
     ) -> str:
         return f'''{indent}/* {CONSECUTIVE_EMPTY_STOP_RESET_MARKER} */
-{indent}const __abProgressAssistantState = classifyAssistantTurn({{
-{indent}\tattempt: {input_name}.attempt,
-{indent}\tpayloadCount: {input_name}.payloadsWithToolMedia?.length ?? 0,
-{indent}}});
-{indent}const __abProgressToolEvidence = resolveSettledToolBatchEvidence({input_name}.attempt);
-{indent}const __abBlockedToolLoopVeto = ({input_name}.attempt.messagesSnapshot ?? []).some(
-{indent}\t(message) => message?.role === "toolResult"
-{indent}\t\t&& message?.details?.status === "blocked"
-{indent}\t\t&& message?.details?.deniedReason === "tool-loop"
-{indent});
-{indent}const __abControlActivity = Boolean(
-{indent}\t{input_name}.attempt.clientToolCalls
-{indent}\t|| {input_name}.attempt.yieldDetected
-{indent}\t|| {input_name}.attempt.didSendDeterministicApprovalPrompt
-{indent}\t|| {input_name}.attempt.hasToolMediaBlockReply
-{indent}\t|| hasCompletedMessagingToolDeliveryEvidence({input_name}.attempt)
-{indent}\t|| hasAsyncActivity({input_name}.attempt.toolMetas)
-{indent});
-{indent}const __abVisibleProgressText = __abProgressAssistantState.visibleText.trim();
-{indent}const __abMeaningfulAssistantProgress = Boolean(
-{indent}\t__abVisibleProgressText
-{indent}\t&& __abVisibleProgressText !== "NO_REPLY"
-{indent}\t&& __abVisibleProgressText !== "HEARTBEAT_OK"
-{indent}\t&& !__abProgressAssistantState.reasoningOnly
-{indent}\t&& !__abProgressAssistantState.emptyResponse
-{indent});
-{indent}const __abRealSettledToolProgress = Boolean(
-{indent}\t__abProgressToolEvidence.allToolsProvenSettled
-{indent}\t&& ({input_name}.attempt.toolMetas?.length ?? 0) > 0
-{indent});
 {indent}if (process.env.{SETTLED_TOOL_POLICY_ENV} === "continue"
 {indent}\t&& {state}.emptyResponseAttempts > 0
 {indent}\t&& !isEmbeddedRunTerminalAbort({input_name}.terminalState.outcome)
 {indent}\t&& !isEmbeddedRunTerminalTimeout({input_name}.terminalState.outcome)
 {indent}\t&& {input_name}.attempt?.terminal?.kind !== "failed"
-{indent}\t&& {input_name}.attempt?.terminal?.kind !== "timeout"
-{indent}\t&& !__abBlockedToolLoopVeto
-{indent}\t&& !__abControlActivity
-{indent}\t&& (__abRealSettledToolProgress || __abMeaningfulAssistantProgress)) {{
-{indent}\t{state}.emptyResponseAttempts = 0;
+{indent}\t&& {input_name}.attempt?.terminal?.kind !== "timeout") {{
+{indent}\tconst __abProgressToolEvidence = resolveSettledToolBatchEvidence({input_name}.attempt);
+{indent}\tconst __abBlockedToolLoopVeto = ({input_name}.attempt.messagesSnapshot ?? []).some(
+{indent}\t\t(message) => message?.role === "toolResult"
+{indent}\t\t\t&& message?.details?.status === "blocked"
+{indent}\t\t\t&& message?.details?.deniedReason === "tool-loop"
+{indent}\t);
+{indent}\tconst __abControlActivity = Boolean(
+{indent}\t\t{input_name}.attempt.clientToolCalls
+{indent}\t\t|| {input_name}.attempt.yieldDetected
+{indent}\t\t|| {input_name}.attempt.didSendDeterministicApprovalPrompt
+{indent}\t\t|| {input_name}.attempt.heartbeatToolResponse
+{indent}\t\t|| {input_name}.attempt.hasToolMediaBlockReply
+{indent}\t\t|| {input_name}.attempt.didDeliverSourceReplyViaMessageTool
+{indent}\t\t|| ({input_name}.attempt.messagingToolSourceReplyPayloads?.length ?? 0) > 0
+{indent}\t\t|| hasMessagingToolDeliveryEvidence({input_name}.attempt)
+{indent}\t\t|| ({input_name}.attempt.acceptedSessionSpawns?.length ?? 0) > 0
+{indent}\t\t|| ({input_name}.attempt.successfulCronAdds ?? 0) > 0
+{indent}\t\t|| hasAsyncActivity({input_name}.attempt.toolMetas)
+{indent}\t);
+{indent}\tconst __abVisibleProgressText = String(
+{indent}\t\t{input_name}.finalAssistantVisibleText ?? ""
+{indent}\t).trim();
+{indent}\tconst __abMeaningfulAssistantProgress = Boolean(
+{indent}\t\t__abVisibleProgressText
+{indent}\t\t&& __abVisibleProgressText !== "NO_REPLY"
+{indent}\t\t&& __abVisibleProgressText !== "HEARTBEAT_OK"
+{indent}\t);
+{indent}\tconst __abRealSettledToolProgress = Boolean(
+{indent}\t\t__abProgressToolEvidence.allToolsProvenSettled
+{indent}\t\t&& ({input_name}.attempt.toolMetas?.length ?? 0) > 0
+{indent}\t);
+{indent}\tif (!__abBlockedToolLoopVeto
+{indent}\t\t&& !__abControlActivity
+{indent}\t\t&& (__abRealSettledToolProgress || __abMeaningfulAssistantProgress)) {{
+{indent}\t\t{state}.emptyResponseAttempts = 0;
+{indent}\t}}
 {indent}}}
-{indent}/* AB_HARNESS_OPENCLAW_V2026_9_2_CONSECUTIVE_EMPTY_STOP_RESET_END */'''
+{indent}/* AB_HARNESS_OPENCLAW_V2026_9_2_CONSECUTIVE_EMPTY_STOP_RESET_V2_END */'''
+
+    required_reset_bindings = (
+        "resolveSettledToolBatchEvidence",
+        "hasMessagingToolDeliveryEvidence",
+        "hasAsyncActivity",
+        "isEmbeddedRunTerminalAbort",
+        "isEmbeddedRunTerminalTimeout",
+    )
+
+    def has_lexical_binding(text: str, name: str) -> bool:
+        return bool(
+            re.search(rf"function\s+{re.escape(name)}\s*\(", text)
+            or re.search(
+                rf"import\s*\{{[^}}]*\b{re.escape(name)}\b[^}}]*\}}\s*from",
+                text,
+                flags=re.DOTALL,
+            )
+        )
+
+    def require_reset_bindings(text: str, path: Path) -> None:
+        missing = [
+            name for name in required_reset_bindings
+            if not has_lexical_binding(text, name)
+        ]
+        if missing:
+            raise RuntimeError(
+                "consecutive-empty reset lexical bindings missing in "
+                f"{path}: {', '.join(missing)}"
+            )
 
     def length_budget_replacement(match: re.Match[str]) -> str:
         indent = match.groupdict().get("indent") or ""
@@ -520,10 +554,26 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
 
     for path in length_budget_targets:
         text = _read(path)
+        if LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_MARKER in text:
+            legacy_pattern = re.compile(
+                rf"(?P<indent>^[ \t]*)/\* "
+                rf"{re.escape(LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_MARKER)} "
+                rf"\*/.*?^(?P=indent)/\* AB_HARNESS_OPENCLAW_V2026_9_2_"
+                rf"CONSECUTIVE_EMPTY_STOP_RESET_END \*/\n?",
+                flags=re.MULTILINE | re.DOTALL,
+            )
+            text, legacy_count = legacy_pattern.subn("", text, count=1)
+            if legacy_count != 1:
+                raise RuntimeError(
+                    f"legacy consecutive-empty reset block is malformed in {path}"
+                )
+            _write(path, text)
+            changed.add(path)
         if (
             UNBOUNDED_LENGTH_CONTINUATION_MARKER in text
             and CONSECUTIVE_EMPTY_STOP_RESET_MARKER not in text
         ):
+            require_reset_bindings(text, path)
             marker_matches = list(re.finditer(
                 rf"(?P<indent>^[ \t]*)/\* "
                 rf"{re.escape(UNBOUNDED_LENGTH_CONTINUATION_MARKER)} \*/$",
@@ -573,6 +623,7 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
             _write(path, text)
             changed.add(path)
         if UNBOUNDED_LENGTH_CONTINUATION_MARKER not in text:
+            require_reset_bindings(text, path)
             readable_count = len(length_budget_readable_anchor.findall(text))
             minified_count = len(length_budget_minified_anchor.findall(text))
             if readable_count + minified_count != 1:
