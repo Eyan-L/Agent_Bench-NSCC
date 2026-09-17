@@ -28,6 +28,7 @@ def _build_sqlite_store(
     parent_status: str = "running",
     parent_events: list[str] | None = None,
     with_child: bool = False,
+    parent_last_run_id: str | None = None,
 ) -> tuple[Path, Path, str]:
     state_dir = tmp_path / run_id
     agent_dir = state_dir / "agents" / "roadmap_bench" / "agent"
@@ -68,14 +69,17 @@ def _build_sqlite_store(
 
     parent_key = f"agent:roadmap_bench:explicit:{run_id}"
     parent_session_id = "parent-sqlite-session"
+    parent_entry = json.dumps(
+        {"lastRunId": parent_last_run_id} if parent_last_run_id else {}
+    )
     connection.execute(
         """
         INSERT INTO session_nodes
           (session_key, current_session_id, entry_json, updated_at, status,
            parent_session_key, spawned_by)
-        VALUES (?, ?, '{}', 1000, ?, NULL, NULL)
+        VALUES (?, ?, ?, 1000, ?, NULL, NULL)
         """,
-        (parent_key, parent_session_id, parent_status),
+        (parent_key, parent_session_id, parent_entry, parent_status),
     )
     connection.execute(
         """
@@ -193,6 +197,66 @@ def test_sqlite_watcher_accepts_explicit_done_and_counts_children(tmp_path: Path
     assert snapshot["done_text"].startswith("DONE")
     assert snapshot["total_children"] == 1
     assert snapshot["pending_children"] == 1
+
+
+def test_sqlite_watcher_keeps_requester_settle_no_reply_pending(tmp_path: Path):
+    settle_run = "announce:requester-settle:roadmap_bench:parent:retry-1"
+    events = [
+        _event(
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "NO_REPLY"}],
+                "stopReason": "stop",
+                "timestamp": 2000,
+                "__openclaw": {"runId": settle_run},
+            }
+        )
+    ]
+    sessions_dir, _db_path, _parent_key = _build_sqlite_store(
+        tmp_path,
+        parent_status="done",
+        parent_events=events,
+        parent_last_run_id=settle_run,
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot is not None
+    assert snapshot["session_store"] == "sqlite"
+    assert snapshot["latest_assistant_text"] == "NO_REPLY"
+    assert snapshot["parent_last_run_id"] == settle_run
+    assert snapshot["requester_settle_pending"] is True
+    assert snapshot["parent_terminal"] is False
+    assert snapshot["post_yield_parent_terminal"] is False
+    assert snapshot["post_yield_terminal_reason"] == ""
+    assert RoadmapBenchOpenClawCondition._terminal_stop_signature(snapshot) is None
+
+
+def test_sqlite_watcher_keeps_ordinary_no_reply_terminal(tmp_path: Path):
+    events = [
+        _event(
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "NO_REPLY"}],
+                "stopReason": "stop",
+                "timestamp": 2000,
+                "__openclaw": {"runId": "ordinary-parent-run"},
+            }
+        )
+    ]
+    sessions_dir, _db_path, _parent_key = _build_sqlite_store(
+        tmp_path,
+        parent_status="done",
+        parent_events=events,
+        parent_last_run_id="ordinary-parent-run",
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot is not None
+    assert snapshot["requester_settle_pending"] is False
+    assert snapshot["parent_terminal"] is True
+    assert RoadmapBenchOpenClawCondition._terminal_stop_signature(snapshot)
 
 
 def test_sqlite_projection_preserves_explicit_parent_for_measurement(tmp_path: Path):

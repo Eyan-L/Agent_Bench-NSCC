@@ -904,12 +904,25 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         requiring them to finish here can deadlock when a child yielded and
         is waiting for a requester that can no longer resume it.
         """
+        if cls._requester_settle_pending(snapshot):
+            return False
         return bool(
             snapshot.get("parent_session_status")
             in cls._NORMAL_DURABLE_PARENT_STATES
             and snapshot.get("latest_parent_event") == "assistant_stop"
             and snapshot.get("latest_assistant_stop_reason")
             in cls._DURABLE_ASSISTANT_STOP_REASONS
+        )
+
+    @staticmethod
+    def _requester_settle_pending(snapshot: Dict) -> bool:
+        """Whether OpenClaw has scheduled its native requester retry."""
+        return bool(
+            str(snapshot.get("latest_assistant_text") or "").strip()
+            == "NO_REPLY"
+            and str(snapshot.get("parent_last_run_id") or "").startswith(
+                "announce:requester-settle:"
+            )
         )
 
     @classmethod
@@ -1252,6 +1265,8 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         post_yield_prompt_error = ""
         latest_event_kind = ""
         latest_assistant_stop_reason = ""
+        latest_assistant_text = ""
+        latest_assistant_run_id = ""
         post_terminal_settle_error = ""
         heartbeat_turn = False
 
@@ -1308,6 +1323,8 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 heartbeat_turn = False
                 post_yield_parent_terminal = False
                 done_text = ""
+                latest_assistant_text = ""
+                latest_assistant_run_id = ""
                 latest_event_kind = "resume"
                 continue
 
@@ -1362,6 +1379,8 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 continue
 
             latest_assistant_stop_reason = stop_reason
+            latest_assistant_text = text
+            latest_assistant_run_id = run_id
             post_yield_parent_activity = True
             post_yield_parent_terminal = (
                 stop_reason in cls._DURABLE_ASSISTANT_STOP_REASONS
@@ -1384,12 +1403,20 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             else:
                 done_text = ""
 
+        parent_last_run_id = str(
+            parent.get("lastRunId") or latest_assistant_run_id or ""
+        ).strip()
+        requester_settle_pending = bool(
+            latest_assistant_text.strip() == "NO_REPLY"
+            and parent_last_run_id.startswith("announce:requester-settle:")
+        )
         assistant_stop_candidate = post_yield_parent_terminal
         logical_parent_terminal = bool(
             done_text
             or (
                 assistant_stop_candidate
                 and parent_session_terminal
+                and not requester_settle_pending
             )
         )
 
@@ -1397,6 +1424,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             "parent_session_key": str(parent_key),
             "parent_session_id": str(parent_session_id),
             "parent_session_status": parent_session_status,
+            "parent_last_run_id": parent_last_run_id,
             "parent_session_error": parent_session_error,
             "parent_session_active": parent_session_active,
             "parent_session_terminal": parent_session_terminal,
@@ -1413,14 +1441,20 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 post_yield_parent_activity
             ),
             "post_yield_parent_terminal": (
-                assistant_stop_candidate and parent_session_terminal
+                assistant_stop_candidate
+                and parent_session_terminal
+                and not requester_settle_pending
             ),
             "post_yield_terminal_reason": (
                 "explicit_done"
                 if done_text
                 else (
                     "assistant_stop"
-                    if assistant_stop_candidate and parent_session_terminal
+                    if (
+                        assistant_stop_candidate
+                        and parent_session_terminal
+                        and not requester_settle_pending
+                    )
                     else ""
                 )
             ),
@@ -1447,6 +1481,8 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             "assistant_stop_candidate": assistant_stop_candidate,
             "latest_parent_event": latest_event_kind,
             "latest_assistant_stop_reason": latest_assistant_stop_reason,
+            "latest_assistant_text": latest_assistant_text,
+            "requester_settle_pending": requester_settle_pending,
         }
 
     @classmethod

@@ -436,6 +436,9 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
     post_yield_parent_terminal = False
     post_yield_prompt_error = ""
     latest_event_kind = ""
+    latest_assistant_stop_reason = ""
+    latest_assistant_text = ""
+    latest_assistant_run_id = ""
     heartbeat_turn = False
 
     for event in messages[latest_yield + 1 :]:
@@ -474,6 +477,8 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
             heartbeat_turn = False
             post_yield_parent_terminal = False
             done_text = ""
+            latest_assistant_text = ""
+            latest_assistant_run_id = ""
             latest_event_kind = "resume"
             continue
 
@@ -497,8 +502,19 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
                 heartbeat_turn = False
             continue
 
+        openclaw_meta = message.get("__openclaw") or {}
+        run_id = str(
+            openclaw_meta.get("runId") or ""
+            if isinstance(openclaw_meta, dict)
+            else ""
+        )
+        latest_assistant_stop_reason = stop_reason
+        latest_assistant_text = text
+        latest_assistant_run_id = run_id
         post_yield_parent_activity = True
-        post_yield_parent_terminal = stop_reason == "stop"
+        post_yield_parent_terminal = (
+            stop_reason in cls._DURABLE_ASSISTANT_STOP_REASONS
+        )
         latest_event_kind = (
             "assistant_stop" if post_yield_parent_terminal else "assistant_active"
         )
@@ -511,15 +527,28 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
         else:
             done_text = ""
 
+    parent_last_run_id = str(
+        parent.get("lastRunId") or latest_assistant_run_id or ""
+    ).strip()
+    requester_settle_pending = bool(
+        latest_assistant_text.strip() == "NO_REPLY"
+        and parent_last_run_id.startswith("announce:requester-settle:")
+    )
     assistant_stop_candidate = post_yield_parent_terminal
     logical_parent_terminal = bool(
-        done_text or (assistant_stop_candidate and parent_session_terminal)
+        done_text
+        or (
+            assistant_stop_candidate
+            and parent_session_terminal
+            and not requester_settle_pending
+        )
     )
     return {
         "session_store": "sqlite",
         "parent_session_key": str(parent_key),
         "parent_session_id": parent_session_id,
         "parent_session_status": parent_session_status,
+        "parent_last_run_id": parent_last_run_id,
         "parent_session_active": parent_session_active,
         "parent_session_terminal": parent_session_terminal,
         "total_children": len(child_entries),
@@ -533,14 +562,20 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
         "transcript_size_bytes": transcript_sizes.get(parent_session_id, 0),
         "post_yield_parent_activity": post_yield_parent_activity,
         "post_yield_parent_terminal": (
-            assistant_stop_candidate and parent_session_terminal
+            assistant_stop_candidate
+            and parent_session_terminal
+            and not requester_settle_pending
         ),
         "post_yield_terminal_reason": (
             "explicit_done"
             if done_text
             else (
                 "assistant_stop"
-                if assistant_stop_candidate and parent_session_terminal
+                if (
+                    assistant_stop_candidate
+                    and parent_session_terminal
+                    and not requester_settle_pending
+                )
                 else ""
             )
         ),
@@ -561,6 +596,9 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
         "parent_terminal": logical_parent_terminal,
         "assistant_stop_candidate": assistant_stop_candidate,
         "latest_parent_event": latest_event_kind,
+        "latest_assistant_stop_reason": latest_assistant_stop_reason,
+        "latest_assistant_text": latest_assistant_text,
+        "requester_settle_pending": requester_settle_pending,
     }
 
 

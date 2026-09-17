@@ -652,6 +652,7 @@ def _write_roadmap_session_state(
     parent_status="done",
     parent_key="agent:roadmap_bench:main",
     parent_error=None,
+    parent_last_run_id=None,
 ):
     sessions_dir.mkdir(parents=True, exist_ok=True)
     index = {
@@ -662,6 +663,8 @@ def _write_roadmap_session_state(
     }
     if parent_error is not None:
         index[parent_key]["lastRunError"] = parent_error
+    if parent_last_run_id is not None:
+        index[parent_key]["lastRunId"] = parent_last_run_id
     for i, status in enumerate(child_statuses):
         index[f"agent:roadmap_bench:subagent:{i}"] = {
             "sessionId": f"child-{i}",
@@ -760,6 +763,112 @@ def test_roadmap_snapshot_does_not_hide_regular_error_after_done(tmp_path):
     assert snapshot is not None
     assert snapshot["done_text"] == ""
     assert snapshot["latest_assistant_stop_reason"] == "error"
+
+
+def test_roadmap_requester_settle_no_reply_is_not_terminal(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    settle_run = "announce:requester-settle:roadmap_bench:parent:retry-1"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_assistant_event("NO_REPLY", run_id=settle_run)],
+        child_statuses=(),
+        parent_status="done",
+        parent_last_run_id=settle_run,
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot is not None
+    assert snapshot["latest_assistant_text"] == "NO_REPLY"
+    assert snapshot["parent_last_run_id"] == settle_run
+    assert snapshot["requester_settle_pending"] is True
+    assert snapshot["parent_terminal"] is False
+    assert snapshot["post_yield_parent_terminal"] is False
+    assert snapshot["post_yield_terminal_reason"] == ""
+    assert RoadmapBenchOpenClawCondition._terminal_stop_signature(snapshot) is None
+
+
+def test_roadmap_no_reply_with_ordinary_run_id_keeps_terminal_behavior(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_assistant_event("NO_REPLY", run_id="ordinary-parent-run")],
+        child_statuses=(),
+        parent_status="done",
+        parent_last_run_id="ordinary-parent-run",
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot is not None
+    assert snapshot["requester_settle_pending"] is False
+    assert snapshot["parent_terminal"] is True
+    assert RoadmapBenchOpenClawCondition._terminal_stop_signature(snapshot)
+
+
+def test_roadmap_requester_settle_waits_for_native_retry_before_quiesce(
+    tmp_path, monkeypatch
+):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    settle_run = "announce:requester-settle:roadmap_bench:parent:retry-1"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_assistant_event("NO_REPLY", run_id=settle_run)],
+        child_statuses=(),
+        parent_status="done",
+        parent_last_run_id=settle_run,
+    )
+    calls = []
+
+    class Harness:
+        def quiesce_orphan_children(self, _env_info):
+            calls.append("quiesce")
+            return {"workspaceQuiesced": True}
+
+    condition = _roadmap_condition_for_state(tmp_path, Harness())
+    clock = [0.0]
+    sleeps = [0]
+
+    def advance(seconds):
+        assert calls == []
+        clock[0] += seconds
+        sleeps[0] += 1
+        if sleeps[0] == 1:
+            final_run = "announce:requester-settle:roadmap_bench:parent:retry-2"
+            _write_roadmap_session_state(
+                sessions_dir,
+                [
+                    _assistant_event("NO_REPLY", run_id=settle_run),
+                    _assistant_event("DONE\nValidated.", run_id=final_run),
+                ],
+                child_statuses=(),
+                parent_status="done",
+                parent_last_run_id=final_run,
+            )
+
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.monotonic",
+        lambda: clock[0],
+    )
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.sleep",
+        advance,
+    )
+
+    payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "stale CLI turn",
+        deadline=10.0,
+    )
+
+    assert error == ""
+    assert sleeps[0] == 1
+    assert calls == ["quiesce"]
+    assert payload["result"]["meta"]["finalAssistantVisibleText"].startswith(
+        "DONE"
+    )
 
 
 def test_roadmap_post_terminal_settle_error_quiesces_then_completes(tmp_path):

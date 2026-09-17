@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 
 import pytest
 
 from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
+    CONSECUTIVE_EMPTY_STOP_RESET_MARKER,
     EMPTY_STOP_RETRY_LIMIT_MARKER,
     EXEC_MARKER,
     FS_CHECK_MARKER,
@@ -222,6 +224,8 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
         builtin_text.index("shouldSkipNonVisibleTurnRetry(params)")
     )
     assert EMPTY_STOP_RETRY_LIMIT_MARKER in embedded_text
+    assert CONSECUTIVE_EMPTY_STOP_RESET_MARKER in embedded_text
+    assert CONSECUTIVE_EMPTY_STOP_RESET_MARKER in worker_text
     assert UNBOUNDED_LENGTH_CONTINUATION_MARKER in embedded_text
     assert UNBOUNDED_LENGTH_CONTINUATION_MARKER in worker_text
     assert 'Ot.attemptAssistant?.stopReason === "length"' in worker_text
@@ -231,6 +235,10 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert "if (!__abLengthContinuation)" not in embedded_text
     assert "if (raw === void 0 || raw === \"\") return 1" in embedded_text
     assert "Math.min(parsed, 16)" in embedded_text
+    assert "retryState.emptyResponseAttempts = 0" in embedded_text
+    assert 'message?.details?.deniedReason === "tool-loop"' in embedded_text
+    assert "!__abBlockedToolLoopVeto" in embedded_text
+    assert "!__abControlActivity" in embedded_text
     assert LOOP_VETO_RECOVERY_PROBE_MARKER in loop_detection_text
     assert "OPENCLAW_AGENT_BENCH_LOOP_VETO_RECOVERY_PROBE" in (
         loop_detection_text
@@ -320,6 +328,72 @@ def test_v2026_9_2_length_continues_without_consuming_empty_stop_budget(tmp_path
     assert "!__abSettledToolEvidence.hasUnsettledToolError" not in builtin
 
 
+def _advance_empty_stop_streak(attempts, event):
+    """Model the generated patch's retry-state transition contract."""
+    genuine_progress = event in {"settled_tool", "assistant_progress"}
+    if genuine_progress:
+        attempts = 0
+    if event != "empty":
+        return attempts, False
+    if attempts >= 4:
+        return attempts, True
+    return attempts + 1, False
+
+
+def test_v2026_9_2_empty_stop_budget_is_consecutive(tmp_path):
+    root = _runtime_tree(tmp_path)
+    patch_runtime_tree(root)
+
+    embedded = (root / "dist/embedded-agent-test.js").read_text()
+    reset_index = embedded.index("retryState.emptyResponseAttempts = 0")
+    increment_index = embedded.index("retryState.emptyResponseAttempts += 1")
+    assert reset_index < increment_index
+    assert "__abProgressToolEvidence.allToolsProvenSettled" in embedded
+    assert "__abMeaningfulAssistantProgress" in embedded
+    assert "!isEmbeddedRunTerminalAbort(input.terminalState.outcome)" in embedded
+    assert "!isEmbeddedRunTerminalTimeout(input.terminalState.outcome)" in embedded
+
+    attempts = 0
+    exhausted = False
+    for _ in range(5):
+        attempts, exhausted = _advance_empty_stop_streak(attempts, "empty")
+    assert attempts == 4
+    assert exhausted is True
+
+    attempts = 0
+    for _ in range(4):
+        attempts, exhausted = _advance_empty_stop_streak(attempts, "empty")
+        assert exhausted is False
+    attempts, exhausted = _advance_empty_stop_streak(attempts, "settled_tool")
+    assert (attempts, exhausted) == (0, False)
+    attempts, exhausted = _advance_empty_stop_streak(attempts, "empty")
+    assert (attempts, exhausted) == (1, False)
+
+    attempts = 3
+    attempts, exhausted = _advance_empty_stop_streak(
+        attempts, "assistant_progress"
+    )
+    assert (attempts, exhausted) == (0, False)
+    attempts, exhausted = _advance_empty_stop_streak(attempts, "empty")
+    assert (attempts, exhausted) == (1, False)
+
+
+@pytest.mark.parametrize(
+    "control_event",
+    ["reasoning_only", "internal_prompt", "aborted", "timeout", "loop_veto"],
+)
+def test_v2026_9_2_control_activity_does_not_reset_empty_streak(
+    control_event,
+):
+    attempts = 3
+    attempts, exhausted = _advance_empty_stop_streak(attempts, control_event)
+    assert (attempts, exhausted) == (3, False)
+    attempts, exhausted = _advance_empty_stop_streak(attempts, "empty")
+    assert (attempts, exhausted) == (4, False)
+    attempts, exhausted = _advance_empty_stop_streak(attempts, "empty")
+    assert (attempts, exhausted) == (4, True)
+
+
 def test_v2026_9_2_patcher_fails_closed_on_wrong_version(tmp_path):
     root = _runtime_tree(tmp_path)
     (root / "package.json").write_text(json.dumps({"version": "2026.4.22"}))
@@ -385,6 +459,35 @@ def test_v2026_9_2_patcher_fails_closed_when_retry_counter_anchor_moves(
         RuntimeError, match="empty-response retry counter anchor"
     ):
         patch_runtime_tree(root)
+
+
+def test_v2026_9_2_patcher_upgrades_counter_patch_without_streak_reset(
+    tmp_path,
+):
+    root = _runtime_tree(tmp_path)
+    patch_runtime_tree(root)
+    path = root / "dist/embedded-agent-test.js"
+    old_patch, count = re.subn(
+        rf"^[ \t]*/\* {CONSECUTIVE_EMPTY_STOP_RESET_MARKER} \*/.*?"
+        r"^[ \t]*/\* AB_HARNESS_OPENCLAW_V2026_9_2_"
+        r"CONSECUTIVE_EMPTY_STOP_RESET_END \*/\n?",
+        "",
+        path.read_text(),
+        count=1,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert count == 1
+    path.write_text(old_patch)
+
+    upgraded = patch_runtime_tree(root)
+
+    assert CONSECUTIVE_EMPTY_STOP_RESET_MARKER in path.read_text()
+    assert str(path.relative_to(root)) in upgraded[
+        "settled_tool_continuation"
+    ]["files_changed"]
+    assert patch_runtime_tree(root)["settled_tool_continuation"][
+        "files_changed"
+    ] == []
 
 
 def test_v2026_9_2_patcher_fails_closed_when_loop_recovery_anchor_moves(

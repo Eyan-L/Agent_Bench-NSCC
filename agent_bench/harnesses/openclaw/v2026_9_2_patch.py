@@ -63,6 +63,9 @@ SETTLED_CONTINUATION_TOOL_ERROR_MARKER = (
 EMPTY_STOP_RETRY_LIMIT_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_EMPTY_STOP_RETRY_LIMIT_BEGIN"
 )
+CONSECUTIVE_EMPTY_STOP_RESET_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_CONSECUTIVE_EMPTY_STOP_RESET_BEGIN"
+)
 LOOP_VETO_RECOVERY_PROBE_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_LOOP_VETO_RECOVERY_PROBE_BEGIN"
 )
@@ -438,6 +441,55 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
             "v2026.9.2 empty-response retry counter anchor not found"
         )
 
+    def consecutive_reset_source(
+        indent: str,
+        input_name: str,
+        state: str,
+    ) -> str:
+        return f'''{indent}/* {CONSECUTIVE_EMPTY_STOP_RESET_MARKER} */
+{indent}const __abProgressAssistantState = classifyAssistantTurn({{
+{indent}\tattempt: {input_name}.attempt,
+{indent}\tpayloadCount: {input_name}.payloadsWithToolMedia?.length ?? 0,
+{indent}}});
+{indent}const __abProgressToolEvidence = resolveSettledToolBatchEvidence({input_name}.attempt);
+{indent}const __abBlockedToolLoopVeto = ({input_name}.attempt.messagesSnapshot ?? []).some(
+{indent}\t(message) => message?.role === "toolResult"
+{indent}\t\t&& message?.details?.status === "blocked"
+{indent}\t\t&& message?.details?.deniedReason === "tool-loop"
+{indent});
+{indent}const __abControlActivity = Boolean(
+{indent}\t{input_name}.attempt.clientToolCalls
+{indent}\t|| {input_name}.attempt.yieldDetected
+{indent}\t|| {input_name}.attempt.didSendDeterministicApprovalPrompt
+{indent}\t|| {input_name}.attempt.hasToolMediaBlockReply
+{indent}\t|| hasCompletedMessagingToolDeliveryEvidence({input_name}.attempt)
+{indent}\t|| hasAsyncActivity({input_name}.attempt.toolMetas)
+{indent});
+{indent}const __abVisibleProgressText = __abProgressAssistantState.visibleText.trim();
+{indent}const __abMeaningfulAssistantProgress = Boolean(
+{indent}\t__abVisibleProgressText
+{indent}\t&& __abVisibleProgressText !== "NO_REPLY"
+{indent}\t&& __abVisibleProgressText !== "HEARTBEAT_OK"
+{indent}\t&& !__abProgressAssistantState.reasoningOnly
+{indent}\t&& !__abProgressAssistantState.emptyResponse
+{indent});
+{indent}const __abRealSettledToolProgress = Boolean(
+{indent}\t__abProgressToolEvidence.allToolsProvenSettled
+{indent}\t&& ({input_name}.attempt.toolMetas?.length ?? 0) > 0
+{indent});
+{indent}if (process.env.{SETTLED_TOOL_POLICY_ENV} === "continue"
+{indent}\t&& {state}.emptyResponseAttempts > 0
+{indent}\t&& !isEmbeddedRunTerminalAbort({input_name}.terminalState.outcome)
+{indent}\t&& !isEmbeddedRunTerminalTimeout({input_name}.terminalState.outcome)
+{indent}\t&& {input_name}.attempt?.terminal?.kind !== "failed"
+{indent}\t&& {input_name}.attempt?.terminal?.kind !== "timeout"
+{indent}\t&& !__abBlockedToolLoopVeto
+{indent}\t&& !__abControlActivity
+{indent}\t&& (__abRealSettledToolProgress || __abMeaningfulAssistantProgress)) {{
+{indent}\t{state}.emptyResponseAttempts = 0;
+{indent}}}
+{indent}/* AB_HARNESS_OPENCLAW_V2026_9_2_CONSECUTIVE_EMPTY_STOP_RESET_END */'''
+
     def length_budget_replacement(match: re.Match[str]) -> str:
         indent = match.groupdict().get("indent") or ""
         reason = match.group("reason")
@@ -445,7 +497,9 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
         state = match.group("state")
         input_name = match.group("input")
         logger = match.group("logger")
+        reset_source = consecutive_reset_source(indent, input_name, state)
         return f'''{indent}/* {UNBOUNDED_LENGTH_CONTINUATION_MARKER} */
+{reset_source}
 {indent}const __abLengthContinuation =
 {indent}\tprocess.env.{SETTLED_TOOL_POLICY_ENV} === "continue"
 {indent}\t&& {input_name}.attemptAssistant?.stopReason === "length"
@@ -466,6 +520,58 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
 
     for path in length_budget_targets:
         text = _read(path)
+        if (
+            UNBOUNDED_LENGTH_CONTINUATION_MARKER in text
+            and CONSECUTIVE_EMPTY_STOP_RESET_MARKER not in text
+        ):
+            marker_matches = list(re.finditer(
+                rf"(?P<indent>^[ \t]*)/\* "
+                rf"{re.escape(UNBOUNDED_LENGTH_CONTINUATION_MARKER)} \*/$",
+                text,
+                flags=re.MULTILINE,
+            ))
+            if len(marker_matches) != 1:
+                raise RuntimeError(
+                    "existing empty-response counter marker is ambiguous in "
+                    f"{path}"
+                )
+            marker_match = marker_matches[0]
+            end_marker = (
+                "AB_HARNESS_OPENCLAW_V2026_9_2_"
+                "UNBOUNDED_LENGTH_CONTINUATION_END"
+            )
+            end = text.find(end_marker, marker_match.end())
+            if end < 0:
+                raise RuntimeError(
+                    f"existing empty-response counter end marker missing in {path}"
+                )
+            block = text[marker_match.end():end]
+            counter_match = re.search(
+                rf"\|\|\s*(?P<state>{ident})\.emptyResponseAttempts"
+                rf"\s*<\s*(?P<input>{ident})"
+                r"\.maxEmptyResponseRetryAttempts",
+                block,
+            )
+            if counter_match is None or not re.search(
+                rf"const\s+__abLengthContinuation\s*=.*?"
+                rf"{re.escape(counter_match.group('input'))}"
+                r"\.attemptAssistant\?\.stopReason",
+                block,
+                flags=re.DOTALL,
+            ):
+                raise RuntimeError(
+                    "existing empty-response counter structure missing in "
+                    f"{path}"
+                )
+            insert_at = marker_match.end()
+            reset_source = consecutive_reset_source(
+                marker_match.group("indent"),
+                counter_match.group("input"),
+                counter_match.group("state"),
+            )
+            text = text[:insert_at] + "\n" + reset_source + text[insert_at:]
+            _write(path, text)
+            changed.add(path)
         if UNBOUNDED_LENGTH_CONTINUATION_MARKER not in text:
             readable_count = len(length_budget_readable_anchor.findall(text))
             minified_count = len(length_budget_minified_anchor.findall(text))
@@ -877,6 +983,10 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
         "unbounded_length_continuation": (
             "dist/**/*",
             UNBOUNDED_LENGTH_CONTINUATION_MARKER,
+        ),
+        "consecutive_empty_stop_reset": (
+            "dist/**/*",
+            CONSECUTIVE_EMPTY_STOP_RESET_MARKER,
         ),
         "settled_continuation_tool_error": (
             "dist/**/*",
