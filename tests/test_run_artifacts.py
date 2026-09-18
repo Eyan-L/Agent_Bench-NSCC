@@ -308,6 +308,7 @@ def test_timeline_generation_failure_marks_bundle_incomplete(tmp_path, monkeypat
 
     assert index["viewer"]["status"] == "generation_failed"
     assert "injected renderer failure" in index["viewer"]["error"]
+    assert index["links"]["spans_timeline"] is None
     assert index["complete"] is False
     failed = [
         item
@@ -324,16 +325,23 @@ def test_manifest_artifact_paths_drive_analysis_and_timeline(tmp_path):
     external.mkdir()
     manifest = json.loads((run / "manifest.json").read_text())
     artifact_fields = {
-        "telemetry_path": "spans.jsonl",
-        "trajectory_path": "trajectory.jsonl",
-        "step_trace_path": "steps.jsonl",
-        "runtime_observability_path": "runtime_observability.json",
-        "token_accounting_path": "token_accounting.json",
-        "verdict_path": "verdict.json",
+        "telemetry_path": ("spans.jsonl", "model-trace.jsonl"),
+        "trajectory_path": ("trajectory.jsonl", "trajectory.jsonl"),
+        "step_trace_path": ("steps.jsonl", "steps.jsonl"),
+        "runtime_observability_path": (
+            "runtime_observability.json",
+            "runtime_observability.json",
+        ),
+        "token_accounting_path": (
+            "token_accounting.json",
+            "token_accounting.json",
+        ),
+        "util_path": ("util.jsonl", "resource-samples.jsonl"),
+        "verdict_path": ("verdict.json", "score-result.json"),
     }
-    for field, name in artifact_fields.items():
-        source = run / name
-        destination = external / name
+    for field, (source_name, destination_name) in artifact_fields.items():
+        source = run / source_name
+        destination = external / destination_name
         shutil.move(str(source), destination)
         manifest[field] = str(destination)
     _write_json(run / "manifest.json", manifest)
@@ -341,14 +349,21 @@ def test_manifest_artifact_paths_drive_analysis_and_timeline(tmp_path):
     summary = run_artifacts.analyze_run(run)
     assert summary["activity"]["spans"]["status"] == "available"
     assert summary["activity"]["trajectory"]["record_count"] == 2
+    assert summary["resources"]["status"] == "available"
     assert summary["source_documents"]["verdict"]["status"] == "available"
-    assert summary["artifact_sources"]["spans"] == str(external / "spans.jsonl")
+    assert summary["artifact_sources"]["spans"] == str(
+        external / "model-trace.jsonl"
+    )
+    assert summary["artifact_sources"]["resources"] == str(
+        external / "resource-samples.jsonl"
+    )
 
     _bundle, index = _export(tmp_path / "export", run)
     assert index["viewer"]["status"] == "generated"
     assert not any(
         item["status"] == "not_collected"
-        and str(item.get("source_path", "")).endswith("spans.jsonl")
+        and Path(str(item.get("source_path", ""))).name
+        in {"spans.jsonl", "util.jsonl", "verdict.json"}
         for item in index["artifacts"]
     )
     copied_spans = [
@@ -358,6 +373,21 @@ def test_manifest_artifact_paths_drive_analysis_and_timeline(tmp_path):
     ]
     assert len(copied_spans) == 1
     assert copied_spans[0]["status"] == "copied"
+    copied_resources = [
+        item
+        for item in index["artifacts"]
+        if "util_path" in item.get("manifest_fields", [])
+    ]
+    assert len(copied_resources) == 1
+    assert copied_resources[0]["status"] == "copied"
+    assert index["links"]["resources"] == copied_resources[0]["bundle_path"]
+    copied_verdict = [
+        item
+        for item in index["artifacts"]
+        if "verdict_path" in item.get("manifest_fields", [])
+    ]
+    assert len(copied_verdict) == 1
+    assert index["links"]["verdict"] == copied_verdict[0]["bundle_path"]
 
 
 def test_corrupt_json_is_preserved_and_reported_invalid(tmp_path):
@@ -656,6 +686,13 @@ def test_compare_cli_exports_both_arms_with_portable_links(tmp_path, capsys):
 
     catalog = json.loads((bundle / "paired-artifact-index.json").read_text())
     assert len(catalog["runs"]) == 2
+    exported_links = {item["arm"]: item["links"] for item in catalog["runs"]}
+    assert report["tasks"]["subagent"][0]["artifact_links"] == (
+        exported_links["subagent"]
+    )
+    assert report["tasks"]["single_agent"][0]["artifact_links"] == (
+        exported_links["single-agent"]
+    )
     assert not any(
         item["status"] in {"copy_failed", "generation_failed"}
         for run in catalog["runs"]

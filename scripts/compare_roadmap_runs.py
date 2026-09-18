@@ -245,46 +245,22 @@ def record_to_dict(record) -> dict[str, Any]:
 
 
 def _artifact_links(record) -> dict[str, str | None]:
-    """Portable links resolved relative to the generated bundle root."""
-    task_dir = _impl._artifact_task_dir(record)
-    arm = record.arm
-    shared_root = _impl.discover_shared_job_root(record.run_dir)
-    timeline_available = (
-        (record.run_dir / "spans_timeline.html").is_file()
-        or (record.run_dir / "spans.jsonl").is_file()
-    )
-
-    def available(category: str, name: str) -> str | None:
-        return (
-            f"{category}/{arm}/{task_dir}/{name}"
-            if (record.run_dir / name).is_file()
-            else None
-        )
-
+    """Return only links confirmed by the completed artifact exporter."""
+    exported = record.__dict__.get("_roadmap_artifact_bundle_links")
+    if not isinstance(exported, dict):
+        exported = {}
     return {
-        "details": f"04_final_workspace_score/{arm}/{task_dir}/index.html",
-        "spans_timeline": (
-            f"02_timeline_model_trace/{arm}/{task_dir}/spans_timeline.html"
-            if timeline_available
-            else None
-        ),
-        "conversation": (
-            f"01_durable_session_records/{arm}/{task_dir}/index.html"
-            if (record.run_dir / "conversation").is_dir()
-            else None
-        ),
-        "resources": available("03_execution_evidence", "util.jsonl"),
-        "execution_log": available(
-            "03_execution_evidence", "openclaw_gateway.log"
-        ),
-        "candidate": available("04_final_workspace_score", "candidate.patch"),
-        "verdict": available("04_final_workspace_score", "verdict.json"),
-        "job_evidence": (
-            f"03_execution_evidence/{arm}/_jobs/"
-            f"{_impl._safe_name(record.job_id)}/index.html"
-            if shared_root is not None
-            else None
-        ),
+        key: str(exported[key]) if exported.get(key) else None
+        for key in (
+            "details",
+            "spans_timeline",
+            "conversation",
+            "resources",
+            "execution_log",
+            "candidate",
+            "verdict",
+            "job_evidence",
+        )
     }
 
 

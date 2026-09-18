@@ -41,6 +41,17 @@ MINIMUM_ARTIFACTS = (
     "verdict.json",
 )
 
+_MINIMUM_ARTIFACT_MANIFEST_FIELDS = {
+    "steps.jsonl": {"step_trace_path"},
+    "spans.jsonl": {"telemetry_path"},
+    "spans_timeline.html": {"telemetry_path"},
+    "trajectory.jsonl": {"trajectory_path"},
+    "runtime_observability.json": {"runtime_observability_path"},
+    "token_accounting.json": {"token_accounting_path"},
+    "util.jsonl": {"util_path"},
+    "verdict.json": {"verdict_path"},
+}
+
 _TIMELINE_NAMES = {
     "steps.jsonl",
     "spans.jsonl",
@@ -95,6 +106,7 @@ _MANIFEST_ARTIFACT_KEYS = {
     "telemetry_path",
     "token_accounting_path",
     "trajectory_path",
+    "util_path",
     "verdict_path",
 }
 _MANIFEST_ARTIFACT_KEY_RE = re.compile(
@@ -991,11 +1003,23 @@ def _append_missing_minimum_entries(
         and item.get("status") == "copied"
         and item.get("source_path")
     }
+    manifest_reference_fields = {
+        str(field).rsplit(".", 1)[-1]
+        for item in entries
+        for field in item.get("manifest_fields") or []
+    }
     for relative in MINIMUM_ARTIFACTS:
         if relative == "conversation":
             if any(path == "conversation" or path.startswith("conversation/") for path in present):
                 continue
-        elif relative in present or Path(relative).name in manifest_reference_names:
+        elif (
+            relative in present
+            or Path(relative).name in manifest_reference_names
+            or bool(
+                _MINIMUM_ARTIFACT_MANIFEST_FIELDS.get(relative, set())
+                & manifest_reference_fields
+            )
+        ):
             continue
         entries.append(
             _entry(
@@ -1121,6 +1145,39 @@ def _ensure_spans_timeline(
 
 def _relative_href(from_path: Path, to_bundle_path: str) -> str:
     return Path(os.path.relpath(to_bundle_path, start=from_path.parent)).as_posix()
+
+
+def _copied_artifact_link(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    manifest_field: str | None = None,
+    fallback_names: Sequence[str] = (),
+) -> str | None:
+    """Return the exported path for a logical artifact, not a guessed path."""
+    if manifest_field:
+        for item in entries:
+            fields = {
+                str(field).rsplit(".", 1)[-1]
+                for field in item.get("manifest_fields") or []
+            }
+            if (
+                item.get("status") == "copied"
+                and item.get("bundle_path")
+                and manifest_field in fields
+            ):
+                return str(item["bundle_path"])
+    names = set(fallback_names)
+    if names:
+        for item in entries:
+            source = item.get("source_path")
+            if (
+                item.get("status") == "copied"
+                and item.get("bundle_path")
+                and source
+                and Path(str(source)).name in names
+            ):
+                return str(item["bundle_path"])
+    return None
 
 
 def _render_conversation_index(
@@ -1285,44 +1342,34 @@ def export_run_artifacts(
         if item.get("status") in {"copied", "generated"} and item.get("bundle_path")
     ]
     links = {
-        "details": str(detail_path.relative_to(bundle_dir).as_posix()),
+        "details": (
+            str(detail_path.relative_to(bundle_dir).as_posix())
+            if detail_item.get("status") == "generated"
+            else None
+        ),
         "spans_timeline": viewer.get("path"),
-        "conversation": str(conversation_index.relative_to(bundle_dir).as_posix()),
-        "resources": next(
-            (
-                str(item["bundle_path"])
-                for item in entries
-                if item.get("status") == "copied"
-                and str(item.get("bundle_path") or "").endswith("/util.jsonl")
-            ),
-            None,
+        "conversation": (
+            str(conversation_index.relative_to(bundle_dir).as_posix())
+            if conversation_item.get("status") == "generated"
+            else None
         ),
-        "execution_log": next(
-            (
-                str(item["bundle_path"])
-                for item in entries
-                if item.get("status") == "copied"
-                and str(item.get("bundle_path") or "").endswith("/openclaw_gateway.log")
-            ),
-            None,
+        "resources": _copied_artifact_link(
+            entries,
+            manifest_field="util_path",
+            fallback_names=("util.jsonl",),
         ),
-        "candidate": next(
-            (
-                str(item["bundle_path"])
-                for item in entries
-                if item.get("status") == "copied"
-                and str(item.get("bundle_path") or "").endswith("/candidate.patch")
-            ),
-            None,
+        "execution_log": _copied_artifact_link(
+            entries,
+            fallback_names=("openclaw_gateway.log",),
         ),
-        "verdict": next(
-            (
-                str(item["bundle_path"])
-                for item in entries
-                if item.get("status") == "copied"
-                and str(item.get("bundle_path") or "").endswith("/verdict.json")
-            ),
-            None,
+        "candidate": _copied_artifact_link(
+            entries,
+            fallback_names=("candidate.patch",),
+        ),
+        "verdict": _copied_artifact_link(
+            entries,
+            manifest_field="verdict_path",
+            fallback_names=("verdict.json",),
         ),
         "job_evidence": (related_links or {}).get("job_evidence"),
     }

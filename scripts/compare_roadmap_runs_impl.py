@@ -1646,17 +1646,19 @@ def _copy_selected_task_artifacts(
                     job_id=record.job_id,
                 )
                 shared_by_key[key] = shared
-        run_indexes.append(
-            export_run_artifacts(
-                record.run_dir,
-                bundle_dir,
-                arm=record.arm,
-                instance_id=record.instance_id,
-                seed=record.seed,
-                job_id=record.job_id,
-                related_links=(shared or {}).get("links") or {},
-            )
+        run_index = export_run_artifacts(
+            record.run_dir,
+            bundle_dir,
+            arm=record.arm,
+            instance_id=record.instance_id,
+            seed=record.seed,
+            job_id=record.job_id,
+            related_links=(shared or {}).get("links") or {},
         )
+        record.__dict__["_roadmap_artifact_bundle_links"] = dict(
+            run_index.get("links") or {}
+        )
+        run_indexes.append(run_index)
     return run_indexes, list(shared_by_key.values())
 
 
@@ -1745,27 +1747,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             "single_agent": single_summary,
             "paired": paired_summary,
             "tasks": {
-                "subagent": [record_to_dict(record) for record in subagent],
-                "single_agent": [
-                    record_to_dict(record) for record in single_agent
-                ],
+                "subagent": [],
+                "single_agent": [],
                 "paired": paired_rows,
             },
             "duplicates": _duplicates_json(duplicates),
             "figures": figure_names,
             "selection": selection_diagnostics,
         }
-        markdown = render_markdown(
-            subagent,
-            sub_summary,
-            single_agent=single_agent,
-            single_summary=single_summary,
-            paired_summary=paired_summary,
-            paired_rows=paired_rows,
-            duplicate_count=duplicate_count,
-            figure_names=figure_names,
-            selection_diagnostics=selection_diagnostics,
-        )
+        markdown = ""
     else:
         raw_sub = collect_records(
             args.runs, arm="subagent", runs_root=runs_root
@@ -1786,15 +1776,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "mode": "summary",
             "jobs": _jobs(subagent),
             "summary": sub_summary,
-            "tasks": [record_to_dict(record) for record in subagent],
+            "tasks": [],
             "duplicates": _duplicates_json(duplicates),
             "figures": [],
         }
-        markdown = render_markdown(
-            subagent,
-            sub_summary,
-            duplicate_count=duplicate_count,
-        )
+        markdown = ""
 
     json_path = bundle_dir / f"{basename}.json"
     md_path = bundle_dir / f"{basename}.md"
@@ -1818,6 +1804,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             not bool(item.get("complete")) for item in shared_index
         ),
     }
+
+    if comparison:
+        report["tasks"] = {
+            "subagent": [record_to_dict(record) for record in subagent],
+            "single_agent": [
+                record_to_dict(record) for record in single_agent
+            ],
+            "paired": paired_rows,
+        }
+        markdown = render_markdown(
+            subagent,
+            sub_summary,
+            single_agent=single_agent,
+            single_summary=single_summary,
+            paired_summary=paired_summary,
+            paired_rows=paired_rows,
+            duplicate_count=duplicate_count,
+            figure_names=figure_names,
+            selection_diagnostics=selection_diagnostics,
+        )
+    else:
+        report["tasks"] = [record_to_dict(record) for record in subagent]
+        markdown = render_markdown(
+            subagent,
+            sub_summary,
+            duplicate_count=duplicate_count,
+        )
 
     json_path.write_text(json.dumps(report, indent=2) + "\n")
     md_path.write_text(markdown)
