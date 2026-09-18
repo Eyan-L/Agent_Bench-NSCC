@@ -63,6 +63,9 @@ CURRENT_TERMINAL_PAYLOAD_MARKER = (
 BOUNDED_LENGTH_CONTINUATION_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_BOUNDED_NO_PROGRESS_LENGTH_V1_BEGIN"
 )
+LENGTH_SEMANTIC_PROGRESS_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_LENGTH_SEMANTIC_PROGRESS_V2_BEGIN"
+)
 SETTLED_CONTINUATION_TOOL_ERROR_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_TOOL_ERROR_BEGIN"
 )
@@ -652,6 +655,33 @@ hasCurrentTerminalPayload: (() => {{
 {indent}\t&& !isEmbeddedRunTerminalTimeout({input_name}.terminalState.outcome)
 {indent}\t&& {input_name}.attempt?.terminal?.kind !== "failed"
 {indent}\t&& {input_name}.attempt?.terminal?.kind !== "timeout") {{
+{indent}\t/* {LENGTH_SEMANTIC_PROGRESS_MARKER} */
+{indent}\tconst __abLengthVolatileResultKeys = new Set([
+{indent}\t\t"toolCallId", "runId", "sessionId", "timestamp", "timestampMs",
+{indent}\t\t"startedAt", "completedAt", "endedAt", "durationMs",
+{indent}\t\t"elapsedMs", "pid",
+{indent}\t]);
+{indent}\tconst __abNormalizeLengthFingerprintValue = (value, omitVolatile) => {{
+{indent}\t\tif (typeof value === "string") return value.replace(/\\r\\n?/g, "\\n").trimEnd();
+{indent}\t\tif (value === null || typeof value !== "object") return value;
+{indent}\t\tif (Array.isArray(value)) return value.map(
+{indent}\t\t\t(item) => __abNormalizeLengthFingerprintValue(item, omitVolatile)
+{indent}\t\t);
+{indent}\t\treturn Object.fromEntries(Object.keys(value).sort()
+{indent}\t\t\t.filter((key) => !omitVolatile || !__abLengthVolatileResultKeys.has(key))
+{indent}\t\t\t.map((key) => [
+{indent}\t\t\t\tkey,
+{indent}\t\t\t\t__abNormalizeLengthFingerprintValue(value[key], omitVolatile),
+{indent}\t\t\t]));
+{indent}\t}};
+{indent}\tconst __abHashLengthFingerprint = (value) => {{
+{indent}\t\tlet hash = 2166136261;
+{indent}\t\tfor (let index = 0; index < value.length; index += 1) {{
+{indent}\t\t\thash ^= value.charCodeAt(index);
+{indent}\t\t\thash = Math.imul(hash, 16777619);
+{indent}\t\t}}
+{indent}\t\treturn `${{value.length}}:${{(hash >>> 0).toString(16).padStart(8, "0")}}`;
+{indent}\t}};
 {indent}\tconst __abLengthEvidence = resolveSettledToolBatchEvidence({input_name}.attempt);
 {indent}\tconst __abLengthToolCalls = Array.isArray(__abLengthEvidence.assistant?.content)
 {indent}\t\t? __abLengthEvidence.assistant.content.filter(
@@ -671,7 +701,17 @@ hasCurrentTerminalPayload: (() => {{
 {indent}\t\tconst blocked = result?.details?.status === "blocked";
 {indent}\t\tif (!result || result?.isError === true || meta?.isError === true
 {indent}\t\t\t|| meta?.asyncStarted === true || blocked) return null;
-{indent}\t\treturn `${{call.id}}:${{String(call.name ?? "")}}`;
+{indent}\t\tconst semanticArguments = call.arguments ?? call.args ?? call.input ?? call.params ?? null;
+{indent}\t\tconst semanticResult = {{
+{indent}\t\t\tcontent: result.content ?? null,
+{indent}\t\t\tdetails: result.details ?? null,
+{indent}\t\t}};
+{indent}\t\tconst semanticRecord = JSON.stringify({{
+{indent}\t\t\ttool: String(call.name ?? ""),
+{indent}\t\t\targuments: __abNormalizeLengthFingerprintValue(semanticArguments, false),
+{indent}\t\t\tresult: __abNormalizeLengthFingerprintValue(semanticResult, true),
+{indent}\t\t}});
+{indent}\t\treturn __abHashLengthFingerprint(semanticRecord);
 {indent}\t}});
 {indent}\tconst __abLengthProgressSignature =
 {indent}\t\t__abLengthEvidence.allToolsProvenSettled
@@ -679,11 +719,13 @@ hasCurrentTerminalPayload: (() => {{
 {indent}\t\t&& __abLengthProgressEntries.every(Boolean)
 {indent}\t\t\t? __abLengthProgressEntries.join("|")
 {indent}\t\t\t: "";
+{indent}\t{state}.lengthProgressSignatures ??= [];
 {indent}\tif (__abLengthProgressSignature
-{indent}\t\t&& __abLengthProgressSignature !== {state}.lastLengthProgressSignature) {{
-{indent}\t\t{state}.lastLengthProgressSignature = __abLengthProgressSignature;
+{indent}\t\t&& !{state}.lengthProgressSignatures.includes(__abLengthProgressSignature)) {{
+{indent}\t\t{state}.lengthProgressSignatures.push(__abLengthProgressSignature);
 {indent}\t\t{state}.lengthNoProgressAttempts = 0;
 {indent}\t}}
+{indent}\t/* AB_HARNESS_OPENCLAW_V2026_9_2_LENGTH_SEMANTIC_PROGRESS_V2_END */
 {indent}}}
 {indent}const __abLengthContinuation =
 {indent}\tprocess.env.{SETTLED_TOOL_POLICY_ENV} === "continue"
@@ -727,7 +769,10 @@ hasCurrentTerminalPayload: (() => {{
         if LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_MARKER in _read(path)
         or (
             BOUNDED_LENGTH_CONTINUATION_MARKER in _read(path)
-            and CONSECUTIVE_EMPTY_STOP_RESET_MARKER not in _read(path)
+            and (
+                CONSECUTIVE_EMPTY_STOP_RESET_MARKER not in _read(path)
+                or LENGTH_SEMANTIC_PROGRESS_MARKER not in _read(path)
+            )
         )
     ]
     if stale_or_incomplete_length_targets:
@@ -1162,6 +1207,10 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
         "bounded_no_progress_length": (
             "dist/**/*",
             BOUNDED_LENGTH_CONTINUATION_MARKER,
+        ),
+        "length_semantic_progress": (
+            "dist/**/*",
+            LENGTH_SEMANTIC_PROGRESS_MARKER,
         ),
         "consecutive_empty_stop_reset": (
             "dist/**/*",

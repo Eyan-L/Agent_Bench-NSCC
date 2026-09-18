@@ -22,6 +22,7 @@ from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     FS_WRITE_MARKER,
     LITELLM_PRICING_URL,
     LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_MARKER,
+    LENGTH_SEMANTIC_PROGRESS_MARKER,
     LOOP_VETO_RECOVERY_PROBE_MARKER,
     NONEMPTY_LENGTH_ELIGIBILITY_MARKER,
     OPENROUTER_PRICING_URL,
@@ -339,11 +340,13 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert CONSECUTIVE_EMPTY_STOP_RESET_MARKER in worker_text
     assert BOUNDED_LENGTH_CONTINUATION_MARKER in embedded_text
     assert BOUNDED_LENGTH_CONTINUATION_MARKER in worker_text
+    assert LENGTH_SEMANTIC_PROGRESS_MARKER in embedded_text
+    assert LENGTH_SEMANTIC_PROGRESS_MARKER in worker_text
     assert 'Ot.attemptAssistant?.stopReason === "length"' in worker_text
     assert 'input.attemptAssistant?.stopReason === "length"' in embedded_text
     assert "if (__abLengthContinuation)" in embedded_text
     assert "lengthNoProgressAttempts" in embedded_text
-    assert "lastLengthProgressSignature" in embedded_text
+    assert "lengthProgressSignatures" in embedded_text
     assert "OPENCLAW_AGENT_BENCH_LENGTH_NO_PROGRESS_RETRIES" in embedded_text
     assert "if (raw === void 0 || raw === \"\") return 1" in embedded_text
     assert "Math.min(parsed, 16)" in embedded_text
@@ -440,7 +443,7 @@ def test_v2026_9_2_length_has_independent_no_progress_budget(tmp_path):
     assert "__abLengthContinuation" in embedded
     assert "retryState.emptyResponseAttempts += 1" in embedded
     assert "retryState.lengthNoProgressAttempts += 1" in embedded
-    assert "retryState.lastLengthProgressSignature" in embedded
+    assert "retryState.lengthProgressSignatures" in embedded
     assert "OPENCLAW_AGENT_BENCH_LENGTH_NO_PROGRESS_RETRIES" in embedded
     assert "__abLengthProgressEntries.length > 0" in embedded
     assert "__abLengthProgressEntries.every(Boolean)" in embedded
@@ -693,28 +696,39 @@ def test_v2026_9_2_transformed_bundle_executes_retry_state_contract(tmp_path):
 function abInput({
   progress = "none", outcome = "ok", loopVeto = false,
   toolId = "call-1", toolError = false, stopReason = "stop",
+  toolArgs = { query: "needle", path: "src" }, resultText = "same result",
+  asyncStarted = false, includeResult = true,
 } = {}) {
   const toolProgress = progress === "tool";
-  const toolCall = { type: "toolCall", id: toolId, name: "exec" };
+  const toolCall = {
+    type: "toolCall", id: toolId, name: "exec", arguments: toolArgs,
+  };
   const toolResult = {
     role: "toolResult", toolCallId: toolId, toolName: "exec",
     isError: toolError,
+    content: [{ type: "text", text: resultText }],
     details: loopVeto
       ? { status: "blocked", deniedReason: "tool-loop" }
-      : { status: "completed" },
+      : { status: "completed", durationMs: toolId.length, toolCallId: toolId },
   };
+  const completed = toolProgress && includeResult;
   return {
     attempt: {
       terminal: { kind: outcome === "timeout" ? "timeout" : "ok" },
       messagesSnapshot: toolProgress
-        ? [{ role: "assistant", content: [toolCall] }, toolResult]
+        ? [
+            { role: "assistant", content: [toolCall] },
+            ...(includeResult ? [toolResult] : []),
+          ]
         : [],
       itemLifecycle: {
         startedCount: toolProgress ? 1 : 0,
-        completedCount: toolProgress ? 1 : 0,
-        activeCount: 0,
+        completedCount: completed ? 1 : 0,
+        activeCount: toolProgress && !completed ? 1 : 0,
       },
-      toolMetas: toolProgress ? [{ toolCallId: toolId, isError: toolError }] : [],
+      toolMetas: toolProgress ? [{
+        toolCallId: toolId, isError: toolError, asyncStarted,
+      }] : [],
     },
     terminalState: { outcome },
     finalAssistantVisibleText: progress === "assistant" ? "Implemented feature" : "",
@@ -782,28 +796,53 @@ assert(length(configuredLength)?.action === "retry", "configured first retry all
 assert(length(configuredLength) === undefined, "configured second retry is blocked");
 delete process.env.OPENCLAW_AGENT_BENCH_LENGTH_NO_PROGRESS_RETRIES;
 
-const lengthToolReset = {
-  emptyResponseAttempts: 4,
-  lengthNoProgressAttempts: 4,
-  lastLengthProgressSignature: "old:exec",
+const repeatedSemanticTool = {
+  emptyResponseAttempts: 4, lengthNoProgressAttempts: 4,
 };
 assert(
-  length(lengthToolReset, { progress: "tool", toolId: "new-call" })?.action
+  length(repeatedSemanticTool, { progress: "tool", toolId: "call-A" })?.action
     === "retry",
-  "new valid settled tool progress resets the length streak",
+  "the first successful semantic tool result is progress",
 );
 assert(
-  lengthToolReset.lengthNoProgressAttempts === 1,
+  repeatedSemanticTool.lengthNoProgressAttempts === 1,
   "length streak restarts at one after valid progress",
 );
 assert(
-  lengthToolReset.emptyResponseAttempts === 0,
+  repeatedSemanticTool.emptyResponseAttempts === 0,
   "the existing empty streak reset remains independent",
 );
-lengthToolReset.lengthNoProgressAttempts = 4;
+for (const toolId of ["call-B", "call-C", "call-D"]) {
+  assert(
+    length(repeatedSemanticTool, {
+      progress: "tool", toolId,
+      toolArgs: { path: "src", query: "needle" },
+    })?.action === "retry",
+    "same semantics with a fresh tool id consumes the no-progress budget",
+  );
+}
 assert(
-  length(lengthToolReset, { progress: "tool", toolId: "new-call" }) === undefined,
-  "replayed settled-tool evidence cannot repeatedly reset length streak",
+  repeatedSemanticTool.lengthNoProgressAttempts === 4,
+  "fresh tool ids do not reset an unchanged semantic/result fingerprint",
+);
+assert(
+  length(repeatedSemanticTool, { progress: "tool", toolId: "call-E" })
+    === undefined,
+  "repeated semantic progress eventually exhausts the length budget",
+);
+
+assert(
+  length(repeatedSemanticTool, {
+    progress: "tool",
+    toolId: "call-F",
+    toolArgs: { query: "different", path: "src" },
+    resultText: "different result",
+  })?.action === "retry",
+  "a genuinely different successful tool execution resets the length streak",
+);
+assert(
+  repeatedSemanticTool.lengthNoProgressAttempts === 1,
+  "new semantic progress starts a fresh length streak",
 );
 
 const lengthText = { emptyResponseAttempts: 0, lengthNoProgressAttempts: 4 };
@@ -820,6 +859,17 @@ const lengthFailure = { emptyResponseAttempts: 0, lengthNoProgressAttempts: 4 };
 assert(
   length(lengthFailure, { progress: "tool", toolError: true }) === undefined,
   "failed settled tools do not reset length no-progress streak",
+);
+const lengthAsync = { emptyResponseAttempts: 0, lengthNoProgressAttempts: 4 };
+assert(
+  length(lengthAsync, { progress: "tool", asyncStarted: true }) === undefined,
+  "async tools do not reset length no-progress streak",
+);
+const lengthIncomplete = { emptyResponseAttempts: 0, lengthNoProgressAttempts: 4 };
+assert(
+  length(lengthIncomplete, { progress: "tool", includeResult: false })
+    === undefined,
+  "incomplete tools do not reset length no-progress streak",
 );
 process.stdout.write("TRANSFORMED_RETRY_CONTRACT_OK\n");
 ''')
@@ -959,6 +1009,21 @@ def test_v2026_9_2_patcher_rejects_counter_patch_without_streak_reset(
         patch_runtime_tree(root)
 
 
+def test_v2026_9_2_patcher_rejects_old_length_identity_patch(tmp_path):
+    root = _runtime_tree(tmp_path)
+    patch_runtime_tree(root)
+    path = root / "dist/embedded-agent-test.js"
+    path.write_text(
+        path.read_text().replace(
+            LENGTH_SEMANTIC_PROGRESS_MARKER,
+            "REMOVED_LENGTH_SEMANTIC_PROGRESS_MARKER",
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="stale or incomplete"):
+        patch_runtime_tree(root)
+
+
 def test_v2026_9_2_patcher_rejects_legacy_consecutive_reset(tmp_path):
     root = _runtime_tree(tmp_path)
     patch_runtime_tree(root)
@@ -1068,6 +1133,7 @@ def test_v2026_9_2_builder_does_not_reapply_legacy_runtime_patches():
     assert CURRENT_ASSISTANT_EMPTY_STOP_MARKER in audit
     assert CURRENT_TERMINAL_PAYLOAD_MARKER in audit
     assert BOUNDED_LENGTH_CONTINUATION_MARKER in audit
+    assert LENGTH_SEMANTIC_PROGRESS_MARKER in audit
     assert "stale_unbounded_length_continuation_present" in audit
     assert CONSECUTIVE_EMPTY_STOP_RESET_MARKER in audit
     assert SETTLED_CONTINUATION_TOOL_ERROR_MARKER in audit
