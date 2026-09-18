@@ -90,11 +90,17 @@ CONSECUTIVE_EMPTY_STOP_RESET_MARKER = (
 LOOP_VETO_RECOVERY_PROBE_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_LOOP_VETO_RECOVERY_PROBE_BEGIN"
 )
-CONTEXT_PRESSURE_LENGTH_RECOVERY_MARKER = (
+LEGACY_CONTEXT_PRESSURE_LENGTH_RECOVERY_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_LENGTH_RECOVERY_V1_BEGIN"
 )
-COMPACTION_LENGTH_STREAK_RESET_MARKER = (
+CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V2_BEGIN"
+)
+LEGACY_COMPACTION_LENGTH_STREAK_RESET_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_COMPACTION_LENGTH_STREAK_RESET_V1_BEGIN"
+)
+COMPACTION_RETRY_STREAK_RESET_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_COMPACTION_RETRY_STREAK_RESET_V2_BEGIN"
 )
 
 SETTLED_TOOL_POLICY_ENV = "OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY"
@@ -975,8 +981,222 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
     }
 
 
-def _patch_context_pressure_length_recovery(root: Path) -> list[str]:
-    """Route pressure-induced length stops through native compaction recovery."""
+def _patch_minified_context_pressure_terminal_recovery(
+    text: str,
+    *,
+    path: Path,
+    helper_source: str,
+) -> str:
+    """Patch the minified worker form of the native recovery pipeline."""
+    ident = r"[A-Za-z_$][\w$]*"
+    overflow_function = re.compile(
+        rf"async function recoverEmbeddedRunOverflow\((?P<input>{ident})\)\{{"
+    )
+    attempt_function = re.compile(
+        rf"async function recoverEmbeddedRunAttempt\((?P<input>{ident})\)\{{"
+    )
+    normalized_fields = re.compile(
+        rf"\{{attempt:(?P<attempt>{ident}),sessionIdUsed:{ident},"
+        rf"attemptAssistant:(?P<attempt_assistant>{ident}),"
+        rf"currentAttemptAssistant:{ident},"
+        rf"currentAttemptCompletedAssistant:(?P<completed>{ident}),"
+    )
+    terminal_fields = re.compile(
+        rf"\{{aborted:(?P<aborted>{ident}),externalAbort:{ident},"
+        rf"promptError:{ident},promptErrorSource:{ident},"
+        rf"timedOut:(?P<timed_out>{ident}),[^}}]*\}}="
+        rf"projectAgentRunAttemptTerminal\([^)]*\),"
+        rf"(?P<interrupted>{ident})=isEmbeddedRunTerminalInterrupted\("
+    )
+    proceed_guard = re.compile(
+        rf"if\(!(?P<replay>{ident})&&!(?P<mid>{ident})&&!"
+        rf"(?P<transport>{ident})\)return\{{action:`proceed`\}};"
+    )
+    overflow_call = re.compile(
+        rf"assistantErrorText:(?P<assistant_error>{ident}),"
+        rf"assistantOverflowCandidate:(?P<overflow_candidate>{ident}),"
+        r"attemptCompactionCount:"
+    )
+    budget = re.compile(
+        rf"(?P<budget>{ident})=(?P<terminal>{ident})\.promptErrorSource"
+        rf"===`precheck`&&(?P<preflight>{ident})\?\.source===`mid-turn`"
+        rf"&&typeof (?P=preflight)\.promptBudgetBeforeReserve==`number`"
+    )
+    overflow_await = re.compile(
+        rf"let (?P<recovery>{ident})=await recoverEmbeddedRunOverflow\("
+    )
+    retry_return = re.compile(
+        rf"if\((?P<recovery>{ident})\.action===`retry`\)"
+        rf"return (?P<retry>{ident})\(\);"
+    )
+    retry_state = re.compile(
+        rf"(?P<state>{ident})=createEmbeddedRunTerminalRetryState\(\)"
+    )
+    outer_recovery_call = re.compile(
+        r"recoverEmbeddedRunAttempt\(\{(?P<body>[^{}]+)\}\);"
+        rf"if\((?P<recovery>{ident})\.action===`complete`\)"
+    )
+
+    anchors = {
+        "overflow helper": overflow_function,
+        "attempt helper": attempt_function,
+        "normalized attempt fields": normalized_fields,
+        "terminal fields": terminal_fields,
+        "attempt proceed guard": proceed_guard,
+        "overflow call": overflow_call,
+        "preflight budget": budget,
+        "overflow await": overflow_await,
+        "overflow retry": retry_return,
+        "terminal retry state": retry_state,
+        "outer recovery call": outer_recovery_call,
+    }
+    for name, anchor in anchors.items():
+        if len(anchor.findall(text)) != 1:
+            raise RuntimeError(
+                f"context-pressure minified {name} anchor "
+                f"missing/ambiguous in {path}"
+            )
+
+    attempt_match = normalized_fields.search(text)
+    terminal_match = terminal_fields.search(text)
+    attempt_function_match = attempt_function.search(text)
+    overflow_function_match = overflow_function.search(text)
+    retry_state_match = retry_state.search(text)
+    assert attempt_match and terminal_match and attempt_function_match
+    assert overflow_function_match and retry_state_match
+    attempt = attempt_match.group("attempt")
+    attempt_assistant = attempt_match.group("attempt_assistant")
+    completed = attempt_match.group("completed")
+    attempt_input = attempt_function_match.group("input")
+    overflow_input = overflow_function_match.group("input")
+    retry_state_name = retry_state_match.group("state")
+
+    text, count = overflow_function.subn(
+        lambda match: helper_source + match.group(0), text, count=1
+    )
+    if count != 1:
+        raise RuntimeError(f"context-pressure minified helper failed in {path}")
+
+    def replace_guard(match: re.Match[str]) -> str:
+        pressure = "__abContextPressureTerminal"
+        return (
+            f"const {pressure}=!{terminal_match.group('aborted')}"
+            f"&&!{terminal_match.group('timed_out')}"
+            f"&&!{terminal_match.group('interrupted')}"
+            f"?__abResolveRoadmapContextPressureTerminal("
+            f"{attempt},{completed}??{attempt_assistant}):null;"
+            f"if({pressure}&&!{attempt}.preflightRecovery)"
+            f"{attempt}.preflightRecovery={{route:{pressure}.route,"
+            f"source:`agent-bench-terminal`,"
+            f"estimatedPromptTokens:{pressure}.estimatedPromptTokens,"
+            f"promptBudgetBeforeReserve:{pressure}.promptBudgetBeforeReserve}};"
+            f"if({pressure})console.warn("
+            f"`[agent-bench-continuation-decision] ${{JSON.stringify({{"
+            f"candidate:{pressure}.candidate,decision:`recover`,"
+            f"deny_reason:[],recovery_reason:`context_pressure_compaction`,"
+            f"current_stop_reason:{pressure}.stopReason,"
+            f"context_pressure_route:{pressure}.route,"
+            f"estimated_prompt_tokens:{pressure}.estimatedPromptTokens,"
+            f"prompt_budget_before_reserve:{pressure}.promptBudgetBeforeReserve"
+            f"}})}}`);"
+            f"if(!{match.group('replay')}&&!{match.group('mid')}"
+            f"&&!{match.group('transport')}&&!{pressure})"
+            f"return{{action:`proceed`}};"
+        )
+
+    text, count = proceed_guard.subn(replace_guard, text, count=1)
+    if count != 1:
+        raise RuntimeError(f"context-pressure minified guard failed in {path}")
+
+    def replace_overflow_call(match: re.Match[str]) -> str:
+        pressure = "__abContextPressureTerminal"
+        return (
+            f"assistantErrorText:{pressure}?`Context window exceeded under "
+            f"preflight pressure`:{match.group('assistant_error')},"
+            f"assistantOverflowCandidate:{pressure}"
+            f"?({completed}??{attempt_assistant})"
+            f":{match.group('overflow_candidate')},"
+            f"agentBenchContextPressure:{pressure},attemptCompactionCount:"
+        )
+
+    text, count = overflow_call.subn(replace_overflow_call, text, count=1)
+    if count != 1:
+        raise RuntimeError(
+            f"context-pressure minified overflow call failed in {path}"
+        )
+
+    def replace_budget(match: re.Match[str]) -> str:
+        preflight = match.group("preflight")
+        return (
+            f"{match.group('budget')}=(("
+            f"{match.group('terminal')}.promptErrorSource===`precheck`"
+            f"&&{preflight}?.source===`mid-turn`)"
+            f"||{preflight}?.source===`agent-bench-terminal`"
+            f"||{overflow_input}.agentBenchContextPressure)"
+            f"&&typeof {preflight}.promptBudgetBeforeReserve==`number`"
+        )
+
+    text, count = budget.subn(replace_budget, text, count=1)
+    if count != 1:
+        raise RuntimeError(f"context-pressure minified budget failed in {path}")
+
+    def replace_overflow_await(match: re.Match[str]) -> str:
+        return (
+            f"let __abCompactionsBeforeAttemptRecovery="
+            f"{attempt_input}.contextRecoveryState.autoCompactionCount,"
+            f"{match.group('recovery')}=await recoverEmbeddedRunOverflow("
+        )
+
+    text, count = overflow_await.subn(replace_overflow_await, text, count=1)
+    if count != 1:
+        raise RuntimeError(
+            f"context-pressure minified compaction snapshot failed in {path}"
+        )
+
+    def replace_retry_return(match: re.Match[str]) -> str:
+        recovery = match.group("recovery")
+        pressure = "__abContextPressureTerminal"
+        return (
+            f"if({recovery}.action===`retry`){{"
+            f"if({attempt_input}.contextRecoveryState.autoCompactionCount>"
+            f"__abCompactionsBeforeAttemptRecovery"
+            f"&&{attempt_input}.terminalRetryState){{"
+            f"if({pressure}?.stopReason===`length`)"
+            f"{attempt_input}.terminalRetryState.lengthNoProgressAttempts=0;"
+            f"else if({pressure}?.stopReason===`stop`)"
+            f"{attempt_input}.terminalRetryState.emptyResponseAttempts=0;"
+            f"}}/* {COMPACTION_RETRY_STREAK_RESET_MARKER} */"
+            f"/* AB_HARNESS_OPENCLAW_V2026_9_2_"
+            f"COMPACTION_RETRY_STREAK_RESET_V2_END */"
+            f"return {match.group('retry')}();}}"
+        )
+
+    text, count = retry_return.subn(replace_retry_return, text, count=1)
+    if count != 1:
+        raise RuntimeError(f"context-pressure minified reset failed in {path}")
+
+    def add_retry_state(match: re.Match[str]) -> str:
+        body = match.group("body")
+        if "terminalRetryState:" in body:
+            raise RuntimeError(
+                f"context-pressure minified retry state already present in {path}"
+            )
+        return (
+            f"recoverEmbeddedRunAttempt({{{body},"
+            f"terminalRetryState:{retry_state_name}}});"
+            f"if({match.group('recovery')}.action===`complete`)"
+        )
+
+    text, count = outer_recovery_call.subn(add_retry_state, text, count=1)
+    if count != 1:
+        raise RuntimeError(
+            f"context-pressure minified retry-state wiring failed in {path}"
+        )
+    return text
+
+
+def _patch_context_pressure_terminal_recovery(root: Path) -> list[str]:
+    """Route pressure-induced empty/length stops through native recovery."""
     changed: list[str] = []
     dist_files = sorted(_js_files(root / "dist"))
     required_functions = (
@@ -988,12 +1208,14 @@ def _patch_context_pressure_length_recovery(root: Path) -> list[str]:
         path
         for path in dist_files
         if all(f"function {name}(" in _read(path) for name in required_functions)
-        or CONTEXT_PRESSURE_LENGTH_RECOVERY_MARKER in _read(path)
-        or COMPACTION_LENGTH_STREAK_RESET_MARKER in _read(path)
+        or CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER in _read(path)
+        or COMPACTION_RETRY_STREAK_RESET_MARKER in _read(path)
+        or LEGACY_CONTEXT_PRESSURE_LENGTH_RECOVERY_MARKER in _read(path)
+        or LEGACY_COMPACTION_LENGTH_STREAK_RESET_MARKER in _read(path)
     ]
     if not targets:
         raise RuntimeError(
-            "v2026.9.2 context-pressure length recovery anchors not found"
+            "v2026.9.2 context-pressure terminal recovery anchors not found"
         )
 
     helper_anchor = re.compile(
@@ -1028,16 +1250,59 @@ def _patch_context_pressure_length_recovery(root: Path) -> list[str]:
         r'(?P<indent>[ \t]*)const recovery = await '
         r'recoverEmbeddedRunAttempt\(\{'
     )
+    overflow_candidate_call_anchor = re.compile(
+        r'(?P<indent>[ \t]*)assistantErrorText'
+        r'(?:: (?P<assistant_error>[^,\n]+))?,\s*'
+        r'(?P=indent)assistantOverflowCandidate,'
+    )
     recovery_retry_anchor = re.compile(
         r'(?P<indent>[ \t]*)if \(recovery\.action === "complete"\) '
         r'return recovery\.result;\s*'
         r'(?P=indent)if \(recovery\.action === "retry"\) \{'
     )
 
-    helper_source = f'''/* {CONTEXT_PRESSURE_LENGTH_RECOVERY_MARKER} */
-function __abResolveRoadmapContextPressureLength(attempt, assistant) {{
+    helper_source = f'''/* {CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER} */
+function __abResolveRoadmapContextPressureTerminal(attempt, assistant) {{
 \tif (process.env.{SETTLED_TOOL_POLICY_ENV} !== "continue") return null;
-\tif (assistant?.stopReason !== "length") return null;
+\tconst content = assistant?.content;
+\tconst currentVisibleText = (
+\t\ttypeof content === "string"
+\t\t\t? content
+\t\t\t: Array.isArray(content)
+\t\t\t\t? content
+\t\t\t\t\t.filter((item) => item?.type === "text" && typeof item.text === "string")
+\t\t\t\t\t.map((item) => item.text)
+\t\t\t\t\t.join("")
+\t\t\t\t: ""
+\t).trim();
+\tconst currentHasToolCall =
+\t\tArray.isArray(content)
+\t\t&& content.some((item) => item?.type === "toolCall" || item?.type === "toolUse");
+\tconst currentHasPayload =
+\t\tArray.isArray(content)
+\t\t&& content.some((item) => {{
+\t\t\tif (item === null || item === void 0) return false;
+\t\t\tif (typeof item !== "object") return String(item).trim().length > 0;
+\t\t\treturn item.type !== "text"
+\t\t\t\t&& item.type !== "thinking"
+\t\t\t\t&& item.type !== "reasoning"
+\t\t\t\t&& item.type !== "toolCall"
+\t\t\t\t&& item.type !== "toolUse";
+\t\t}});
+\tconst currentHasReasoning =
+\t\tArray.isArray(content)
+\t\t&& content.some((item) => item?.type === "thinking" || item?.type === "reasoning");
+\tconst stopReason = String(assistant?.stopReason ?? "");
+\tconst candidate = stopReason === "length"
+\t\t? "length"
+\t\t: stopReason === "stop"
+\t\t\t&& !currentVisibleText
+\t\t\t&& !currentHasToolCall
+\t\t\t&& !currentHasPayload
+\t\t\t&& !currentHasReasoning
+\t\t\t\t? "current-empty"
+\t\t\t\t: "";
+\tif (!candidate) return null;
 \tconst preflight = attempt?.preflightRecovery ?? attempt?.contextBudgetStatus;
 \tif (preflight?.route !== "compact_only"
 \t\t&& preflight?.route !== "compact_then_truncate") return null;
@@ -1060,12 +1325,14 @@ function __abResolveRoadmapContextPressureLength(attempt, assistant) {{
 \t\t|| evidence.intentionalTermination
 \t\t|| evidence.parkedCodeModeRun) return null;
 \treturn {{
+\t\tcandidate,
+\t\tstopReason,
 \t\troute: preflight.route,
 \t\testimatedPromptTokens,
 \t\tpromptBudgetBeforeReserve,
 \t}};
 }}
-/* AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_LENGTH_RECOVERY_V1_END */
+/* AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V2_END */
 '''
 
     required_bindings = (
@@ -1076,12 +1343,20 @@ function __abResolveRoadmapContextPressureLength(attempt, assistant) {{
     for path in targets:
         text = _read(path)
         markers = (
-            CONTEXT_PRESSURE_LENGTH_RECOVERY_MARKER in text,
-            COMPACTION_LENGTH_STREAK_RESET_MARKER in text,
+            CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER in text,
+            COMPACTION_RETRY_STREAK_RESET_MARKER in text,
         )
+        if (
+            LEGACY_CONTEXT_PRESSURE_LENGTH_RECOVERY_MARKER in text
+            or LEGACY_COMPACTION_LENGTH_STREAK_RESET_MARKER in text
+        ):
+            raise RuntimeError(
+                "context-pressure recovery patch is length-only in "
+                f"{path}; rebuild from the clean v2026.9.2 base"
+            )
         if any(markers) and not all(markers):
             raise RuntimeError(
-                "incomplete context-pressure length recovery patch in "
+                "incomplete context-pressure terminal recovery patch in "
                 f"{path}; rebuild from the clean v2026.9.2 base"
             )
         if all(markers):
@@ -1103,9 +1378,19 @@ function __abResolveRoadmapContextPressureLength(attempt, assistant) {{
             "overflow context-error": context_error_anchor,
             "preflight metadata": preflight_metadata_anchor,
             "preflight budget": budget_anchor,
+            "overflow candidate call": overflow_candidate_call_anchor,
             "outer recovery call": recovery_call_anchor,
             "outer recovery retry": recovery_retry_anchor,
         }
+        if not all(len(anchor.findall(text)) == 1 for anchor in anchors.values()):
+            updated = _patch_minified_context_pressure_terminal_recovery(
+                text,
+                path=path,
+                helper_source=helper_source,
+            )
+            _write(path, updated)
+            changed.append(str(path.relative_to(root)))
+            continue
         for name, anchor in anchors.items():
             if len(anchor.findall(text)) != 1:
                 raise RuntimeError(
@@ -1120,13 +1405,13 @@ function __abResolveRoadmapContextPressureLength(attempt, assistant) {{
 
         def replace_eligibility(match: re.Match[str]) -> str:
             indent = match.group("indent")
-            return f'''{indent}const __abContextPressureLength =
-{indent}\t__abResolveRoadmapContextPressureLength(
+            return f'''{indent}const __abContextPressureTerminal =
+{indent}\t__abResolveRoadmapContextPressureTerminal(
 {indent}\t\tattempt,
 {indent}\t\tcurrentAttemptCompletedAssistant ?? attemptAssistant,
 {indent}\t);
 {indent}const canContinueSettledMidTurnOverflow = Boolean(
-{indent}\t__abContextPressureLength
+{indent}\t__abContextPressureTerminal
 {indent}\t&& !aborted
 {indent}\t&& !timedOut
 {indent}\t&& !terminalInterrupted
@@ -1141,8 +1426,8 @@ function __abResolveRoadmapContextPressureLength(attempt, assistant) {{
 
         def replace_context_error(match: re.Match[str]) -> str:
             indent = match.group("indent")
-            return f'''{indent}const __abContextPressureLength =
-{indent}\t__abResolveRoadmapContextPressureLength(
+            return f'''{indent}const __abContextPressureTerminal =
+{indent}\t__abResolveRoadmapContextPressureTerminal(
 {indent}\t\tinput.attempt,
 {indent}\t\tinput.assistantOverflowCandidate,
 {indent}\t);
@@ -1159,19 +1444,19 @@ function __abResolveRoadmapContextPressureLength(attempt, assistant) {{
         def replace_classifier(match: re.Match[str]) -> str:
             indent = match.group("indent")
             return match.group(0) + f'''
-{indent}if (__abContextPressureLength) {{
+{indent}if (__abContextPressureTerminal) {{
 {indent}\tconsole.warn("[agent-bench-continuation-decision] " + JSON.stringify({{
-{indent}\t\tcandidate: "length",
+{indent}\t\tcandidate: __abContextPressureTerminal.candidate,
 {indent}\t\tdecision: "recover",
 {indent}\t\tdeny_reason: [],
 {indent}\t\trecovery_reason: "context_pressure_compaction",
-{indent}\t\tcurrent_stop_reason: "length",
-{indent}\t\tcontext_pressure_route: __abContextPressureLength.route,
-{indent}\t\testimated_prompt_tokens: __abContextPressureLength.estimatedPromptTokens,
-{indent}\t\tprompt_budget_before_reserve: __abContextPressureLength.promptBudgetBeforeReserve,
+{indent}\t\tcurrent_stop_reason: __abContextPressureTerminal.stopReason,
+{indent}\t\tcontext_pressure_route: __abContextPressureTerminal.route,
+{indent}\t\testimated_prompt_tokens: __abContextPressureTerminal.estimatedPromptTokens,
+{indent}\t\tprompt_budget_before_reserve: __abContextPressureTerminal.promptBudgetBeforeReserve,
 {indent}\t}}));
 {indent}\treturn {{
-{indent}\t\ttext: `Context-pressure length stop: estimated prompt ${{__abContextPressureLength.estimatedPromptTokens}} exceeds budget ${{__abContextPressureLength.promptBudgetBeforeReserve}}`,
+{indent}\t\ttext: `Context-pressure ${{__abContextPressureTerminal.candidate}} stop: estimated prompt ${{__abContextPressureTerminal.estimatedPromptTokens}} exceeds budget ${{__abContextPressureTerminal.promptBudgetBeforeReserve}}`,
 {indent}\t\tsource: "preflightPressure",
 {indent}\t}};
 {indent}}}'''
@@ -1184,11 +1469,11 @@ function __abResolveRoadmapContextPressureLength(attempt, assistant) {{
             indent = match.group("indent")
             return f'''{indent}const preflightRecovery =
 {indent}\tinput.attempt.preflightRecovery
-{indent}\t?? (__abContextPressureLength ? {{
-{indent}\t\troute: __abContextPressureLength.route,
+{indent}\t?? (__abContextPressureTerminal ? {{
+{indent}\t\troute: __abContextPressureTerminal.route,
 {indent}\t\tsource: "agent-bench-terminal",
-{indent}\t\testimatedPromptTokens: __abContextPressureLength.estimatedPromptTokens,
-{indent}\t\tpromptBudgetBeforeReserve: __abContextPressureLength.promptBudgetBeforeReserve,
+{indent}\t\testimatedPromptTokens: __abContextPressureTerminal.estimatedPromptTokens,
+{indent}\t\tpromptBudgetBeforeReserve: __abContextPressureTerminal.promptBudgetBeforeReserve,
 {indent}\t}} : void 0);'''
 
         text, count = preflight_metadata_anchor.subn(
@@ -1212,11 +1497,37 @@ function __abResolveRoadmapContextPressureLength(attempt, assistant) {{
         if count != 1:
             raise RuntimeError(f"context-pressure budget patch failed in {path}")
 
+        def replace_overflow_candidate_call(match: re.Match[str]) -> str:
+            indent = match.group("indent")
+            assistant_error = match.group("assistant_error")
+            assistant_error_property = (
+                "assistantErrorText"
+                if assistant_error is None
+                else f"assistantErrorText: {assistant_error}"
+            )
+            return f'''{indent}{assistant_error_property},
+{indent}assistantOverflowCandidate: __abContextPressureTerminal
+{indent}\t? (currentAttemptCompletedAssistant ?? attemptAssistant)
+{indent}\t: assistantOverflowCandidate,'''
+
+        text, count = overflow_candidate_call_anchor.subn(
+            replace_overflow_candidate_call,
+            text,
+            count=1,
+        )
+        if count != 1:
+            raise RuntimeError(
+                f"context-pressure overflow candidate patch failed in {path}"
+            )
+
         def replace_recovery_call(match: re.Match[str]) -> str:
             indent = match.group("indent")
-            return f'''{indent}/* {COMPACTION_LENGTH_STREAK_RESET_MARKER} */
+            return f'''{indent}/* {COMPACTION_RETRY_STREAK_RESET_MARKER} */
 {indent}const __abCompactionsBeforeAttemptRecovery =
 {indent}\tcontextRecoveryState.autoCompactionCount;
+{indent}const __abContextPressureStopReason =
+{indent}\tinput.normalizedAttempt.currentAttemptCompletedAssistant?.stopReason
+{indent}\t?? input.normalizedAttempt.attemptAssistant?.stopReason;
 {indent}const recovery = await recoverEmbeddedRunAttempt({{'''
 
         text, count = recovery_call_anchor.subn(
@@ -1232,10 +1543,14 @@ function __abResolveRoadmapContextPressureLength(attempt, assistant) {{
                 f'{indent}if (recovery.action === "retry") {{\n'
                 f'{indent}\tif (contextRecoveryState.autoCompactionCount '
                 '> __abCompactionsBeforeAttemptRecovery) {\n'
-                f'{indent}\t\tterminalRetryState.lengthNoProgressAttempts = 0;\n'
+                f'{indent}\t\tif (__abContextPressureStopReason === "length") {{\n'
+                f'{indent}\t\t\tterminalRetryState.lengthNoProgressAttempts = 0;\n'
+                f'{indent}\t\t}} else if (__abContextPressureStopReason === "stop") {{\n'
+                f'{indent}\t\t\tterminalRetryState.emptyResponseAttempts = 0;\n'
+                f'{indent}\t\t}}\n'
                 f'{indent}\t}}\n'
                 f'{indent}\t/* '
-                'AB_HARNESS_OPENCLAW_V2026_9_2_COMPACTION_LENGTH_STREAK_RESET_V1_END */'
+                'AB_HARNESS_OPENCLAW_V2026_9_2_COMPACTION_RETRY_STREAK_RESET_V2_END */'
             )
 
         text, count = recovery_retry_anchor.subn(
@@ -1525,8 +1840,8 @@ def patch_runtime_tree(root: Path) -> dict[str, Any]:
     sandbox_files = _patch_sandbox_bypass(root)
     shared_workspace_spawn_files = _patch_shared_workspace_spawns(root)
     settled_continuation = _patch_settled_tool_continuation(root)
-    context_pressure_length_recovery_files = (
-        _patch_context_pressure_length_recovery(root)
+    context_pressure_terminal_recovery_files = (
+        _patch_context_pressure_terminal_recovery(root)
     )
     loop_veto_recovery_probe_files = _patch_loop_veto_recovery_probe(root)
     fs_files = _patch_fs_bridge(root)
@@ -1546,8 +1861,8 @@ def patch_runtime_tree(root: Path) -> dict[str, Any]:
         "sandbox_bypass_files_changed": sandbox_files,
         "shared_workspace_spawn_files_changed": shared_workspace_spawn_files,
         "settled_tool_continuation": settled_continuation,
-        "context_pressure_length_recovery_files_changed": (
-            context_pressure_length_recovery_files
+        "context_pressure_terminal_recovery_files_changed": (
+            context_pressure_terminal_recovery_files
         ),
         "loop_veto_recovery_probe_files_changed": (
             loop_veto_recovery_probe_files
@@ -1623,13 +1938,13 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
             "dist/**/*",
             LOOP_VETO_RECOVERY_PROBE_MARKER,
         ),
-        "context_pressure_length_recovery": (
+        "context_pressure_terminal_recovery": (
             "dist/**/*",
-            CONTEXT_PRESSURE_LENGTH_RECOVERY_MARKER,
+            CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER,
         ),
-        "compaction_length_streak_reset": (
+        "compaction_retry_streak_reset": (
             "dist/**/*",
-            COMPACTION_LENGTH_STREAK_RESET_MARKER,
+            COMPACTION_RETRY_STREAK_RESET_MARKER,
         ),
         "fs_helper": ("dist/fs-bridge-*.js", FS_HELPER_MARKER),
         "fs_run": ("dist/fs-bridge-*.js", FS_RUN_MARKER),
@@ -1719,13 +2034,16 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
         if (
             "function compactEmbeddedRunForRecovery(" not in text
             or "function recoverEmbeddedRunAttempt(" not in text
-            or CONTEXT_PRESSURE_LENGTH_RECOVERY_MARKER not in text
-            or COMPACTION_LENGTH_STREAK_RESET_MARKER not in text
+            or CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER not in text
+            or COMPACTION_RETRY_STREAK_RESET_MARKER not in text
+            or LEGACY_CONTEXT_PRESSURE_LENGTH_RECOVERY_MARKER in text
+            or LEGACY_COMPACTION_LENGTH_STREAK_RESET_MARKER in text
             or "attempt?.preflightRecovery ?? attempt?.contextBudgetStatus"
             not in text
-            or 'source: "preflightPressure"' not in text
-            or 'source: "agent-bench-terminal"' not in text
-            or "terminalRetryState.lengthNoProgressAttempts = 0" not in text
+            or not re.search(r'source:\s*["`]preflightPressure["`]', text)
+            or not re.search(r'source:\s*["`]agent-bench-terminal["`]', text)
+            or not re.search(r'lengthNoProgressAttempts\s*=\s*0', text)
+            or not re.search(r'emptyResponseAttempts\s*=\s*0', text)
         ):
             raise RuntimeError(
                 "incomplete context-pressure native recovery contract in "

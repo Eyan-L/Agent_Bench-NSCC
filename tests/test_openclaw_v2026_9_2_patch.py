@@ -11,8 +11,8 @@ import pytest
 
 from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     CONSECUTIVE_EMPTY_STOP_RESET_MARKER,
-    COMPACTION_LENGTH_STREAK_RESET_MARKER,
-    CONTEXT_PRESSURE_LENGTH_RECOVERY_MARKER,
+    COMPACTION_RETRY_STREAK_RESET_MARKER,
+    CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER,
     CONTINUATION_DECISION_DIAGNOSTIC_MARKER,
     CURRENT_ASSISTANT_EMPTY_STOP_MARKER,
     EMPTY_STOP_RETRY_LIMIT_MARKER,
@@ -560,14 +560,15 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert "!__abControlActivity" in embedded_text
     assert "empty_retry_attempt" in embedded_text
     assert "length_retry_attempt" in embedded_text
-    assert CONTEXT_PRESSURE_LENGTH_RECOVERY_MARKER in recovery_text
-    assert COMPACTION_LENGTH_STREAK_RESET_MARKER in recovery_text
+    assert CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER in recovery_text
+    assert COMPACTION_RETRY_STREAK_RESET_MARKER in recovery_text
     assert "attempt?.preflightRecovery ?? attempt?.contextBudgetStatus" in (
         recovery_text
     )
     assert 'source: "preflightPressure"' in recovery_text
     assert 'source: "agent-bench-terminal"' in recovery_text
     assert "terminalRetryState.lengthNoProgressAttempts = 0" in recovery_text
+    assert "terminalRetryState.emptyResponseAttempts = 0" in recovery_text
     assert LOOP_VETO_RECOVERY_PROBE_MARKER in loop_detection_text
     assert "OPENCLAW_AGENT_BENCH_LOOP_VETO_RECOVERY_PROBE" in (
         loop_detection_text
@@ -622,7 +623,7 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert second["sandbox_bypass_files_changed"] == []
     assert second["shared_workspace_spawn_files_changed"] == []
     assert second["settled_tool_continuation"]["files_changed"] == []
-    assert second["context_pressure_length_recovery_files_changed"] == []
+    assert second["context_pressure_terminal_recovery_files_changed"] == []
     assert second["loop_veto_recovery_probe_files_changed"] == []
     assert second["fs_bridge_files_changed"] == []
     assert second["openrouter_pricing_url_replacements"] == 0
@@ -1294,7 +1295,7 @@ process.stdout.write("CURRENT_EMPTY_STOP_CONTRACT_OK\n");
     assert length_decision["length_retry_attempt"] == 1
 
 
-def test_v2026_9_2_context_pressure_length_uses_native_recovery(tmp_path):
+def test_v2026_9_2_context_pressure_terminal_uses_native_recovery(tmp_path):
     root = _runtime_tree(tmp_path)
     patch_runtime_tree(root)
     bundle = root / "dist/embedded-recovery-test.js"
@@ -1305,6 +1306,7 @@ function assert(value, message) {
 function recoveryInput({
   activeCount = 0, route = "compact_then_truncate",
   estimatedPromptTokens = 427191, promptBudgetBeforeReserve = 242144,
+  stopReason = "length", content = [],
 } = {}) {
   const contextRecoveryState = {
     autoCompactionCount: 0, overflowCompactionAttempts: 0,
@@ -1314,7 +1316,7 @@ function recoveryInput({
   };
   const events = [];
   const attempt = {
-    currentAttemptCompletedAssistant: { content: [], stopReason: "length" },
+    currentAttemptCompletedAssistant: { content, stopReason },
     terminal: { kind: "ok" },
     contextBudgetStatus: {
       route, source: "pre-prompt-estimate", estimatedPromptTokens,
@@ -1383,6 +1385,10 @@ function recoveryInput({
     "successful compaction must reset the independent length streak",
   );
   assert(
+    pressure.terminalRetryState.emptyResponseAttempts === 2,
+    "length compaction must not consume or reset the empty budget",
+  );
+  assert(
     pressure.commonRecoveryInput.workspace === pressure.workspace
       && pressure.commonRecoveryInput.toolCapability === pressure.toolCapability,
     "compaction recovery must preserve session workspace and tool capability",
@@ -1410,6 +1416,56 @@ function recoveryInput({
     !compactOnly.events.some(([event]) => event === "truncate"),
     "compact_only must not run the truncate phase",
   );
+
+  const emptyPressure = recoveryInput({ stopReason: "stop" });
+  const emptyPressureResult = await executeRecoveryContract(emptyPressure);
+  assert(emptyPressureResult.action === "retry", "pressure empty must retry");
+  assert(
+    emptyPressure.contextRecoveryState.autoCompactionCount === 1,
+    "pressure empty must perform an actual compaction",
+  );
+  assert(
+    emptyPressure.events.some(([event]) => event === "truncate"),
+    "pressure empty must preserve compact_then_truncate behavior",
+  );
+  assert(
+    emptyPressure.terminalRetryState.emptyResponseAttempts === 0,
+    "successful empty compaction must reset the empty streak",
+  );
+  assert(
+    emptyPressure.terminalRetryState.lengthNoProgressAttempts === 3,
+    "empty compaction must not consume or reset the length budget",
+  );
+
+  const activeEmpty = recoveryInput({ activeCount: 1, stopReason: "stop" });
+  const activeEmptyResult = await executeRecoveryContract(activeEmpty);
+  assert(
+    activeEmptyResult.action === "proceed"
+      && activeEmpty.contextRecoveryState.autoCompactionCount === 0,
+    "active tool work must retain ownership before empty compaction",
+  );
+
+  const healthyEmpty = recoveryInput({
+    stopReason: "stop", estimatedPromptTokens: 200000,
+  });
+  const healthyEmptyResult = await executeRecoveryContract(healthyEmpty);
+  assert(
+    healthyEmptyResult.action === "proceed"
+      && healthyEmpty.contextRecoveryState.autoCompactionCount === 0
+      && healthyEmpty.terminalRetryState.emptyResponseAttempts === 2,
+    "healthy-context empty must remain on the ordinary empty retry path",
+  );
+
+  const payloadEmpty = recoveryInput({
+    stopReason: "stop",
+    content: [{ type: "image", data: "terminal-payload" }],
+  });
+  const payloadEmptyResult = await executeRecoveryContract(payloadEmpty);
+  assert(
+    payloadEmptyResult.action === "proceed"
+      && payloadEmpty.contextRecoveryState.autoCompactionCount === 0,
+    "a current terminal payload must not be classified as pressure empty",
+  );
   process.stdout.write("CONTEXT_PRESSURE_RECOVERY_CONTRACT_OK\n");
 })().catch((error) => {
   console.error(error);
@@ -1432,6 +1488,62 @@ function recoveryInput({
     assert '"recovery_reason":"context_pressure_compaction"' in (
         completed.stderr
     )
+    assert '"candidate":"current-empty"' in completed.stderr
+
+
+def test_v2026_9_2_minified_worker_executes_pressure_recovery(tmp_path):
+    root = _runtime_tree(tmp_path)
+    bundle = root / "dist/embedded-recovery-minified-test.js"
+    bundle.write_text(r'''
+function resolveSettledToolBatchEvidence(Ot){return Ot.settledToolEvidence}
+function hasOutboundDeliveryEvidence(Ot){return Ot.completedDelivery===true}
+function hasAsyncActivity(Ot){return(Ot??[]).some(Zt=>Zt.asyncStarted===true)}
+function projectAgentRunAttemptTerminal(Ot){return{aborted:Ot.kind===`aborted`,promptErrorSource:Ot.promptErrorSource,timedOut:Ot.kind===`timeout`}}
+function isEmbeddedRunTerminalInterrupted(Ot){return Ot===`aborted`||Ot===`timeout`}
+function isProviderRefusalAssistantError(){return false}
+function isLikelyContextOverflowError(Ot){return String(Ot).includes(`Context window exceeded`)}
+async function compactEmbeddedRunForRecovery(Ot,Zt){Ot.events.push([`compact`,Zt.tokenBudget]);Ot.state.autoCompactionCount+=1;return{result:{compacted:true}}}
+async function recoverEmbeddedRunOverflow(Ot){let Zt=!Ot.aborted&&!Ot.signalOwnedInterruption?(()=>{if(isProviderRefusalAssistantError(Ot.assistantOverflowCandidate))return null;return Ot.assistantErrorText&&isLikelyContextOverflowError(Ot.assistantErrorText)?{text:Ot.assistantErrorText,source:`assistantError`}:null})():null;if(!Zt||!Ot.genericCompactionRecoveryAllowed||Ot.contextTokenBudget===void 0)return{action:`none`};let Dn=projectAgentRunAttemptTerminal(Ot.attempt.terminal),cr=Ot.attempt.preflightRecovery,pr=Dn.promptErrorSource===`precheck`&&cr?.source===`mid-turn`&&typeof cr.promptBudgetBeforeReserve==`number`?cr.promptBudgetBeforeReserve:void 0;if(Ot.attemptCompactionCount===0){let Zt=await compactEmbeddedRunForRecovery(Ot,{tokenBudget:pr??Ot.contextTokenBudget});if(Zt.result.compacted){if(cr?.route===`compact_then_truncate`)Ot.truncateToolResults();return{action:`retry`}}}return{action:`surface`}}
+async function recoverEmbeddedRunAttempt(Ot){let{normalizedAttempt:Dn}=Ot,{attempt:pr,sessionIdUsed:xr,attemptAssistant:Mr,currentAttemptAssistant:Pr,currentAttemptCompletedAssistant:Br,terminalState:Hr}=Dn,{aborted:ta,externalAbort:na,promptError:ra,promptErrorSource:ia,timedOut:aa,timedOutDuringCompaction:oa}=projectAgentRunAttemptTerminal(pr.terminal),la=isEmbeddedRunTerminalInterrupted(Hr.outcome),ua=false,ma=false,ha=false,Mi=null,va=Br===void 0?Mr?.stopReason===`error`||Mr?.stopReason===`length`?Mr:void 0:Br.stopReason===`error`||Br.stopReason===`length`?Br:void 0,retry=()=>({action:`retry`});if(!ua&&!ma&&!ha)return{action:`proceed`};let Sa=await recoverEmbeddedRunOverflow({aborted:ta,signalOwnedInterruption:false,promptError:ra,assistantErrorText:Mi,assistantOverflowCandidate:va,attemptCompactionCount:0,attempt:pr,genericCompactionRecoveryAllowed:true,contextTokenBudget:262144,state:Ot.contextRecoveryState,events:Ot.events,truncateToolResults:Ot.truncateToolResults});if(Sa.action===`retry`)return retry();return{action:`proceed`}}
+function createEmbeddedRunTerminalRetryState(){return{emptyResponseAttempts:3,lengthNoProgressAttempts:3}}
+async function executeWorkerContract(stopReason,{activeCount=0,content=[]}={}){let Da=createEmbeddedRunTerminalRetryState(),Sa={autoCompactionCount:0},Br={content,stopReason},pr={terminal:{kind:`ok`},contextBudgetStatus:{route:`compact_then_truncate`,estimatedPromptTokens:427191,promptBudgetBeforeReserve:242144},itemLifecycle:{activeCount},toolMetas:[],settledToolEvidence:{allToolsProvenSettled:false,intentionalTermination:false,parkedCodeModeRun:false}},za={attempt:pr,sessionIdUsed:`s`,attemptAssistant:Br,currentAttemptAssistant:Br,currentAttemptCompletedAssistant:Br,terminalState:{outcome:`ok`}},na={},ev=[],ro=await recoverEmbeddedRunAttempt({runInput:na,normalizedAttempt:za,contextRecoveryState:Sa,events:ev,truncateToolResults:()=>ev.push([`truncate`])});if(ro.action===`complete`)return ro.result;if(ro.action===`retry`)return{action:`retry`,retryState:Da,recoveryState:Sa,events:ev};return{action:`proceed`,retryState:Da,recoveryState:Sa,events:ev}}
+''')
+    patch_runtime_tree(root)
+    bundle.write_text(bundle.read_text() + r'''
+function assert(value,message){if(!value)throw new Error(message)}
+(async()=>{
+process.env.OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY=`continue`;
+const empty=await executeWorkerContract(`stop`);
+assert(empty.action===`retry`, `minified pressure empty must retry`);
+assert(empty.recoveryState.autoCompactionCount===1, `minified empty must compact`);
+assert(empty.retryState.emptyResponseAttempts===0, `minified empty streak must reset`);
+assert(empty.retryState.lengthNoProgressAttempts===3, `empty must preserve length streak`);
+assert(empty.events.some(([event,budget])=>event===`compact`&&budget===242144),`empty must use the pressure budget`);
+assert(empty.events.some(([event])=>event===`truncate`), `empty must retain truncation`);
+const length=await executeWorkerContract(`length`);
+assert(length.action===`retry`, `minified pressure length must retry`);
+assert(length.retryState.lengthNoProgressAttempts===0, `length streak must reset`);
+assert(length.retryState.emptyResponseAttempts===3, `length must preserve empty streak`);
+const active=await executeWorkerContract(`stop`,{activeCount:1});
+assert(active.action===`proceed`&&active.recoveryState.autoCompactionCount===0,`active owner must block recovery`);
+const payload=await executeWorkerContract(`stop`,{content:[{type:`image`,data:`x`}]});
+assert(payload.action===`proceed`&&payload.recoveryState.autoCompactionCount===0,`payload must not be empty`);
+process.stdout.write(`MINIFIED_PRESSURE_RECOVERY_OK\n`);
+})().catch(error=>{console.error(error);process.exitCode=1});
+''')
+    completed = subprocess.run(
+        [*_node_command(), str(bundle)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            **os.environ,
+            "OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY": "continue",
+        },
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "MINIFIED_PRESSURE_RECOVERY_OK" in completed.stdout
 
 
 def test_v2026_9_2_transformed_bundle_executes_retry_state_contract(tmp_path):
