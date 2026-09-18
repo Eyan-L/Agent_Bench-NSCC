@@ -693,6 +693,14 @@ def test_compare_cli_exports_both_arms_with_portable_links(tmp_path, capsys):
     assert report["tasks"]["single_agent"][0]["artifact_links"] == (
         exported_links["single-agent"]
     )
+    assert report["tasks"]["paired"][0]["subagent_artifact_links"] == (
+        exported_links["subagent"]
+    )
+    assert report["tasks"]["paired"][0]["single_agent_artifact_links"] == (
+        exported_links["single-agent"]
+    )
+    assert "subagent: not collected" not in markdown
+    assert "single: not collected" not in markdown
     assert not any(
         item["status"] in {"copy_failed", "generation_failed"}
         for run in catalog["runs"]

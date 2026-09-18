@@ -1791,6 +1791,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     copied_index, shared_index = _copy_selected_task_artifacts(
         selected, bundle_dir
     )
+    if comparison:
+        subagent_by_key = {record.key: record for record in subagent}
+        single_agent_by_key = {record.key: record for record in single_agent}
+        for row in paired_rows:
+            key = (row["instance_id"], row["seed"])
+            row["subagent_artifact_links"] = (
+                record_to_dict(subagent_by_key[key]).get("artifact_links") or {}
+            )
+            row["single_agent_artifact_links"] = (
+                record_to_dict(single_agent_by_key[key]).get("artifact_links")
+                or {}
+            )
     report["artifact_bundle"] = {
         "subdirectories": list(BUNDLE_SUBDIRS),
         "artifact_index": artifact_index_path.name,
