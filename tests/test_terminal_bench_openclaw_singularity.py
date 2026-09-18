@@ -1056,6 +1056,66 @@ def test_roadmap_running_parent_empty_stop_is_not_terminal(tmp_path):
     assert snapshot["parent_terminal"] is False
 
 
+def test_roadmap_done_parent_empty_stop_is_blocked_incomplete(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_assistant_event("")],
+        child_statuses=(),
+        parent_status="done",
+    )
+    class Harness:
+        def quiesce_orphan_children(self, _env_info):
+            return {"workspaceQuiesced": True}
+
+    condition = _roadmap_condition_for_state(tmp_path, Harness())
+    condition.terminal_stop_confirmation_seconds = 0.0
+
+    snapshot = condition._read_yield_snapshot(sessions_dir)
+    assert snapshot is not None
+    assert snapshot["latest_assistant_text"] == ""
+    assert snapshot["latest_assistant_has_payload"] is False
+    assert snapshot["latest_assistant_has_tool_call"] is False
+    assert condition._is_durable_empty_assistant_stop_terminal(snapshot)
+
+    payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "stale CLI liveness",
+        deadline=time.monotonic() + 10,
+    )
+
+    assert "empty assistant stop" in error
+    assert condition._last_completion_status == "blocked_incomplete"
+    assert payload["result"]["meta"]["livenessState"] == "blocked"
+    lifecycle = payload["result"]["meta"]["agentBenchLifecycle"]
+    assert lifecycle["terminalEvidence"] == (
+        "durable_session_terminal_empty_assistant_stop"
+    )
+    assert lifecycle["workspaceQuiesced"] is True
+
+
+def test_roadmap_done_parent_current_payload_is_not_empty_stop(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    event = _assistant_event("")
+    event["message"]["content"] = [{
+        "type": "image", "data": "current-terminal-payload",
+    }]
+    _write_roadmap_session_state(
+        sessions_dir,
+        [event],
+        child_statuses=(),
+        parent_status="done",
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot is not None
+    assert snapshot["latest_assistant_has_payload"] is True
+    assert not RoadmapBenchOpenClawCondition._is_durable_empty_assistant_stop_terminal(
+        snapshot
+    )
+
+
 def test_roadmap_invocation_watch_ignores_active_parent(tmp_path):
     sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
     _write_roadmap_session_state(
@@ -1229,6 +1289,28 @@ def test_roadmap_invocation_watch_accepts_stable_length_termination(tmp_path):
     assert condition._classify_completion(payload) == (
         "normal_completion", ""
     )
+
+
+def test_roadmap_invocation_watch_marks_stable_empty_stop_incomplete(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_assistant_event("")],
+        child_statuses=(),
+        parent_status="done",
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+
+    signature, status, diagnostic = (
+        condition._durable_invocation_terminal_evidence()
+    )
+
+    assert signature[1] == "done"
+    assert status == "blocked_incomplete"
+    assert "empty assistant stop" in diagnostic
+    assert condition._payload_for_durable_invocation_terminal(
+        status, diagnostic
+    ) is None
 
 
 def test_roadmap_invocation_watch_accepts_terminal_parent_with_orphan_child(

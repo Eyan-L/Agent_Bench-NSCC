@@ -12,6 +12,7 @@ import pytest
 from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     CONSECUTIVE_EMPTY_STOP_RESET_MARKER,
     CURRENT_ASSISTANT_EMPTY_STOP_MARKER,
+    CURRENT_TERMINAL_PAYLOAD_MARKER,
     EMPTY_STOP_RETRY_LIMIT_MARKER,
     EXEC_MARKER,
     FS_CHECK_MARKER,
@@ -122,7 +123,9 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "    parkedCodeModeRun: false,\n"
         "  };\n"
         "}\n"
-        "function hasCompletedMessagingToolDeliveryEvidence() { return false; }\n"
+        "function hasCompletedMessagingToolDeliveryEvidence(attempt) {\n"
+        "  return attempt.completedDelivery === true;\n"
+        "}\n"
         "function hasAsyncActivity(toolMetas) {\n"
         "  return (toolMetas ?? []).some((entry) => entry.asyncStarted === true);\n"
         "}\n"
@@ -143,6 +146,27 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "  if (shouldSkipNonVisibleTurnRetry(params)) return null;\n"
         "  return classifyAssistantTurn(params).emptyResponse\n"
         "    ? EMPTY_RESPONSE_RETRY_INSTRUCTION : null;\n"
+        "}\n"
+        "function buildEmbeddedRunPayloads(params) {\n"
+        "  return (params.assistantTexts ?? [])\n"
+        "    .filter((text) => String(text).trim().length > 0)\n"
+        "    .map((text) => ({ text }));\n"
+        "}\n"
+        "function resolveEmbeddedRunTerminal(input, retryState) {\n"
+        "  const payloads = buildEmbeddedRunPayloads({\n"
+        "    assistantTexts: input.attempt.assistantTexts,\n"
+        "  });\n"
+        "  const instruction = resolveEmptyResponseRetryInstruction({\n"
+        "    provider: 'agent_model', modelId: 'roadmap',\n"
+        "    modelApi: 'openai-completions', payloadCount: payloads.length,\n"
+        "    aborted: input.aborted, timedOut: input.timedOut,\n"
+        "    attempt: input.attempt\n"
+        "  });\n"
+        "  if (instruction && retryState.emptyResponseAttempts < 4) {\n"
+        "    retryState.emptyResponseAttempts += 1;\n"
+        "    return { action: 'retry', instruction, payloads };\n"
+        "  }\n"
+        "  return { action: 'complete', payloads };\n"
         "}\n"
     )
     (dist / "embedded-agent-test.js").write_text(
@@ -256,6 +280,8 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert SETTLED_CONTINUATION_LENGTH_MARKER in builtin_text
     assert NONEMPTY_LENGTH_ELIGIBILITY_MARKER in builtin_text
     assert CURRENT_ASSISTANT_EMPTY_STOP_MARKER in builtin_text
+    assert CURRENT_TERMINAL_PAYLOAD_MARKER in builtin_text
+    assert "hasCurrentTerminalPayload:" in builtin_text
     assert SETTLED_CONTINUATION_TOOL_ERROR_MARKER in builtin_text
     assert "__abSettledToolEvidence.allToolsProvenSettled" in builtin_text
     assert "!__abSettledToolEvidence.hasUnsettledToolError" not in builtin_text
@@ -473,20 +499,25 @@ def test_v2026_9_2_current_empty_stop_ignores_historical_visible_text(
     patch_runtime_tree(root)
     bundle = root / "dist/builtin-openclaw-test.js"
     bundle.write_text(bundle.read_text() + r'''
-function params({
-  content = [], aborted = false, settled = true, payloadCount = 0,
+function terminalInput({
+  content = [], aborted = false, settled = true, completedDelivery = false,
+  asyncStarted = false, yielded = false, timedOut = false,
+  toolFailed = false,
 } = {}) {
   return {
     aborted,
-    timedOut: false,
-    payloadCount,
+    timedOut,
     attempt: {
       assistantTexts: ["Historical visible progress before tool calls."],
       currentAttemptAssistant: { content, stopReason: "stop" },
       terminal: { kind: "ok" },
-      toolMetas: [],
+      toolMetas: [{ toolCallId: "call-1", asyncStarted }],
+      yieldDetected: yielded,
+      completedDelivery,
+      lastToolError: toolFailed ? { toolName: "edit" } : undefined,
       settledToolEvidence: {
         allToolsProvenSettled: settled,
+        failedToolNames: toolFailed ? new Set(["edit"]) : new Set(),
         intentionalTermination: false,
         parkedCodeModeRun: false,
       },
@@ -496,28 +527,86 @@ function params({
 function assert(value, message) {
   if (!value) throw new Error(message);
 }
-const historicalThenEmpty = resolveEmptyResponseRetryInstruction(params());
+const retryState = { emptyResponseAttempts: 0 };
+const historicalThenEmpty = resolveEmbeddedRunTerminal(
+  terminalInput(), retryState,
+);
 assert(
-  historicalThenEmpty === EMPTY_RESPONSE_RETRY_INSTRUCTION,
+  historicalThenEmpty.action === "retry",
   "current empty stop must remain eligible despite historical visible text",
 );
 assert(
-  resolveEmptyResponseRetryInstruction(params({
+  historicalThenEmpty.payloads.length === 1,
+  "the production-style path must retain cumulative historical payloads",
+);
+assert(
+  retryState.emptyResponseAttempts === 1,
+  "the production-style path must enter the retry counter",
+);
+assert(
+  resolveEmbeddedRunTerminal(terminalInput({
     content: [{ type: "text", text: "Current final answer" }],
-  })) === null,
+  }), { emptyResponseAttempts: 0 }).action === "complete",
   "current visible text must not be treated as an empty stop",
 );
 assert(
-  resolveEmptyResponseRetryInstruction(params({ payloadCount: 1 })) === null,
-  "an existing terminal payload must suppress current-empty-stop continuation",
+  resolveEmbeddedRunTerminal(terminalInput({
+    completedDelivery: true,
+  }), { emptyResponseAttempts: 0 }).action === "complete",
+  "a current terminal delivery must suppress current-empty-stop continuation",
 );
 assert(
-  resolveEmptyResponseRetryInstruction(params({ settled: false })) === null,
+  resolveEmbeddedRunTerminal(terminalInput({
+    content: [{ type: "image", data: "current-terminal-payload" }],
+  }), { emptyResponseAttempts: 0 }).action === "complete",
+  "a current non-text terminal payload must suppress continuation",
+);
+assert(
+  resolveEmbeddedRunTerminal(terminalInput({
+    settled: false,
+  }), { emptyResponseAttempts: 0 }).action === "complete",
   "unsettled tools must preserve the existing safety guard",
 );
 assert(
-  resolveEmptyResponseRetryInstruction(params({ aborted: true })) === null,
+  resolveEmbeddedRunTerminal(terminalInput({
+    aborted: true,
+  }), { emptyResponseAttempts: 0 }).action === "complete",
   "aborted runs must preserve the existing safety guard",
+);
+assert(
+  resolveEmbeddedRunTerminal(terminalInput({
+    timedOut: true,
+  }), { emptyResponseAttempts: 0 }).action === "complete",
+  "timed-out runs must preserve the existing safety guard",
+);
+assert(
+  resolveEmbeddedRunTerminal(terminalInput({
+    yielded: true,
+  }), { emptyResponseAttempts: 0 }).action === "complete",
+  "yielded runs must preserve the existing safety guard",
+);
+assert(
+  resolveEmbeddedRunTerminal(terminalInput({
+    asyncStarted: true,
+  }), { emptyResponseAttempts: 0 }).action === "complete",
+  "async tools must preserve the existing safety guard",
+);
+assert(
+  resolveEmbeddedRunTerminal(terminalInput({
+    toolFailed: true,
+  }), { emptyResponseAttempts: 0 }).action === "retry",
+  "a settled tool failure remains recoverable model feedback",
+);
+const consecutive = { emptyResponseAttempts: 0 };
+for (let i = 0; i < 4; i += 1) {
+  assert(
+    resolveEmbeddedRunTerminal(terminalInput(), consecutive).action === "retry",
+    "four consecutive current-empty stops remain retryable",
+  );
+}
+assert(
+  resolveEmbeddedRunTerminal(terminalInput(), consecutive).action === "complete",
+  "the fifth consecutive current-empty stop exhausts the retry budget",
 );
 process.stdout.write("CURRENT_EMPTY_STOP_CONTRACT_OK\n");
 ''')
@@ -650,6 +739,39 @@ def test_v2026_9_2_patcher_fails_closed_when_retry_eligibility_anchor_moves(
     with pytest.raises(
         RuntimeError, match="empty-response retry eligibility anchor"
     ):
+        patch_runtime_tree(root)
+
+
+def test_v2026_9_2_patcher_fails_closed_without_terminal_payload_call_anchor(
+    tmp_path,
+):
+    root = _runtime_tree(tmp_path)
+    path = root / "dist/builtin-openclaw-test.js"
+    path.write_text(
+        path.read_text().replace(
+            "payloadCount: payloads.length",
+            "movedPayloadCount: payloads.length",
+        )
+    )
+
+    with pytest.raises(
+        RuntimeError, match="current terminal payload call anchor"
+    ):
+        patch_runtime_tree(root)
+
+
+def test_v2026_9_2_patcher_rejects_stale_current_empty_payload_patch(tmp_path):
+    root = _runtime_tree(tmp_path)
+    patch_runtime_tree(root)
+    path = root / "dist/builtin-openclaw-test.js"
+    path.write_text(
+        path.read_text().replace(
+            CURRENT_TERMINAL_PAYLOAD_MARKER,
+            "AB_HARNESS_OPENCLAW_V2026_9_2_OLD_PAYLOAD_PROVENANCE_BEGIN",
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="terminal-payload provenance"):
         patch_runtime_tree(root)
 
 
@@ -799,6 +921,7 @@ def test_v2026_9_2_builder_does_not_reapply_legacy_runtime_patches():
     assert SETTLED_CONTINUATION_LENGTH_MARKER in audit
     assert NONEMPTY_LENGTH_ELIGIBILITY_MARKER in audit
     assert CURRENT_ASSISTANT_EMPTY_STOP_MARKER in audit
+    assert CURRENT_TERMINAL_PAYLOAD_MARKER in audit
     assert UNBOUNDED_LENGTH_CONTINUATION_MARKER in audit
     assert CONSECUTIVE_EMPTY_STOP_RESET_MARKER in audit
     assert SETTLED_CONTINUATION_TOOL_ERROR_MARKER in audit

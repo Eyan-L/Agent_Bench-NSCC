@@ -57,6 +57,9 @@ NONEMPTY_LENGTH_ELIGIBILITY_MARKER = (
 CURRENT_ASSISTANT_EMPTY_STOP_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_ASSISTANT_EMPTY_STOP_BEGIN"
 )
+CURRENT_TERMINAL_PAYLOAD_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_TERMINAL_PAYLOAD_V2_BEGIN"
+)
 UNBOUNDED_LENGTH_CONTINUATION_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_UNBOUNDED_LENGTH_CONTINUATION_BEGIN"
 )
@@ -347,6 +350,73 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
             "v2026.9.2 empty-response retry eligibility anchor not found"
         )
 
+    current_payload_call_anchor = re.compile(
+        r"resolveEmptyResponseRetryInstruction\(\{"
+        r"(?P<body>[^{}]*?\bpayloadCount\s*:\s*[^,}]+,"
+        r"[^{}]*?\battempt\s*:\s*(?P<attempt>[A-Za-z_$][\w$]*"
+        r"(?:\.[A-Za-z_$][\w$]*)*))"
+        r"(?P<tail>[^{}]*?)\}\)"
+    )
+
+    def current_payload_call_replacement(match: re.Match[str]) -> str:
+        attempt = match.group("attempt")
+        return f'''resolveEmptyResponseRetryInstruction({{
+/* {CURRENT_TERMINAL_PAYLOAD_MARKER} */
+hasCurrentTerminalPayload: (() => {{
+	const __abCurrentTerminalContent = {attempt}.currentAttemptAssistant?.content;
+	if (typeof __abCurrentTerminalContent === "string") {{
+		return __abCurrentTerminalContent.trim().length > 0;
+	}}
+	if (!Array.isArray(__abCurrentTerminalContent)) return false;
+	return __abCurrentTerminalContent.some((item) => {{
+		if (!item || typeof item !== "object") return false;
+		if (item.type === "text") return String(item.text ?? "").trim().length > 0;
+		if (item.type === "thinking" || item.type === "reasoning") return false;
+		return true;
+	}});
+}})(),
+/* AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_TERMINAL_PAYLOAD_V2_END */
+{match.group("body")}{match.group("tail")}}})'''
+
+    current_payload_targets = [
+        path for path in retry_eligibility_targets
+        if current_payload_call_anchor.search(_read(path))
+        or CURRENT_TERMINAL_PAYLOAD_MARKER in _read(path)
+    ]
+    stale_current_payload_targets = [
+        path for path in retry_eligibility_targets
+        if CURRENT_ASSISTANT_EMPTY_STOP_MARKER in _read(path)
+        and CURRENT_TERMINAL_PAYLOAD_MARKER not in _read(path)
+    ]
+    if stale_current_payload_targets:
+        raise RuntimeError(
+            "current-empty patch predates terminal-payload provenance; "
+            "rebuild from the clean v2026.9.2 base: "
+            + ", ".join(str(path) for path in stale_current_payload_targets)
+        )
+    if not current_payload_targets:
+        raise RuntimeError(
+            "v2026.9.2 current terminal payload call anchor not found"
+        )
+    for path in current_payload_targets:
+        text = _read(path)
+        if CURRENT_TERMINAL_PAYLOAD_MARKER in text:
+            continue
+        if len(current_payload_call_anchor.findall(text)) != 1:
+            raise RuntimeError(
+                "current terminal payload call anchor missing/ambiguous in "
+                f"{path}"
+            )
+        text, count = current_payload_call_anchor.subn(
+            current_payload_call_replacement, text, count=1
+        )
+        if count != 1:
+            raise RuntimeError(
+                f"current terminal payload call anchor missing/ambiguous in {path}"
+            )
+        _write(path, text)
+        changed.add(path)
+
     def retry_eligibility_replacement(match: re.Match[str]) -> str:
         param = match.group("param")
         return match.group(1) + f'''/* {SETTLED_CONTINUATION_RETRY_MARKER} */
@@ -371,7 +441,7 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
 			(item) => item?.type === "toolCall" || item?.type === "toolUse"
 		);
 	const __abCurrentAssistantEmptyStop =
-		{param}.payloadCount === 0
+		{param}.hasCurrentTerminalPayload === false
 		&& __abAssistantState.assistant?.stopReason === "stop"
 		&& !__abAssistantState.reasoningOnly
 		&& !__abCurrentAssistantVisibleText
@@ -420,6 +490,7 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
             or SETTLED_CONTINUATION_TOOL_ERROR_MARKER not in _read(path)
             or NONEMPTY_LENGTH_ELIGIBILITY_MARKER not in _read(path)
             or CURRENT_ASSISTANT_EMPTY_STOP_MARKER not in _read(path)
+            or CURRENT_TERMINAL_PAYLOAD_MARKER not in _read(path)
         )
     ]
     if stale_retry_targets:
@@ -718,6 +789,9 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
         "retry_eligibility_files": [
             str(path.relative_to(root))
             for path in retry_eligibility_targets
+        ],
+        "current_terminal_payload_files": [
+            str(path.relative_to(root)) for path in current_payload_targets
         ],
         "length_budget_files": [
             str(path.relative_to(root)) for path in length_budget_targets
@@ -1064,6 +1138,10 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
         "current_assistant_empty_stop": (
             "dist/**/*",
             CURRENT_ASSISTANT_EMPTY_STOP_MARKER,
+        ),
+        "current_terminal_payload": (
+            "dist/**/*",
+            CURRENT_TERMINAL_PAYLOAD_MARKER,
         ),
         "unbounded_length_continuation": (
             "dist/**/*",

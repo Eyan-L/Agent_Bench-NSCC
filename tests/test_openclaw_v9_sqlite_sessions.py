@@ -232,6 +232,37 @@ def test_sqlite_watcher_keeps_requester_settle_no_reply_pending(tmp_path: Path):
     assert RoadmapBenchOpenClawCondition._terminal_stop_signature(snapshot) is None
 
 
+def test_sqlite_watcher_classifies_done_empty_stop_as_incomplete(
+    tmp_path: Path,
+):
+    events = [
+        _event(
+            {
+                "role": "assistant",
+                "content": [],
+                "stopReason": "stop",
+                "timestamp": 2000,
+            }
+        )
+    ]
+    sessions_dir, _db_path, _parent_key = _build_sqlite_store(
+        tmp_path,
+        parent_status="done",
+        parent_events=events,
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot is not None
+    assert snapshot["session_store"] == "sqlite"
+    assert snapshot["latest_assistant_text"] == ""
+    assert snapshot["latest_assistant_has_payload"] is False
+    assert snapshot["latest_assistant_has_tool_call"] is False
+    assert RoadmapBenchOpenClawCondition._is_durable_empty_assistant_stop_terminal(
+        snapshot
+    )
+
+
 def test_sqlite_watcher_keeps_ordinary_no_reply_terminal(tmp_path: Path):
     events = [
         _event(

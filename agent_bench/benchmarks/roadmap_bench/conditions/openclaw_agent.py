@@ -84,12 +84,21 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             and not self._is_durable_assistant_stop_terminal(snapshot)
         ):
             return None
-        completion_status = self.NORMAL_COMPLETION
-        diagnostic = (
-            "OpenClaw durable parent session completed while the CLI was "
-            f"still running (status={parent_status}, "
-            f"session={snapshot['parent_session_id']})"
-        )
+        if self._is_durable_empty_assistant_stop_terminal(snapshot):
+            completion_status = self.BLOCKED_INCOMPLETE
+            diagnostic = (
+                "OpenClaw durable parent session completed with an empty "
+                "assistant stop and no pending native recovery "
+                f"(status={parent_status}, "
+                f"session={snapshot['parent_session_id']})"
+            )
+        else:
+            completion_status = self.NORMAL_COMPLETION
+            diagnostic = (
+                "OpenClaw durable parent session completed while the CLI was "
+                f"still running (status={parent_status}, "
+                f"session={snapshot['parent_session_id']})"
+            )
         signature = (
             snapshot.get("parent_session_id"),
             parent_status,
@@ -99,6 +108,9 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             snapshot.get("latest_assistant_stop_reason"),
             snapshot.get("pending_children"),
             diagnostic,
+            snapshot.get("latest_assistant_text"),
+            snapshot.get("latest_assistant_has_tool_call"),
+            snapshot.get("latest_assistant_has_payload"),
         )
         self._durable_invocation_snapshot = snapshot
         return signature, completion_status, diagnostic
@@ -578,6 +590,48 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             )
             return payload, getattr(self, "_last_completion_error", error)
 
+        durable_interrupt_snapshot = getattr(
+            self, "_durable_invocation_snapshot", None
+        )
+        if (
+            getattr(self, "_last_completion_status", None)
+            == self.BLOCKED_INCOMPLETE
+            and isinstance(durable_interrupt_snapshot, dict)
+            and snapshot
+            and self._is_durable_empty_assistant_stop_terminal(snapshot)
+        ):
+            snapshot = dict(
+                snapshot,
+                terminal_evidence=(
+                    "durable_session_terminal_empty_assistant_stop"
+                ),
+            )
+            blocked_error = str(
+                getattr(self, "_last_completion_error", None)
+                or error
+                or "OpenClaw durable parent session ended with an empty stop"
+            )
+            self._last_completion_status = self.BLOCKED_INCOMPLETE
+            self._last_completion_error = blocked_error
+            reconciled_payload = (
+                copy.deepcopy(payload) if isinstance(payload, dict) else {}
+            )
+            if not isinstance(reconciled_payload.get("result"), dict):
+                reconciled_payload["result"] = {}
+            meta = reconciled_payload["result"].setdefault("meta", {})
+            meta["livenessState"] = "blocked"
+            meta["replayInvalid"] = False
+            meta["stopReason"] = "stop"
+            meta["agentBenchBlockedIncomplete"] = True
+            snapshot, quiescence = self._quiesce_with_timing(
+                snapshot, logical_parent_terminal=True
+            )
+            self._attach_lifecycle_summary(
+                reconciled_payload, snapshot, quiescence
+            )
+            payload = reconciled_payload
+            return payload, blocked_error
+
         # The CLI payload can lag behind the durable requester transcript. In
         # particular, a no-yield requester can have appended a terminal DONE
         # while the payload still reports livenessState=working. Explicit
@@ -865,6 +919,41 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             self._last_completion_error = completion_error
             return reconciled_payload, completion_error
 
+        if (
+            confirm_non_done_stop
+            and self._is_durable_empty_assistant_stop_terminal(snapshot)
+        ):
+            snapshot = dict(
+                snapshot,
+                terminal_evidence=(
+                    "durable_session_terminal_empty_assistant_stop"
+                ),
+            )
+            snapshot, quiescence = self._quiesce_with_timing(
+                snapshot, logical_parent_terminal=True
+            )
+            completion_error = (
+                "OpenClaw durable parent session completed with an empty "
+                "assistant stop and no pending native recovery"
+            )
+            reconciled_payload = (
+                copy.deepcopy(payload) if isinstance(payload, dict) else {}
+            )
+            if not isinstance(reconciled_payload.get("result"), dict):
+                reconciled_payload["result"] = {}
+            result = reconciled_payload["result"]
+            meta = result.setdefault("meta", {})
+            meta["livenessState"] = "blocked"
+            meta["replayInvalid"] = False
+            meta["stopReason"] = "stop"
+            meta["agentBenchBlockedIncomplete"] = True
+            self._attach_lifecycle_summary(
+                reconciled_payload, snapshot, quiescence
+            )
+            self._last_completion_status = self.BLOCKED_INCOMPLETE
+            self._last_completion_error = completion_error
+            return reconciled_payload, completion_error
+
         # A durable completed requester is the logical runtime boundary even
         # when its CLI RPC does not deliver a final reply. Stability
         # confirmation prevents a mutable transcript read from ending early.
@@ -914,6 +1003,47 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             in cls._DURABLE_ASSISTANT_STOP_REASONS
         )
 
+    @classmethod
+    def _is_durable_empty_assistant_stop_terminal(cls, snapshot: Dict) -> bool:
+        """Whether a durably completed requester ended on an empty stop."""
+        return bool(
+            cls._is_durable_assistant_stop_terminal(snapshot)
+            and snapshot.get("latest_assistant_stop_reason") == "stop"
+            and not str(snapshot.get("latest_assistant_text") or "").strip()
+            and not snapshot.get("latest_assistant_has_payload")
+            and not snapshot.get("latest_assistant_has_tool_call")
+            and not snapshot.get("requester_settle_pending")
+        )
+
+    @staticmethod
+    def _assistant_content_evidence(message: Dict) -> Tuple[str, bool, bool]:
+        """Return visible text, tool-call presence, and current payload evidence."""
+        content = message.get("content")
+        if isinstance(content, str):
+            text = content.strip()
+            return text, False, bool(text)
+
+        texts = []
+        has_tool_call = False
+        has_payload = False
+        for item in content or []:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "")
+            if item_type == "text":
+                item_text = str(item.get("text") or "")
+                if item_text.strip():
+                    texts.append(item_text)
+                    has_payload = True
+                continue
+            if item_type in {"toolCall", "toolUse"}:
+                has_tool_call = True
+                has_payload = True
+                continue
+            if item_type not in {"thinking", "reasoning"}:
+                has_payload = True
+        return "\n".join(texts).strip(), has_tool_call, has_payload
+
     @staticmethod
     def _requester_settle_pending(snapshot: Dict) -> bool:
         """Whether OpenClaw has scheduled its native requester retry."""
@@ -940,6 +1070,9 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             snapshot.get("transcript_size_bytes"),
             snapshot.get("latest_parent_event"),
             snapshot.get("latest_assistant_stop_reason"),
+            snapshot.get("latest_assistant_text"),
+            snapshot.get("latest_assistant_has_tool_call"),
+            snapshot.get("latest_assistant_has_payload"),
         )
 
     @staticmethod
@@ -1267,6 +1400,8 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         latest_assistant_stop_reason = ""
         latest_assistant_text = ""
         latest_assistant_run_id = ""
+        latest_assistant_has_tool_call = False
+        latest_assistant_has_payload = False
         post_terminal_settle_error = ""
         heartbeat_turn = False
 
@@ -1298,15 +1433,11 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
 
             message = event.get("message") or {}
             role = message.get("role")
-            parts = [
-                str(item.get("text") or "")
-                for item in message.get("content") or []
-                if isinstance(item, dict)
-                and item.get("type") == "text"
-            ]
-            text = "\n".join(
-                part for part in parts if part
-            ).strip()
+            (
+                text,
+                has_tool_payload,
+                has_current_payload,
+            ) = cls._assistant_content_evidence(message)
 
             # A later requester/model/tool message proves that any earlier
             # prompt error was transient.
@@ -1325,6 +1456,8 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 done_text = ""
                 latest_assistant_text = ""
                 latest_assistant_run_id = ""
+                latest_assistant_has_tool_call = False
+                latest_assistant_has_payload = False
                 latest_event_kind = "resume"
                 continue
 
@@ -1357,11 +1490,6 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 if isinstance(openclaw_meta, dict)
                 else ""
             )
-            has_tool_payload = any(
-                isinstance(item, dict)
-                and item.get("type") in {"toolCall", "toolUse"}
-                for item in message.get("content") or []
-            )
             if (
                 done_text
                 and stop_reason == "error"
@@ -1381,6 +1509,8 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             latest_assistant_stop_reason = stop_reason
             latest_assistant_text = text
             latest_assistant_run_id = run_id
+            latest_assistant_has_tool_call = has_tool_payload
+            latest_assistant_has_payload = has_current_payload
             post_yield_parent_activity = True
             post_yield_parent_terminal = (
                 stop_reason in cls._DURABLE_ASSISTANT_STOP_REASONS
@@ -1482,6 +1612,10 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             "latest_parent_event": latest_event_kind,
             "latest_assistant_stop_reason": latest_assistant_stop_reason,
             "latest_assistant_text": latest_assistant_text,
+            "latest_assistant_has_tool_call": (
+                latest_assistant_has_tool_call
+            ),
+            "latest_assistant_has_payload": latest_assistant_has_payload,
             "requester_settle_pending": requester_settle_pending,
         }
 

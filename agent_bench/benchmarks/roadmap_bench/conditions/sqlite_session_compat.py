@@ -439,6 +439,8 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
     latest_assistant_stop_reason = ""
     latest_assistant_text = ""
     latest_assistant_run_id = ""
+    latest_assistant_has_tool_call = False
+    latest_assistant_has_payload = False
     heartbeat_turn = False
 
     for event in messages[latest_yield + 1 :]:
@@ -459,12 +461,11 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
 
         message = event.get("message") or {}
         role = message.get("role")
-        parts = [
-            str(item.get("text") or "")
-            for item in message.get("content") or []
-            if isinstance(item, dict) and item.get("type") == "text"
-        ]
-        text = "\n".join(part for part in parts if part).strip()
+        (
+            text,
+            has_tool_payload,
+            has_current_payload,
+        ) = cls._assistant_content_evidence(message)
 
         if role in {"user", "assistant", "toolResult"}:
             post_yield_prompt_error = ""
@@ -479,6 +480,8 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
             done_text = ""
             latest_assistant_text = ""
             latest_assistant_run_id = ""
+            latest_assistant_has_tool_call = False
+            latest_assistant_has_payload = False
             latest_event_kind = "resume"
             continue
 
@@ -511,6 +514,8 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
         latest_assistant_stop_reason = stop_reason
         latest_assistant_text = text
         latest_assistant_run_id = run_id
+        latest_assistant_has_tool_call = has_tool_payload
+        latest_assistant_has_payload = has_current_payload
         post_yield_parent_activity = True
         post_yield_parent_terminal = (
             stop_reason in cls._DURABLE_ASSISTANT_STOP_REASONS
@@ -598,6 +603,8 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
         "latest_parent_event": latest_event_kind,
         "latest_assistant_stop_reason": latest_assistant_stop_reason,
         "latest_assistant_text": latest_assistant_text,
+        "latest_assistant_has_tool_call": latest_assistant_has_tool_call,
+        "latest_assistant_has_payload": latest_assistant_has_payload,
         "requester_settle_pending": requester_settle_pending,
     }
 
