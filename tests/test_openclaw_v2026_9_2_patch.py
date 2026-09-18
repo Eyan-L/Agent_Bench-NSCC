@@ -347,8 +347,17 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert "if (__abLengthContinuation)" in embedded_text
     assert "lengthNoProgressAttempts" in embedded_text
     assert "lengthProgressSignatures" in embedded_text
-    assert "OPENCLAW_AGENT_BENCH_LENGTH_NO_PROGRESS_RETRIES" in embedded_text
-    assert "if (raw === void 0 || raw === \"\") return 1" in embedded_text
+    assert re.search(
+        r"const raw = process\.env\."
+        r"OPENCLAW_AGENT_BENCH_LENGTH_NO_PROGRESS_RETRIES;\s*"
+        r'if \(raw === void 0 \|\| raw === ""\) return 4;',
+        embedded_text,
+    )
+    assert re.search(
+        r"const raw = process\.env\.OPENCLAW_AGENT_BENCH_EMPTY_STOP_RETRIES;"
+        r"\s*if \(raw === void 0 \|\| raw === \"\"\) return 1;",
+        embedded_text,
+    )
     assert "Math.min(parsed, 16)" in embedded_text
     assert "retryState.emptyResponseAttempts = 0" in embedded_text
     assert 'message?.details?.deniedReason === "tool-loop"' in embedded_text
