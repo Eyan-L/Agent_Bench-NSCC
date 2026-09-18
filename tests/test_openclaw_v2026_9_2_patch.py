@@ -407,6 +407,15 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "    attempt, attemptCompactionCount: 0,\n"
         "  });\n"
         "  if (overflowRecovery.action === 'retry') return { action: 'retry' };\n"
+        "  if (overflowRecovery.action === 'surface') {\n"
+        "    return {\n"
+        "      action: 'complete',\n"
+        "      result: {\n"
+        "        errorKind: overflowRecovery.kind,\n"
+        "        livenessState: 'blocked',\n"
+        "      },\n"
+        "    };\n"
+        "  }\n"
         "  return { action: 'proceed' };\n"
         "}\n"
         "async function executeRecoveryContract(input) {\n"
@@ -576,7 +585,7 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
         CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER, 1
     )[1].split(
         "AB_HARNESS_OPENCLAW_V2026_9_2_"
-        "CONTEXT_PRESSURE_TERMINAL_RECOVERY_V3_END",
+        "CONTEXT_PRESSURE_TERMINAL_RECOVERY_V4_END",
         1,
     )[0]
     assert "hasMessagingToolDeliveryEvidence(attempt)" in recovery_helper
@@ -1330,6 +1339,7 @@ function recoveryInput({
   estimatedPromptTokens = 427191, promptBudgetBeforeReserve = 242144,
   stopReason = "length", content = [], truncationHelps = true,
   acceptedSessionSpawns = [], completedDelivery = false,
+  assistantPresent = true, assistantTexts = [],
 } = {}) {
   const contextRecoveryState = {
     autoCompactionCount: 0, overflowCompactionAttempts: 0,
@@ -1339,8 +1349,10 @@ function recoveryInput({
     emptyResponseAttempts: 2, lengthNoProgressAttempts: 3,
   };
   const events = [];
+  const assistant = assistantPresent ? { content, stopReason } : undefined;
   const attempt = {
-    currentAttemptCompletedAssistant: { content, stopReason },
+    ...(assistant ? { currentAttemptCompletedAssistant: assistant } : {}),
+    assistantTexts,
     terminal: { kind: "ok" },
     contextBudgetStatus: {
       route, source: "pre-prompt-estimate", estimatedPromptTokens,
@@ -1360,8 +1372,8 @@ function recoveryInput({
     runInput: { runParams: { runId: "pressure", sessionId: "session" } },
     normalizedAttempt: {
       attempt,
-      attemptAssistant: attempt.currentAttemptCompletedAssistant,
-      currentAttemptCompletedAssistant: attempt.currentAttemptCompletedAssistant,
+      attemptAssistant: assistant,
+      currentAttemptCompletedAssistant: assistant,
       terminalState: { outcome: "ok" },
     },
     contextRecoveryState,
@@ -1508,10 +1520,12 @@ function recoveryInput({
     ineffectiveTruncation,
   );
   assert(
-    ineffectiveTruncationResult.action === "proceed"
+    ineffectiveTruncationResult.errorKind === "context_overflow"
+      && ineffectiveTruncationResult.livenessState === "blocked"
       && ineffectiveTruncation.contextRecoveryState.autoCompactionCount === 0
-      && ineffectiveTruncation.terminalRetryState.lengthNoProgressAttempts === 3,
-    "ineffective truncation must preserve native fallback and retry streak",
+      && ineffectiveTruncation.terminalRetryState.lengthNoProgressAttempts === 3
+      && ineffectiveTruncation.terminalRetryState.emptyResponseAttempts === 2,
+    "ineffective truncation must surface blocked overflow without resetting streak",
   );
 
   const emptyPressure = recoveryInput({ stopReason: "stop" });
@@ -1532,6 +1546,40 @@ function recoveryInput({
   assert(
     emptyPressure.terminalRetryState.lengthNoProgressAttempts === 3,
     "empty compaction must not consume or reset the length budget",
+  );
+
+  const accumulatedEmptyPressure = recoveryInput({
+    assistantPresent: false, assistantTexts: [],
+  });
+  const accumulatedEmptyResult = await executeRecoveryContract(
+    accumulatedEmptyPressure,
+  );
+  assert(
+    accumulatedEmptyResult.action === "retry"
+      && accumulatedEmptyPressure.contextRecoveryState.autoCompactionCount === 1,
+    "pressure accumulated-empty must use native compaction recovery",
+  );
+  assert(
+    accumulatedEmptyPressure.terminalRetryState.emptyResponseAttempts === 0
+      && accumulatedEmptyPressure.terminalRetryState.lengthNoProgressAttempts === 3,
+    "successful accumulated-empty recovery must reset only the empty streak",
+  );
+  assert(
+    accumulatedEmptyPressure.events.some(([event]) => event === "truncate"),
+    "accumulated-empty compact_then_truncate must retain native truncation",
+  );
+
+  const historicalVisibleWithoutAssistant = recoveryInput({
+    assistantPresent: false, assistantTexts: ["already visible"],
+  });
+  const historicalVisibleResult = await executeRecoveryContract(
+    historicalVisibleWithoutAssistant,
+  );
+  assert(
+    historicalVisibleResult.action === "proceed"
+      && historicalVisibleWithoutAssistant.contextRecoveryState
+        .autoCompactionCount === 0,
+    "missing assistant with historical visible text is not accumulated-empty",
   );
 
   const activeEmpty = recoveryInput({ activeCount: 1, stopReason: "stop" });
@@ -1586,6 +1634,7 @@ function recoveryInput({
         completed.stderr
     )
     assert '"candidate":"current-empty"' in completed.stderr
+    assert '"candidate":"accumulated-empty"' in completed.stderr
 
 
 def test_v2026_9_2_minified_worker_executes_pressure_recovery(tmp_path):
@@ -1600,10 +1649,10 @@ function isEmbeddedRunTerminalInterrupted(Ot){return Ot===`aborted`||Ot===`timeo
 function isProviderRefusalAssistantError(){return false}
 function isLikelyContextOverflowError(Ot){return String(Ot).includes(`Context window exceeded`)}
 async function compactEmbeddedRunForRecovery(Ot,Zt){Ot.events.push([`compact`,Zt.tokenBudget]);Ot.state.autoCompactionCount+=1;return{result:{compacted:true}}}
-async function recoverEmbeddedRunOverflow(Ot){let Zt=!Ot.aborted&&!Ot.signalOwnedInterruption?(()=>{if(isProviderRefusalAssistantError(Ot.assistantOverflowCandidate))return null;return Ot.assistantErrorText&&isLikelyContextOverflowError(Ot.assistantErrorText)?{text:Ot.assistantErrorText,source:`assistantError`}:null})():null;if(!Zt||!Ot.genericCompactionRecoveryAllowed||Ot.contextTokenBudget===void 0)return{action:`none`};let Dn=projectAgentRunAttemptTerminal(Ot.attempt.terminal),cr=Ot.attempt.preflightRecovery,pr=Dn.promptErrorSource===`precheck`&&cr?.source===`mid-turn`&&typeof cr.promptBudgetBeforeReserve==`number`?cr.promptBudgetBeforeReserve:void 0,Br=false;if(!Br&&Ot.attemptCompactionCount>0&&Ot.state.overflowCompactionAttempts<3)return{action:`retry`};if(!Br&&Ot.attemptCompactionCount===0&&Ot.state.overflowCompactionAttempts<3){let Zt=await compactEmbeddedRunForRecovery(Ot,{tokenBudget:pr??Ot.contextTokenBudget});if(Zt.result.compacted){if(cr?.route===`compact_then_truncate`)Ot.truncateToolResults();return{action:`retry`}}}if(!Ot.state.toolResultTruncationAttempted){Ot.state.toolResultTruncationAttempted=true;let Zt=Ot.truncateToolResults();if(Zt.truncated)return{action:`retry`}}return{action:`surface`}}
-async function recoverEmbeddedRunAttempt(Ot){let{normalizedAttempt:Dn}=Ot,{attempt:pr,sessionIdUsed:xr,attemptAssistant:Mr,currentAttemptAssistant:Pr,currentAttemptCompletedAssistant:Br,terminalState:Hr}=Dn,{aborted:ta,externalAbort:na,promptError:ra,promptErrorSource:ia,timedOut:aa,timedOutDuringCompaction:oa}=projectAgentRunAttemptTerminal(pr.terminal),la=isEmbeddedRunTerminalInterrupted(Hr.outcome),ua=false,ma=false,ha=false,Mi=null,va=Br===void 0?Mr?.stopReason===`error`||Mr?.stopReason===`length`?Mr:void 0:Br.stopReason===`error`||Br.stopReason===`length`?Br:void 0,retry=()=>({action:`retry`});if(!ua&&!ma&&!ha)return{action:`proceed`};let Sa=await recoverEmbeddedRunOverflow({aborted:ta,signalOwnedInterruption:false,promptError:ra,assistantErrorText:Mi,assistantOverflowCandidate:va,attemptCompactionCount:0,attempt:pr,genericCompactionRecoveryAllowed:true,contextTokenBudget:262144,state:Ot.contextRecoveryState,events:Ot.events,truncateToolResults:Ot.truncateToolResults});if(Sa.action===`retry`)return retry();return{action:`proceed`}}
+async function recoverEmbeddedRunOverflow(Ot){let Zt=!Ot.aborted&&!Ot.signalOwnedInterruption?(()=>{if(isProviderRefusalAssistantError(Ot.assistantOverflowCandidate))return null;return Ot.assistantErrorText&&isLikelyContextOverflowError(Ot.assistantErrorText)?{text:Ot.assistantErrorText,source:`assistantError`}:null})():null;if(!Zt||!Ot.genericCompactionRecoveryAllowed||Ot.contextTokenBudget===void 0)return{action:`none`};let Dn=projectAgentRunAttemptTerminal(Ot.attempt.terminal),cr=Ot.attempt.preflightRecovery,pr=Dn.promptErrorSource===`precheck`&&cr?.source===`mid-turn`&&typeof cr.promptBudgetBeforeReserve==`number`?cr.promptBudgetBeforeReserve:void 0,Br=false;if(!Br&&Ot.attemptCompactionCount>0&&Ot.state.overflowCompactionAttempts<3)return{action:`retry`};if(!Br&&Ot.attemptCompactionCount===0&&Ot.state.overflowCompactionAttempts<3){let Zt=await compactEmbeddedRunForRecovery(Ot,{tokenBudget:pr??Ot.contextTokenBudget});if(Zt.result.compacted){if(cr?.route===`compact_then_truncate`)Ot.truncateToolResults();return{action:`retry`}}}if(!Ot.state.toolResultTruncationAttempted){Ot.state.toolResultTruncationAttempted=true;let Zt=Ot.truncateToolResults();if(Zt.truncated)return{action:`retry`}}return{action:`surface`,kind:`context_overflow`}}
+async function recoverEmbeddedRunAttempt(Ot){let{normalizedAttempt:Dn}=Ot,{attempt:pr,sessionIdUsed:xr,attemptAssistant:Mr,currentAttemptAssistant:Pr,currentAttemptCompletedAssistant:Br,terminalState:Hr}=Dn,{aborted:ta,externalAbort:na,promptError:ra,promptErrorSource:ia,timedOut:aa,timedOutDuringCompaction:oa}=projectAgentRunAttemptTerminal(pr.terminal),la=isEmbeddedRunTerminalInterrupted(Hr.outcome),ua=false,ma=false,ha=false,Mi=null,va=Br===void 0?Mr?.stopReason===`error`||Mr?.stopReason===`length`?Mr:void 0:Br.stopReason===`error`||Br.stopReason===`length`?Br:void 0,retry=()=>({action:`retry`});if(!ua&&!ma&&!ha)return{action:`proceed`};let Sa=await recoverEmbeddedRunOverflow({aborted:ta,signalOwnedInterruption:false,promptError:ra,assistantErrorText:Mi,assistantOverflowCandidate:va,attemptCompactionCount:0,attempt:pr,genericCompactionRecoveryAllowed:true,contextTokenBudget:262144,state:Ot.contextRecoveryState,events:Ot.events,truncateToolResults:Ot.truncateToolResults});if(Sa.action===`retry`)return retry();if(Sa.action===`surface`)return{action:`complete`,result:{errorKind:Sa.kind,livenessState:`blocked`}};return{action:`proceed`}}
 function createEmbeddedRunTerminalRetryState(){return{emptyResponseAttempts:3,lengthNoProgressAttempts:3}}
-async function executeWorkerContract(stopReason,{activeCount=0,content=[],route=`compact_then_truncate`,truncationHelps=true,acceptedSessionSpawns=[],completedDelivery=false}={}){let Da=createEmbeddedRunTerminalRetryState(),Sa={autoCompactionCount:0,overflowCompactionAttempts:0,toolResultTruncationAttempted:false},Br={content,stopReason},pr={terminal:{kind:`ok`},contextBudgetStatus:{route,estimatedPromptTokens:427191,promptBudgetBeforeReserve:242144},itemLifecycle:{activeCount},toolMetas:[],acceptedSessionSpawns,completedDelivery,settledToolEvidence:{allToolsProvenSettled:false,intentionalTermination:false,parkedCodeModeRun:false}},za={attempt:pr,sessionIdUsed:`s`,attemptAssistant:Br,currentAttemptAssistant:Br,currentAttemptCompletedAssistant:Br,terminalState:{outcome:`ok`}},na={},ev=[],tr=()=>{ev.push([`truncate`]);return{truncated:truncationHelps,truncatedCount:truncationHelps?1:0}},ro=await recoverEmbeddedRunAttempt({runInput:na,normalizedAttempt:za,contextRecoveryState:Sa,events:ev,truncateToolResults:tr});if(ro.action===`complete`)return ro.result;if(ro.action===`retry`)return{action:`retry`,retryState:Da,recoveryState:Sa,events:ev};return{action:`proceed`,retryState:Da,recoveryState:Sa,events:ev}}
+async function executeWorkerContract(stopReason,{activeCount=0,content=[],route=`compact_then_truncate`,truncationHelps=true,acceptedSessionSpawns=[],completedDelivery=false,assistantPresent=true,assistantTexts=[]}={}){let Da=createEmbeddedRunTerminalRetryState(),Sa={autoCompactionCount:0,overflowCompactionAttempts:0,toolResultTruncationAttempted:false},Br=assistantPresent?{content,stopReason}:void 0,pr={terminal:{kind:`ok`},assistantTexts,contextBudgetStatus:{route,estimatedPromptTokens:427191,promptBudgetBeforeReserve:242144},itemLifecycle:{activeCount},toolMetas:[],acceptedSessionSpawns,completedDelivery,settledToolEvidence:{allToolsProvenSettled:false,intentionalTermination:false,parkedCodeModeRun:false}},za={attempt:pr,sessionIdUsed:`s`,attemptAssistant:Br,currentAttemptAssistant:Br,currentAttemptCompletedAssistant:Br,terminalState:{outcome:`ok`}},na={},ev=[],tr=()=>{ev.push([`truncate`]);return{truncated:truncationHelps,truncatedCount:truncationHelps?1:0}},ro=await recoverEmbeddedRunAttempt({runInput:na,normalizedAttempt:za,contextRecoveryState:Sa,events:ev,truncateToolResults:tr});if(ro.action===`complete`)return{...ro.result,retryState:Da,recoveryState:Sa,events:ev};if(ro.action===`retry`)return{action:`retry`,retryState:Da,recoveryState:Sa,events:ev};return{action:`proceed`,retryState:Da,recoveryState:Sa,events:ev}}
 ''')
     patch_runtime_tree(root)
     bundle.write_text(bundle.read_text() + r'''
@@ -1629,11 +1678,16 @@ assert(truncateOnly.recoveryState.autoCompactionCount===0, `truncate-only must s
 assert(truncateOnly.events.some(([event])=>event===`truncate`), `truncate-only must use native truncation`);
 assert(truncateOnly.retryState.lengthNoProgressAttempts===0, `truncate-only must reset length streak`);
 const ineffectiveTruncate=await executeWorkerContract(`length`,{route:`truncate_tool_results_only`,truncationHelps:false});
-assert(ineffectiveTruncate.action===`proceed`&&ineffectiveTruncate.retryState.lengthNoProgressAttempts===3,`ineffective truncation must not reset streak`);
+assert(ineffectiveTruncate.errorKind===`context_overflow`&&ineffectiveTruncate.livenessState===`blocked`&&ineffectiveTruncate.retryState.lengthNoProgressAttempts===3&&ineffectiveTruncate.retryState.emptyResponseAttempts===3,`ineffective truncation must surface blocked overflow without resetting streak`);
 const active=await executeWorkerContract(`stop`,{activeCount:1});
 assert(active.action===`proceed`&&active.recoveryState.autoCompactionCount===0,`active owner must block recovery`);
 const payload=await executeWorkerContract(`stop`,{content:[{type:`image`,data:`x`}]});
 assert(payload.action===`proceed`&&payload.recoveryState.autoCompactionCount===0,`payload must not be empty`);
+const accumulated=await executeWorkerContract(void 0,{assistantPresent:false,assistantTexts:[]});
+assert(accumulated.action===`retry`&&accumulated.recoveryState.autoCompactionCount===1,`minified accumulated empty must compact`);
+assert(accumulated.retryState.emptyResponseAttempts===0&&accumulated.retryState.lengthNoProgressAttempts===3,`minified accumulated empty must reset only empty streak`);
+const historical=await executeWorkerContract(void 0,{assistantPresent:false,assistantTexts:[`visible`]});
+assert(historical.action===`proceed`&&historical.recoveryState.autoCompactionCount===0,`minified visible history is not accumulated empty`);
 process.stdout.write(`MINIFIED_PRESSURE_RECOVERY_OK\n`);
 })().catch(error=>{console.error(error);process.exitCode=1});
 ''')
@@ -2046,18 +2100,37 @@ def test_v2026_9_2_patcher_rejects_old_length_identity_patch(tmp_path):
         patch_runtime_tree(root)
 
 
-def test_v2026_9_2_patcher_rejects_pre_truncate_pressure_patch(tmp_path):
+@pytest.mark.parametrize(
+    ("terminal_marker", "reset_marker"),
+    [
+        (
+            "AB_HARNESS_OPENCLAW_V2026_9_2_"
+            "CONTEXT_PRESSURE_TERMINAL_RECOVERY_V2_BEGIN",
+            "AB_HARNESS_OPENCLAW_V2026_9_2_"
+            "COMPACTION_RETRY_STREAK_RESET_V2_BEGIN",
+        ),
+        (
+            "AB_HARNESS_OPENCLAW_V2026_9_2_"
+            "CONTEXT_PRESSURE_TERMINAL_RECOVERY_V3_BEGIN",
+            "AB_HARNESS_OPENCLAW_V2026_9_2_"
+            "CONTEXT_RECOVERY_STREAK_RESET_V3_BEGIN",
+        ),
+    ],
+)
+def test_v2026_9_2_patcher_rejects_stale_pressure_patch(
+    tmp_path,
+    terminal_marker,
+    reset_marker,
+):
     root = _runtime_tree(tmp_path)
     patch_runtime_tree(root)
     path = root / "dist/embedded-recovery-test.js"
     text = path.read_text().replace(
         CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER,
-        "AB_HARNESS_OPENCLAW_V2026_9_2_"
-        "CONTEXT_PRESSURE_TERMINAL_RECOVERY_V2_BEGIN",
+        terminal_marker,
     ).replace(
         CONTEXT_RECOVERY_STREAK_RESET_MARKER,
-        "AB_HARNESS_OPENCLAW_V2026_9_2_"
-        "COMPACTION_RETRY_STREAK_RESET_V2_BEGIN",
+        reset_marker,
     )
     path.write_text(text)
 
