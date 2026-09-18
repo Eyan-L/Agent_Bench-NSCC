@@ -261,7 +261,12 @@ if [[ "$CANDIDATE" -eq 1 ]]; then
             for helper in resolveSettledToolBatchEvidence hasNonToolTerminalState; do
                 grep -q -E "function[[:space:]]+$helper[[:space:]]*\\(|(const|let|var)[[:space:]]+$helper[[:space:]]*=|as[[:space:]]+$helper([^A-Za-z0-9_$]|$)|import[[:space:]]+$helper([[:space:],]|$)" "$file"
             done
-            grep -q "preflightPressure" "$file"
+            if grep -q "preflightPressure" "$file"; then
+                :
+            else
+                test "$(grep -o "agentBenchContextPressure" "$file" | wc -l)" -ge 2
+                grep -q "Context window exceeded under preflight pressure" "$file"
+            fi
             grep -q "agent-bench-terminal" "$file"
             grep -q "truncate_tool_results_only" "$file"
             grep -q -E "lengthNoProgressAttempts[[:space:]]*=[[:space:]]*0" "$file"

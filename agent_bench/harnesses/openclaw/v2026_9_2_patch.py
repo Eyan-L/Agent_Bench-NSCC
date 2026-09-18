@@ -2225,6 +2225,13 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
             if helper_start >= 0 and helper_end > helper_start
             else ""
         )
+        readable_pressure_contract = bool(
+            re.search(r'source:\s*["`]preflightPressure["`]', text)
+        )
+        minified_pressure_contract = (
+            text.count("agentBenchContextPressure") >= 2
+            and "Context window exceeded under preflight pressure" in text
+        )
         if (
             overflow_definitions != 1
             or attempt_definitions != 1
@@ -2245,7 +2252,9 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
             or LEGACY_CONTEXT_RECOVERY_STREAK_RESET_V4_MARKER in text
             or "attempt?.preflightRecovery ?? attempt?.contextBudgetStatus"
             not in text
-            or not re.search(r'source:\s*["`]preflightPressure["`]', text)
+            or not (
+                readable_pressure_contract or minified_pressure_contract
+            )
             or not re.search(r'source:\s*["`]agent-bench-terminal["`]', text)
             or not re.search(r'lengthNoProgressAttempts\s*=\s*0', text)
             or not re.search(r'emptyResponseAttempts\s*=\s*0', text)

@@ -1835,6 +1835,9 @@ function createEmbeddedRunTerminalRetryState(){return{emptyResponseAttempts:3,le
 async function executeWorkerContract(stopReason,{activeCount=0,content=[],route=`compact_then_truncate`,truncationHelps=true,acceptedSessionSpawns=[],completedDelivery=false,assistantPresent=true,assistantTexts=[]}={}){let Da=createEmbeddedRunTerminalRetryState(),Sa={autoCompactionCount:0,overflowCompactionAttempts:0,toolResultTruncationAttempted:false},Br=assistantPresent?{content,stopReason}:void 0,pr={terminal:{kind:`ok`},assistantTexts,contextBudgetStatus:{route,estimatedPromptTokens:427191,promptBudgetBeforeReserve:242144},itemLifecycle:{activeCount},toolMetas:[],acceptedSessionSpawns,completedDelivery,settledToolEvidence:{allToolsProvenSettled:false,intentionalTermination:false,parkedCodeModeRun:false}},za={attempt:pr,sessionIdUsed:`s`,attemptAssistant:Br,currentAttemptAssistant:Br,currentAttemptCompletedAssistant:Br,terminalState:{outcome:`ok`}},na={},ev=[],tr=()=>{ev.push([`truncate`]);return{truncated:truncationHelps,truncatedCount:truncationHelps?1:0}},ro=await recoverEmbeddedRunAttempt({runInput:na,normalizedAttempt:za,contextRecoveryState:Sa,events:ev,truncateToolResults:tr});if(ro.action===`complete`)return{...ro.result,retryState:Da,recoveryState:Sa,events:ev};if(ro.action===`retry`)return{action:`retry`,retryState:Da,recoveryState:Sa,events:ev};return{action:`proceed`,retryState:Da,recoveryState:Sa,events:ev}}
 ''')
     patch_runtime_tree(root)
+    transformed = bundle.read_text()
+    assert transformed.count("agentBenchContextPressure") >= 2
+    assert "Context window exceeded under preflight pressure" in transformed
     bundle.write_text(bundle.read_text() + r'''
 function assert(value,message){if(!value)throw new Error(message)}
 (async()=>{
