@@ -27,6 +27,8 @@ from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     LEGACY_CURRENT_ASSISTANT_EMPTY_STOP_MARKER,
     LEGACY_CURRENT_TERMINAL_PAYLOAD_MARKER,
     LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_MARKER,
+    LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_V2_MARKER,
+    LEGACY_RUNTIME_OWNER_CONTINUATION_MARKER,
     LENGTH_SEMANTIC_PROGRESS_MARKER,
     LOOP_VETO_RECOVERY_PROBE_MARKER,
     NONEMPTY_LENGTH_ELIGIBILITY_MARKER,
@@ -568,6 +570,18 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert CURRENT_ASSISTANT_EMPTY_STOP_MARKER in builtin_text
     assert CONTINUATION_DECISION_DIAGNOSTIC_MARKER in builtin_text
     assert RUNTIME_OWNER_CONTINUATION_MARKER in builtin_text
+    owner_contract = builtin_text.split(
+        RUNTIME_OWNER_CONTINUATION_MARKER, 1
+    )[1].split(
+        "AB_HARNESS_OPENCLAW_V2026_9_2_"
+        "RUNTIME_OWNER_CONTINUATION_V2_END",
+        1,
+    )[0]
+    assert "runtimeContinuationStarted === true" in owner_contract
+    assert "&& !__abRuntimeContinuationOwner" in owner_contract
+    assert 'push("runtime_continuation_owner")' in owner_contract
+    assert "&& __abRoadmapContinuationEligible) return null;" in owner_contract
+    assert "acceptedSessionSpawns" not in owner_contract
     assert IMPLICIT_CHILD_HANDOFF_OWNERSHIP_MARKER in recovery_text
     assert "result.runtimeContinuationStarted = true" in recovery_text
     assert LEGACY_CURRENT_TERMINAL_PAYLOAD_MARKER not in builtin_text
@@ -637,6 +651,15 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     )
     assert "Math.min(parsed, 16)" in embedded_text
     assert "retryState.emptyResponseAttempts = 0" in embedded_text
+    reset_contract = embedded_text.split(
+        CONSECUTIVE_EMPTY_STOP_RESET_MARKER, 1
+    )[1].split(
+        "AB_HARNESS_OPENCLAW_V2026_9_2_"
+        "CONSECUTIVE_EMPTY_STOP_RESET_V3_END",
+        1,
+    )[0]
+    assert "runtimeContinuationStarted === true" in reset_contract
+    assert "acceptedSessionSpawns" not in reset_contract
     assert 'message?.details?.deniedReason === "tool-loop"' in embedded_text
     assert "!__abBlockedToolLoopVeto" in embedded_text
     assert "!__abControlActivity" in embedded_text
@@ -869,6 +892,8 @@ def test_v2026_9_2_length_has_independent_no_progress_budget(tmp_path):
         "&& !__abCompletedMessagingDelivery",
         "Number(params.attempt?.itemLifecycle?.activeCount ?? 0) > 0",
         "&& !__abActiveToolWork",
+        "params.attempt?.runtimeContinuationStarted === true",
+        "&& !__abRuntimeContinuationOwner",
         "hasAsyncActivity(params.attempt.toolMetas)",
         "&& !__abAsyncActivity",
     )
@@ -904,6 +929,15 @@ def test_v2026_9_2_empty_stop_budget_is_consecutive(tmp_path):
     assert "classifyAssistantTurn" not in embedded
     assert "hasCompletedMessagingToolDeliveryEvidence" not in embedded
     assert "hasMessagingToolDeliveryEvidence(input.attempt)" in embedded
+    reset_contract = embedded.split(
+        CONSECUTIVE_EMPTY_STOP_RESET_MARKER, 1
+    )[1].split(
+        "AB_HARNESS_OPENCLAW_V2026_9_2_"
+        "CONSECUTIVE_EMPTY_STOP_RESET_V3_END",
+        1,
+    )[0]
+    assert "input.attempt.runtimeContinuationStarted === true" in reset_contract
+    assert "acceptedSessionSpawns" not in reset_contract
 
     attempts = 0
     exhausted = False
@@ -946,6 +980,54 @@ def test_v2026_9_2_control_activity_does_not_reset_empty_streak(
     assert (attempts, exhausted) == (4, True)
 
 
+def test_v2026_9_2_minified_empty_reset_uses_runtime_owner(tmp_path):
+    root = _runtime_tree(tmp_path)
+    patch_runtime_tree(root)
+    bundle = root / "dist/worker-test.mjs"
+    bundle.write_text(bundle.read_text() + r'''
+function assert(value, message) {
+  if (!value) throw new Error(message);
+}
+function resetInput(runtimeContinuationStarted) {
+  return {
+    terminalState: { outcome: "ok" },
+    attempt: {
+      terminal: { kind: "ok" },
+      acceptedSessionSpawns: [{ childSessionKey: "agent:child:test" }],
+      runtimeContinuationStarted,
+      messagesSnapshot: [], toolMetas: [],
+      itemLifecycle: { startedCount: 0, completedCount: 0, activeCount: 0 },
+    },
+    finalAssistantVisibleText: "Parent made genuine progress.",
+    attemptAssistant: undefined,
+    maxEmptyResponseRetryAttempts: 4,
+    runParams: { runId: "minified-reset", sessionId: "minified-reset" },
+    activeErrorContext: { provider: "probe", model: "probe" },
+    activateInternalPrompt() {},
+  };
+}
+process.env.OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY = "continue";
+const ordinary = { emptyResponseAttempts: 3 };
+retryMinified(resetInput(false), ordinary, null, null);
+assert(ordinary.emptyResponseAttempts === 0,
+  "ordinary spawn progress must reset the minified streak");
+const handoff = { emptyResponseAttempts: 3 };
+retryMinified(resetInput(true), handoff, null, null);
+assert(handoff.emptyResponseAttempts === 3,
+  "runtime-owned handoff must preserve the minified streak");
+process.stdout.write("MINIFIED_RUNTIME_OWNER_RESET_OK\n");
+''')
+    completed = subprocess.run(
+        [*_node_command(), str(bundle)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "MINIFIED_RUNTIME_OWNER_RESET_OK" in completed.stdout
+
+
 def _node_command() -> list[str]:
     node = shutil.which("node")
     if node:
@@ -979,6 +1061,7 @@ function terminalInput({
   toolFailed = false, completedFallback = false,
   historicalText = "Historical visible progress before tool calls.",
   stopReason = "stop", staleHistoricalMutationError = false,
+  runtimeContinuationStarted = false, acceptedSessionSpawns = [],
 } = {}) {
   const toolCall = { type: "toolCall", id: "call-1", name: "edit" };
   let messagesSnapshot = [{ role: "assistant", content: [toolCall] }];
@@ -1039,6 +1122,8 @@ function terminalInput({
       },
       toolMetas,
       yieldDetected: yielded,
+      runtimeContinuationStarted,
+      acceptedSessionSpawns,
       completedDelivery,
       lastToolError,
     },
@@ -1175,6 +1260,100 @@ assert(
     activateInternalPrompt() {},
   }, outerLengthState, null, lengthTerminal.instruction)?.action === "retry",
   "length candidates must reach the independent outer retry budget",
+);
+const ownedCurrentEmpty = terminalInput({ runtimeContinuationStarted: true });
+assert(
+  resolveEmbeddedRunTerminal(
+    ownedCurrentEmpty, { emptyResponseAttempts: 0 },
+  ).action === "complete"
+    && ownedCurrentEmpty.attempt.__agentBenchContinuationDecision
+      ?.candidate === "current-empty"
+    && ownedCurrentEmpty.attempt.__agentBenchContinuationDecision
+      ?.deny_reason?.includes("runtime_continuation_owner"),
+  "runtime-owned current-empty must not start a competing parent retry",
+);
+const ownedAccumulatedEmpty = terminalInput({
+  historicalText: "", runtimeContinuationStarted: true,
+});
+delete ownedAccumulatedEmpty.attempt.currentAttemptAssistant;
+assert(
+  resolveEmbeddedRunTerminal(
+    ownedAccumulatedEmpty, { emptyResponseAttempts: 0 },
+  ).action === "complete"
+    && ownedAccumulatedEmpty.attempt.__agentBenchContinuationDecision
+      ?.candidate === "accumulated-empty"
+    && ownedAccumulatedEmpty.attempt.__agentBenchContinuationDecision
+      ?.deny_reason?.includes("runtime_continuation_owner"),
+  "runtime-owned accumulated-empty must not start a competing parent retry",
+);
+const ownedLength = terminalInput({
+  content: [{ type: "text", text: "Child handoff owns continuation." }],
+  stopReason: "length", runtimeContinuationStarted: true,
+});
+assert(
+  resolveEmbeddedRunTerminal(
+    ownedLength, { emptyResponseAttempts: 0 },
+  ).action === "complete"
+    && ownedLength.attempt.__agentBenchContinuationDecision
+      ?.candidate === "length"
+    && ownedLength.attempt.__agentBenchContinuationDecision
+      ?.deny_reason?.includes("runtime_continuation_owner"),
+  "runtime-owned length must not start a competing parent retry",
+);
+const ordinarySpawnReceipt = terminalInput({
+  acceptedSessionSpawns: [{
+    childSessionKey: "agent:child:settled", expectsCompletionMessage: true,
+  }],
+});
+assert(
+  resolveEmbeddedRunTerminal(
+    ordinarySpawnReceipt, { emptyResponseAttempts: 0 },
+  ).action === "retry"
+    && ordinarySpawnReceipt.attempt.__agentBenchContinuationDecision
+      ?.decision === "continue",
+  "a spawn receipt without runtime ownership must remain retryable",
+);
+const nonOwningSpawnProgressState = { emptyResponseAttempts: 3 };
+retryTerminal({
+  terminalState: { outcome: "ok" },
+  attempt: {
+    terminal: { kind: "ok" },
+    acceptedSessionSpawns: [{ childSessionKey: "agent:child:settled" }],
+    runtimeContinuationStarted: false,
+    messagesSnapshot: [], toolMetas: [],
+    itemLifecycle: { startedCount: 0, completedCount: 0, activeCount: 0 },
+  },
+  finalAssistantVisibleText: "Parent completed a genuine integration step.",
+  attemptAssistant: undefined,
+  maxEmptyResponseRetryAttempts: 4,
+  runParams: { runId: "spawn-progress", sessionId: "spawn-progress" },
+  activeErrorContext: { provider: "probe", model: "probe" },
+  activateInternalPrompt() {},
+}, nonOwningSpawnProgressState, null, null);
+assert(
+  nonOwningSpawnProgressState.emptyResponseAttempts === 0,
+  "ordinary spawn receipt must not prevent genuine progress from resetting the streak",
+);
+const runtimeOwnedProgressState = { emptyResponseAttempts: 3 };
+retryTerminal({
+  terminalState: { outcome: "ok" },
+  attempt: {
+    terminal: { kind: "ok" },
+    acceptedSessionSpawns: [{ childSessionKey: "agent:child:handoff" }],
+    runtimeContinuationStarted: true,
+    messagesSnapshot: [], toolMetas: [],
+    itemLifecycle: { startedCount: 0, completedCount: 0, activeCount: 0 },
+  },
+  finalAssistantVisibleText: "Handoff control output.",
+  attemptAssistant: undefined,
+  maxEmptyResponseRetryAttempts: 4,
+  runParams: { runId: "handoff-progress", sessionId: "handoff-progress" },
+  activeErrorContext: { provider: "probe", model: "probe" },
+  activateInternalPrompt() {},
+}, runtimeOwnedProgressState, null, null);
+assert(
+  runtimeOwnedProgressState.emptyResponseAttempts === 3,
+  "runtime handoff must not fabricate genuine parent progress",
 );
 assert(
   resolveEmbeddedRunTerminal(terminalInput({
@@ -2406,7 +2585,7 @@ def test_v2026_9_2_patcher_rejects_counter_patch_without_streak_reset(
     old_patch, count = re.subn(
         rf"^[ \t]*/\* {CONSECUTIVE_EMPTY_STOP_RESET_MARKER} \*/.*?"
         r"^[ \t]*/\* AB_HARNESS_OPENCLAW_V2026_9_2_"
-        r"CONSECUTIVE_EMPTY_STOP_RESET_V2_END \*/\n?",
+        r"CONSECUTIVE_EMPTY_STOP_RESET_V3_END \*/\n?",
         "",
         path.read_text(),
         count=1,
@@ -2431,6 +2610,26 @@ def test_v2026_9_2_patcher_rejects_old_length_identity_patch(tmp_path):
     )
 
     with pytest.raises(RuntimeError, match="stale or incomplete"):
+        patch_runtime_tree(root)
+
+
+def test_v2026_9_2_patcher_rejects_legacy_runtime_owner_guard(tmp_path):
+    root = _runtime_tree(tmp_path)
+    patch_runtime_tree(root)
+    path = root / "dist/builtin-openclaw-test.js"
+    path.write_text(
+        path.read_text().replace(
+            RUNTIME_OWNER_CONTINUATION_MARKER,
+            LEGACY_RUNTIME_OWNER_CONTINUATION_MARKER,
+        ).replace(
+            "AB_HARNESS_OPENCLAW_V2026_9_2_"
+            "RUNTIME_OWNER_CONTINUATION_V2_END",
+            "AB_HARNESS_OPENCLAW_V2026_9_2_"
+            "RUNTIME_OWNER_CONTINUATION_V1_END",
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="settled continuation patch predates"):
         patch_runtime_tree(root)
 
 
@@ -2506,16 +2705,35 @@ def test_v2026_9_2_patcher_fails_closed_when_attempt_binding_moves(tmp_path):
         patch_runtime_tree(root)
 
 
-def test_v2026_9_2_patcher_rejects_legacy_consecutive_reset(tmp_path):
+@pytest.mark.parametrize(
+    ("legacy_marker", "legacy_end"),
+    [
+        (
+            LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_MARKER,
+            "AB_HARNESS_OPENCLAW_V2026_9_2_"
+            "CONSECUTIVE_EMPTY_STOP_RESET_END",
+        ),
+        (
+            LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_V2_MARKER,
+            "AB_HARNESS_OPENCLAW_V2026_9_2_"
+            "CONSECUTIVE_EMPTY_STOP_RESET_V2_END",
+        ),
+    ],
+)
+def test_v2026_9_2_patcher_rejects_legacy_consecutive_reset(
+    tmp_path,
+    legacy_marker,
+    legacy_end,
+):
     root = _runtime_tree(tmp_path)
     patch_runtime_tree(root)
     path = root / "dist/embedded-agent-test.js"
     text = path.read_text().replace(
         CONSECUTIVE_EMPTY_STOP_RESET_MARKER,
-        LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_MARKER,
+        legacy_marker,
     ).replace(
-        "AB_HARNESS_OPENCLAW_V2026_9_2_CONSECUTIVE_EMPTY_STOP_RESET_V2_END",
-        "AB_HARNESS_OPENCLAW_V2026_9_2_CONSECUTIVE_EMPTY_STOP_RESET_END",
+        "AB_HARNESS_OPENCLAW_V2026_9_2_CONSECUTIVE_EMPTY_STOP_RESET_V3_END",
+        legacy_end,
     )
     path.write_text(text)
 

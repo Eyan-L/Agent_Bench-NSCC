@@ -66,8 +66,11 @@ LEGACY_CURRENT_TERMINAL_PAYLOAD_MARKER = (
 CONTINUATION_DECISION_DIAGNOSTIC_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_CONTINUATION_DECISION_DIAGNOSTIC_V1_BEGIN"
 )
-RUNTIME_OWNER_CONTINUATION_MARKER = (
+LEGACY_RUNTIME_OWNER_CONTINUATION_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_RUNTIME_OWNER_CONTINUATION_V1_BEGIN"
+)
+RUNTIME_OWNER_CONTINUATION_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_RUNTIME_OWNER_CONTINUATION_V2_BEGIN"
 )
 IMPLICIT_CHILD_HANDOFF_OWNERSHIP_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_IMPLICIT_CHILD_HANDOFF_OWNERSHIP_V1_BEGIN"
@@ -87,8 +90,11 @@ EMPTY_STOP_RETRY_LIMIT_MARKER = (
 LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_CONSECUTIVE_EMPTY_STOP_RESET_BEGIN"
 )
-CONSECUTIVE_EMPTY_STOP_RESET_MARKER = (
+LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_V2_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_CONSECUTIVE_EMPTY_STOP_RESET_V2_BEGIN"
+)
+CONSECUTIVE_EMPTY_STOP_RESET_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_CONSECUTIVE_EMPTY_STOP_RESET_V3_BEGIN"
 )
 LOOP_VETO_RECOVERY_PROBE_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_LOOP_VETO_RECOVERY_PROBE_BEGIN"
@@ -350,7 +356,7 @@ def _patch_implicit_child_handoff_ownership(root: Path) -> list[str]:
         rf"(?P<prefix>"
         rf"if\s*\(\s*shouldContinueInteractiveAcceptedSessionSpawns\s*\(\s*\{{\s*"
         rf"attempt\s*:\s*(?P<result>{ident})\s*,\s*"
-        rf"run\s*:\s*{ident}\s*\}}\s*\)\s*\)\s*\{{\s*"
+        rf"run\s*:\s*{ident}\s*,?\s*\}}\s*\)\s*\)\s*\{{\s*"
         rf"if\s*\(\s*markRequesterTurnYielded\s*\(\s*\{{.*?\}}\s*\)\s*"
         rf"===\s*0\s*\)\s*throw\s+(?:new\s+)?Error\s*\(\s*"
         rf"(?P<quote>[\"'`]){re.escape(error_text)}(?P=quote)\s*\)\s*;?"
@@ -605,7 +611,8 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
 	/* {RUNTIME_OWNER_CONTINUATION_MARKER} */
 	const __abActiveToolWork =
 		Number({param}.attempt?.itemLifecycle?.activeCount ?? 0) > 0;
-	/* AB_HARNESS_OPENCLAW_V2026_9_2_RUNTIME_OWNER_CONTINUATION_V1_END */
+	const __abRuntimeContinuationOwner =
+		{param}.attempt?.runtimeContinuationStarted === true;
 	const __abContinuationAllowed =
 		process.env.{SETTLED_TOOL_POLICY_ENV} === "continue"
 		&& !{param}.aborted
@@ -620,6 +627,7 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
 		&& !(__abCurrentAssistantEmptyShape && __abCurrentAssistantHasPayload)
 		&& __abRoadmapContinuationEligible
 		&& !__abActiveToolWork
+		&& !__abRuntimeContinuationOwner
 		/* {SETTLED_CONTINUATION_TOOL_ERROR_MARKER} */
 		/* Settled tool errors are recoverable model feedback, not runtime fatality. */
 		/* AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_TOOL_ERROR_END */
@@ -652,6 +660,7 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
 			&& __abCurrentAssistantHasPayload) __abDenyReasons.push("current_payload");
 		if (!__abRoadmapContinuationEligible) __abDenyReasons.push("not_eligible");
 		if (__abActiveToolWork) __abDenyReasons.push("active_tool_work");
+		if (__abRuntimeContinuationOwner) __abDenyReasons.push("runtime_continuation_owner");
 		if (__abSettledToolEvidence.intentionalTermination) __abDenyReasons.push("intentional_termination");
 		if (__abSettledToolEvidence.parkedCodeModeRun) __abDenyReasons.push("parked_code_mode");
 		if (__abAsyncActivity) __abDenyReasons.push("async_activity");
@@ -683,6 +692,10 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
 			}}));
 		}}
 	}}
+	if (process.env.{SETTLED_TOOL_POLICY_ENV} === "continue"
+		&& __abRuntimeContinuationOwner
+		&& __abRoadmapContinuationEligible) return null;
+	/* AB_HARNESS_OPENCLAW_V2026_9_2_RUNTIME_OWNER_CONTINUATION_V2_END */
 	/* AB_HARNESS_OPENCLAW_V2026_9_2_CONTINUATION_DECISION_DIAGNOSTIC_V1_END */
 	if (__abContinuationAllowed) {{
 		return EMPTY_RESPONSE_RETRY_INSTRUCTION;
@@ -700,6 +713,7 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
             or CURRENT_ASSISTANT_EMPTY_STOP_MARKER not in _read(path)
             or CONTINUATION_DECISION_DIAGNOSTIC_MARKER not in _read(path)
             or RUNTIME_OWNER_CONTINUATION_MARKER not in _read(path)
+            or LEGACY_RUNTIME_OWNER_CONTINUATION_MARKER in _read(path)
         )
     ]
     if stale_retry_targets:
@@ -781,7 +795,7 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
 {indent}\t\t|| {input_name}.attempt.didDeliverSourceReplyViaMessageTool
 {indent}\t\t|| ({input_name}.attempt.messagingToolSourceReplyPayloads?.length ?? 0) > 0
 {indent}\t\t|| hasMessagingToolDeliveryEvidence({input_name}.attempt)
-{indent}\t\t|| ({input_name}.attempt.acceptedSessionSpawns?.length ?? 0) > 0
+{indent}\t\t|| {input_name}.attempt.runtimeContinuationStarted === true
 {indent}\t\t|| ({input_name}.attempt.successfulCronAdds ?? 0) > 0
 {indent}\t\t|| hasAsyncActivity({input_name}.attempt.toolMetas)
 {indent}\t);
@@ -803,7 +817,7 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
 {indent}\t\t{state}.emptyResponseAttempts = 0;
 {indent}\t}}
 {indent}}}
-{indent}/* AB_HARNESS_OPENCLAW_V2026_9_2_CONSECUTIVE_EMPTY_STOP_RESET_V2_END */'''
+{indent}/* AB_HARNESS_OPENCLAW_V2026_9_2_CONSECUTIVE_EMPTY_STOP_RESET_V3_END */'''
 
     required_reset_bindings = (
         "resolveSettledToolBatchEvidence",
@@ -994,6 +1008,7 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
     stale_or_incomplete_length_targets = [
         path for path in dist_files
         if LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_MARKER in _read(path)
+        or LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_V2_MARKER in _read(path)
         or (
             BOUNDED_LENGTH_CONTINUATION_MARKER in _read(path)
             and (
@@ -2281,6 +2296,12 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
     resolver_files: list[str] = []
     resolver_bindings: dict[str, list[str]] = {}
     stale_contract_files: list[str] = []
+    owner_block_pattern = re.compile(
+        re.escape(RUNTIME_OWNER_CONTINUATION_MARKER)
+        + r".*?AB_HARNESS_OPENCLAW_V2026_9_2_"
+        + r"RUNTIME_OWNER_CONTINUATION_V2_END",
+        re.DOTALL,
+    )
     for path in sorted(_js_files(root / "dist")):
         try:
             text = _read(path)
@@ -2296,6 +2317,19 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
                     f"contains current-empty/runtime-owner logic: {path} "
                     f"definitions={definitions} current_empty={markers} "
                     f"runtime_owner={owner_markers}"
+                )
+            owner_blocks = owner_block_pattern.findall(text)
+            if len(owner_blocks) != definitions or any(
+                "runtimeContinuationStarted === true" not in block
+                or "&& !__abRuntimeContinuationOwner" not in block
+                or 'push("runtime_continuation_owner")' not in block
+                or "&& __abRoadmapContinuationEligible) return null;" not in block
+                or "acceptedSessionSpawns" in block
+                for block in owner_blocks
+            ):
+                raise RuntimeError(
+                    "ordinary continuation runtime-owner guard missing or "
+                    f"stale in {path}"
                 )
             if "tools_unsettled" in text:
                 raise RuntimeError(
@@ -2320,6 +2354,7 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
         if (
             LEGACY_CURRENT_ASSISTANT_EMPTY_STOP_MARKER in text
             or LEGACY_CURRENT_TERMINAL_PAYLOAD_MARKER in text
+            or LEGACY_RUNTIME_OWNER_CONTINUATION_MARKER in text
             or "hasCurrentTerminalPayload" in text
         ):
             stale_contract_files.append(str(path.relative_to(root)))
@@ -2332,6 +2367,43 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
             "obsolete cross-bundle current-empty contract remains in: "
             + ", ".join(stale_contract_files)
         )
+
+    reset_block_pattern = re.compile(
+        re.escape(CONSECUTIVE_EMPTY_STOP_RESET_MARKER)
+        + r".*?AB_HARNESS_OPENCLAW_V2026_9_2_"
+        + r"CONSECUTIVE_EMPTY_STOP_RESET_V3_END",
+        re.DOTALL,
+    )
+    for path in sorted(_js_files(root / "dist")):
+        try:
+            text = _read(path)
+        except (OSError, UnicodeDecodeError):
+            continue
+        if (
+            LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_MARKER in text
+            or LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_V2_MARKER in text
+        ):
+            raise RuntimeError(
+                f"legacy consecutive-empty reset contract remains in {path}"
+            )
+        bounded_count = text.count(BOUNDED_LENGTH_CONTINUATION_MARKER)
+        if not bounded_count:
+            continue
+        reset_markers = text.count(CONSECUTIVE_EMPTY_STOP_RESET_MARKER)
+        reset_blocks = reset_block_pattern.findall(text)
+        if (
+            reset_markers != bounded_count
+            or len(reset_blocks) != bounded_count
+            or any(
+                "runtimeContinuationStarted === true" not in block
+                or "acceptedSessionSpawns" in block
+                for block in reset_blocks
+            )
+        ):
+            raise RuntimeError(
+                "consecutive-empty reset ownership contract missing or "
+                f"stale in {path}"
+            )
 
     recovery_files: list[str] = []
     for path in sorted(_js_files(root / "dist")):
