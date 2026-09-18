@@ -108,7 +108,7 @@ if (s.upstream_version !== "2026.9.2") throw new Error("unexpected upstream_vers
 const verification = s.verification || {};
 if (!verification.verified) throw new Error("semantic patch verification did not pass");
 const markers = verification.markers || {};
-for (const key of ["exec_bridge", "sandbox_bypass", "shared_workspace_spawn", "settled_continuation_policy", "settled_continuation_instruction", "settled_continuation_retry", "empty_stop_retry_limit", "loop_veto_recovery_probe", "sessions_yield_no_pending_loop", "sessions_yield_probe_projection", "fs_helper", "fs_run", "fs_write", "fs_read", "fs_check"]) {
+for (const key of ["exec_bridge", "sandbox_bypass", "shared_workspace_spawn", "settled_continuation_policy", "settled_continuation_instruction", "settled_continuation_retry", "empty_stop_retry_limit", "loop_veto_recovery_probe", "sessions_yield_no_pending_loop", "fs_helper", "fs_run", "fs_write", "fs_read", "fs_check"]) {
   if (!Array.isArray(markers[key]) || markers[key].length === 0) throw new Error("missing sealed marker: " + key);
 }
 process.stdout.write(JSON.stringify(s) + "\n");

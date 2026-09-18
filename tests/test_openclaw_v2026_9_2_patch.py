@@ -516,8 +516,11 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "{action:`retry`};}\n"
     )
     (dist / "tool-loop-detection-test.js").write_text(
-        "const CRITICAL_THRESHOLD = 4;\n"
-        "function selectHistoryForScope(history) { return history; }\n"
+        "const CRITICAL_THRESHOLD = 20;\n"
+        "function selectHistoryForScope(history, scope) {\n"
+        "  return history.filter((record) => !scope?.runId "
+        "|| record.runId === scope.runId);\n"
+        "}\n"
         "function hashToolCall(toolName, params) {\n"
         "  return toolName + ':' + JSON.stringify(params);\n"
         "}\n"
@@ -529,11 +532,17 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "  const outcome = hashToolOutcome(params.toolName, params.toolParams, "
         "params.result, params.error);\n"
         "  state.toolCallHistory ??= [];\n"
-        "  state.toolCallHistory.push({ toolName: params.toolName, "
-        "toolCallId: params.toolCallId, ...outcome });\n"
+        "  state.toolCallHistory.push({ runId: params.runId, "
+        "toolName: params.toolName, toolCallId: params.toolCallId, "
+        "argsHash: hashToolCall(params.toolName, params.toolParams), "
+        "...outcome });\n"
         "  return state.toolCallHistory.at(-1);\n"
         "}\n"
-        "function getNoProgressStreak() { return { count: 0 }; }\n"
+        "function getNoProgressStreak(history, toolName, currentHash) {\n"
+        "  return { count: history.filter((record) => "
+        "record.toolName === toolName && record.argsHash === currentHash "
+        "&& record.noProgress === true).length };\n"
+        "}\n"
         "function detectToolCallLoop(state, toolName, params, config, scope) {\n"
         "  if (!config?.enabled) return { stuck: false };\n"
         "  const history = selectHistoryForScope(state.toolCallHistory ?? [], scope);\n"
@@ -554,15 +563,21 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "recordToolCallOutcome };\n"
     )
     (dist / "tool-loop-detection-worker-test.mjs").write_text(
-        "const CRITICAL_THRESHOLD=4;"
+        "const CRITICAL_THRESHOLD=20;"
         "function hashToolOutcome(Ot,Zt,_n,Dn){"
         "return{resultHash:Dn!==void 0?`error:${String(Dn)}`:JSON.stringify(_n)}}"
         "function recordToolCallOutcome(Ot,Zt){"
         "const _n=hashToolOutcome(Zt.toolName,Zt.toolParams,Zt.result,Zt.error);"
-        "return(Ot.toolCallHistory??=[]).push({toolName:Zt.toolName,"
-        "toolCallId:Zt.toolCallId,..._n}),Ot.toolCallHistory.at(-1)}"
+        "return(Ot.toolCallHistory??=[]).push({runId:Zt.runId,toolName:Zt.toolName,"
+        "toolCallId:Zt.toolCallId,argsHash:Zt.toolName+`:`+JSON.stringify(Zt.toolParams),"
+        "..._n}),Ot.toolCallHistory.at(-1)}"
         "function detectToolCallLoop(Ot,Zt,_n,Dn,kn){"
-        "if(!Dn?.enabled)return{stuck:!1};return{stuck:!1}}"
+        "if(!Dn?.enabled)return{stuck:!1};const history=(Ot.toolCallHistory??[])"
+        ".filter((record)=>!kn?.runId||record.runId===kn.runId),"
+        "currentHash=Zt+`:`+JSON.stringify(_n),count=history.filter((record)=>"
+        "record.toolName===Zt&&record.argsHash===currentHash&&record.noProgress===!0)"
+        ".length;return count>=CRITICAL_THRESHOLD?{stuck:!0,level:`critical`}:"
+        "{stuck:!1}}"
         "async function admitToolCallBatch(Ot,Zt){const _n=Zt.sessionState,"
         "Dn={..._n,toolCallHistory:[..._n.toolCallHistory??[]]};return Dn}"
         "globalThis.__yieldLoopContractMinified={detectToolCallLoop,"
@@ -748,6 +763,16 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert 'outcomeKind: "sessions-yield-no-pending"' in loop_detection_text
     assert 'detector: "sessions_yield_no_pending"' in loop_detection_text
     assert SESSIONS_YIELD_NO_PENDING_ERROR in loop_detection_text
+    assert "loopState.count < 10" in loop_detection_text
+    assert "loopState.count < CRITICAL_THRESHOLD" in loop_detection_text
+    assert "__abPeekSessionsYieldNoPendingRunState" in loop_detection_text
+    assert "__abFilterSessionsYieldHistoryAfterOwnership" in (
+        loop_detection_text
+    )
+    assert "staleHistoryByRunId" in loop_detection_text
+    assert "criticalEmitted" not in loop_detection_text
+    assert "probeConsumed" not in loop_detection_text
+    assert "SESSIONS_YIELD_PROBE_PROJECTION" not in loop_detection_text
     assert "OPENCLAW_AGENT_BENCH_LOOP_VETO_RECOVERY_PROBE" in (
         loop_detection_text
     )
@@ -871,70 +896,145 @@ def test_v2026_9_2_sessions_yield_no_pending_loop_runtime_contract(
   const assert = (condition, message) => {{
     if (!condition) throw new Error(message);
   }};
-  const detect = (state, runId, message) => api.detectToolCallLoop(
-    state, "sessions_yield", {{ message }}, config, {{ runId }},
+  const detect = (state, runId, message, acknowledgment = "") =>
+    api.detectToolCallLoop(
+    state, "sessions_yield", {{ message, acknowledgment }}, config,
+    {{ runId }},
   );
-  const record = (state, runId, toolCallId, result = noPending) =>
+  const record = (
+    state, runId, toolCallId, message, result = noPending,
+  ) =>
     api.recordToolCallOutcome(state, {{
-      runId, toolName: "sessions_yield", toolParams: {{ message: toolCallId }},
+      runId, toolName: "sessions_yield", toolParams: {{ message }},
       toolCallId, result,
+    }});
+  const recordSpawn = (state, runId, toolCallId, childRunId) =>
+    api.recordToolCallOutcome(state, {{
+      runId,
+      toolName: "sessions_spawn",
+      toolParams: {{ task: `child-${{childRunId}}` }},
+      toolCallId,
+      result: {{
+        details: {{
+          status: "accepted",
+          expectsCompletionMessage: true,
+          runId: childRunId,
+          childSessionKey: `agent:roadmap_bench:subagent:${{childRunId}}`,
+        }},
+      }},
     }});
 
   const policy = process.env.OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY;
   delete process.env.OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY;
   const outsideRoadmap = {{ toolCallHistory: [] }};
   for (let index = 0; index < 6; index += 1) {{
-    record(outsideRoadmap, "terminal-run", `terminal-yield-${{index}}`);
+    record(
+      outsideRoadmap, "terminal-run", `terminal-yield-${{index}}`,
+      `terminal wording ${{index}}`,
+    );
   }}
   assert(!detect(outsideRoadmap, "terminal-run", "unchanged upstream").stuck,
     "the semantic detector must be disabled outside Roadmap policy");
   process.env.OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY = policy;
 
+  const untouched = {{ toolCallHistory: [] }};
+  assert(!detect(untouched, "untouched-run", "first check").stuck,
+    "an empty detector snapshot must not be blocked");
+  assert(!detect(untouched, "untouched-run", "second check").stuck,
+    "repeated detector checks must remain read-only");
+  assert(untouched.__agentBenchSessionsYieldNoPendingLoop === undefined,
+    "detector checks must not initialize policy state");
+
   const looped = {{ generation: 1, toolCallHistory: [] }};
-  for (let index = 0; index < 3; index += 1) {{
-    assert(!detect(looped, "parent-run", `wording-${{index}}`).stuck,
+  for (let index = 0; index < 10; index += 1) {{
+    assert(!detect(
+      looped, "parent-run", `wording-${{index}}`, `ack-${{index}}`,
+    ).stuck,
       "pre-threshold rewritten yield must execute");
-    record(looped, "parent-run", `yield-${{index}}`);
+    record(
+      looped, "parent-run", `yield-${{index}}`, `wording-${{index}}`,
+    );
     api.recordToolCallOutcome(looped, {{
       runId: "parent-run", toolName: index % 2 ? "exec" : "read",
       toolParams: {{ path: `/tmp/${{index}}` }}, toolCallId: `other-${{index}}`,
       result: {{ details: {{ status: "completed" }}, content: [] }},
     }});
   }}
-  record(looped, "parent-run", "yield-0");
-  assert(!detect(looped, "parent-run", "fourth wording").stuck,
+  record(looped, "parent-run", "yield-0", "replayed wording");
+  const warning = detect(looped, "parent-run", "warning wording");
+  assert(warning.stuck && warning.level === "warning" && warning.count === 10,
+    "ten semantic failures must use the native warning level");
+  const guardState = looped.__agentBenchSessionsYieldNoPendingLoop;
+  const countBeforeChecks = guardState.byRunId.get("parent-run").count;
+  detect(looped, "parent-run", "another warning check");
+  detect(looped, "parent-run", "yet another warning check");
+  assert(guardState.byRunId.get("parent-run").count === countBeforeChecks,
+    "admission checks must not consume or add failures");
+  assert(countBeforeChecks === 10,
     "replayed receipt must not increment the semantic streak");
-  record(looped, "parent-run", "yield-3");
+
+  for (let index = 10; index < 20; index += 1) {{
+    const decision = detect(
+      looped, "parent-run", `rewritten-${{index}}`, `new-ack-${{index}}`,
+    );
+    assert(decision.stuck && decision.level === "warning",
+      "warning-level calls remain eligible for native warning recovery");
+    record(
+      looped, "parent-run", `yield-${{index}}`, `rewritten-${{index}}`,
+    );
+  }}
   looped.generation = 999;
-  const blocked = detect(looped, "parent-run", "fifth wording");
+  const blocked = detect(looped, "parent-run", "critical wording");
   assert(blocked.stuck && blocked.detector === "sessions_yield_no_pending",
     "rewritten no-pending yields must reach the native critical threshold");
-  assert(blocked.count === 4, "receipt replay or unrelated tools changed count");
-  assert(!detect(looped, "parent-run", "ownership probe").stuck,
-    "one real ownership probe must be allowed after the first veto");
-  record(looped, "parent-run", "yield-probe");
+  assert(blocked.level === "critical" && blocked.count === 20,
+    "receipt replay or unrelated tools changed the production threshold");
   for (let index = 0; index < 3; index += 1) {{
-    const terminal = detect(looped, "parent-run", `post-probe-${{index}}`);
+    const terminal = detect(looped, "parent-run", `post-veto-${{index}}`);
     assert(terminal.stuck && terminal.detector === "sessions_yield_no_pending",
-      "failed probe must not reopen through the generic veto probe");
+      "rewritten arguments must not reopen the invalid yield after critical");
   }}
 
   assert(!detect(looped, "new-parent-run", "isolated run").stuck,
     "a distinct parent run must have an isolated failure streak");
 
   const recovered = {{ toolCallHistory: [] }};
-  for (let index = 0; index < 4; index += 1) {{
-    assert(!detect(recovered, "resume-run", `failure-${{index}}`).stuck,
-      "failure must execute before threshold");
-    record(recovered, "resume-run", `failed-${{index}}`);
+  for (let index = 0; index < 20; index += 1) {{
+    record(recovered, "resume-run", `failed-${{index}}`, "same message");
   }}
-  assert(detect(recovered, "resume-run", "first veto").stuck,
-    "threshold must emit one critical veto");
-  assert(!detect(recovered, "resume-run", "verified ownership").stuck,
-    "verified ownership must get one execution probe");
-  record(recovered, "resume-run", "successful-yield", yielded);
-  assert(!detect(recovered, "resume-run", "after success").stuck,
-    "successful claim must advance the dedicated ownership epoch");
+  assert(detect(recovered, "resume-run", "same message").level === "critical",
+    "old ownership must be blocked at the critical threshold");
+  recordSpawn(recovered, "resume-run", "spawn-1", "child-1");
+  assert(!detect(recovered, "resume-run", "same message").stuck,
+    "new executed completion ownership must unlock the same yield wording");
+  record(recovered, "resume-run", "new-failure", "same message");
+  assert(
+    recovered.__agentBenchSessionsYieldNoPendingLoop.byRunId
+      .get("resume-run").count === 1,
+    "the new ownership must start a fresh semantic failure streak",
+  );
+  recordSpawn(recovered, "resume-run", "spawn-1", "child-1");
+  assert(
+    recovered.__agentBenchSessionsYieldNoPendingLoop.byRunId
+      .get("resume-run").count === 1,
+    "replayed spawn receipt must not reset the new streak",
+  );
+  record(
+    recovered, "resume-run", "successful-yield", "same message", yielded,
+  );
+  assert(!detect(recovered, "resume-run", "same message").stuck,
+    "a real successful yield must advance only that run ownership");
+
+  const isolated = {{ toolCallHistory: [] }};
+  for (let index = 0; index < 10; index += 1) {{
+    record(isolated, "run-a", `a-${{index}}`, `a wording ${{index}}`);
+    record(isolated, "run-b", `b-${{index}}`, `b wording ${{index}}`);
+  }}
+  recordSpawn(isolated, "run-b", "spawn-b", "child-b");
+  assert(detect(isolated, "run-a", "a warning").level === "warning",
+    "ownership in another run must not clear this run failure count");
+  assert(!detect(isolated, "run-b", "b wording 0").stuck,
+    "ownership must clear only its parent run");
 
   const ordinary = {{ toolCallHistory: [] }};
   for (let index = 0; index < 8; index += 1) {{

@@ -102,11 +102,11 @@ LOOP_VETO_RECOVERY_PROBE_MARKER = (
 LEGACY_SESSIONS_YIELD_NO_PENDING_LOOP_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_NO_PENDING_LOOP_V1_BEGIN"
 )
-SESSIONS_YIELD_NO_PENDING_LOOP_MARKER = (
+LEGACY_SESSIONS_YIELD_NO_PENDING_LOOP_V2_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_NO_PENDING_LOOP_V2_BEGIN"
 )
-SESSIONS_YIELD_PROBE_PROJECTION_MARKER = (
-    "AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_PROBE_PROJECTION_V1_BEGIN"
+SESSIONS_YIELD_NO_PENDING_LOOP_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_NO_PENDING_LOOP_V3_BEGIN"
 )
 LEGACY_CONTEXT_PRESSURE_LENGTH_RECOVERY_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_LENGTH_RECOVERY_V1_BEGIN"
@@ -1861,13 +1861,12 @@ def _patch_sessions_yield_no_pending_loop(root: Path) -> list[str]:
     The tool accepts free-form ``message`` and ``acknowledgment`` fields, so
     argument hashing alone cannot recognize repeated ownership failures. Keep
     the original call/result untouched and attach a Roadmap-only semantic
-    outcome plus a session-state streak. A dedicated ownership epoch advances
-    only after a verified successful yield or a newly executed, completion-
-    owned child spawn; each runtime ``runId`` has an independent streak inside
-    that epoch. Probe admission is reserved only on the atomic batch's projected
-    state, while an actual no-pending outcome consumes the real probe. Internal
+    outcome plus a session-state streak. Only an actually recorded tool result
+    changes the streak; detector calls are read-only. A successful yield or a
+    newly executed, completion-owned child spawn resets only its parent run and
+    hides that run's stale no-pending evidence from native detection. Internal
     retries, compaction, receipt replay, and unrelated tool calls do not mutate
-    either identity.
+    that identity.
     """
     changed: list[str] = []
     dist_files = sorted(_js_files(root / "dist"))
@@ -1887,19 +1886,13 @@ def _patch_sessions_yield_no_pending_loop(root: Path) -> list[str]:
         rf"function\s+recordToolCallOutcome\(\s*"
         rf"(?P<state>{ident})\s*,\s*(?P<params>{ident})\s*\)\s*\{{"
     )
-    projected_state_anchor = re.compile(
-        rf"const\s+(?P<projected>{ident})\s*=\s*\{{\s*"
-        rf"\.\.\.(?P<state>{ident})\s*,\s*"
-        rf"toolCallHistory\s*:\s*\[\s*\.\.\."
-        rf"(?P=state)\.toolCallHistory\s*\?\?\s*\[\s*\]\s*\]\s*\}}"
-    )
-    batch_admission_anchor = re.compile(
-        r"async\s+function\s+admitToolCallBatch\s*\("
-    )
     legacy_files = [
         str(path.relative_to(root))
         for path in dist_files
         if LEGACY_SESSIONS_YIELD_NO_PENDING_LOOP_MARKER in _read(path)
+        or LEGACY_SESSIONS_YIELD_NO_PENDING_LOOP_V2_MARKER in _read(path)
+        or "AB_HARNESS_OPENCLAW_V2026_9_2_"
+        "SESSIONS_YIELD_PROBE_PROJECTION_V1_BEGIN" in _read(path)
     ]
     if legacy_files:
         raise RuntimeError(
@@ -1916,27 +1909,11 @@ def _patch_sessions_yield_no_pending_loop(root: Path) -> list[str]:
         raise RuntimeError(
             "v2026.9.2 sessions_yield loop-detection anchor not found"
         )
-    projection_targets = [
-        path
-        for path in dist_files
-        if (
-            batch_admission_anchor.search(_read(path))
-            and projected_state_anchor.search(_read(path))
-        )
-        or SESSIONS_YIELD_PROBE_PROJECTION_MARKER in _read(path)
-    ]
-    if not projection_targets:
-        raise RuntimeError(
-            "v2026.9.2 atomic tool-batch projection anchor not found"
-        )
-
     helper_source = f'''/* {SESSIONS_YIELD_NO_PENDING_LOOP_MARKER} */
 const __abSessionsYieldNoPendingError = {json.dumps(SESSIONS_YIELD_NO_PENDING_ERROR)};
 const __abSessionsYieldNoPendingStateKey = "__agentBenchSessionsYieldNoPendingLoop";
 const __abSessionsYieldSeenCallIdsKey = "__agentBenchSessionsYieldSeenCallIds";
 const __abSessionsYieldSeenOwnershipIdsKey = "__agentBenchSessionsYieldSeenOwnershipIds";
-const __abProjectedToolLoopAdmissionKey = "__agentBenchProjectedToolLoopAdmission";
-const __abSessionsYieldProbeReservationKey = "__agentBenchSessionsYieldProbeReservation";
 function __abClassifySessionsYieldOutcome(toolName, result, error) {{
 	if (process.env.{SETTLED_TOOL_POLICY_ENV} !== "continue"
 		|| toolName !== "sessions_yield" || error !== void 0
@@ -1964,37 +1941,66 @@ function __abResolveSessionsYieldOwnershipIdentity(toolName, result, error, pare
 function __abGetSessionsYieldNoPendingLoopState(state) {{
 	const existing = state?.[__abSessionsYieldNoPendingStateKey];
 	if (existing?.byRunId instanceof Map
+		&& existing.staleHistoryByRunId instanceof Map
 		&& Number.isSafeInteger(existing.yieldOwnershipEpoch)) return existing;
 	const created = {{
 		yieldOwnershipEpoch: 0,
 		byRunId: new Map(),
+		staleHistoryByRunId: new Map(),
 	}};
 	state[__abSessionsYieldNoPendingStateKey] = created;
 	return created;
 }}
-function __abAdvanceSessionsYieldOwnershipEpoch(state) {{
+function __abAdvanceSessionsYieldOwnershipEpoch(state, runId) {{
 	const ownershipState = __abGetSessionsYieldNoPendingLoopState(state);
 	ownershipState.yieldOwnershipEpoch += 1;
-	ownershipState.byRunId.clear();
+	ownershipState.byRunId.delete(runId);
+	ownershipState.staleHistoryByRunId.set(
+		runId,
+		new Set((state.toolCallHistory ?? []).filter((record) =>
+			record?.runId === runId && record?.toolName === "sessions_yield"
+			&& (record.outcomeKind === "sessions-yield-no-pending"
+				|| record.outcomeKind === "tool-loop-veto"),
+		)),
+	);
 }}
 function __abGetSessionsYieldNoPendingRunState(state, runId) {{
 	const ownershipState = __abGetSessionsYieldNoPendingLoopState(state);
-	const normalizedRunId = typeof runId === "string" && runId ? runId : "unknown";
-	const existing = ownershipState.byRunId.get(normalizedRunId);
-	if (existing?.yieldOwnershipEpoch === ownershipState.yieldOwnershipEpoch) return existing;
+	const existing = ownershipState.byRunId.get(runId);
+	if (existing) return existing;
 	const created = {{
-		runId: normalizedRunId,
+		runId,
 		yieldOwnershipEpoch: ownershipState.yieldOwnershipEpoch,
 		count: 0,
-		criticalEmitted: false,
-		probeConsumed: false,
 	}};
-	ownershipState.byRunId.set(normalizedRunId, created);
+	ownershipState.byRunId.set(runId, created);
 	return created;
+}}
+function __abPeekSessionsYieldNoPendingRunState(state, runId) {{
+	if (typeof runId !== "string" || !runId) return null;
+	const ownershipState = state?.[__abSessionsYieldNoPendingStateKey];
+	if (!(ownershipState?.byRunId instanceof Map)) return null;
+	return ownershipState.byRunId.get(runId) ?? null;
+}}
+function __abFilterSessionsYieldHistoryAfterOwnership(state, runId) {{
+	if (typeof runId !== "string" || !runId
+		|| !Array.isArray(state?.toolCallHistory)) return state;
+	const ownershipState = state?.[__abSessionsYieldNoPendingStateKey];
+	const staleHistory = ownershipState?.staleHistoryByRunId instanceof Map
+		? ownershipState.staleHistoryByRunId.get(runId) : void 0;
+	if (!(staleHistory instanceof Set) || staleHistory.size === 0) return state;
+	const toolCallHistory = state.toolCallHistory.filter(
+		(record) => !staleHistory.has(record),
+	);
+	return toolCallHistory.length === state.toolCallHistory.length
+		? state : {{ ...state, toolCallHistory }};
 }}
 function __abRecordSessionsYieldOutcome(state, params) {{
 	const runId = typeof params.runId === "string" && params.runId
-		? params.runId : "unknown";
+		? params.runId : "";
+	const toolCallId = typeof params.toolCallId === "string"
+		&& params.toolCallId ? params.toolCallId : "";
+	if (!runId || !toolCallId) return;
 	const kind = __abClassifySessionsYieldOutcome(
 		params.toolName, params.result, params.error,
 	);
@@ -2007,11 +2013,9 @@ function __abRecordSessionsYieldOutcome(state, params) {{
 		seenCallIds = new Set();
 		state[__abSessionsYieldSeenCallIdsKey] = seenCallIds;
 	}}
-	const toolCallId = typeof params.toolCallId === "string"
-		&& params.toolCallId ? params.toolCallId : void 0;
-	const executionId = toolCallId ? `${{runId}}:${{toolCallId}}` : void 0;
-	if (executionId && seenCallIds.has(executionId)) return;
-	if (executionId) seenCallIds.add(executionId);
+	const executionId = `${{runId}}:${{toolCallId}}`;
+	if (seenCallIds.has(executionId)) return;
+	seenCallIds.add(executionId);
 	if (ownershipIdentity) {{
 		let seenOwnershipIds = state[__abSessionsYieldSeenOwnershipIdsKey];
 		if (!(seenOwnershipIds instanceof Set)) {{
@@ -2020,34 +2024,31 @@ function __abRecordSessionsYieldOutcome(state, params) {{
 		}}
 		if (seenOwnershipIds.has(ownershipIdentity)) return;
 		seenOwnershipIds.add(ownershipIdentity);
-		__abAdvanceSessionsYieldOwnershipEpoch(state);
+		__abAdvanceSessionsYieldOwnershipEpoch(state, runId);
 		return;
 	}}
 	if (kind === "yielded") {{
-		__abAdvanceSessionsYieldOwnershipEpoch(state);
+		__abAdvanceSessionsYieldOwnershipEpoch(state, runId);
 		return;
 	}}
 	const loopState = __abGetSessionsYieldNoPendingRunState(state, runId);
 	loopState.count += 1;
-	if (loopState.criticalEmitted && !loopState.probeConsumed) {{
-		loopState.probeConsumed = true;
-	}}
 }}
 function __abDetectSessionsYieldNoPendingLoop(state, toolName, config, scope) {{
 	if (process.env.{SETTLED_TOOL_POLICY_ENV} !== "continue"
 		|| config?.enabled !== true || toolName !== "sessions_yield") return null;
-	const loopState = __abGetSessionsYieldNoPendingRunState(state, scope?.runId);
-	if (loopState.count < CRITICAL_THRESHOLD) return null;
-	if (loopState.criticalEmitted && !loopState.probeConsumed) {{
-		const reservation = `${{loopState.runId}}:${{loopState.yieldOwnershipEpoch}}`;
-		if (state?.[__abProjectedToolLoopAdmissionKey] === true) {{
-			if (state[__abSessionsYieldProbeReservationKey] !== reservation) {{
-				state[__abSessionsYieldProbeReservationKey] = reservation;
-				return {{ stuck: false }};
-			}}
-		}} else return {{ stuck: false }};
-	}}
-	loopState.criticalEmitted = true;
+	const loopState = __abPeekSessionsYieldNoPendingRunState(
+		state, scope?.runId,
+	);
+	if (!loopState || loopState.count < 10) return null;
+	if (loopState.count < CRITICAL_THRESHOLD) return {{
+		stuck: true,
+		level: "warning",
+		detector: "sessions_yield_no_pending",
+		count: loopState.count,
+		message: `WARNING: sessions_yield returned no pending child completion ${{loopState.count}} times for the same parent ownership state. Stop rewriting the yield message and continue useful work.`,
+		warningKey: `sessions-yield-no-pending:${{loopState.runId}}:${{loopState.yieldOwnershipEpoch}}`,
+	}};
 	return {{
 		stuck: true,
 		level: "critical",
@@ -2057,7 +2058,7 @@ function __abDetectSessionsYieldNoPendingLoop(state, toolName, config, scope) {{
 		warningKey: `sessions-yield-no-pending:${{loopState.runId}}:${{loopState.yieldOwnershipEpoch}}`,
 	}};
 }}
-/* AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_NO_PENDING_LOOP_V2_END */
+/* AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_NO_PENDING_LOOP_V3_END */
 '''
 
     for path in targets:
@@ -2136,7 +2137,14 @@ function __abDetectSessionsYieldNoPendingLoop(state, toolName, config, scope) {{
             + ","
             + detect_names["scope"]
             + ");\n"
-            + "\tif (__abSessionsYieldLoop) return __abSessionsYieldLoop;"
+            + "\tif (__abSessionsYieldLoop) return __abSessionsYieldLoop;\n"
+            + "\t"
+            + detect_names["state"]
+            + " = __abFilterSessionsYieldHistoryAfterOwnership("
+            + detect_names["state"]
+            + ","
+            + detect_names["scope"]
+            + "?.runId);"
         )
         text, count = detect_anchor.subn(
             lambda _match: detect_replacement,
@@ -2148,38 +2156,6 @@ function __abDetectSessionsYieldNoPendingLoop(state, toolName, config, scope) {{
 
         _write(path, text)
         changed.append(str(path.relative_to(root)))
-
-    for path in projection_targets:
-        text = _read(path)
-        if SESSIONS_YIELD_PROBE_PROJECTION_MARKER in text:
-            continue
-        if len(batch_admission_anchor.findall(text)) != 1:
-            raise RuntimeError(
-                "atomic tool-batch admission anchor missing/ambiguous in "
-                f"{path}"
-            )
-        matches = list(projected_state_anchor.finditer(text))
-        if len(matches) != 1:
-            raise RuntimeError(
-                "atomic tool-batch projection contract missing/ambiguous in "
-                f"{path}"
-            )
-        match = matches[0]
-        projected = match.group("projected")
-        state = match.group("state")
-        replacement = (
-            f"const {projected} = {{\n"
-            f"\t...{state},\n"
-            f"\ttoolCallHistory: [...{state}.toolCallHistory ?? []],\n"
-            f"\t/* {SESSIONS_YIELD_PROBE_PROJECTION_MARKER} */\n"
-            "\t__agentBenchProjectedToolLoopAdmission: true\n"
-            "}"
-        )
-        text = text[: match.start()] + replacement + text[match.end() :]
-        _write(path, text)
-        relative = str(path.relative_to(root))
-        if relative not in changed:
-            changed.append(relative)
     return changed
 
 
@@ -2577,10 +2553,6 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
             "dist/**/*",
             SESSIONS_YIELD_NO_PENDING_LOOP_MARKER,
         ),
-        "sessions_yield_probe_projection": (
-            "dist/**/*",
-            SESSIONS_YIELD_PROBE_PROJECTION_MARKER,
-        ),
         "context_pressure_terminal_recovery": (
             "dist/**/*",
             CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER,
@@ -2737,7 +2709,7 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
         marker_start = text.find(SESSIONS_YIELD_NO_PENDING_LOOP_MARKER)
         marker_end = text.find(
             "AB_HARNESS_OPENCLAW_V2026_9_2_"
-            "SESSIONS_YIELD_NO_PENDING_LOOP_V2_END"
+            "SESSIONS_YIELD_NO_PENDING_LOOP_V3_END"
         )
         marker_block = (
             text[marker_start:marker_end]
@@ -2753,18 +2725,25 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
             or "scope?.runId" not in text
             or "byRunId" not in text
             or "params.toolCallId" not in text
+            or "loopState.count < 10" not in text
             or "loopState.count < CRITICAL_THRESHOLD" not in text
-            or "loopState.probeConsumed" not in text
-            or "probeOffered" in marker_block
-            or "__abProjectedToolLoopAdmissionKey" not in marker_block
-            or "__abSessionsYieldProbeReservationKey" not in marker_block
+            or "__abPeekSessionsYieldNoPendingRunState" not in marker_block
+            or "__abFilterSessionsYieldHistoryAfterOwnership" not in text
+            or "staleHistoryByRunId" not in marker_block
             or 'toolName !== "sessions_spawn"' not in marker_block
             or "details.expectsCompletionMessage !== true" not in marker_block
             or "__abSessionsYieldSeenOwnershipIdsKey" not in marker_block
             or "__abRecordSessionsYieldOutcome(" not in text
             or "__abDetectSessionsYieldNoPendingLoop(" not in text
             or "generation" in marker_block
+            or "criticalEmitted" in marker_block
+            or "probeConsumed" in marker_block
+            or "probeOffered" in marker_block
+            or "ProjectedToolLoopAdmission" in marker_block
             or LEGACY_SESSIONS_YIELD_NO_PENDING_LOOP_MARKER in text
+            or LEGACY_SESSIONS_YIELD_NO_PENDING_LOOP_V2_MARKER in text
+            or "AB_HARNESS_OPENCLAW_V2026_9_2_"
+            "SESSIONS_YIELD_PROBE_PROJECTION_V1_BEGIN" in text
         ):
             raise RuntimeError(
                 "sessions_yield no-pending loop contract missing or "
@@ -2774,33 +2753,6 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
     if not yield_loop_files:
         raise RuntimeError(
             "no v2026.9.2 sessions_yield loop-detection definitions found"
-        )
-
-    yield_projection_files: list[str] = []
-    yield_projection_anchor = re.compile(
-        r"async\s+function\s+admitToolCallBatch\s*\("
-    )
-    for path in sorted(_js_files(root / "dist")):
-        try:
-            text = _read(path)
-        except (OSError, UnicodeDecodeError):
-            continue
-        definitions = len(yield_projection_anchor.findall(text))
-        if not definitions:
-            continue
-        markers = text.count(SESSIONS_YIELD_PROBE_PROJECTION_MARKER)
-        if (
-            markers != definitions
-            or "__agentBenchProjectedToolLoopAdmission: true" not in text
-        ):
-            raise RuntimeError(
-                "sessions_yield atomic probe projection missing or "
-                f"incomplete in {path}"
-            )
-        yield_projection_files.append(str(path.relative_to(root)))
-    if not yield_projection_files:
-        raise RuntimeError(
-            "no v2026.9.2 atomic tool-batch admission definitions found"
         )
 
     reset_block_pattern = re.compile(
@@ -2940,7 +2892,6 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
         "implicit_child_handoff_ownership_files": handoff_files,
         "current_empty_resolver_bindings": resolver_bindings,
         "sessions_yield_no_pending_loop_files": yield_loop_files,
-        "sessions_yield_probe_projection_files": yield_projection_files,
         "context_pressure_recovery_files": recovery_files,
         "verified": True,
     }
