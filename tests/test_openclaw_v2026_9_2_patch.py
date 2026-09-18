@@ -614,13 +614,12 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
         CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER, 1
     )[1].split(
         "AB_HARNESS_OPENCLAW_V2026_9_2_"
-        "CONTEXT_PRESSURE_TERMINAL_RECOVERY_V6_END",
+        "CONTEXT_PRESSURE_TERMINAL_RECOVERY_V7_END",
         1,
     )[0]
     assert "hasNonToolTerminalState({" in recovery_helper
     assert "acceptedSessionSpawns: []" in recovery_helper
-    assert "hasCompletionOwningSpawn" in recovery_helper
-    assert "spawn?.expectsCompletionMessage === true" in recovery_helper
+    assert "hasCompletionOwningSpawn" not in recovery_helper
     assert "runtimeContinuationStarted === true" in recovery_helper
     assert "hasOutboundDeliveryEvidence(attempt)" not in recovery_helper
     assert "currentReasoningOnly" in recovery_helper
@@ -1398,6 +1397,7 @@ function recoveryInput({
   stopReason = "length", content = [], truncationHelps = true,
   acceptedSessionSpawns = [], completedDelivery = false,
   runtimeContinuationStarted = false,
+  yieldDetected = false,
   assistantPresent = true, assistantTexts = [],
   heartbeatToolResponse, successfulCronAdds = 0,
 } = {}) {
@@ -1421,6 +1421,7 @@ function recoveryInput({
     itemLifecycle: { startedCount: 0, completedCount: 0, activeCount },
     messagesSnapshot: [], toolMetas: [],
     acceptedSessionSpawns, completedDelivery, runtimeContinuationStarted,
+    yieldDetected,
     heartbeatToolResponse, successfulCronAdds,
     settledToolEvidence: {
       allToolsProvenSettled: false, intentionalTermination: false,
@@ -1535,18 +1536,18 @@ function recoveryInput({
     "historical settled session spawns must not veto pressure recovery",
   );
 
-  const completionOwningSpawn = recoveryInput({
+  const parentContinuedAfterSpawn = recoveryInput({
     acceptedSessionSpawns: [{
-      childSessionKey: "agent:child:pending", expectsCompletionMessage: true,
+      childSessionKey: "agent:child:settled", expectsCompletionMessage: true,
     }],
   });
-  const completionOwningSpawnResult = await executeRecoveryContract(
-    completionOwningSpawn,
+  const parentContinuedAfterSpawnResult = await executeRecoveryContract(
+    parentContinuedAfterSpawn,
   );
   assert(
-    completionOwningSpawnResult.action === "proceed"
-      && completionOwningSpawn.contextRecoveryState.autoCompactionCount === 0,
-    "a spawn expecting completion must retain terminal ownership",
+    parentContinuedAfterSpawnResult.action === "retry"
+      && parentContinuedAfterSpawn.contextRecoveryState.autoCompactionCount === 1,
+    "a settled spawn receipt must not retain terminal ownership",
   );
 
   const runtimeContinuation = recoveryInput({
@@ -1559,6 +1560,14 @@ function recoveryInput({
     runtimeContinuationResult.action === "proceed"
       && runtimeContinuation.contextRecoveryState.autoCompactionCount === 0,
     "an existing runtime continuation must veto competing recovery",
+  );
+
+  const nativeHandoff = recoveryInput({ yieldDetected: true });
+  const nativeHandoffResult = await executeRecoveryContract(nativeHandoff);
+  assert(
+    nativeHandoffResult.action === "proceed"
+      && nativeHandoff.contextRecoveryState.autoCompactionCount === 0,
+    "an actual native handoff must veto competing recovery",
   );
 
   const completedDelivery = recoveryInput({ completedDelivery: true });
@@ -1864,7 +1873,7 @@ async function compactEmbeddedRunForRecovery(Ot,Zt){Ot.events.push([`compact`,Zt
 async function recoverEmbeddedRunOverflow(Ot){let Zt=!Ot.aborted&&!Ot.signalOwnedInterruption?(()=>{if(isProviderRefusalAssistantError(Ot.assistantOverflowCandidate))return null;return Ot.assistantErrorText&&isLikelyContextOverflowError(Ot.assistantErrorText)?{text:Ot.assistantErrorText,source:`assistantError`}:null})():null;if(!Zt||!Ot.genericCompactionRecoveryAllowed||Ot.contextTokenBudget===void 0)return{action:`none`};let Dn=projectAgentRunAttemptTerminal(Ot.attempt.terminal),cr=Ot.attempt.preflightRecovery,pr=Dn.promptErrorSource===`precheck`&&cr?.source===`mid-turn`&&typeof cr.promptBudgetBeforeReserve==`number`?cr.promptBudgetBeforeReserve:void 0,Br=false;if(!Br&&Ot.attemptCompactionCount>0&&Ot.state.overflowCompactionAttempts<3)return{action:`retry`};if(!Br&&Ot.attemptCompactionCount===0&&Ot.state.overflowCompactionAttempts<3){let Zt=await compactEmbeddedRunForRecovery(Ot,{tokenBudget:pr??Ot.contextTokenBudget});if(Zt.result.compacted){if(cr?.route===`compact_then_truncate`)Ot.truncateToolResults();return{action:`retry`}}}if(!Ot.state.toolResultTruncationAttempted){Ot.state.toolResultTruncationAttempted=true;let Zt=Ot.truncateToolResults();if(Zt.truncated)return{action:`retry`}}return{action:`surface`,kind:`context_overflow`}}
 async function recoverEmbeddedRunAttempt(Ot){let{normalizedAttempt:Dn}=Ot,{attempt:pr,sessionIdUsed:xr,attemptAssistant:Mr,currentAttemptAssistant:Pr,currentAttemptCompletedAssistant:Br,terminalState:Hr}=Dn,{aborted:ta,externalAbort:na,promptError:ra,promptErrorSource:ia,timedOut:aa,timedOutDuringCompaction:oa}=projectAgentRunAttemptTerminal(pr.terminal),la=isEmbeddedRunTerminalInterrupted(Hr.outcome),ua=false,ma=false,ha=false,Mi=null,va=Br===void 0?Mr?.stopReason===`error`||Mr?.stopReason===`length`?Mr:void 0:Br.stopReason===`error`||Br.stopReason===`length`?Br:void 0,retry=()=>({action:`retry`});if(!ua&&!ma&&!ha)return{action:`proceed`};let Sa=await recoverEmbeddedRunOverflow({aborted:ta,signalOwnedInterruption:false,promptError:ra,assistantErrorText:Mi,assistantOverflowCandidate:va,attemptCompactionCount:0,attempt:pr,genericCompactionRecoveryAllowed:true,contextTokenBudget:262144,state:Ot.contextRecoveryState,events:Ot.events,truncateToolResults:Ot.truncateToolResults});if(Sa.action===`retry`)return retry();if(Sa.action===`surface`)return{action:`complete`,result:{errorKind:Sa.kind,livenessState:`blocked`}};return{action:`proceed`}}
 function createEmbeddedRunTerminalRetryState(){return{emptyResponseAttempts:3,lengthNoProgressAttempts:3}}
-async function executeWorkerContract(stopReason,{activeCount=0,content=[],route=`compact_then_truncate`,truncationHelps=true,acceptedSessionSpawns=[],runtimeContinuationStarted=false,completedDelivery=false,assistantPresent=true,assistantTexts=[]}={}){let Da=createEmbeddedRunTerminalRetryState(),Sa={autoCompactionCount:0,overflowCompactionAttempts:0,toolResultTruncationAttempted:false},Br=assistantPresent?{content,stopReason}:void 0,pr={terminal:{kind:`ok`},assistantTexts,contextBudgetStatus:{route,estimatedPromptTokens:427191,promptBudgetBeforeReserve:242144},itemLifecycle:{activeCount},toolMetas:[],acceptedSessionSpawns,runtimeContinuationStarted,completedDelivery,settledToolEvidence:{allToolsProvenSettled:false,intentionalTermination:false,parkedCodeModeRun:false}},za={attempt:pr,sessionIdUsed:`s`,attemptAssistant:Br,currentAttemptAssistant:Br,currentAttemptCompletedAssistant:Br,terminalState:{outcome:`ok`}},na={},ev=[],tr=()=>{ev.push([`truncate`]);return{truncated:truncationHelps,truncatedCount:truncationHelps?1:0}},ro=await recoverEmbeddedRunAttempt({runInput:na,normalizedAttempt:za,contextRecoveryState:Sa,events:ev,truncateToolResults:tr});if(ro.action===`complete`)return{...ro.result,retryState:Da,recoveryState:Sa,events:ev};if(ro.action===`retry`)return{action:`retry`,retryState:Da,recoveryState:Sa,events:ev};return{action:`proceed`,retryState:Da,recoveryState:Sa,events:ev}}
+async function executeWorkerContract(stopReason,{activeCount=0,content=[],route=`compact_then_truncate`,truncationHelps=true,acceptedSessionSpawns=[],runtimeContinuationStarted=false,yieldDetected=false,completedDelivery=false,assistantPresent=true,assistantTexts=[]}={}){let Da=createEmbeddedRunTerminalRetryState(),Sa={autoCompactionCount:0,overflowCompactionAttempts:0,toolResultTruncationAttempted:false},Br=assistantPresent?{content,stopReason}:void 0,pr={terminal:{kind:`ok`},assistantTexts,contextBudgetStatus:{route,estimatedPromptTokens:427191,promptBudgetBeforeReserve:242144},itemLifecycle:{activeCount},toolMetas:[],acceptedSessionSpawns,runtimeContinuationStarted,yieldDetected,completedDelivery,settledToolEvidence:{allToolsProvenSettled:false,intentionalTermination:false,parkedCodeModeRun:false}},za={attempt:pr,sessionIdUsed:`s`,attemptAssistant:Br,currentAttemptAssistant:Br,currentAttemptCompletedAssistant:Br,terminalState:{outcome:`ok`}},na={},ev=[],tr=()=>{ev.push([`truncate`]);return{truncated:truncationHelps,truncatedCount:truncationHelps?1:0}},ro=await recoverEmbeddedRunAttempt({runInput:na,normalizedAttempt:za,contextRecoveryState:Sa,events:ev,truncateToolResults:tr});if(ro.action===`complete`)return{...ro.result,retryState:Da,recoveryState:Sa,events:ev};if(ro.action===`retry`)return{action:`retry`,retryState:Da,recoveryState:Sa,events:ev};return{action:`proceed`,retryState:Da,recoveryState:Sa,events:ev}}
 ''')
     patch_runtime_tree(root)
     transformed = bundle.read_text()
@@ -1887,10 +1896,12 @@ assert(length.retryState.lengthNoProgressAttempts===0, `length streak must reset
 assert(length.retryState.emptyResponseAttempts===3, `length must preserve empty streak`);
 const settledSpawn=await executeWorkerContract(`length`,{acceptedSessionSpawns:[{childSessionKey:`settled`,expectsCompletionMessage:false}]});
 assert(settledSpawn.action===`retry`&&settledSpawn.recoveryState.autoCompactionCount===1,`historical spawn must not veto minified recovery`);
-const owningSpawn=await executeWorkerContract(`length`,{acceptedSessionSpawns:[{childSessionKey:`pending`,expectsCompletionMessage:true}]});
-assert(owningSpawn.action===`proceed`&&owningSpawn.recoveryState.autoCompactionCount===0,`completion-owning spawn must veto minified recovery`);
+const parentContinuedSpawn=await executeWorkerContract(`length`,{acceptedSessionSpawns:[{childSessionKey:`settled`,expectsCompletionMessage:true}]});
+assert(parentContinuedSpawn.action===`retry`&&parentContinuedSpawn.recoveryState.autoCompactionCount===1,`settled completion-message spawn must not veto minified recovery`);
 const runtimeContinuation=await executeWorkerContract(`length`,{runtimeContinuationStarted:true});
 assert(runtimeContinuation.action===`proceed`&&runtimeContinuation.recoveryState.autoCompactionCount===0,`runtime continuation must veto minified recovery`);
+const nativeHandoff=await executeWorkerContract(`length`,{yieldDetected:true});
+assert(nativeHandoff.action===`proceed`&&nativeHandoff.recoveryState.autoCompactionCount===0,`native handoff must veto minified recovery`);
 const delivered=await executeWorkerContract(`length`,{completedDelivery:true});
 assert(delivered.action===`proceed`&&delivered.recoveryState.autoCompactionCount===0,`external delivery must veto minified recovery`);
 const explicitDone=await executeWorkerContract(`length`,{content:[{type:`text`,text:`DONE`}],assistantTexts:[`DONE`]});
@@ -2345,6 +2356,18 @@ def test_v2026_9_2_patcher_rejects_old_length_identity_patch(tmp_path):
             "CONTEXT_PRESSURE_TERMINAL_RECOVERY_V4_BEGIN",
             "AB_HARNESS_OPENCLAW_V2026_9_2_"
             "CONTEXT_RECOVERY_STREAK_RESET_V4_BEGIN",
+        ),
+        (
+            "AB_HARNESS_OPENCLAW_V2026_9_2_"
+            "CONTEXT_PRESSURE_TERMINAL_RECOVERY_V5_BEGIN",
+            "AB_HARNESS_OPENCLAW_V2026_9_2_"
+            "CONTEXT_RECOVERY_STREAK_RESET_V5_BEGIN",
+        ),
+        (
+            "AB_HARNESS_OPENCLAW_V2026_9_2_"
+            "CONTEXT_PRESSURE_TERMINAL_RECOVERY_V6_BEGIN",
+            "AB_HARNESS_OPENCLAW_V2026_9_2_"
+            "CONTEXT_RECOVERY_STREAK_RESET_V5_BEGIN",
         ),
     ],
 )

@@ -195,7 +195,7 @@ if [[ "$CANDIDATE" -eq 1 ]]; then
         AB_HARNESS_OPENCLAW_V2026_9_2_RUNTIME_OWNER_CONTINUATION_V1_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_BOUNDED_NO_PROGRESS_LENGTH_V1_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_LENGTH_SEMANTIC_PROGRESS_V2_BEGIN \
-        AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V6_BEGIN \
+        AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V7_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_RECOVERY_STREAK_RESET_V5_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_TRUNCATE_ONLY_NATIVE_RECOVERY_V1_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_CONSECUTIVE_EMPTY_STOP_RESET_V2_BEGIN \
@@ -240,7 +240,7 @@ if [[ "$CANDIDATE" -eq 1 ]]; then
         for file in $files; do
             overflow_definitions="$(grep -o "function recoverEmbeddedRunOverflow(" "$file" | wc -l)"
             attempt_definitions="$(grep -o "function recoverEmbeddedRunAttempt(" "$file" | wc -l)"
-            pressure_markers="$(grep -o "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V6_BEGIN" "$file" | wc -l)"
+            pressure_markers="$(grep -o "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V7_BEGIN" "$file" | wc -l)"
             reset_markers="$(grep -o "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_RECOVERY_STREAK_RESET_V5_BEGIN" "$file" | wc -l)"
             test "$overflow_definitions" -eq 1
             test "$attempt_definitions" -eq 1
@@ -248,7 +248,7 @@ if [[ "$CANDIDATE" -eq 1 ]]; then
             test "$attempt_definitions" -eq "$reset_markers"
             grep -q "function compactEmbeddedRunForRecovery(" "$file"
             grep -q "function recoverEmbeddedRunAttempt(" "$file"
-            grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V6_BEGIN" "$file"
+            grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V7_BEGIN" "$file"
             grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_RECOVERY_STREAK_RESET_V5_BEGIN" "$file"
             grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_TRUNCATE_ONLY_NATIVE_RECOVERY_V1_BEGIN" "$file"
             grep -q "attempt?.preflightRecovery ?? attempt?.contextBudgetStatus" "$file"
@@ -256,8 +256,7 @@ if [[ "$CANDIDATE" -eq 1 ]]; then
             grep -q "accumulated-empty" "$file"
             grep -q "hasNonToolTerminalState({" "$file"
             grep -q "acceptedSessionSpawns: \[\]" "$file"
-            grep -q "hasCompletionOwningSpawn" "$file"
-            grep -q "spawn?.expectsCompletionMessage === true" "$file"
+            ! grep -q "hasCompletionOwningSpawn" "$file"
             grep -q "runtimeContinuationStarted === true" "$file"
             grep -q "currentReasoningOnly" "$file"
             grep -q "explicitDone" "$file"
@@ -282,6 +281,7 @@ if [[ "$CANDIDATE" -eq 1 ]]; then
             ! grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V3_BEGIN" "$file"
             ! grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V4_BEGIN" "$file"
             ! grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V5_BEGIN" "$file"
+            ! grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V6_BEGIN" "$file"
             ! grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_COMPACTION_RETRY_STREAK_RESET_V2_BEGIN" "$file"
             ! grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_RECOVERY_STREAK_RESET_V3_BEGIN" "$file"
             ! grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_RECOVERY_STREAK_RESET_V4_BEGIN" "$file"
