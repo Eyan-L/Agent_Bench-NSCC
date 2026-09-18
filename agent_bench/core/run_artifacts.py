@@ -71,7 +71,24 @@ _SENSITIVE_NAMES = {
     "id_rsa",
     "id_ed25519",
     "netrc",
+    "oc_gateway_env",
 }
+_SHARED_JOB_DIRS = {"logs"}
+_SHARED_JOB_FILES = {
+    "pbs_job_spec.json",
+    "placement.json",
+    "placement_manifest.json",
+    "swe_atlas_qa_instances.json",
+    "terminal_bench_tasks.json",
+}
+_SHARED_JOB_CONFIG_RE = re.compile(
+    r"^(?:config|experiment|placement|resolved[-_].+)\.(?:json|toml|ya?ml)$",
+    re.IGNORECASE,
+)
+_SHARED_JOB_OUTPUT_RE = re.compile(
+    r"(?:\.(?:out|err|log)|\.[oe]\d+)$",
+    re.IGNORECASE,
+)
 _MANIFEST_ARTIFACT_KEYS = {
     "runtime_observability_path",
     "step_trace_path",
@@ -201,6 +218,47 @@ def _excluded_artifact(path: Path) -> str | None:
     if lowered_name in _SENSITIVE_NAMES:
         return "credential_or_secret_file"
     return None
+
+
+def _shared_job_root_file_allowed(path: Path) -> bool:
+    name = path.name
+    return (
+        name in _SHARED_JOB_FILES
+        or _SHARED_JOB_CONFIG_RE.fullmatch(name) is not None
+        or _SHARED_JOB_OUTPUT_RE.search(name) is not None
+    )
+
+
+def _manifest_reference_candidates(run_dir: Path, raw: str) -> list[Path]:
+    raw_path = Path(raw).expanduser()
+    if raw_path.is_absolute():
+        return [raw_path, run_dir / raw_path.name]
+    candidates = [run_dir / raw_path]
+    basename_fallback = run_dir / raw_path.name
+    if basename_fallback != candidates[0]:
+        candidates.append(basename_fallback)
+    return candidates
+
+
+def resolve_run_artifact(
+    run_dir: Path,
+    manifest: Mapping[str, Any],
+    *,
+    field: str,
+    fallback: str,
+) -> Path:
+    """Resolve a run artifact using the manifest contract, then its root fallback."""
+    run_dir = run_dir.expanduser().resolve()
+    raw = manifest.get(field)
+    candidates = (
+        _manifest_reference_candidates(run_dir, raw)
+        if isinstance(raw, str) and raw
+        else []
+    )
+    fallback_path = run_dir / fallback
+    if fallback_path not in candidates:
+        candidates.append(fallback_path)
+    return next((path for path in candidates if path.is_file()), candidates[0])
 
 
 def _iter_manifest_references(value: object, prefix: str = ""):
@@ -454,16 +512,45 @@ def summarize_resources(path: Path) -> dict[str, Any]:
 def analyze_run(run_dir: Path) -> dict[str, Any]:
     run_dir = run_dir.expanduser().resolve()
     manifest_doc = _json_document(run_dir / "manifest.json")
-    verdict_doc = _json_document(run_dir / "verdict.json")
-    observability_doc = _json_document(run_dir / "runtime_observability.json")
-    token_doc = _json_document(run_dir / "token_accounting.json")
     manifest = manifest_doc.value or {}
+    artifact_paths = {
+        "verdict": resolve_run_artifact(
+            run_dir, manifest, field="verdict_path", fallback="verdict.json"
+        ),
+        "runtime_observability": resolve_run_artifact(
+            run_dir,
+            manifest,
+            field="runtime_observability_path",
+            fallback="runtime_observability.json",
+        ),
+        "token_accounting": resolve_run_artifact(
+            run_dir,
+            manifest,
+            field="token_accounting_path",
+            fallback="token_accounting.json",
+        ),
+        "trajectory": resolve_run_artifact(
+            run_dir, manifest, field="trajectory_path", fallback="trajectory.jsonl"
+        ),
+        "steps": resolve_run_artifact(
+            run_dir, manifest, field="step_trace_path", fallback="steps.jsonl"
+        ),
+        "spans": resolve_run_artifact(
+            run_dir, manifest, field="telemetry_path", fallback="spans.jsonl"
+        ),
+        "resources": resolve_run_artifact(
+            run_dir, manifest, field="util_path", fallback="util.jsonl"
+        ),
+    }
+    verdict_doc = _json_document(artifact_paths["verdict"])
+    observability_doc = _json_document(artifact_paths["runtime_observability"])
+    token_doc = _json_document(artifact_paths["token_accounting"])
     verdict = verdict_doc.value or {}
     observability = observability_doc.value or {}
 
-    trajectory = summarize_jsonl(run_dir / "trajectory.jsonl", event_field="event_type")
-    steps = summarize_jsonl(run_dir / "steps.jsonl")
-    spans = summarize_jsonl(run_dir / "spans.jsonl", event_field="name")
+    trajectory = summarize_jsonl(artifact_paths["trajectory"], event_field="event_type")
+    steps = summarize_jsonl(artifact_paths["steps"])
+    spans = summarize_jsonl(artifact_paths["spans"], event_field="name")
     phase = manifest.get("phase_timing") or {}
     if not isinstance(phase, dict):
         phase = {}
@@ -561,15 +648,31 @@ def analyze_run(run_dir: Path) -> dict[str, Any]:
                 "Timestamp quality/censored fields are preserved in runtime_observability.json.",
             ],
         },
-        "resources": summarize_resources(run_dir / "util.jsonl"),
+        "resources": summarize_resources(artifact_paths["resources"]),
         "source_documents": {
-            "manifest": {"status": manifest_doc.status, "error": manifest_doc.error},
-            "verdict": {"status": verdict_doc.status, "error": verdict_doc.error},
+            "manifest": {
+                "status": manifest_doc.status,
+                "error": manifest_doc.error,
+                "path": str(run_dir / "manifest.json"),
+            },
+            "verdict": {
+                "status": verdict_doc.status,
+                "error": verdict_doc.error,
+                "path": str(artifact_paths["verdict"]),
+            },
             "runtime_observability": {
                 "status": observability_doc.status,
                 "error": observability_doc.error,
+                "path": str(artifact_paths["runtime_observability"]),
             },
-            "token_accounting": {"status": token_doc.status, "error": token_doc.error},
+            "token_accounting": {
+                "status": token_doc.status,
+                "error": token_doc.error,
+                "path": str(artifact_paths["token_accounting"]),
+            },
+        },
+        "artifact_sources": {
+            name: str(path) for name, path in artifact_paths.items()
         },
         "measurement_notes": [
             "steps.jsonl is a coarse harness step trace; spans.jsonl contains per-call timing when collected.",
@@ -643,7 +746,7 @@ def export_shared_job_artifacts(
     arm: str,
     job_id: object,
 ) -> dict[str, Any]:
-    """Export job-level logs/config once, excluding nested per-instance runs."""
+    """Export an allowlisted set of job-level logs/configuration once."""
     source_root = source_root.expanduser().resolve()
     bundle_dir = bundle_dir.expanduser().resolve()
     ensure_disjoint_output(bundle_dir, (source_root,))
@@ -653,12 +756,27 @@ def export_shared_job_artifacts(
         bundle_dir / BUNDLE_SUBDIRS[2] / arm / "_jobs" / job_dir
     )
     entries: list[dict[str, Any]] = []
-    for source in sorted(source_root.rglob("*")):
-        if source.is_dir():
-            continue
+    sources: set[Path] = set()
+    for name in _SHARED_JOB_DIRS:
+        shared_dir = source_root / name
+        if shared_dir.is_dir() and not shared_dir.is_symlink():
+            for current, directories, filenames in os.walk(
+                shared_dir, followlinks=False
+            ):
+                current_path = Path(current)
+                directories[:] = [
+                    directory
+                    for directory in directories
+                    if not (current_path / directory).is_symlink()
+                ]
+                sources.update(current_path / filename for filename in filenames)
+    sources.update(
+        path
+        for path in source_root.iterdir()
+        if path.is_file() and _shared_job_root_file_allowed(path)
+    )
+    for source in sorted(sources):
         relative = source.relative_to(source_root)
-        if relative.parts and relative.parts[0] == "runs":
-            continue
         destination = destination_root / relative
         if source.is_symlink():
             item = _entry(
@@ -743,14 +861,7 @@ def _copy_manifest_references(
         if not raw or (field, raw) in seen_fields:
             continue
         seen_fields.add((field, raw))
-        raw_path = Path(raw).expanduser()
-        candidates = (
-            [raw_path, run_dir / raw_path.name]
-            if raw_path.is_absolute()
-            else [run_dir / raw_path]
-        )
-        if not raw_path.is_absolute():
-            candidates.append(run_dir / raw_path.name)
+        candidates = _manifest_reference_candidates(run_dir, raw)
         source = next((path for path in candidates if path.exists()), candidates[0])
         if source.exists() and source.is_dir():
             referenced_files = sorted(path for path in source.rglob("*") if path.is_file())
@@ -873,11 +984,18 @@ def _append_missing_minimum_entries(
         and item.get("source_path")
         and _is_relative_to(Path(str(item["source_path"])), run_dir)
     }
+    manifest_reference_names = {
+        Path(str(item["source_path"])).name
+        for item in entries
+        if item.get("source_kind") == "manifest_reference"
+        and item.get("status") == "copied"
+        and item.get("source_path")
+    }
     for relative in MINIMUM_ARTIFACTS:
         if relative == "conversation":
             if any(path == "conversation" or path.startswith("conversation/") for path in present):
                 continue
-        elif relative in present:
+        elif relative in present or Path(relative).name in manifest_reference_names:
             continue
         entries.append(
             _entry(
@@ -922,6 +1040,7 @@ def _write_generated(
 
 def _ensure_spans_timeline(
     run_dir: Path,
+    manifest: Mapping[str, Any],
     bundle_dir: Path,
     *,
     arm: str,
@@ -948,7 +1067,9 @@ def _ensure_spans_timeline(
     if copied is not None:
         return {"status": "copied", "path": copied["bundle_path"], "error": None}
 
-    spans_path = run_dir / "spans.jsonl"
+    spans_path = resolve_run_artifact(
+        run_dir, manifest, field="telemetry_path", fallback="spans.jsonl"
+    )
     if not spans_path.is_file() or spans_path.stat().st_size <= 0:
         return {"status": "unavailable", "path": None, "error": "spans.jsonl not collected"}
     try:
@@ -957,7 +1078,13 @@ def _ensure_spans_timeline(
         spans = _load_spans(spans_path)
         if not spans:
             return {"status": "unavailable", "path": None, "error": "no valid spans"}
-        observability = _json_document(run_dir / "runtime_observability.json").value or {}
+        observability_path = resolve_run_artifact(
+            run_dir,
+            manifest,
+            field="runtime_observability_path",
+            fallback="runtime_observability.json",
+        )
+        observability = _json_document(observability_path).value or {}
         timeline = observability.get("agent_timeline")
         if not isinstance(timeline, dict):
             timeline = None
@@ -965,7 +1092,7 @@ def _ensure_spans_timeline(
             destination,
             render_html(spans, spans_path, agent_timeline=timeline),
             bundle_dir=bundle_dir,
-            generated_from=("spans.jsonl", "runtime_observability.json"),
+            generated_from=(str(spans_path), str(observability_path)),
         )
         entries.append(item)
         return {
@@ -974,10 +1101,21 @@ def _ensure_spans_timeline(
             "error": item.get("error"),
         }
     except Exception as exc:  # noqa: BLE001 - source data remains available
+        error = f"{type(exc).__name__}: {exc}"
+        entries.append(
+            _entry(
+                source=None,
+                bundle_path=destination.relative_to(bundle_dir),
+                status="generation_failed",
+                source_kind="report_generated",
+                error=error,
+                generated_from=(str(spans_path),),
+            )
+        )
         return {
             "status": "generation_failed",
             "path": None,
-            "error": f"{type(exc).__name__}: {exc}",
+            "error": error,
         }
 
 
@@ -1106,6 +1244,7 @@ def export_run_artifacts(
     _append_missing_minimum_entries(run_dir, entries)
     viewer = _ensure_spans_timeline(
         run_dir,
+        manifest,
         bundle_dir,
         arm=arm,
         task_dir=task_dir,

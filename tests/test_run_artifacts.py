@@ -294,6 +294,72 @@ def test_existing_timeline_is_preserved_and_missing_timeline_is_rendered(tmp_pat
     assert "Agent Runtime Timeline" in rendered
 
 
+def test_timeline_generation_failure_marks_bundle_incomplete(tmp_path, monkeypatch):
+    run = _make_run(tmp_path, with_html=False)
+
+    def fail_to_load(_path):
+        raise ValueError("injected renderer failure")
+
+    monkeypatch.setattr(
+        "agent_bench.telemetry.otel.visualize_spans._load_spans",
+        fail_to_load,
+    )
+    _bundle, index = _export(tmp_path, run)
+
+    assert index["viewer"]["status"] == "generation_failed"
+    assert "injected renderer failure" in index["viewer"]["error"]
+    assert index["complete"] is False
+    failed = [
+        item
+        for item in index["artifacts"]
+        if item["status"] == "generation_failed"
+        and str(item.get("bundle_path", "")).endswith("spans_timeline.html")
+    ]
+    assert len(failed) == 1
+
+
+def test_manifest_artifact_paths_drive_analysis_and_timeline(tmp_path):
+    run = _make_run(tmp_path / "source", with_html=False)
+    external = tmp_path / "external"
+    external.mkdir()
+    manifest = json.loads((run / "manifest.json").read_text())
+    artifact_fields = {
+        "telemetry_path": "spans.jsonl",
+        "trajectory_path": "trajectory.jsonl",
+        "step_trace_path": "steps.jsonl",
+        "runtime_observability_path": "runtime_observability.json",
+        "token_accounting_path": "token_accounting.json",
+        "verdict_path": "verdict.json",
+    }
+    for field, name in artifact_fields.items():
+        source = run / name
+        destination = external / name
+        shutil.move(str(source), destination)
+        manifest[field] = str(destination)
+    _write_json(run / "manifest.json", manifest)
+
+    summary = run_artifacts.analyze_run(run)
+    assert summary["activity"]["spans"]["status"] == "available"
+    assert summary["activity"]["trajectory"]["record_count"] == 2
+    assert summary["source_documents"]["verdict"]["status"] == "available"
+    assert summary["artifact_sources"]["spans"] == str(external / "spans.jsonl")
+
+    _bundle, index = _export(tmp_path / "export", run)
+    assert index["viewer"]["status"] == "generated"
+    assert not any(
+        item["status"] == "not_collected"
+        and str(item.get("source_path", "")).endswith("spans.jsonl")
+        for item in index["artifacts"]
+    )
+    copied_spans = [
+        item
+        for item in index["artifacts"]
+        if "telemetry_path" in item.get("manifest_fields", [])
+    ]
+    assert len(copied_spans) == 1
+    assert copied_spans[0]["status"] == "copied"
+
+
 def test_corrupt_json_is_preserved_and_reported_invalid(tmp_path):
     run = _make_run(tmp_path)
     (run / "verdict.json").write_bytes(b"{not-json\n")
@@ -492,6 +558,13 @@ def test_single_run_bundle_exports_shared_serving_and_otel_logs_once(tmp_path):
         b'{"resourceSpans":[]}\n'
     )
     _write_json(pbs_root / "pbs_job_spec.json", {"queue": "gdev"})
+    secret = pbs_root / "states" / "run-1" / "agent-bench" / "oc_gateway_env"
+    secret.parent.mkdir(parents=True)
+    secret.write_text("OPENCLAW_GATEWAY_TOKEN=must-not-leak\n")
+    workspace = pbs_root / "workspaces" / "run-1" / "source.py"
+    workspace.parent.mkdir(parents=True)
+    workspace.write_text("print('must not copy workspace')\n")
+    (pbs_root / "unrelated-cache.txt").write_text("must not copy\n")
 
     bundle, report = run_artifacts.create_single_run_bundle(
         run,
@@ -516,6 +589,19 @@ def test_single_run_bundle_exports_shared_serving_and_otel_logs_once(tmp_path):
         / "logs"
         / "sglang.log"
     ).read_bytes() == b"serving log\n"
+    assert not any(path.name == "oc_gateway_env" for path in bundle.rglob("*"))
+    assert not any("workspaces" in path.parts for path in bundle.rglob("*"))
+    assert not any(path.name == "unrelated-cache.txt" for path in bundle.rglob("*"))
+    assert not any(
+        item.get("source_path") in {str(secret), str(workspace)}
+        for item in shared["artifacts"]
+    )
+    assert (
+        run_artifacts._excluded_artifact(
+            Path("states/run-1/agent-bench/oc_gateway_env")
+        )
+        == "credential_or_secret_file"
+    )
 
 
 def test_compare_cli_exports_both_arms_with_portable_links(tmp_path, capsys):
