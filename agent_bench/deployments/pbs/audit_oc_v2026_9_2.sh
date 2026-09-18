@@ -203,6 +203,7 @@ if [[ "$CANDIDATE" -eq 1 ]]; then
         AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_TOOL_ERROR_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_EMPTY_STOP_RETRY_LIMIT_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_LOOP_VETO_RECOVERY_PROBE_BEGIN \
+        AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_NO_PENDING_LOOP_V1_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_FS_BRIDGE_HELPER_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_FS_BRIDGE_RUN_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_FS_BRIDGE_WRITE_BEGIN \
@@ -271,6 +272,30 @@ if [[ "$CANDIDATE" -eq 1 ]]; then
         echo 'PASS consecutive_empty_reset_runtime_ownership_contract'
     else
         echo 'FAIL consecutive_empty_reset_runtime_ownership_contract'
+        FAIL=1
+    fi
+    if run 'set -e
+        files="$(grep -R -l "function detectToolCallLoop" /app/dist 2>/dev/null)"
+        test -n "$files"
+        for file in $files; do
+            definitions="$(grep -o "function detectToolCallLoop" "$file" | wc -l)"
+            markers="$(grep -o "AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_NO_PENDING_LOOP_V1_BEGIN" "$file" | wc -l)"
+            test "$definitions" -eq "$markers"
+            grep -q "sessions-yield-no-pending" "$file"
+            grep -q "sessions_yield_no_pending" "$file"
+            grep -q "No pending child completion is owned by this turn" "$file"
+            grep -q "yieldOwnershipEpoch" "$file"
+            grep -q "scope?.runId" "$file"
+            grep -q "byRunId" "$file"
+            grep -q "params.toolCallId" "$file"
+            grep -q "loopState.count < CRITICAL_THRESHOLD" "$file"
+            grep -q "loopState.probeConsumed" "$file"
+            ownership_contract="$(sed -n "/AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_NO_PENDING_LOOP_V1_BEGIN/,/AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_NO_PENDING_LOOP_V1_END/p" "$file")"
+            ! printf "%s" "$ownership_contract" | grep -q "generation"
+        done'; then
+        echo 'PASS sessions_yield_no_pending_loop_contract'
+    else
+        echo 'FAIL sessions_yield_no_pending_loop_contract'
         FAIL=1
     fi
     if run 'set -e

@@ -36,6 +36,8 @@ from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     ROADMAP_CONTINUATION_INSTRUCTION,
     RUNTIME_OWNER_CONTINUATION_MARKER,
     SANDBOX_MARKER,
+    SESSIONS_YIELD_NO_PENDING_ERROR,
+    SESSIONS_YIELD_NO_PENDING_LOOP_MARKER,
     SETTLED_CONTINUATION_INSTRUCTION_MARKER,
     SETTLED_CONTINUATION_LENGTH_MARKER,
     SETTLED_CONTINUATION_POLICY_MARKER,
@@ -514,13 +516,47 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "{action:`retry`};}\n"
     )
     (dist / "tool-loop-detection-test.js").write_text(
+        "const CRITICAL_THRESHOLD = 4;\n"
+        "function selectHistoryForScope(history) { return history; }\n"
+        "function hashToolCall(toolName, params) {\n"
+        "  return toolName + ':' + JSON.stringify(params);\n"
+        "}\n"
+        "function hashToolOutcome(toolName, params, result, error) {\n"
+        "  if (error !== undefined) return { resultHash: 'error:' + String(error) };\n"
+        "  return { resultHash: JSON.stringify(result) };\n"
+        "}\n"
+        "function recordToolCallOutcome(state, params) {\n"
+        "  const outcome = hashToolOutcome(params.toolName, params.toolParams, "
+        "params.result, params.error);\n"
+        "  state.toolCallHistory ??= [];\n"
+        "  state.toolCallHistory.push({ toolName: params.toolName, "
+        "toolCallId: params.toolCallId, ...outcome });\n"
+        "  return state.toolCallHistory.at(-1);\n"
+        "}\n"
+        "function getNoProgressStreak() { return { count: 0 }; }\n"
         "function detectToolCallLoop(state, toolName, params, config, scope) {\n"
         "  if (!config?.enabled) return { stuck: false };\n"
         "  const history = selectHistoryForScope(state.toolCallHistory ?? [], scope);\n"
         "  const currentHash = hashToolCall(toolName, params);\n"
         "  const noProgress = getNoProgressStreak(history, toolName, currentHash);\n"
-        "  return noProgress.count >= 20 ? { stuck: true } : { stuck: false };\n"
+        "  return noProgress.count >= CRITICAL_THRESHOLD "
+        "? { stuck: true } : { stuck: false };\n"
         "}\n"
+        "globalThis.__yieldLoopContract = { detectToolCallLoop, "
+        "recordToolCallOutcome };\n"
+    )
+    (dist / "tool-loop-detection-worker-test.mjs").write_text(
+        "const CRITICAL_THRESHOLD=4;"
+        "function hashToolOutcome(Ot,Zt,_n,Dn){"
+        "return{resultHash:Dn!==void 0?`error:${String(Dn)}`:JSON.stringify(_n)}}"
+        "function recordToolCallOutcome(Ot,Zt){"
+        "const _n=hashToolOutcome(Zt.toolName,Zt.toolParams,Zt.result,Zt.error);"
+        "return(Ot.toolCallHistory??=[]).push({toolName:Zt.toolName,"
+        "toolCallId:Zt.toolCallId,..._n}),Ot.toolCallHistory.at(-1)}"
+        "function detectToolCallLoop(Ot,Zt,_n,Dn,kn){"
+        "if(!Dn?.enabled)return{stuck:!1};return{stuck:!1}}"
+        "globalThis.__yieldLoopContractMinified={detectToolCallLoop,"
+        "recordToolCallOutcome};\n"
     )
     return root
 
@@ -548,6 +584,9 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     worker_text = (root / "dist/worker-test.mjs").read_text()
     loop_detection_text = (
         root / "dist/tool-loop-detection-test.js"
+    ).read_text()
+    loop_detection_worker_text = (
+        root / "dist/tool-loop-detection-worker-test.mjs"
     ).read_text()
 
     assert EXEC_MARKER in exec_text
@@ -694,6 +733,11 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert "terminalRetryState.emptyResponseAttempts = 0" in recovery_text
     assert "input.normalizedAttempt" not in recovery_text
     assert LOOP_VETO_RECOVERY_PROBE_MARKER in loop_detection_text
+    assert SESSIONS_YIELD_NO_PENDING_LOOP_MARKER in loop_detection_text
+    assert SESSIONS_YIELD_NO_PENDING_LOOP_MARKER in loop_detection_worker_text
+    assert 'outcomeKind: "sessions-yield-no-pending"' in loop_detection_text
+    assert 'detector: "sessions_yield_no_pending"' in loop_detection_text
+    assert SESSIONS_YIELD_NO_PENDING_ERROR in loop_detection_text
     assert "OPENCLAW_AGENT_BENCH_LOOP_VETO_RECOVERY_PROBE" in (
         loop_detection_text
     )
@@ -748,6 +792,7 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert second["shared_workspace_spawn_files_changed"] == []
     assert second["settled_tool_continuation"]["files_changed"] == []
     assert second["context_pressure_terminal_recovery_files_changed"] == []
+    assert second["sessions_yield_no_pending_loop_files_changed"] == []
     assert second["loop_veto_recovery_probe_files_changed"] == []
     assert second["fs_bridge_files_changed"] == []
     assert second["openrouter_pricing_url_replacements"] == 0
@@ -770,6 +815,7 @@ def test_v2026_9_2_transformed_retry_bundles_parse_with_real_node(tmp_path):
         "dist/embedded-agent-test.js",
         "dist/embedded-recovery-test.js",
         "dist/worker-test.mjs",
+        "dist/tool-loop-detection-worker-test.mjs",
     ):
         completed = subprocess.run(
             [*_node_command(), "--check", str(root / relative)],
@@ -781,6 +827,128 @@ def test_v2026_9_2_transformed_retry_bundles_parse_with_real_node(tmp_path):
         assert completed.returncode == 0, (
             relative + "\n" + completed.stdout + completed.stderr
         )
+
+
+@pytest.mark.parametrize(
+    ("relative", "contract_name"),
+    [
+        ("dist/tool-loop-detection-test.js", "__yieldLoopContract"),
+        (
+            "dist/tool-loop-detection-worker-test.mjs",
+            "__yieldLoopContractMinified",
+        ),
+    ],
+)
+def test_v2026_9_2_sessions_yield_no_pending_loop_runtime_contract(
+    tmp_path,
+    relative,
+    contract_name,
+):
+    root = _runtime_tree(tmp_path)
+    patch_runtime_tree(root)
+    bundle = root / relative
+    bundle.write_text(bundle.read_text() + rf'''
+(() => {{
+  const api = globalThis.{contract_name};
+  const config = {{ enabled: true }};
+  const noPending = {{
+    details: {{
+      status: "error",
+      error: {json.dumps(SESSIONS_YIELD_NO_PENDING_ERROR)},
+    }},
+  }};
+  const yielded = {{ details: {{ status: "yielded", message: "ready" }} }};
+  const assert = (condition, message) => {{
+    if (!condition) throw new Error(message);
+  }};
+  const detect = (state, runId, message) => api.detectToolCallLoop(
+    state, "sessions_yield", {{ message }}, config, {{ runId }},
+  );
+  const record = (state, runId, toolCallId, result = noPending) =>
+    api.recordToolCallOutcome(state, {{
+      runId, toolName: "sessions_yield", toolParams: {{ message: toolCallId }},
+      toolCallId, result,
+    }});
+
+  const policy = process.env.OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY;
+  delete process.env.OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY;
+  const outsideRoadmap = {{ toolCallHistory: [] }};
+  for (let index = 0; index < 6; index += 1) {{
+    record(outsideRoadmap, "terminal-run", `terminal-yield-${{index}}`);
+  }}
+  assert(!detect(outsideRoadmap, "terminal-run", "unchanged upstream").stuck,
+    "the semantic detector must be disabled outside Roadmap policy");
+  process.env.OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY = policy;
+
+  const looped = {{ generation: 1, toolCallHistory: [] }};
+  for (let index = 0; index < 3; index += 1) {{
+    assert(!detect(looped, "parent-run", `wording-${{index}}`).stuck,
+      "pre-threshold rewritten yield must execute");
+    record(looped, "parent-run", `yield-${{index}}`);
+    api.recordToolCallOutcome(looped, {{
+      runId: "parent-run", toolName: index % 2 ? "exec" : "read",
+      toolParams: {{ path: `/tmp/${{index}}` }}, toolCallId: `other-${{index}}`,
+      result: {{ details: {{ status: "completed" }}, content: [] }},
+    }});
+  }}
+  record(looped, "parent-run", "yield-0");
+  assert(!detect(looped, "parent-run", "fourth wording").stuck,
+    "replayed receipt must not increment the semantic streak");
+  record(looped, "parent-run", "yield-3");
+  looped.generation = 999;
+  const blocked = detect(looped, "parent-run", "fifth wording");
+  assert(blocked.stuck && blocked.detector === "sessions_yield_no_pending",
+    "rewritten no-pending yields must reach the native critical threshold");
+  assert(blocked.count === 4, "receipt replay or unrelated tools changed count");
+  assert(!detect(looped, "parent-run", "ownership probe").stuck,
+    "one real ownership probe must be allowed after the first veto");
+  record(looped, "parent-run", "yield-probe");
+  for (let index = 0; index < 3; index += 1) {{
+    const terminal = detect(looped, "parent-run", `post-probe-${{index}}`);
+    assert(terminal.stuck && terminal.detector === "sessions_yield_no_pending",
+      "failed probe must not reopen through the generic veto probe");
+  }}
+
+  assert(!detect(looped, "new-parent-run", "isolated run").stuck,
+    "a distinct parent run must have an isolated failure streak");
+
+  const recovered = {{ toolCallHistory: [] }};
+  for (let index = 0; index < 4; index += 1) {{
+    assert(!detect(recovered, "resume-run", `failure-${{index}}`).stuck,
+      "failure must execute before threshold");
+    record(recovered, "resume-run", `failed-${{index}}`);
+  }}
+  assert(detect(recovered, "resume-run", "first veto").stuck,
+    "threshold must emit one critical veto");
+  assert(!detect(recovered, "resume-run", "verified ownership").stuck,
+    "verified ownership must get one execution probe");
+  record(recovered, "resume-run", "successful-yield", yielded);
+  assert(!detect(recovered, "resume-run", "after success").stuck,
+    "successful claim must advance the dedicated ownership epoch");
+
+  const ordinary = {{ toolCallHistory: [] }};
+  for (let index = 0; index < 8; index += 1) {{
+    const decision = api.detectToolCallLoop(
+      ordinary, "read", {{ path: `/different/${{index}}` }}, config,
+      {{ runId: "ordinary-run" }},
+    );
+    assert(!decision.stuck, "ordinary varying reads must remain unaffected");
+  }}
+  process.stdout.write("SESSIONS_YIELD_LOOP_CONTRACT_OK\n");
+}})();
+''')
+    env = os.environ.copy()
+    env["OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY"] = "continue"
+    completed = subprocess.run(
+        [*_node_command(), str(bundle)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "SESSIONS_YIELD_LOOP_CONTRACT_OK" in completed.stdout
 
 
 def test_v2026_9_2_second_resolver_executes_with_lexical_bindings(tmp_path):
@@ -2832,6 +3000,7 @@ def test_v2026_9_2_builder_does_not_reapply_legacy_runtime_patches():
     assert NONEMPTY_LENGTH_ELIGIBILITY_MARKER in audit
     assert CURRENT_ASSISTANT_EMPTY_STOP_MARKER in audit
     assert CONTINUATION_DECISION_DIAGNOSTIC_MARKER in audit
+    assert SESSIONS_YIELD_NO_PENDING_LOOP_MARKER in audit
     assert LEGACY_CURRENT_TERMINAL_PAYLOAD_MARKER in audit
     assert (
         "all_resolver_definitions_have_current_empty_logic_and_bindings"

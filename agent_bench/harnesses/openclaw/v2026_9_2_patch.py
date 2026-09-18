@@ -99,6 +99,9 @@ CONSECUTIVE_EMPTY_STOP_RESET_MARKER = (
 LOOP_VETO_RECOVERY_PROBE_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_LOOP_VETO_RECOVERY_PROBE_BEGIN"
 )
+SESSIONS_YIELD_NO_PENDING_LOOP_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_NO_PENDING_LOOP_V1_BEGIN"
+)
 LEGACY_CONTEXT_PRESSURE_LENGTH_RECOVERY_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_LENGTH_RECOVERY_V1_BEGIN"
 )
@@ -153,6 +156,10 @@ ROADMAP_CONTINUATION_INSTRUCTION = (
     "Use tools for any remaining implementation or validation work. "
     "Only produce the final answer when the task is complete. "
     "Do not restart from scratch or repeat completed work."
+)
+SESSIONS_YIELD_NO_PENDING_ERROR = (
+    "No pending child completion is owned by this turn. Continue working "
+    "because independent background operations complete separately."
 )
 _UPSTREAM_EMPTY_RESPONSE_RETRY_INSTRUCTION = (
     "The previous attempt did not produce a user-visible answer. Continue "
@@ -1842,6 +1849,232 @@ function __abResolveRoadmapContextPressureTerminal(attempt, assistant) {{
     return changed
 
 
+def _patch_sessions_yield_no_pending_loop(root: Path) -> list[str]:
+    """Normalize the exact no-pending yield failure for native loop safety.
+
+    The tool accepts free-form ``message`` and ``acknowledgment`` fields, so
+    argument hashing alone cannot recognize repeated ownership failures. Keep
+    the original call/result untouched and attach a Roadmap-only semantic
+    outcome plus a session-state streak. A dedicated ownership epoch advances
+    only after a verified successful yield; each runtime ``runId`` has an
+    independent streak inside that epoch. Internal retries, compaction, and
+    unrelated tool calls do not mutate either identity.
+    """
+    changed: list[str] = []
+    dist_files = sorted(_js_files(root / "dist"))
+    ident = r"[A-Za-z_$][\w$]*"
+    detect_anchor = re.compile(
+        rf"function\s+detectToolCallLoop\(\s*"
+        rf"(?P<state>{ident})\s*,\s*(?P<tool>{ident})\s*,\s*"
+        rf"(?P<params>{ident})\s*,\s*(?P<config>{ident})\s*,\s*"
+        rf"(?P<scope>{ident})\s*\)\s*\{{"
+    )
+    outcome_anchor = re.compile(
+        rf"function\s+hashToolOutcome\(\s*"
+        rf"(?P<tool>{ident})\s*,\s*(?P<params>{ident})\s*,\s*"
+        rf"(?P<result>{ident})\s*,\s*(?P<error>{ident})\s*\)\s*\{{"
+    )
+    record_anchor = re.compile(
+        rf"function\s+recordToolCallOutcome\(\s*"
+        rf"(?P<state>{ident})\s*,\s*(?P<params>{ident})\s*\)\s*\{{"
+    )
+    targets = [
+        path
+        for path in dist_files
+        if detect_anchor.search(_read(path))
+        or SESSIONS_YIELD_NO_PENDING_LOOP_MARKER in _read(path)
+    ]
+    if not targets:
+        raise RuntimeError(
+            "v2026.9.2 sessions_yield loop-detection anchor not found"
+        )
+
+    helper_source = f'''/* {SESSIONS_YIELD_NO_PENDING_LOOP_MARKER} */
+const __abSessionsYieldNoPendingError = {json.dumps(SESSIONS_YIELD_NO_PENDING_ERROR)};
+const __abSessionsYieldNoPendingStateKey = "__agentBenchSessionsYieldNoPendingLoop";
+const __abSessionsYieldSeenCallIdsKey = "__agentBenchSessionsYieldSeenCallIds";
+function __abClassifySessionsYieldOutcome(toolName, result, error) {{
+	if (process.env.{SETTLED_TOOL_POLICY_ENV} !== "continue"
+		|| toolName !== "sessions_yield" || error !== void 0
+		|| result === null || typeof result !== "object" || Array.isArray(result)) return "";
+	const details = result.details !== null && typeof result.details === "object"
+		&& !Array.isArray(result.details) ? result.details : {{}};
+	if (details.status === "error"
+		&& details.error === __abSessionsYieldNoPendingError) return "no-pending";
+	if (details.status === "yielded") return "yielded";
+	return "";
+}}
+function __abGetSessionsYieldNoPendingLoopState(state) {{
+	const existing = state?.[__abSessionsYieldNoPendingStateKey];
+	if (existing?.byRunId instanceof Map
+		&& Number.isSafeInteger(existing.yieldOwnershipEpoch)) return existing;
+	const created = {{
+		yieldOwnershipEpoch: 0,
+		byRunId: new Map(),
+	}};
+	state[__abSessionsYieldNoPendingStateKey] = created;
+	return created;
+}}
+function __abGetSessionsYieldNoPendingRunState(state, runId) {{
+	const ownershipState = __abGetSessionsYieldNoPendingLoopState(state);
+	const normalizedRunId = typeof runId === "string" && runId ? runId : "unknown";
+	const existing = ownershipState.byRunId.get(normalizedRunId);
+	if (existing?.yieldOwnershipEpoch === ownershipState.yieldOwnershipEpoch) return existing;
+	const created = {{
+		runId: normalizedRunId,
+		yieldOwnershipEpoch: ownershipState.yieldOwnershipEpoch,
+		count: 0,
+		criticalEmitted: false,
+		probeOffered: false,
+		probeConsumed: false,
+	}};
+	ownershipState.byRunId.set(normalizedRunId, created);
+	return created;
+}}
+function __abRecordSessionsYieldOutcome(state, params) {{
+	const kind = __abClassifySessionsYieldOutcome(
+		params.toolName, params.result, params.error,
+	);
+	if (!kind) return;
+	let seenCallIds = state[__abSessionsYieldSeenCallIdsKey];
+	if (!(seenCallIds instanceof Set)) {{
+		seenCallIds = new Set();
+		state[__abSessionsYieldSeenCallIdsKey] = seenCallIds;
+	}}
+	const runId = typeof params.runId === "string" && params.runId
+		? params.runId : "unknown";
+	const toolCallId = typeof params.toolCallId === "string"
+		&& params.toolCallId ? params.toolCallId : void 0;
+	const executionId = toolCallId ? `${{runId}}:${{toolCallId}}` : void 0;
+	if (executionId && seenCallIds.has(executionId)) return;
+	if (executionId) seenCallIds.add(executionId);
+	const ownershipState = __abGetSessionsYieldNoPendingLoopState(state);
+	if (kind === "yielded") {{
+		ownershipState.yieldOwnershipEpoch += 1;
+		ownershipState.byRunId.clear();
+		return;
+	}}
+	const loopState = __abGetSessionsYieldNoPendingRunState(state, runId);
+	loopState.count += 1;
+	if (loopState.probeOffered) {{
+		loopState.probeOffered = false;
+		loopState.probeConsumed = true;
+	}}
+}}
+function __abDetectSessionsYieldNoPendingLoop(state, toolName, config, scope) {{
+	if (process.env.{SETTLED_TOOL_POLICY_ENV} !== "continue"
+		|| config?.enabled !== true || toolName !== "sessions_yield") return null;
+	const loopState = __abGetSessionsYieldNoPendingRunState(state, scope?.runId);
+	if (loopState.count < CRITICAL_THRESHOLD) return null;
+	if (loopState.criticalEmitted && !loopState.probeConsumed
+		&& !loopState.probeOffered) {{
+		loopState.probeOffered = true;
+		return {{ stuck: false }};
+	}}
+	loopState.criticalEmitted = true;
+	return {{
+		stuck: true,
+		level: "critical",
+		detector: "sessions_yield_no_pending",
+		count: loopState.count,
+		message: `CRITICAL: sessions_yield returned no pending child completion ${{loopState.count}} times for the same parent ownership state. Stop yielding and terminate this stalled turn.`,
+		warningKey: `sessions-yield-no-pending:${{loopState.runId}}:${{loopState.yieldOwnershipEpoch}}`,
+	}};
+}}
+/* AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_NO_PENDING_LOOP_V1_END */
+'''
+
+    for path in targets:
+        text = _read(path)
+        if SESSIONS_YIELD_NO_PENDING_LOOP_MARKER in text:
+            continue
+        if (
+            len(detect_anchor.findall(text)) != 1
+            or len(outcome_anchor.findall(text)) != 1
+            or len(record_anchor.findall(text)) != 1
+        ):
+            raise RuntimeError(
+                "sessions_yield loop contract missing/ambiguous in "
+                f"{path}"
+            )
+
+        outcome_match = outcome_anchor.search(text)
+        assert outcome_match is not None
+        outcome_names = outcome_match.groupdict()
+        outcome_open = outcome_match.group(0)
+        outcome_replacement = (
+            helper_source
+            + outcome_open
+            + "\n\tconst __abSessionsYieldOutcome = "
+            "__abClassifySessionsYieldOutcome("
+            + outcome_names["tool"]
+            + ","
+            + outcome_names["result"]
+            + ","
+            + outcome_names["error"]
+            + ");\n"
+            + '\tif (__abSessionsYieldOutcome === "no-pending") return {\n'
+            + '\t\tresultHash: "agent-bench:sessions-yield:no-pending",\n'
+            + '\t\toutcomeKind: "sessions-yield-no-pending",\n'
+            + "\t\tnoProgress: true,\n\t};"
+        )
+        text, count = outcome_anchor.subn(
+            lambda _match: outcome_replacement,
+            text,
+            count=1,
+        )
+        if count != 1:
+            raise RuntimeError(f"sessions_yield outcome patch failed in {path}")
+
+        record_match = record_anchor.search(text)
+        assert record_match is not None
+        record_names = record_match.groupdict()
+        record_replacement = (
+            record_match.group(0)
+            + "\n\t__abRecordSessionsYieldOutcome("
+            + record_names["state"]
+            + ","
+            + record_names["params"]
+            + ");"
+        )
+        text, count = record_anchor.subn(
+            lambda _match: record_replacement,
+            text,
+            count=1,
+        )
+        if count != 1:
+            raise RuntimeError(f"sessions_yield recorder patch failed in {path}")
+
+        detect_match = detect_anchor.search(text)
+        assert detect_match is not None
+        detect_names = detect_match.groupdict()
+        detect_replacement = (
+            detect_match.group(0)
+            + "\n\tconst __abSessionsYieldLoop = "
+            "__abDetectSessionsYieldNoPendingLoop("
+            + detect_names["state"]
+            + ","
+            + detect_names["tool"]
+            + ","
+            + detect_names["config"]
+            + ","
+            + detect_names["scope"]
+            + ");\n"
+            + "\tif (__abSessionsYieldLoop) return __abSessionsYieldLoop;"
+        )
+        text, count = detect_anchor.subn(
+            lambda _match: detect_replacement,
+            text,
+            count=1,
+        )
+        if count != 1:
+            raise RuntimeError(f"sessions_yield detector patch failed in {path}")
+
+        _write(path, text)
+        changed.append(str(path.relative_to(root)))
+    return changed
+
+
 def _patch_loop_veto_recovery_probe(root: Path) -> list[str]:
     """Allow one real probe after a native critical loop veto.
 
@@ -2124,6 +2357,9 @@ def patch_runtime_tree(root: Path) -> dict[str, Any]:
     context_pressure_terminal_recovery_files = (
         _patch_context_pressure_terminal_recovery(root)
     )
+    sessions_yield_no_pending_loop_files = (
+        _patch_sessions_yield_no_pending_loop(root)
+    )
     loop_veto_recovery_probe_files = _patch_loop_veto_recovery_probe(root)
     fs_files = _patch_fs_bridge(root)
     pricing = _patch_pricing(root)
@@ -2147,6 +2383,9 @@ def patch_runtime_tree(root: Path) -> dict[str, Any]:
         "settled_tool_continuation": settled_continuation,
         "context_pressure_terminal_recovery_files_changed": (
             context_pressure_terminal_recovery_files
+        ),
+        "sessions_yield_no_pending_loop_files_changed": (
+            sessions_yield_no_pending_loop_files
         ),
         "loop_veto_recovery_probe_files_changed": (
             loop_veto_recovery_probe_files
@@ -2225,6 +2464,10 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
         "loop_veto_recovery_probe": (
             "dist/**/*",
             LOOP_VETO_RECOVERY_PROBE_MARKER,
+        ),
+        "sessions_yield_no_pending_loop": (
+            "dist/**/*",
+            SESSIONS_YIELD_NO_PENDING_LOOP_MARKER,
         ),
         "context_pressure_terminal_recovery": (
             "dist/**/*",
@@ -2368,6 +2611,52 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
             + ", ".join(stale_contract_files)
         )
 
+    yield_loop_files: list[str] = []
+    yield_loop_anchor = re.compile(r"function\s+detectToolCallLoop\s*\(")
+    for path in sorted(_js_files(root / "dist")):
+        try:
+            text = _read(path)
+        except (OSError, UnicodeDecodeError):
+            continue
+        definitions = len(yield_loop_anchor.findall(text))
+        if not definitions:
+            continue
+        markers = text.count(SESSIONS_YIELD_NO_PENDING_LOOP_MARKER)
+        marker_start = text.find(SESSIONS_YIELD_NO_PENDING_LOOP_MARKER)
+        marker_end = text.find(
+            "AB_HARNESS_OPENCLAW_V2026_9_2_"
+            "SESSIONS_YIELD_NO_PENDING_LOOP_V1_END"
+        )
+        marker_block = (
+            text[marker_start:marker_end]
+            if marker_start >= 0 and marker_end > marker_start
+            else ""
+        )
+        if (
+            markers != definitions
+            or SESSIONS_YIELD_NO_PENDING_ERROR not in text
+            or 'outcomeKind: "sessions-yield-no-pending"' not in text
+            or 'detector: "sessions_yield_no_pending"' not in text
+            or "yieldOwnershipEpoch" not in text
+            or "scope?.runId" not in text
+            or "byRunId" not in text
+            or "params.toolCallId" not in text
+            or "loopState.count < CRITICAL_THRESHOLD" not in text
+            or "loopState.probeConsumed" not in text
+            or "__abRecordSessionsYieldOutcome(" not in text
+            or "__abDetectSessionsYieldNoPendingLoop(" not in text
+            or "generation" in marker_block
+        ):
+            raise RuntimeError(
+                "sessions_yield no-pending loop contract missing or "
+                f"incomplete in {path}"
+            )
+        yield_loop_files.append(str(path.relative_to(root)))
+    if not yield_loop_files:
+        raise RuntimeError(
+            "no v2026.9.2 sessions_yield loop-detection definitions found"
+        )
+
     reset_block_pattern = re.compile(
         re.escape(CONSECUTIVE_EMPTY_STOP_RESET_MARKER)
         + r".*?AB_HARNESS_OPENCLAW_V2026_9_2_"
@@ -2504,6 +2793,7 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
         "current_empty_resolver_files": resolver_files,
         "implicit_child_handoff_ownership_files": handoff_files,
         "current_empty_resolver_bindings": resolver_bindings,
+        "sessions_yield_no_pending_loop_files": yield_loop_files,
         "context_pressure_recovery_files": recovery_files,
         "verified": True,
     }
