@@ -55,10 +55,16 @@ NONEMPTY_LENGTH_ELIGIBILITY_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_NONEMPTY_LENGTH_ELIGIBILITY_BEGIN"
 )
 CURRENT_ASSISTANT_EMPTY_STOP_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_ASSISTANT_EMPTY_STOP_V2_BEGIN"
+)
+LEGACY_CURRENT_ASSISTANT_EMPTY_STOP_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_ASSISTANT_EMPTY_STOP_BEGIN"
 )
-CURRENT_TERMINAL_PAYLOAD_MARKER = (
+LEGACY_CURRENT_TERMINAL_PAYLOAD_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_TERMINAL_PAYLOAD_V2_BEGIN"
+)
+CONTINUATION_DECISION_DIAGNOSTIC_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_CONTINUATION_DECISION_DIAGNOSTIC_V1_BEGIN"
 )
 BOUNDED_LENGTH_CONTINUATION_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_BOUNDED_NO_PROGRESS_LENGTH_V1_BEGIN"
@@ -356,72 +362,19 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
             "v2026.9.2 empty-response retry eligibility anchor not found"
         )
 
-    current_payload_call_anchor = re.compile(
-        r"resolveEmptyResponseRetryInstruction\(\{"
-        r"(?P<body>[^{}]*?\bpayloadCount\s*:\s*[^,}]+,"
-        r"[^{}]*?\battempt\s*:\s*(?P<attempt>[A-Za-z_$][\w$]*"
-        r"(?:\.[A-Za-z_$][\w$]*)*))"
-        r"(?P<tail>[^{}]*?)\}\)"
-    )
-
-    def current_payload_call_replacement(match: re.Match[str]) -> str:
-        attempt = match.group("attempt")
-        return f'''resolveEmptyResponseRetryInstruction({{
-/* {CURRENT_TERMINAL_PAYLOAD_MARKER} */
-hasCurrentTerminalPayload: (() => {{
-	const __abCurrentTerminalContent = {attempt}.currentAttemptAssistant?.content;
-	if (typeof __abCurrentTerminalContent === "string") {{
-		return __abCurrentTerminalContent.trim().length > 0;
-	}}
-	if (!Array.isArray(__abCurrentTerminalContent)) return false;
-	return __abCurrentTerminalContent.some((item) => {{
-		if (!item || typeof item !== "object") return false;
-		if (item.type === "text") return String(item.text ?? "").trim().length > 0;
-		if (item.type === "thinking" || item.type === "reasoning") return false;
-		return true;
-	}});
-}})(),
-/* AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_TERMINAL_PAYLOAD_V2_END */
-{match.group("body")}{match.group("tail")}}})'''
-
-    current_payload_targets = [
-        path for path in retry_eligibility_targets
-        if current_payload_call_anchor.search(_read(path))
-        or CURRENT_TERMINAL_PAYLOAD_MARKER in _read(path)
+    stale_current_empty_targets = [
+        path for path in dist_files
+        if LEGACY_CURRENT_ASSISTANT_EMPTY_STOP_MARKER in _read(path)
+        or LEGACY_CURRENT_TERMINAL_PAYLOAD_MARKER in _read(path)
+        or "hasCurrentTerminalPayload" in _read(path)
     ]
-    stale_current_payload_targets = [
-        path for path in retry_eligibility_targets
-        if CURRENT_ASSISTANT_EMPTY_STOP_MARKER in _read(path)
-        and CURRENT_TERMINAL_PAYLOAD_MARKER not in _read(path)
-    ]
-    if stale_current_payload_targets:
+    if stale_current_empty_targets:
         raise RuntimeError(
-            "current-empty patch predates terminal-payload provenance; "
+            "current-empty patch uses the obsolete cross-bundle payload "
+            "contract; "
             "rebuild from the clean v2026.9.2 base: "
-            + ", ".join(str(path) for path in stale_current_payload_targets)
+            + ", ".join(str(path) for path in stale_current_empty_targets)
         )
-    if not current_payload_targets:
-        raise RuntimeError(
-            "v2026.9.2 current terminal payload call anchor not found"
-        )
-    for path in current_payload_targets:
-        text = _read(path)
-        if CURRENT_TERMINAL_PAYLOAD_MARKER in text:
-            continue
-        if len(current_payload_call_anchor.findall(text)) != 1:
-            raise RuntimeError(
-                "current terminal payload call anchor missing/ambiguous in "
-                f"{path}"
-            )
-        text, count = current_payload_call_anchor.subn(
-            current_payload_call_replacement, text, count=1
-        )
-        if count != 1:
-            raise RuntimeError(
-                f"current terminal payload call anchor missing/ambiguous in {path}"
-            )
-        _write(path, text)
-        changed.add(path)
 
     def retry_eligibility_replacement(match: re.Match[str]) -> str:
         param = match.group("param")
@@ -446,13 +399,26 @@ hasCurrentTerminalPayload: (() => {{
 		&& __abCurrentAssistantContent.some(
 			(item) => item?.type === "toolCall" || item?.type === "toolUse"
 		);
-	const __abCurrentAssistantEmptyStop =
-		{param}.hasCurrentTerminalPayload === false
-		&& __abAssistantState.assistant?.stopReason === "stop"
+	const __abCurrentAssistantHasPayload =
+		Array.isArray(__abCurrentAssistantContent)
+		&& __abCurrentAssistantContent.some((item) => {{
+			if (item === null || item === void 0) return false;
+			if (typeof item !== "object") return String(item).trim().length > 0;
+			return item.type !== "text"
+				&& item.type !== "thinking"
+				&& item.type !== "reasoning"
+				&& item.type !== "toolCall"
+				&& item.type !== "toolUse";
+		}});
+	const __abCurrentAssistantEmptyShape =
+		__abAssistantState.assistant?.stopReason === "stop"
 		&& !__abAssistantState.reasoningOnly
 		&& !__abCurrentAssistantVisibleText
 		&& !__abCurrentAssistantHasToolCall;
-	/* AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_ASSISTANT_EMPTY_STOP_END */
+	const __abCurrentAssistantEmptyStop =
+		__abCurrentAssistantEmptyShape
+		&& !__abCurrentAssistantHasPayload;
+	/* AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_ASSISTANT_EMPTY_STOP_V2_END */
 	const __abExplicitDone =
 		/(?:^|\\n)\\s*DONE\\s*(?:\\n|$)/.test(__abAssistantState.visibleText);
 	const __abIncompleteLength =
@@ -465,7 +431,11 @@ hasCurrentTerminalPayload: (() => {{
 		|| __abIncompleteLength;
 	/* AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_LENGTH_END */
 	const __abSettledToolEvidence = resolveSettledToolBatchEvidence({param}.attempt);
-	if (process.env.{SETTLED_TOOL_POLICY_ENV} === "continue"
+	const __abCompletedMessagingDelivery =
+		hasCompletedMessagingToolDeliveryEvidence({param}.attempt);
+	const __abAsyncActivity = hasAsyncActivity({param}.attempt.toolMetas);
+	const __abContinuationAllowed =
+		process.env.{SETTLED_TOOL_POLICY_ENV} === "continue"
 		&& !{param}.aborted
 		&& !{param}.timedOut
 		&& {param}.attempt?.terminal?.kind !== "failed"
@@ -474,7 +444,8 @@ hasCurrentTerminalPayload: (() => {{
 		&& !{param}.attempt.yieldDetected
 		&& !{param}.attempt.didSendDeterministicApprovalPrompt
 		&& !{param}.attempt.hasToolMediaBlockReply
-		&& !hasCompletedMessagingToolDeliveryEvidence({param}.attempt)
+		&& !__abCompletedMessagingDelivery
+		&& !(__abCurrentAssistantEmptyShape && __abCurrentAssistantHasPayload)
 		&& __abRoadmapContinuationEligible
 		&& __abSettledToolEvidence.allToolsProvenSettled
 		/* {SETTLED_CONTINUATION_TOOL_ERROR_MARKER} */
@@ -482,7 +453,61 @@ hasCurrentTerminalPayload: (() => {{
 		/* AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_TOOL_ERROR_END */
 		&& !__abSettledToolEvidence.intentionalTermination
 		&& !__abSettledToolEvidence.parkedCodeModeRun
-		&& !hasAsyncActivity({param}.attempt.toolMetas)) {{
+		&& !__abAsyncActivity;
+	/* {CONTINUATION_DECISION_DIAGNOSTIC_MARKER} */
+	const __abContinuationCandidate = __abCurrentAssistantEmptyShape
+		? "current-empty"
+		: __abIncompleteLength ? "length" : "";
+	if (process.env.{SETTLED_TOOL_POLICY_ENV} === "continue"
+		&& __abContinuationCandidate) {{
+		const __abDenyReasons = [];
+		if ({param}.aborted) __abDenyReasons.push("aborted");
+		if ({param}.timedOut) __abDenyReasons.push("timed_out");
+		if ({param}.attempt?.terminal?.kind === "failed"
+			|| {param}.attempt?.terminal?.kind === "timeout") {{
+			__abDenyReasons.push("terminal_" + {param}.attempt.terminal.kind);
+		}}
+		if ({param}.attempt.clientToolCalls) __abDenyReasons.push("client_tool_calls");
+		if ({param}.attempt.yieldDetected) __abDenyReasons.push("yield");
+		if ({param}.attempt.didSendDeterministicApprovalPrompt) __abDenyReasons.push("approval_prompt");
+		if ({param}.attempt.hasToolMediaBlockReply) __abDenyReasons.push("tool_media");
+		if (__abCompletedMessagingDelivery) __abDenyReasons.push("messaging_delivery");
+		if (__abContinuationCandidate === "current-empty"
+			&& __abCurrentAssistantHasPayload) __abDenyReasons.push("current_payload");
+		if (!__abRoadmapContinuationEligible) __abDenyReasons.push("not_eligible");
+		if (!__abSettledToolEvidence.allToolsProvenSettled) __abDenyReasons.push("tools_unsettled");
+		if (__abSettledToolEvidence.intentionalTermination) __abDenyReasons.push("intentional_termination");
+		if (__abSettledToolEvidence.parkedCodeModeRun) __abDenyReasons.push("parked_code_mode");
+		if (__abAsyncActivity) __abDenyReasons.push("async_activity");
+		const __abDecision = {{
+			candidate: __abContinuationCandidate,
+			decision: __abContinuationAllowed ? "continue" : "deny",
+			deny_reason: __abDenyReasons,
+			current_stop_reason: String(__abAssistantState.assistant?.stopReason ?? ""),
+			current_visible_chars: __abCurrentAssistantVisibleText.length,
+			current_has_tool_call: __abCurrentAssistantHasToolCall,
+			current_has_payload: __abCurrentAssistantHasPayload,
+			cumulative_payload_count: Number({param}.payloadCount ?? 0),
+			all_tools_settled: Boolean(__abSettledToolEvidence.allToolsProvenSettled),
+			terminal_kind: String({param}.attempt?.terminal?.kind ?? ""),
+			last_tool_error: Boolean({param}.attempt?.lastToolError),
+		}};
+		try {{
+			Object.defineProperty(
+				{param}.attempt,
+				"__agentBenchContinuationDecision",
+				{{ value: __abDecision, configurable: true, writable: true }},
+			);
+		}} catch {{
+			console.warn("[agent-bench-continuation-decision] " + JSON.stringify({{
+				...__abDecision,
+				empty_retry_attempt: null,
+				length_retry_attempt: null,
+			}}));
+		}}
+	}}
+	/* AB_HARNESS_OPENCLAW_V2026_9_2_CONTINUATION_DECISION_DIAGNOSTIC_V1_END */
+	if (__abContinuationAllowed) {{
 		return EMPTY_RESPONSE_RETRY_INSTRUCTION;
 	}}
 	/* AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_RETRY_END */
@@ -496,7 +521,7 @@ hasCurrentTerminalPayload: (() => {{
             or SETTLED_CONTINUATION_TOOL_ERROR_MARKER not in _read(path)
             or NONEMPTY_LENGTH_ELIGIBILITY_MARKER not in _read(path)
             or CURRENT_ASSISTANT_EMPTY_STOP_MARKER not in _read(path)
-            or CURRENT_TERMINAL_PAYLOAD_MARKER not in _read(path)
+            or CONTINUATION_DECISION_DIAGNOSTIC_MARKER not in _read(path)
         )
     ]
     if stale_retry_targets:
@@ -731,6 +756,40 @@ hasCurrentTerminalPayload: (() => {{
 {indent}\tprocess.env.{SETTLED_TOOL_POLICY_ENV} === "continue"
 {indent}\t&& {input_name}.attemptAssistant?.stopReason === "length"
 {indent}\t&& {instruction};
+{indent}const __abContinuationDecision =
+{indent}\t{input_name}.attempt?.__agentBenchContinuationDecision;
+{indent}if (__abContinuationDecision) {{
+{indent}\tconst __abDiagnosticIsLength =
+{indent}\t\t__abContinuationDecision.candidate === "length";
+{indent}\tconst __abDiagnosticBudgetAvailable = __abDiagnosticIsLength
+{indent}\t\t? {state}.lengthNoProgressAttempts < __abLengthRetryLimit
+{indent}\t\t: {state}.emptyResponseAttempts < {input_name}.maxEmptyResponseRetryAttempts;
+{indent}\tconst __abDiagnosticWillRetry = Boolean(
+{indent}\t\t!{reason} && {instruction} && __abDiagnosticBudgetAvailable
+{indent}\t);
+{indent}\tconst __abDiagnosticDenyReasons = [
+{indent}\t\t...(__abContinuationDecision.deny_reason ?? []),
+{indent}\t];
+{indent}\tif ({reason}) __abDiagnosticDenyReasons.push("reasoning_only_retry_precedence");
+{indent}\tif (!{instruction} && __abDiagnosticDenyReasons.length === 0) {{
+{indent}\t\t__abDiagnosticDenyReasons.push("resolver_rejected");
+{indent}\t}}
+{indent}\tif (!__abDiagnosticBudgetAvailable) {{
+{indent}\t\t__abDiagnosticDenyReasons.push("retry_budget_exhausted");
+{indent}\t}}
+{indent}\tconsole.warn("[agent-bench-continuation-decision] " + JSON.stringify({{
+{indent}\t\t...__abContinuationDecision,
+{indent}\t\tdecision: __abDiagnosticWillRetry ? "continue" : "deny",
+{indent}\t\tdeny_reason: __abDiagnosticWillRetry ? [] : __abDiagnosticDenyReasons,
+{indent}\t\tempty_retry_attempt: {state}.emptyResponseAttempts
+{indent}\t\t\t+ (__abDiagnosticIsLength ? 0 : 1),
+{indent}\t\tlength_retry_attempt: {state}.lengthNoProgressAttempts
+{indent}\t\t\t+ (__abDiagnosticIsLength ? 1 : 0),
+{indent}\t}}));
+{indent}\ttry {{
+{indent}\t\tdelete {input_name}.attempt.__agentBenchContinuationDecision;
+{indent}\t}} catch {{}}
+{indent}}}
 {indent}if (!{reason} && {instruction}
 {indent}\t&& ((__abLengthContinuation
 {indent}\t\t&& {state}.lengthNoProgressAttempts < __abLengthRetryLimit)
@@ -850,9 +909,6 @@ hasCurrentTerminalPayload: (() => {{
         "retry_eligibility_files": [
             str(path.relative_to(root))
             for path in retry_eligibility_targets
-        ],
-        "current_terminal_payload_files": [
-            str(path.relative_to(root)) for path in current_payload_targets
         ],
         "length_budget_files": [
             str(path.relative_to(root)) for path in length_budget_targets
@@ -1200,9 +1256,9 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
             "dist/**/*",
             CURRENT_ASSISTANT_EMPTY_STOP_MARKER,
         ),
-        "current_terminal_payload": (
+        "continuation_decision_diagnostic": (
             "dist/**/*",
-            CURRENT_TERMINAL_PAYLOAD_MARKER,
+            CONTINUATION_DECISION_DIAGNOSTIC_MARKER,
         ),
         "bounded_no_progress_length": (
             "dist/**/*",
@@ -1247,9 +1303,46 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
             raise RuntimeError(f"missing required v2026.9.2 marker: {name}")
         found[name] = paths
 
+    resolver_anchor = re.compile(
+        r"function\s+resolveEmptyResponseRetryInstruction\s*\("
+    )
+    resolver_files: list[str] = []
+    stale_contract_files: list[str] = []
+    for path in sorted(_js_files(root / "dist")):
+        try:
+            text = _read(path)
+        except (OSError, UnicodeDecodeError):
+            continue
+        definitions = len(resolver_anchor.findall(text))
+        if definitions:
+            markers = text.count(CURRENT_ASSISTANT_EMPTY_STOP_MARKER)
+            if markers != definitions:
+                raise RuntimeError(
+                    "not every v2026.9.2 empty-response resolver definition "
+                    f"contains current-empty logic: {path} "
+                    f"definitions={definitions} markers={markers}"
+                )
+            resolver_files.append(str(path.relative_to(root)))
+        if (
+            LEGACY_CURRENT_ASSISTANT_EMPTY_STOP_MARKER in text
+            or LEGACY_CURRENT_TERMINAL_PAYLOAD_MARKER in text
+            or "hasCurrentTerminalPayload" in text
+        ):
+            stale_contract_files.append(str(path.relative_to(root)))
+    if not resolver_files:
+        raise RuntimeError(
+            "no v2026.9.2 empty-response resolver definitions found"
+        )
+    if stale_contract_files:
+        raise RuntimeError(
+            "obsolete cross-bundle current-empty contract remains in: "
+            + ", ".join(stale_contract_files)
+        )
+
     return {
         "upstream_version": version,
         "markers": found,
+        "current_empty_resolver_files": resolver_files,
         "verified": True,
     }
 

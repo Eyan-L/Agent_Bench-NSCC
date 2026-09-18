@@ -11,8 +11,8 @@ import pytest
 
 from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     CONSECUTIVE_EMPTY_STOP_RESET_MARKER,
+    CONTINUATION_DECISION_DIAGNOSTIC_MARKER,
     CURRENT_ASSISTANT_EMPTY_STOP_MARKER,
-    CURRENT_TERMINAL_PAYLOAD_MARKER,
     EMPTY_STOP_RETRY_LIMIT_MARKER,
     EXEC_MARKER,
     FS_CHECK_MARKER,
@@ -21,6 +21,8 @@ from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     FS_RUN_MARKER,
     FS_WRITE_MARKER,
     LITELLM_PRICING_URL,
+    LEGACY_CURRENT_ASSISTANT_EMPTY_STOP_MARKER,
+    LEGACY_CURRENT_TERMINAL_PAYLOAD_MARKER,
     LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_MARKER,
     LENGTH_SEMANTIC_PROGRESS_MARKER,
     LOOP_VETO_RECOVERY_PROBE_MARKER,
@@ -111,7 +113,8 @@ def _runtime_tree(tmp_path: Path) -> Path:
     )
     (dist / "builtin-openclaw-test.js").write_text(
         "function classifyAssistantTurn(params) {\n"
-        "  const assistant = params.attempt.currentAttemptAssistant;\n"
+        "  const assistant = params.attempt.currentAttemptAssistant\n"
+        "    ?? params.attempt.completedAssistant;\n"
         "  const visibleText = (params.attempt.assistantTexts ?? []).join('');\n"
         "  return {\n"
         "    assistant, visibleText, reasoningOnly: false,\n"
@@ -165,6 +168,8 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "  return classifyAssistantTurn(params).emptyResponse\n"
         "    ? EMPTY_RESPONSE_RETRY_INSTRUCTION : null;\n"
         "}\n"
+    )
+    (dist / "embedded-terminal-call-test.js").write_text(
         "function buildEmbeddedRunPayloads(params) {\n"
         "  return (params.assistantTexts ?? [])\n"
         "    .filter((text) => String(text).trim().length > 0)\n"
@@ -174,17 +179,26 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "  const payloads = buildEmbeddedRunPayloads({\n"
         "    assistantTexts: input.attempt.assistantTexts,\n"
         "  });\n"
+        "  const payloadCount = payloads.length;\n"
+        "  const aborted = input.aborted;\n"
+        "  const timedOut = input.timedOut;\n"
+        "  const attempt = input.attempt;\n"
         "  const instruction = resolveEmptyResponseRetryInstruction({\n"
         "    provider: 'agent_model', modelId: 'roadmap',\n"
-        "    modelApi: 'openai-completions', payloadCount: payloads.length,\n"
-        "    aborted: input.aborted, timedOut: input.timedOut,\n"
-        "    attempt: input.attempt\n"
+        "    modelApi: 'openai-completions',\n"
+        "    payloadCount, aborted, timedOut, attempt\n"
         "  });\n"
         "  if (instruction && retryState.emptyResponseAttempts < 4) {\n"
         "    retryState.emptyResponseAttempts += 1;\n"
         "    return { action: 'retry', instruction, payloads };\n"
         "  }\n"
         "  return { action: 'complete', payloads };\n"
+        "}\n"
+    )
+    (dist / "resolver-worker-test.js").write_text(
+        "function resolveEmptyResponseRetryInstruction(params) {\n"
+        "  return classifyAssistantTurn(params).emptyResponse\n"
+        "    ? EMPTY_RESPONSE_RETRY_INSTRUCTION : null;\n"
         "}\n"
     )
     (dist / "embedded-agent-test.js").write_text(
@@ -222,7 +236,7 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "async function prepareTerminalWithSettledTurnFinalization(input) {\n"
         "  return input;\n"
         "}\n"
-        "function resolveEmbeddedRunTerminal(input) {\n"
+        "function resolveOuterRetryCandidate(input) {\n"
         "  const nextEmptyResponseRetryInstruction = "
         "input.settledTurnFinalizationAttempted ? null : "
         "resolveEmptyResponseRetryInstruction(input);\n"
@@ -289,7 +303,13 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     fs_text = (root / "dist/fs-bridge-test.js").read_text()
     pricing_text = (root / "dist/pricing-test.js").read_text()
     builtin_text = (root / "dist/builtin-openclaw-test.js").read_text()
+    embedded_call_text = (
+        root / "dist/embedded-terminal-call-test.js"
+    ).read_text()
     embedded_text = (root / "dist/embedded-agent-test.js").read_text()
+    resolver_worker_text = (
+        root / "dist/resolver-worker-test.js"
+    ).read_text()
     worker_text = (root / "dist/worker-test.mjs").read_text()
     loop_detection_text = (
         root / "dist/tool-loop-detection-test.js"
@@ -313,8 +333,13 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert SETTLED_CONTINUATION_LENGTH_MARKER in builtin_text
     assert NONEMPTY_LENGTH_ELIGIBILITY_MARKER in builtin_text
     assert CURRENT_ASSISTANT_EMPTY_STOP_MARKER in builtin_text
-    assert CURRENT_TERMINAL_PAYLOAD_MARKER in builtin_text
-    assert "hasCurrentTerminalPayload:" in builtin_text
+    assert CONTINUATION_DECISION_DIAGNOSTIC_MARKER in builtin_text
+    assert LEGACY_CURRENT_TERMINAL_PAYLOAD_MARKER not in builtin_text
+    assert "hasCurrentTerminalPayload" not in builtin_text
+    assert "payloadCount, aborted, timedOut, attempt" in embedded_call_text
+    assert CURRENT_ASSISTANT_EMPTY_STOP_MARKER not in embedded_call_text
+    assert "hasCurrentTerminalPayload" not in embedded_call_text
+    assert CURRENT_ASSISTANT_EMPTY_STOP_MARKER in resolver_worker_text
     assert SETTLED_CONTINUATION_TOOL_ERROR_MARKER in builtin_text
     assert "__abSettledToolEvidence.allToolsProvenSettled" in builtin_text
     assert "!__abSettledToolEvidence.hasUnsettledToolError" not in builtin_text
@@ -327,11 +352,25 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert "|| __abCurrentAssistantEmptyStop" in builtin_text
     assert "|| __abIncompleteLength" in builtin_text
     assert "&& __abRoadmapContinuationEligible" in builtin_text
+    assert "current_visible_chars" in builtin_text
+    assert "current_has_tool_call" in builtin_text
+    assert "current_has_payload" in builtin_text
+    assert "cumulative_payload_count" in builtin_text
+    assert "all_tools_settled" in builtin_text
+    assert "terminal_kind" in builtin_text
+    assert "last_tool_error" in builtin_text
     assert 'params.attempt?.terminal?.kind !== "timeout"' in builtin_text
-    assert "!hasCompletedMessagingToolDeliveryEvidence(params.attempt)" in (
-        builtin_text
+    assert (
+        "hasCompletedMessagingToolDeliveryEvidence(params.attempt)"
+        in builtin_text
     )
-    assert "!hasAsyncActivity(params.attempt.toolMetas)" in builtin_text
+    assert "&& !__abCompletedMessagingDelivery" in builtin_text
+    assert (
+        "&& !(__abCurrentAssistantEmptyShape "
+        "&& __abCurrentAssistantHasPayload)" in builtin_text
+    )
+    assert "hasAsyncActivity(params.attempt.toolMetas)" in builtin_text
+    assert "&& !__abAsyncActivity" in builtin_text
     assert builtin_text.index(SETTLED_CONTINUATION_RETRY_MARKER) < (
         builtin_text.index("shouldSkipNonVisibleTurnRetry(params)")
     )
@@ -363,6 +402,8 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert 'message?.details?.deniedReason === "tool-loop"' in embedded_text
     assert "!__abBlockedToolLoopVeto" in embedded_text
     assert "!__abControlActivity" in embedded_text
+    assert "empty_retry_attempt" in embedded_text
+    assert "length_retry_attempt" in embedded_text
     assert LOOP_VETO_RECOVERY_PROBE_MARKER in loop_detection_text
     assert "OPENCLAW_AGENT_BENCH_LOOP_VETO_RECOVERY_PROBE" in (
         loop_detection_text
@@ -393,6 +434,10 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert first["legacy_sessions_patch_timeout_applied"] is False
     assert first["raw_response_patch_applied"] is False
     assert verified["verified"] is True
+    assert set(verified["current_empty_resolver_files"]) == {
+        "dist/builtin-openclaw-test.js",
+        "dist/resolver-worker-test.js",
+    }
 
     snapshot = {
         path.name: path.read_text()
@@ -419,7 +464,13 @@ def test_v2026_9_2_transformed_retry_bundles_parse_with_real_node(tmp_path):
     root = _runtime_tree(tmp_path)
     patch_runtime_tree(root)
 
-    for relative in ("dist/embedded-agent-test.js", "dist/worker-test.mjs"):
+    for relative in (
+        "dist/builtin-openclaw-test.js",
+        "dist/resolver-worker-test.js",
+        "dist/embedded-terminal-call-test.js",
+        "dist/embedded-agent-test.js",
+        "dist/worker-test.mjs",
+    ):
         completed = subprocess.run(
             [*_node_command(), "--check", str(root / relative)],
             check=False,
@@ -464,9 +515,11 @@ def test_v2026_9_2_length_has_independent_no_progress_budget(tmp_path):
         'params.attempt?.terminal?.kind !== "timeout"',
         "!params.attempt.clientToolCalls",
         "!params.attempt.yieldDetected",
-        "!hasCompletedMessagingToolDeliveryEvidence(params.attempt)",
+        "hasCompletedMessagingToolDeliveryEvidence(params.attempt)",
+        "&& !__abCompletedMessagingDelivery",
         "__abSettledToolEvidence.allToolsProvenSettled",
-        "!hasAsyncActivity(params.attempt.toolMetas)",
+        "hasAsyncActivity(params.attempt.toolMetas)",
+        "&& !__abAsyncActivity",
     )
     assert all(guard in builtin for guard in safety_guards)
     assert SETTLED_CONTINUATION_TOOL_ERROR_MARKER in builtin
@@ -561,12 +614,20 @@ def test_v2026_9_2_current_empty_stop_ignores_historical_visible_text(
 ):
     root = _runtime_tree(tmp_path)
     patch_runtime_tree(root)
-    bundle = root / "dist/builtin-openclaw-test.js"
-    bundle.write_text(bundle.read_text() + r'''
+    bundle = root / "dist/current-empty-split-contract.js"
+    bundle.write_text(
+        (root / "dist/builtin-openclaw-test.js").read_text()
+        + "\n"
+        + (root / "dist/embedded-agent-test.js").read_text()
+        + "\n"
+        + (root / "dist/embedded-terminal-call-test.js").read_text()
+        + r'''
 function terminalInput({
   content = [], aborted = false, settled = true, completedDelivery = false,
   asyncStarted = false, yielded = false, timedOut = false,
-  toolFailed = false,
+  toolFailed = false, completedFallback = false,
+  historicalText = "Historical visible progress before tool calls.",
+  stopReason = "stop",
 } = {}) {
   const toolCall = { type: "toolCall", id: "call-1", name: "edit" };
   const messagesSnapshot = [{ role: "assistant", content: [toolCall] }];
@@ -581,8 +642,10 @@ function terminalInput({
     aborted,
     timedOut,
     attempt: {
-      assistantTexts: ["Historical visible progress before tool calls."],
-      currentAttemptAssistant: { content, stopReason: "stop" },
+      assistantTexts: [historicalText],
+      ...(completedFallback
+        ? { completedAssistant: { content, stopReason } }
+        : { currentAttemptAssistant: { content, stopReason } }),
       terminal: { kind: "ok" },
       messagesSnapshot,
       itemLifecycle: {
@@ -601,8 +664,9 @@ function assert(value, message) {
   if (!value) throw new Error(message);
 }
 const retryState = { emptyResponseAttempts: 0 };
+const historicalInput = terminalInput();
 const historicalThenEmpty = resolveEmbeddedRunTerminal(
-  terminalInput(), retryState,
+  historicalInput, retryState,
 );
 assert(
   historicalThenEmpty.action === "retry",
@@ -617,6 +681,70 @@ assert(
   "the production-style path must enter the retry counter",
 );
 assert(
+  historicalInput.attempt.__agentBenchContinuationDecision?.decision === "continue",
+  "the resolver must record an allowed current-empty decision",
+);
+assert(
+  historicalInput.attempt.__agentBenchContinuationDecision
+    ?.cumulative_payload_count === 1,
+  "diagnostics must preserve the cumulative historical payload count",
+);
+const outerRetryState = { emptyResponseAttempts: 0 };
+assert(
+  retryTerminal({
+    ...historicalInput,
+    terminalState: { outcome: "ok" },
+    finalAssistantVisibleText: "",
+    attemptAssistant: historicalInput.attempt.currentAttemptAssistant,
+    maxEmptyResponseRetryAttempts: 4,
+    runParams: { runId: "split-contract", sessionId: "split-contract" },
+    activeErrorContext: { provider: "probe", model: "probe" },
+    activateInternalPrompt() {},
+  }, outerRetryState, null, historicalThenEmpty.instruction)?.action === "retry",
+  "the split production path must reach the existing outer retry",
+);
+assert(
+  outerRetryState.emptyResponseAttempts === 1,
+  "the outer retry path must consume the first empty attempt",
+);
+const lengthInput = terminalInput({
+  content: [{ type: "text", text: "I still need to validate the change." }],
+  stopReason: "length",
+});
+const lengthTerminal = resolveEmbeddedRunTerminal(
+  lengthInput, { emptyResponseAttempts: 0 },
+);
+assert(lengthTerminal.action === "retry", "incomplete length remains eligible");
+const outerLengthState = {
+  emptyResponseAttempts: 0, lengthNoProgressAttempts: 0,
+};
+assert(
+  retryTerminal({
+    ...lengthInput,
+    terminalState: { outcome: "ok" },
+    finalAssistantVisibleText: "I still need to validate the change.",
+    attemptAssistant: lengthInput.attempt.currentAttemptAssistant,
+    maxEmptyResponseRetryAttempts: 4,
+    runParams: { runId: "length-contract", sessionId: "length-contract" },
+    activeErrorContext: { provider: "probe", model: "probe" },
+    activateInternalPrompt() {},
+  }, outerLengthState, null, lengthTerminal.instruction)?.action === "retry",
+  "length candidates must reach the independent outer retry budget",
+);
+assert(
+  resolveEmbeddedRunTerminal(terminalInput({
+    completedFallback: true,
+  }), { emptyResponseAttempts: 0 }).action === "retry",
+  "completed-assistant fallback must use the same current-assistant semantics",
+);
+assert(
+  resolveEmbeddedRunTerminal(terminalInput({
+    toolFailed: true,
+    historicalText: "Tool warning: edit failed before the latest empty stop.",
+  }), { emptyResponseAttempts: 0 }).action === "retry",
+  "historical tool-error payloads must not suppress the latest empty stop",
+);
+assert(
   resolveEmbeddedRunTerminal(terminalInput({
     content: [{ type: "text", text: "Current final answer" }],
   }), { emptyResponseAttempts: 0 }).action === "complete",
@@ -629,9 +757,18 @@ assert(
   "a current terminal delivery must suppress current-empty-stop continuation",
 );
 assert(
-  resolveEmbeddedRunTerminal(terminalInput({
+  (() => {
+    const input = terminalInput({
     content: [{ type: "image", data: "current-terminal-payload" }],
-  }), { emptyResponseAttempts: 0 }).action === "complete",
+    });
+    const result = resolveEmbeddedRunTerminal(
+      input, { emptyResponseAttempts: 0 },
+    );
+    return result.action === "complete"
+      && input.attempt.__agentBenchContinuationDecision?.decision === "deny"
+      && input.attempt.__agentBenchContinuationDecision?.deny_reason
+        ?.includes("current_payload");
+  })(),
   "a current non-text terminal payload must suppress continuation",
 );
 assert(
@@ -682,7 +819,8 @@ assert(
   "the fifth consecutive current-empty stop exhausts the retry budget",
 );
 process.stdout.write("CURRENT_EMPTY_STOP_CONTRACT_OK\n");
-''')
+'''
+    )
     env = dict(os.environ)
     env["OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY"] = "continue"
     completed = subprocess.run(
@@ -695,6 +833,34 @@ process.stdout.write("CURRENT_EMPTY_STOP_CONTRACT_OK\n");
     )
     assert completed.returncode == 0, completed.stderr
     assert "CURRENT_EMPTY_STOP_CONTRACT_OK" in completed.stdout
+    decision_lines = [
+        line.split("] ", 1)[1]
+        for line in completed.stderr.splitlines()
+        if line.startswith("[agent-bench-continuation-decision] ")
+    ]
+    assert decision_lines
+    decisions = [json.loads(line) for line in decision_lines]
+    empty_decision = next(
+        item for item in decisions if item["candidate"] == "current-empty"
+    )
+    assert empty_decision["decision"] == "continue"
+    assert empty_decision["deny_reason"] == []
+    assert empty_decision["current_stop_reason"] == "stop"
+    assert empty_decision["current_visible_chars"] == 0
+    assert empty_decision["current_has_tool_call"] is False
+    assert empty_decision["current_has_payload"] is False
+    assert empty_decision["cumulative_payload_count"] == 1
+    assert empty_decision["all_tools_settled"] is True
+    assert empty_decision["terminal_kind"] == "ok"
+    assert empty_decision["last_tool_error"] is False
+    assert empty_decision["empty_retry_attempt"] == 1
+    assert empty_decision["length_retry_attempt"] == 0
+    length_decision = next(
+        item for item in decisions if item["candidate"] == "length"
+    )
+    assert length_decision["decision"] == "continue"
+    assert length_decision["empty_retry_attempt"] == 0
+    assert length_decision["length_retry_attempt"] == 1
 
 
 def test_v2026_9_2_transformed_bundle_executes_retry_state_contract(tmp_path):
@@ -930,13 +1096,14 @@ def test_v2026_9_2_patcher_fails_closed_when_retry_eligibility_anchor_moves(
     tmp_path,
 ):
     root = _runtime_tree(tmp_path)
-    path = root / "dist/builtin-openclaw-test.js"
-    path.write_text(
-        path.read_text().replace(
-            "function resolveEmptyResponseRetryInstruction(params)",
-            "function movedEmptyResponseRetryInstruction(params)",
+    for name in ("builtin-openclaw-test.js", "resolver-worker-test.js"):
+        path = root / "dist" / name
+        path.write_text(
+            path.read_text().replace(
+                "function resolveEmptyResponseRetryInstruction(params)",
+                "function movedEmptyResponseRetryInstruction(params)",
+            )
         )
-    )
 
     with pytest.raises(
         RuntimeError, match="empty-response retry eligibility anchor"
@@ -944,36 +1111,54 @@ def test_v2026_9_2_patcher_fails_closed_when_retry_eligibility_anchor_moves(
         patch_runtime_tree(root)
 
 
-def test_v2026_9_2_patcher_fails_closed_without_terminal_payload_call_anchor(
+def test_v2026_9_2_patcher_does_not_require_or_rewrite_split_call_site(
     tmp_path,
 ):
     root = _runtime_tree(tmp_path)
-    path = root / "dist/builtin-openclaw-test.js"
-    path.write_text(
-        path.read_text().replace(
-            "payloadCount: payloads.length",
-            "movedPayloadCount: payloads.length",
-        )
-    )
+    path = root / "dist/embedded-terminal-call-test.js"
+    original = path.read_text()
 
-    with pytest.raises(
-        RuntimeError, match="current terminal payload call anchor"
-    ):
-        patch_runtime_tree(root)
+    patch_runtime_tree(root)
+
+    assert path.read_text() == original
+    assert "payloadCount, aborted, timedOut, attempt" in original
+    assert "hasCurrentTerminalPayload" not in original
 
 
-def test_v2026_9_2_patcher_rejects_stale_current_empty_payload_patch(tmp_path):
+def test_v2026_9_2_verify_requires_every_resolver_definition_to_be_patched(
+    tmp_path,
+):
     root = _runtime_tree(tmp_path)
     patch_runtime_tree(root)
-    path = root / "dist/builtin-openclaw-test.js"
+    path = root / "dist/resolver-worker-test.js"
     path.write_text(
         path.read_text().replace(
-            CURRENT_TERMINAL_PAYLOAD_MARKER,
-            "AB_HARNESS_OPENCLAW_V2026_9_2_OLD_PAYLOAD_PROVENANCE_BEGIN",
+            CURRENT_ASSISTANT_EMPTY_STOP_MARKER,
+            "REMOVED_CURRENT_ASSISTANT_EMPTY_STOP_MARKER",
         )
     )
 
-    with pytest.raises(RuntimeError, match="terminal-payload provenance"):
+    with pytest.raises(RuntimeError, match="not every.*resolver definition"):
+        verify_runtime_tree(root)
+
+
+@pytest.mark.parametrize(
+    "legacy_marker",
+    [
+        LEGACY_CURRENT_ASSISTANT_EMPTY_STOP_MARKER,
+        LEGACY_CURRENT_TERMINAL_PAYLOAD_MARKER,
+        "hasCurrentTerminalPayload",
+    ],
+)
+def test_v2026_9_2_patcher_rejects_stale_cross_bundle_current_empty_patch(
+    tmp_path,
+    legacy_marker,
+):
+    root = _runtime_tree(tmp_path)
+    path = root / "dist/builtin-openclaw-test.js"
+    path.write_text(path.read_text() + f"\n/* {legacy_marker} */\n")
+
+    with pytest.raises(RuntimeError, match="obsolete cross-bundle"):
         patch_runtime_tree(root)
 
 
@@ -1140,7 +1325,10 @@ def test_v2026_9_2_builder_does_not_reapply_legacy_runtime_patches():
     assert SETTLED_CONTINUATION_LENGTH_MARKER in audit
     assert NONEMPTY_LENGTH_ELIGIBILITY_MARKER in audit
     assert CURRENT_ASSISTANT_EMPTY_STOP_MARKER in audit
-    assert CURRENT_TERMINAL_PAYLOAD_MARKER in audit
+    assert CONTINUATION_DECISION_DIAGNOSTIC_MARKER in audit
+    assert LEGACY_CURRENT_TERMINAL_PAYLOAD_MARKER in audit
+    assert "all_resolver_definitions_have_current_empty_logic" in audit
+    assert "no_obsolete_cross_bundle_current_empty_contract" in audit
     assert BOUNDED_LENGTH_CONTINUATION_MARKER in audit
     assert LENGTH_SEMANTIC_PROGRESS_MARKER in audit
     assert "stale_unbounded_length_continuation_present" in audit

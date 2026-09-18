@@ -190,8 +190,8 @@ if [[ "$CANDIDATE" -eq 1 ]]; then
         AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_RETRY_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_LENGTH_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_NONEMPTY_LENGTH_ELIGIBILITY_BEGIN \
-        AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_ASSISTANT_EMPTY_STOP_BEGIN \
-        AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_TERMINAL_PAYLOAD_V2_BEGIN \
+        AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_ASSISTANT_EMPTY_STOP_V2_BEGIN \
+        AB_HARNESS_OPENCLAW_V2026_9_2_CONTINUATION_DECISION_DIAGNOSTIC_V1_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_BOUNDED_NO_PROGRESS_LENGTH_V1_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_LENGTH_SEMANTIC_PROGRESS_V2_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_CONSECUTIVE_EMPTY_STOP_RESET_V2_BEGIN \
@@ -211,6 +211,25 @@ if [[ "$CANDIDATE" -eq 1 ]]; then
             FAIL=1
         fi
     done
+    if run 'set -e
+        files="$(grep -R -l "function resolveEmptyResponseRetryInstruction(" /app/dist 2>/dev/null)"
+        test -n "$files"
+        for file in $files; do
+            definitions="$(grep -o "function resolveEmptyResponseRetryInstruction(" "$file" | wc -l)"
+            markers="$(grep -o "AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_ASSISTANT_EMPTY_STOP_V2_BEGIN" "$file" | wc -l)"
+            test "$definitions" -eq "$markers"
+        done'; then
+        echo 'PASS all_resolver_definitions_have_current_empty_logic'
+    else
+        echo 'FAIL resolver_definition_current_empty_coverage'
+        FAIL=1
+    fi
+    if run "grep -R -q -E 'AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_ASSISTANT_EMPTY_STOP_BEGIN|AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_TERMINAL_PAYLOAD_V2_BEGIN|hasCurrentTerminalPayload' /app/dist"; then
+        echo 'FAIL obsolete_cross_bundle_current_empty_contract_present'
+        FAIL=1
+    else
+        echo 'PASS no_obsolete_cross_bundle_current_empty_contract'
+    fi
     if run "grep -R -q 'AB_HARNESS_OPENCLAW_V2026_9_2_UNBOUNDED_LENGTH_CONTINUATION_BEGIN' /app/dist"; then
         echo 'FAIL stale_unbounded_length_continuation_present'
         FAIL=1
