@@ -542,6 +542,14 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "  return noProgress.count >= CRITICAL_THRESHOLD "
         "? { stuck: true } : { stuck: false };\n"
         "}\n"
+        "async function admitToolCallBatch(calls, ctx) {\n"
+        "  const sessionState = ctx.sessionState;\n"
+        "  const projectedState = {\n"
+        "    ...sessionState,\n"
+        "    toolCallHistory: [...sessionState.toolCallHistory ?? []]\n"
+        "  };\n"
+        "  return projectedState;\n"
+        "}\n"
         "globalThis.__yieldLoopContract = { detectToolCallLoop, "
         "recordToolCallOutcome };\n"
     )
@@ -555,6 +563,8 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "toolCallId:Zt.toolCallId,..._n}),Ot.toolCallHistory.at(-1)}"
         "function detectToolCallLoop(Ot,Zt,_n,Dn,kn){"
         "if(!Dn?.enabled)return{stuck:!1};return{stuck:!1}}"
+        "async function admitToolCallBatch(Ot,Zt){const _n=Zt.sessionState,"
+        "Dn={..._n,toolCallHistory:[..._n.toolCallHistory??[]]};return Dn}"
         "globalThis.__yieldLoopContractMinified={detectToolCallLoop,"
         "recordToolCallOutcome};\n"
     )

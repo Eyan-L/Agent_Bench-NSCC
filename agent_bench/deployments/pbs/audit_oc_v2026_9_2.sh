@@ -203,7 +203,8 @@ if [[ "$CANDIDATE" -eq 1 ]]; then
         AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_TOOL_ERROR_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_EMPTY_STOP_RETRY_LIMIT_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_LOOP_VETO_RECOVERY_PROBE_BEGIN \
-        AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_NO_PENDING_LOOP_V1_BEGIN \
+        AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_NO_PENDING_LOOP_V2_BEGIN \
+        AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_PROBE_PROJECTION_V1_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_FS_BRIDGE_HELPER_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_FS_BRIDGE_RUN_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_FS_BRIDGE_WRITE_BEGIN \
@@ -279,7 +280,7 @@ if [[ "$CANDIDATE" -eq 1 ]]; then
         test -n "$files"
         for file in $files; do
             definitions="$(grep -o "function detectToolCallLoop" "$file" | wc -l)"
-            markers="$(grep -o "AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_NO_PENDING_LOOP_V1_BEGIN" "$file" | wc -l)"
+            markers="$(grep -o "AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_NO_PENDING_LOOP_V2_BEGIN" "$file" | wc -l)"
             test "$definitions" -eq "$markers"
             grep -q "sessions-yield-no-pending" "$file"
             grep -q "sessions_yield_no_pending" "$file"
@@ -290,12 +291,32 @@ if [[ "$CANDIDATE" -eq 1 ]]; then
             grep -q "params.toolCallId" "$file"
             grep -q "loopState.count < CRITICAL_THRESHOLD" "$file"
             grep -q "loopState.probeConsumed" "$file"
-            ownership_contract="$(sed -n "/AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_NO_PENDING_LOOP_V1_BEGIN/,/AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_NO_PENDING_LOOP_V1_END/p" "$file")"
+            ownership_contract="$(sed -n "/AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_NO_PENDING_LOOP_V2_BEGIN/,/AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_NO_PENDING_LOOP_V2_END/p" "$file")"
             ! printf "%s" "$ownership_contract" | grep -q "generation"
+            ! printf "%s" "$ownership_contract" | grep -q "probeOffered"
+            printf "%s" "$ownership_contract" | grep -q "__abProjectedToolLoopAdmissionKey"
+            printf "%s" "$ownership_contract" | grep -q "sessions_spawn"
+            printf "%s" "$ownership_contract" | grep -q "expectsCompletionMessage"
+            printf "%s" "$ownership_contract" | grep -q "__abSessionsYieldSeenOwnershipIdsKey"
+            ! grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_NO_PENDING_LOOP_V1_BEGIN" "$file"
         done'; then
         echo 'PASS sessions_yield_no_pending_loop_contract'
     else
         echo 'FAIL sessions_yield_no_pending_loop_contract'
+        FAIL=1
+    fi
+    if run 'set -e
+        files="$(grep -R -l "async function admitToolCallBatch" /app/dist 2>/dev/null)"
+        test -n "$files"
+        for file in $files; do
+            definitions="$(grep -o "async function admitToolCallBatch" "$file" | wc -l)"
+            markers="$(grep -o "AB_HARNESS_OPENCLAW_V2026_9_2_SESSIONS_YIELD_PROBE_PROJECTION_V1_BEGIN" "$file" | wc -l)"
+            test "$definitions" -eq "$markers"
+            grep -q "__agentBenchProjectedToolLoopAdmission: true" "$file"
+        done'; then
+        echo 'PASS sessions_yield_probe_projection_contract'
+    else
+        echo 'FAIL sessions_yield_probe_projection_contract'
         FAIL=1
     fi
     if run 'set -e
