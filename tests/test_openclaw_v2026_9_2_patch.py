@@ -120,9 +120,13 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "  const assistant = params.attempt.currentAttemptAssistant\n"
         "    ?? params.attempt.currentAttemptCompletedAssistant;\n"
         "  const visibleText = (params.attempt.assistantTexts ?? []).join('');\n"
+        "  const content = assistant?.content;\n"
+        "  const reasoningOnly = Array.isArray(content) && content.length > 0\n"
+        "    && content.every((item) => item?.type === 'reasoning'\n"
+        "      || item?.type === 'thinking');\n"
         "  return {\n"
-        "    assistant, visibleText, reasoningOnly: false,\n"
-        "    emptyResponse: visibleText.length === 0,\n"
+        "    assistant, visibleText, reasoningOnly,\n"
+        "    emptyResponse: visibleText.length === 0 && !reasoningOnly,\n"
         "  };\n"
         "}\n"
         "function resolveSettledToolBatchEvidence(attempt) {\n"
@@ -207,10 +211,14 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "  const assistant = params.attempt.currentAttemptAssistant\n"
         "    ?? params.attempt.currentAttemptCompletedAssistant;\n"
         "  const visibleText = (params.attempt.assistantTexts ?? []).join('');\n"
+        "  const content = assistant?.content;\n"
+        "  const reasoningOnly = Array.isArray(content) && content.length > 0\n"
+        "    && content.every((item) => item?.type === 'reasoning'\n"
+        "      || item?.type === 'thinking');\n"
         "  return {\n"
-        "    assistant, visibleText, reasoningOnly: false,\n"
+        "    assistant, visibleText, reasoningOnly,\n"
         "    emptyResponse: params.payloadCount === 0\n"
-        "      && visibleText.length === 0,\n"
+        "      && visibleText.length === 0 && !reasoningOnly,\n"
         "  };\n"
         "}\n"
         "function resolveSettledToolBatchEvidence(attempt) {\n"
@@ -301,6 +309,19 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "function hasMessagingToolDeliveryEvidence(attempt) {\n"
         "  return attempt.completedDelivery === true;\n"
         "}\n"
+        "function hasNonToolTerminalState(attempt) {\n"
+        "  return Boolean(\n"
+        "    attempt.clientToolCalls || attempt.yieldDetected\n"
+        "      || attempt.didSendDeterministicApprovalPrompt\n"
+        "      || attempt.heartbeatToolResponse || attempt.hasToolMediaBlockReply\n"
+        "      || attempt.didDeliverSourceReplyViaMessageTool\n"
+        "      || (attempt.messagingToolSourceReplyPayloads?.length ?? 0) > 0\n"
+        "      || hasMessagingToolDeliveryEvidence(attempt)\n"
+        "      || (attempt.acceptedSessionSpawns?.length ?? 0) > 0\n"
+        "      || (attempt.successfulCronAdds ?? 0) > 0\n"
+        "      || hasAsyncActivity(attempt.toolMetas)\n"
+        "  );\n"
+        "}\n"
         "function hasAsyncActivity(toolMetas) {\n"
         "  return (toolMetas ?? []).some((entry) => entry.asyncStarted === true);\n"
         "}\n"
@@ -315,7 +336,6 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "  return outcome === 'aborted' || outcome === 'timeout';\n"
         "}\n"
         "function isCurrentAttemptReplaySafe() { return false; }\n"
-        "function hasNonToolTerminalState() { return false; }\n"
         "function isSilentTransportDropAssistant() { return false; }\n"
         "function isProviderRefusalAssistantError() { return false; }\n"
         "function isLikelyContextOverflowError() { return false; }\n"
@@ -418,10 +438,18 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "  }\n"
         "  return { action: 'proceed' };\n"
         "}\n"
-        "async function executeRecoveryContract(input) {\n"
+        "async function normalizeEmbeddedRunAttempt(input) {\n"
+        "  return input.attemptEnvelope;\n"
+        "}\n"
+        "async function runPreparedEmbeddedLoop(input) {\n"
         "  const { contextRecoveryState, terminalRetryState } = input;\n"
+        "  const admittedRunInput = input.runInput;\n"
+        "  const preparedRuntime = {};\n"
+        "  const normalizedAttempt = await normalizeEmbeddedRunAttempt(input);\n"
         "  const recovery = await recoverEmbeddedRunAttempt({\n"
-        "    runInput: input.runInput, normalizedAttempt: input.normalizedAttempt,\n"
+        "    runInput: admittedRunInput,\n"
+        "    preparedRuntime,\n"
+        "    normalizedAttempt,\n"
         "    commonRecoveryInput: input.commonRecoveryInput, contextRecoveryState,\n"
         "  });\n"
         "  if (recovery.action === \"complete\") return recovery.result;\n"
@@ -430,6 +458,7 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "  }\n"
         "  return recovery;\n"
         "}\n"
+        "const executeRecoveryContract = runPreparedEmbeddedLoop;\n"
     )
     (dist / "worker-test.mjs").write_text(
         "function resolveSettledToolBatchEvidence(attempt){"
@@ -585,11 +614,14 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
         CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER, 1
     )[1].split(
         "AB_HARNESS_OPENCLAW_V2026_9_2_"
-        "CONTEXT_PRESSURE_TERMINAL_RECOVERY_V4_END",
+        "CONTEXT_PRESSURE_TERMINAL_RECOVERY_V5_END",
         1,
     )[0]
-    assert "hasMessagingToolDeliveryEvidence(attempt)" in recovery_helper
+    assert "hasNonToolTerminalState({" in recovery_helper
+    assert "acceptedSessionSpawns: []" in recovery_helper
     assert "hasOutboundDeliveryEvidence(attempt)" not in recovery_helper
+    assert "currentReasoningOnly" in recovery_helper
+    assert "explicitDone" in recovery_helper
     assert 'preflight?.route !== "truncate_tool_results_only"' in (
         recovery_helper
     )
@@ -600,6 +632,7 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert 'source: "agent-bench-terminal"' in recovery_text
     assert "terminalRetryState.lengthNoProgressAttempts = 0" in recovery_text
     assert "terminalRetryState.emptyResponseAttempts = 0" in recovery_text
+    assert "input.normalizedAttempt" not in recovery_text
     assert LOOP_VETO_RECOVERY_PROBE_MARKER in loop_detection_text
     assert "OPENCLAW_AGENT_BENCH_LOOP_VETO_RECOVERY_PROBE" in (
         loop_detection_text
@@ -725,6 +758,27 @@ if (!instruction) throw new Error("second resolver did not continue");
 const decision = attempt.__agentBenchContinuationDecision;
 if (decision?.candidate !== "current-empty" || decision?.decision !== "continue") {
   throw new Error("second resolver did not materialize current-empty logic");
+}
+const reasoningAttempt = {
+  ...attempt,
+  assistantTexts: [],
+  currentAttemptCompletedAssistant: {
+    content: [{ type: "reasoning", text: "still working" }],
+    stopReason: "length",
+  },
+};
+const reasoningInstruction = resolveEmptyResponseRetryInstruction({
+  provider: "agent_model",
+  modelId: "roadmap",
+  modelApi: "openai-completions",
+  executionContract: "strict-agentic",
+  payloadCount: 0,
+  aborted: false,
+  timedOut: false,
+  attempt: reasoningAttempt,
+});
+if (reasoningInstruction !== null) {
+  throw new Error("reasoning-only length entered ordinary continuation");
 }
 process.stdout.write("SECOND_RESOLVER_EXECUTION_OK\n");
 ''')
@@ -1330,6 +1384,7 @@ def test_v2026_9_2_context_pressure_terminal_uses_native_recovery(tmp_path):
     root = _runtime_tree(tmp_path)
     patch_runtime_tree(root)
     bundle = root / "dist/embedded-recovery-test.js"
+    assert "input.normalizedAttempt" not in bundle.read_text()
     bundle.write_text(bundle.read_text() + r'''
 function assert(value, message) {
   if (!value) throw new Error(message);
@@ -1340,6 +1395,7 @@ function recoveryInput({
   stopReason = "length", content = [], truncationHelps = true,
   acceptedSessionSpawns = [], completedDelivery = false,
   assistantPresent = true, assistantTexts = [],
+  heartbeatToolResponse, successfulCronAdds = 0,
 } = {}) {
   const contextRecoveryState = {
     autoCompactionCount: 0, overflowCompactionAttempts: 0,
@@ -1361,6 +1417,7 @@ function recoveryInput({
     itemLifecycle: { startedCount: 0, completedCount: 0, activeCount },
     messagesSnapshot: [], toolMetas: [],
     acceptedSessionSpawns, completedDelivery,
+    heartbeatToolResponse, successfulCronAdds,
     settledToolEvidence: {
       allToolsProvenSettled: false, intentionalTermination: false,
       parkedCodeModeRun: false, failedToolNames: new Set(),
@@ -1370,7 +1427,7 @@ function recoveryInput({
   const toolCapability = { exec: true, write: true };
   return {
     runInput: { runParams: { runId: "pressure", sessionId: "session" } },
-    normalizedAttempt: {
+    attemptEnvelope: {
       attempt,
       attemptAssistant: assistant,
       currentAttemptCompletedAssistant: assistant,
@@ -1445,7 +1502,7 @@ function recoveryInput({
       && active.contextRecoveryState.autoCompactionCount === 0,
     "active tool work must not start compaction or another model call",
   );
-  active.normalizedAttempt.attempt.itemLifecycle.activeCount = 0;
+  active.attemptEnvelope.attempt.itemLifecycle.activeCount = 0;
   const afterCommit = await executeRecoveryContract(active);
   assert(
     afterCommit.action === "retry"
@@ -1582,6 +1639,53 @@ function recoveryInput({
     "missing assistant with historical visible text is not accumulated-empty",
   );
 
+  const heartbeatOwned = recoveryInput({
+    assistantPresent: false, assistantTexts: [],
+    heartbeatToolResponse: { text: "HEARTBEAT_OK" },
+  });
+  const heartbeatOwnedResult = await executeRecoveryContract(heartbeatOwned);
+  assert(
+    heartbeatOwnedResult.action === "proceed"
+      && heartbeatOwned.contextRecoveryState.autoCompactionCount === 0,
+    "heartbeat terminal ownership must veto accumulated-empty recovery",
+  );
+
+  const cronOwned = recoveryInput({
+    assistantPresent: false, assistantTexts: [], successfulCronAdds: 1,
+  });
+  const cronOwnedResult = await executeRecoveryContract(cronOwned);
+  assert(
+    cronOwnedResult.action === "proceed"
+      && cronOwned.contextRecoveryState.autoCompactionCount === 0,
+    "successful cron terminal ownership must veto accumulated-empty recovery",
+  );
+
+  const explicitDoneLength = recoveryInput({
+    stopReason: "length", assistantTexts: ["DONE"],
+    content: [{ type: "text", text: "DONE" }],
+  });
+  const explicitDoneLengthResult = await executeRecoveryContract(
+    explicitDoneLength,
+  );
+  assert(
+    explicitDoneLengthResult.action === "proceed"
+      && explicitDoneLength.contextRecoveryState.autoCompactionCount === 0,
+    "explicit DONE length must not enter Agent_Bench pressure recovery",
+  );
+
+  const reasoningOnlyLength = recoveryInput({
+    stopReason: "length",
+    content: [{ type: "reasoning", text: "still reasoning" }],
+  });
+  const reasoningOnlyLengthResult = await executeRecoveryContract(
+    reasoningOnlyLength,
+  );
+  assert(
+    reasoningOnlyLengthResult.action === "proceed"
+      && reasoningOnlyLength.contextRecoveryState.autoCompactionCount === 0,
+    "reasoning-only length must not enter Agent_Bench pressure recovery",
+  );
+
   const activeEmpty = recoveryInput({ activeCount: 1, stopReason: "stop" });
   const activeEmptyResult = await executeRecoveryContract(activeEmpty);
   assert(
@@ -1637,6 +1741,81 @@ function recoveryInput({
     assert '"candidate":"accumulated-empty"' in completed.stderr
 
 
+def test_v2026_9_2_readable_recovery_captures_explicit_attempt_binding(
+    tmp_path,
+):
+    root = _runtime_tree(tmp_path)
+    bundle = root / "dist/embedded-recovery-test.js"
+    source = bundle.read_text()
+    declaration_anchor = (
+        "const normalizedAttempt = await normalizeEmbeddedRunAttempt(input);"
+    )
+    assert source.count(declaration_anchor) == 1
+    source = source.replace(
+        declaration_anchor,
+        "const capturedAttempt = await normalizeEmbeddedRunAttempt(input);",
+    )
+    call_anchor = "    normalizedAttempt,\n"
+    assert source.count(call_anchor) == 1
+    source = source.replace(
+        call_anchor,
+        "    normalizedAttempt: capturedAttempt,\n",
+    )
+    bundle.write_text(source)
+
+    patch_runtime_tree(root)
+    transformed = bundle.read_text()
+    assert "input.normalizedAttempt" not in transformed
+    assert "__abResolveRoadmapContextPressureTerminal(\n" in transformed
+    assert "\t\tcapturedAttempt.attempt," in transformed
+    bundle.write_text(transformed + r'''
+(async () => {
+  process.env.OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY = "continue";
+  const result = await runPreparedEmbeddedLoop({
+    attemptEnvelope: {
+      attempt: {
+        terminal: { kind: "ok" }, assistantTexts: ["complete"],
+        itemLifecycle: { activeCount: 0 }, toolMetas: [],
+        settledToolEvidence: {
+          allToolsProvenSettled: false, intentionalTermination: false,
+          parkedCodeModeRun: false, failedToolNames: new Set(),
+        },
+      },
+      attemptAssistant: { content: [{ type: "text", text: "complete" }], stopReason: "stop" },
+      currentAttemptCompletedAssistant: { content: [{ type: "text", text: "complete" }], stopReason: "stop" },
+      terminalState: { outcome: "ok" },
+    },
+    runInput: {},
+    contextRecoveryState: {
+      autoCompactionCount: 0, toolResultTruncationAttempted: false,
+    },
+    terminalRetryState: {
+      emptyResponseAttempts: 0, lengthNoProgressAttempts: 0,
+    },
+    commonRecoveryInput: {},
+  });
+  if (result.action !== "proceed") throw new Error("explicit binding failed");
+  process.stdout.write("EXPLICIT_ATTEMPT_BINDING_OK\n");
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+''')
+    completed = subprocess.run(
+        [*_node_command(), str(bundle)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            **os.environ,
+            "OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY": "continue",
+        },
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "EXPLICIT_ATTEMPT_BINDING_OK" in completed.stdout
+
+
 def test_v2026_9_2_minified_worker_executes_pressure_recovery(tmp_path):
     root = _runtime_tree(tmp_path)
     bundle = root / "dist/embedded-recovery-minified-test.js"
@@ -1644,6 +1823,7 @@ def test_v2026_9_2_minified_worker_executes_pressure_recovery(tmp_path):
 function resolveSettledToolBatchEvidence(Ot){return Ot.settledToolEvidence}
 function hasMessagingToolDeliveryEvidence(Ot){return Ot.completedDelivery===true}
 function hasAsyncActivity(Ot){return(Ot??[]).some(Zt=>Zt.asyncStarted===true)}
+function hasNonToolTerminalState(Ot){return Boolean(Ot.clientToolCalls||Ot.yieldDetected||Ot.didSendDeterministicApprovalPrompt||Ot.heartbeatToolResponse||Ot.hasToolMediaBlockReply||Ot.didDeliverSourceReplyViaMessageTool||(Ot.messagingToolSourceReplyPayloads?.length??0)>0||hasMessagingToolDeliveryEvidence(Ot)||(Ot.acceptedSessionSpawns?.length??0)>0||(Ot.successfulCronAdds??0)>0||hasAsyncActivity(Ot.toolMetas))}
 function projectAgentRunAttemptTerminal(Ot){return{aborted:Ot.kind===`aborted`,promptErrorSource:Ot.promptErrorSource,timedOut:Ot.kind===`timeout`}}
 function isEmbeddedRunTerminalInterrupted(Ot){return Ot===`aborted`||Ot===`timeout`}
 function isProviderRefusalAssistantError(){return false}
@@ -1672,6 +1852,12 @@ assert(length.retryState.lengthNoProgressAttempts===0, `length streak must reset
 assert(length.retryState.emptyResponseAttempts===3, `length must preserve empty streak`);
 const settledSpawn=await executeWorkerContract(`length`,{acceptedSessionSpawns:[{childSessionKey:`settled`}]});
 assert(settledSpawn.action===`retry`&&settledSpawn.recoveryState.autoCompactionCount===1,`historical spawn must not veto minified recovery`);
+const delivered=await executeWorkerContract(`length`,{completedDelivery:true});
+assert(delivered.action===`proceed`&&delivered.recoveryState.autoCompactionCount===0,`external delivery must veto minified recovery`);
+const explicitDone=await executeWorkerContract(`length`,{content:[{type:`text`,text:`DONE`}],assistantTexts:[`DONE`]});
+assert(explicitDone.action===`proceed`&&explicitDone.recoveryState.autoCompactionCount===0,`explicit DONE must veto minified pressure length`);
+const reasoningLength=await executeWorkerContract(`length`,{content:[{type:`reasoning`,text:`working`}]});
+assert(reasoningLength.action===`proceed`&&reasoningLength.recoveryState.autoCompactionCount===0,`reasoning-only length must veto minified pressure recovery`);
 const truncateOnly=await executeWorkerContract(`length`,{route:`truncate_tool_results_only`});
 assert(truncateOnly.action===`retry`, `minified truncate-only must retry`);
 assert(truncateOnly.recoveryState.autoCompactionCount===0, `truncate-only must skip compaction`);
@@ -2115,6 +2301,12 @@ def test_v2026_9_2_patcher_rejects_old_length_identity_patch(tmp_path):
             "AB_HARNESS_OPENCLAW_V2026_9_2_"
             "CONTEXT_RECOVERY_STREAK_RESET_V3_BEGIN",
         ),
+        (
+            "AB_HARNESS_OPENCLAW_V2026_9_2_"
+            "CONTEXT_PRESSURE_TERMINAL_RECOVERY_V4_BEGIN",
+            "AB_HARNESS_OPENCLAW_V2026_9_2_"
+            "CONTEXT_RECOVERY_STREAK_RESET_V4_BEGIN",
+        ),
     ],
 )
 def test_v2026_9_2_patcher_rejects_stale_pressure_patch(
@@ -2135,6 +2327,22 @@ def test_v2026_9_2_patcher_rejects_stale_pressure_patch(
     path.write_text(text)
 
     with pytest.raises(RuntimeError, match="predates current"):
+        patch_runtime_tree(root)
+
+
+def test_v2026_9_2_patcher_fails_closed_when_attempt_binding_moves(tmp_path):
+    root = _runtime_tree(tmp_path)
+    path = root / "dist/embedded-recovery-test.js"
+    source = path.read_text()
+    call_anchor = "    normalizedAttempt,\n"
+    assert source.count(call_anchor) == 1
+    source = source.replace(
+        call_anchor,
+        "    movedNormalizedAttempt,\n",
+    )
+    path.write_text(source)
+
+    with pytest.raises(RuntimeError, match="context-pressure"):
         patch_runtime_tree(root)
 
 

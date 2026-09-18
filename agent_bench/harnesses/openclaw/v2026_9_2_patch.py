@@ -99,8 +99,11 @@ LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER = (
 LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V3_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V3_BEGIN"
 )
-CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER = (
+LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V4_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V4_BEGIN"
+)
+CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V5_BEGIN"
 )
 LEGACY_COMPACTION_LENGTH_STREAK_RESET_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_COMPACTION_LENGTH_STREAK_RESET_V1_BEGIN"
@@ -111,8 +114,11 @@ LEGACY_COMPACTION_RETRY_STREAK_RESET_MARKER = (
 LEGACY_CONTEXT_RECOVERY_STREAK_RESET_V3_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_RECOVERY_STREAK_RESET_V3_BEGIN"
 )
-CONTEXT_RECOVERY_STREAK_RESET_MARKER = (
+LEGACY_CONTEXT_RECOVERY_STREAK_RESET_V4_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_RECOVERY_STREAK_RESET_V4_BEGIN"
+)
+CONTEXT_RECOVERY_STREAK_RESET_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_RECOVERY_STREAK_RESET_V5_BEGIN"
 )
 TRUNCATE_ONLY_NATIVE_RECOVERY_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_TRUNCATE_ONLY_NATIVE_RECOVERY_V1_BEGIN"
@@ -1224,7 +1230,7 @@ def _patch_minified_context_pressure_terminal_recovery(
             f"{attempt_input}.terminalRetryState.emptyResponseAttempts=0;"
             f"}}/* {CONTEXT_RECOVERY_STREAK_RESET_MARKER} */"
             f"/* AB_HARNESS_OPENCLAW_V2026_9_2_"
-            f"CONTEXT_RECOVERY_STREAK_RESET_V4_END */"
+            f"CONTEXT_RECOVERY_STREAK_RESET_V5_END */"
             f"return {match.group('retry')}();}}"
         )
 
@@ -1272,8 +1278,10 @@ def _patch_context_pressure_terminal_recovery(root: Path) -> list[str]:
         or LEGACY_COMPACTION_LENGTH_STREAK_RESET_MARKER in _read(path)
         or LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER in _read(path)
         or LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V3_MARKER in _read(path)
+        or LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V4_MARKER in _read(path)
         or LEGACY_COMPACTION_RETRY_STREAK_RESET_MARKER in _read(path)
         or LEGACY_CONTEXT_RECOVERY_STREAK_RESET_V3_MARKER in _read(path)
+        or LEGACY_CONTEXT_RECOVERY_STREAK_RESET_V4_MARKER in _read(path)
     ]
     if not targets:
         raise RuntimeError(
@@ -1318,8 +1326,13 @@ def _patch_context_pressure_terminal_recovery(root: Path) -> list[str]:
         r'input\.attemptCompactionCount === 0'
     )
     recovery_call_anchor = re.compile(
-        r'(?P<indent>[ \t]*)const recovery = await '
+        r'(?P<indent>^[ \t]*)const recovery = await '
         r'recoverEmbeddedRunAttempt\(\{'
+        r'(?P<body_before>.*?)'
+        r'^[ \t]*normalizedAttempt'
+        r'(?:\s*:\s*(?P<normalized_attempt>'
+        r'[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*)?,',
+        flags=re.MULTILINE | re.DOTALL,
     )
     overflow_candidate_call_anchor = re.compile(
         r'(?P<indent>[ \t]*)assistantErrorText'
@@ -1366,8 +1379,21 @@ function __abResolveRoadmapContextPressureTerminal(attempt, assistant) {{
 \tconst currentHasReasoning =
 \t\tArray.isArray(content)
 \t\t&& content.some((item) => item?.type === "thinking" || item?.type === "reasoning");
+\tconst currentReasoningOnly = Boolean(
+\t\tcurrentHasReasoning
+\t\t&& !currentVisibleText
+\t\t&& !currentHasToolCall
+\t\t&& !currentHasPayload
+\t);
+\tconst explicitDone = /(?:^|\\n)\\s*DONE\\s*(?:\\n|$)/.test(
+\t\t[accumulatedVisibleText, currentVisibleText].filter(Boolean).join("\\n")
+\t);
+\tconst nonSpawnTerminalOwner = hasNonToolTerminalState({{
+\t\t...attempt,
+\t\tacceptedSessionSpawns: [],
+\t}});
 \tconst stopReason = String(assistant?.stopReason ?? "");
-\tconst candidate = stopReason === "length"
+\tconst candidate = stopReason === "length" && !currentReasoningOnly && !explicitDone
 \t\t? "length"
 \t\t: stopReason === "stop"
 \t\t\t&& !currentVisibleText
@@ -1375,7 +1401,9 @@ function __abResolveRoadmapContextPressureTerminal(attempt, assistant) {{
 \t\t\t&& !currentHasPayload
 \t\t\t&& !currentHasReasoning
 \t\t\t\t? "current-empty"
-\t\t\t\t: assistant === void 0 && !accumulatedVisibleText
+\t\t\t\t: assistant === void 0
+\t\t\t\t\t&& !accumulatedVisibleText
+\t\t\t\t\t&& !nonSpawnTerminalOwner
 \t\t\t\t\t? "accumulated-empty"
 \t\t\t\t\t: "";
 \tif (!candidate) return null;
@@ -1393,14 +1421,7 @@ function __abResolveRoadmapContextPressureTerminal(attempt, assistant) {{
 \tif (attempt?.terminal?.kind === "failed"
 \t\t|| attempt?.terminal?.kind === "timeout"
 \t\t|| Number(attempt?.itemLifecycle?.activeCount ?? 0) > 0
-\t\t|| Boolean(attempt?.clientToolCalls)
-\t\t|| attempt?.yieldDetected
-\t\t|| attempt?.didSendDeterministicApprovalPrompt
-\t\t|| attempt?.hasToolMediaBlockReply
-\t\t|| attempt?.didDeliverSourceReplyViaMessageTool === true
-\t\t|| (attempt?.messagingToolSourceReplyPayloads?.length ?? 0) > 0
-\t\t|| hasMessagingToolDeliveryEvidence(attempt)
-\t\t|| hasAsyncActivity(attempt?.toolMetas)
+\t\t|| nonSpawnTerminalOwner
 \t\t|| evidence.intentionalTermination
 \t\t|| evidence.parkedCodeModeRun) return null;
 \treturn {{
@@ -1411,13 +1432,12 @@ function __abResolveRoadmapContextPressureTerminal(attempt, assistant) {{
 \t\tpromptBudgetBeforeReserve,
 \t}};
 }}
-/* AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V4_END */
+/* AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V5_END */
 '''
 
     required_bindings = (
         "resolveSettledToolBatchEvidence",
-        "hasMessagingToolDeliveryEvidence",
-        "hasAsyncActivity",
+        "hasNonToolTerminalState",
     )
     for path in targets:
         text = _read(path)
@@ -1431,8 +1451,10 @@ function __abResolveRoadmapContextPressureTerminal(attempt, assistant) {{
             or LEGACY_COMPACTION_LENGTH_STREAK_RESET_MARKER in text
             or LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER in text
             or LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V3_MARKER in text
+            or LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V4_MARKER in text
             or LEGACY_COMPACTION_RETRY_STREAK_RESET_MARKER in text
             or LEGACY_CONTEXT_RECOVERY_STREAK_RESET_V3_MARKER in text
+            or LEGACY_CONTEXT_RECOVERY_STREAK_RESET_V4_MARKER in text
         ):
             raise RuntimeError(
                 "context-pressure recovery patch predates current "
@@ -1651,6 +1673,9 @@ function __abResolveRoadmapContextPressureTerminal(attempt, assistant) {{
 
         def replace_recovery_call(match: re.Match[str]) -> str:
             indent = match.group("indent")
+            normalized_attempt = (
+                match.group("normalized_attempt") or "normalizedAttempt"
+            )
             return f'''{indent}/* {CONTEXT_RECOVERY_STREAK_RESET_MARKER} */
 {indent}const __abCompactionsBeforeAttemptRecovery =
 {indent}\tcontextRecoveryState.autoCompactionCount;
@@ -1658,14 +1683,14 @@ function __abResolveRoadmapContextPressureTerminal(attempt, assistant) {{
 {indent}\tBoolean(contextRecoveryState.toolResultTruncationAttempted);
 {indent}const __abContextPressureCandidate =
 {indent}\t__abResolveRoadmapContextPressureTerminal(
-{indent}\t\tinput.normalizedAttempt.attempt,
-{indent}\t\tinput.normalizedAttempt.currentAttemptCompletedAssistant
-{indent}\t\t\t?? input.normalizedAttempt.attemptAssistant,
+{indent}\t\t{normalized_attempt}.attempt,
+{indent}\t\t{normalized_attempt}.currentAttemptCompletedAssistant
+{indent}\t\t\t?? {normalized_attempt}.attemptAssistant,
 {indent}\t)?.candidate;
 {indent}const __abContextPressureRoute =
-{indent}\tinput.normalizedAttempt.attempt.preflightRecovery?.route
-{indent}\t?? input.normalizedAttempt.attempt.contextBudgetStatus?.route;
-{indent}const recovery = await recoverEmbeddedRunAttempt({{'''
+{indent}\t{normalized_attempt}.attempt.preflightRecovery?.route
+{indent}\t?? {normalized_attempt}.attempt.contextBudgetStatus?.route;
+{match.group(0)}'''
 
         text, count = recovery_call_anchor.subn(
             replace_recovery_call, text, count=1
@@ -1695,7 +1720,7 @@ function __abResolveRoadmapContextPressureTerminal(attempt, assistant) {{
                 f'{indent}\t\t}}\n'
                 f'{indent}\t}}\n'
                 f'{indent}\t/* '
-                'AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_RECOVERY_STREAK_RESET_V4_END */'
+                'AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_RECOVERY_STREAK_RESET_V5_END */'
             )
 
         text, count = recovery_retry_anchor.subn(
@@ -2180,10 +2205,20 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
             continue
         if "function recoverEmbeddedRunOverflow(" not in text:
             continue
+        overflow_definitions = text.count(
+            "function recoverEmbeddedRunOverflow("
+        )
+        attempt_definitions = text.count(
+            "function recoverEmbeddedRunAttempt("
+        )
+        pressure_markers = text.count(
+            CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER
+        )
+        reset_markers = text.count(CONTEXT_RECOVERY_STREAK_RESET_MARKER)
         helper_start = text.find(CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER)
         helper_end = text.find(
             "AB_HARNESS_OPENCLAW_V2026_9_2_"
-            "CONTEXT_PRESSURE_TERMINAL_RECOVERY_V4_END"
+            "CONTEXT_PRESSURE_TERMINAL_RECOVERY_V5_END"
         )
         helper_block = (
             text[helper_start:helper_end]
@@ -2191,7 +2226,11 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
             else ""
         )
         if (
-            "function compactEmbeddedRunForRecovery(" not in text
+            overflow_definitions != 1
+            or attempt_definitions != 1
+            or pressure_markers != overflow_definitions
+            or reset_markers != attempt_definitions
+            or "function compactEmbeddedRunForRecovery(" not in text
             or "function recoverEmbeddedRunAttempt(" not in text
             or CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER not in text
             or CONTEXT_RECOVERY_STREAK_RESET_MARKER not in text
@@ -2200,20 +2239,33 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
             or LEGACY_COMPACTION_LENGTH_STREAK_RESET_MARKER in text
             or LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER in text
             or LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V3_MARKER in text
+            or LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V4_MARKER in text
             or LEGACY_COMPACTION_RETRY_STREAK_RESET_MARKER in text
             or LEGACY_CONTEXT_RECOVERY_STREAK_RESET_V3_MARKER in text
+            or LEGACY_CONTEXT_RECOVERY_STREAK_RESET_V4_MARKER in text
             or "attempt?.preflightRecovery ?? attempt?.contextBudgetStatus"
             not in text
             or not re.search(r'source:\s*["`]preflightPressure["`]', text)
             or not re.search(r'source:\s*["`]agent-bench-terminal["`]', text)
             or not re.search(r'lengthNoProgressAttempts\s*=\s*0', text)
             or not re.search(r'emptyResponseAttempts\s*=\s*0', text)
-            or "hasMessagingToolDeliveryEvidence(attempt)" not in helper_block
+            or "hasNonToolTerminalState({" not in helper_block
+            or "acceptedSessionSpawns: []" not in helper_block
             or "hasOutboundDeliveryEvidence(attempt)" in helper_block
             or "(attempt?.assistantTexts ?? [])" not in helper_block
             or '"accumulated-empty"' not in helper_block
+            or "currentReasoningOnly" not in helper_block
+            or "explicitDone" not in helper_block
             or 'preflight?.route !== "truncate_tool_results_only"'
             not in helper_block
+            or "input.normalizedAttempt" in text
+            or not all(
+                _has_js_lexical_binding(text, name)
+                for name in (
+                    "resolveSettledToolBatchEvidence",
+                    "hasNonToolTerminalState",
+                )
+            )
         ):
             raise RuntimeError(
                 "incomplete context-pressure native recovery contract in "
