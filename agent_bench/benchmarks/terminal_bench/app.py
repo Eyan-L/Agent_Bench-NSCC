@@ -189,13 +189,14 @@ def _terminal_bench_agent_assets_dir(
 
 
 def _roadmap_v9_continuation_env(agent_id: str) -> Dict[str, str]:
-    """Enable tools-capable empty-turn recovery only for Roadmap on v9.2."""
+    """Enable bounded tools-capable continuation for Roadmap on v9.2."""
     version = str(os.environ.get("AB_AGENT_RUNTIME_VERSION") or "").lstrip("v")
     if agent_id != "roadmap_bench" or version != "2026.9.2":
         return {}
     return {
         "OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY": "continue",
         "OPENCLAW_AGENT_BENCH_EMPTY_STOP_RETRIES": "4",
+        "OPENCLAW_AGENT_BENCH_LENGTH_NO_PROGRESS_RETRIES": "4",
         "OPENCLAW_AGENT_BENCH_LOOP_VETO_RECOVERY_PROBE": "1",
     }
 

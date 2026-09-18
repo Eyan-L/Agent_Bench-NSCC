@@ -92,6 +92,14 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 f"(status={parent_status}, "
                 f"session={snapshot['parent_session_id']})"
             )
+        elif self._is_durable_incomplete_length_terminal(snapshot):
+            completion_status = self.BLOCKED_INCOMPLETE
+            diagnostic = (
+                "OpenClaw durable parent session completed with a "
+                "length-truncated assistant turn and no explicit DONE "
+                f"(status={parent_status}, "
+                f"session={snapshot['parent_session_id']})"
+            )
         else:
             completion_status = self.NORMAL_COMPLETION
             diagnostic = (
@@ -598,18 +606,32 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             == self.BLOCKED_INCOMPLETE
             and isinstance(durable_interrupt_snapshot, dict)
             and snapshot
-            and self._is_durable_empty_assistant_stop_terminal(snapshot)
+            and (
+                self._is_durable_empty_assistant_stop_terminal(snapshot)
+                or self._is_durable_incomplete_length_terminal(snapshot)
+            )
         ):
+            is_empty_stop = self._is_durable_empty_assistant_stop_terminal(
+                snapshot
+            )
+            evidence = (
+                "durable_session_terminal_empty_assistant_stop"
+                if is_empty_stop
+                else "durable_session_terminal_incomplete_length"
+            )
             snapshot = dict(
                 snapshot,
-                terminal_evidence=(
-                    "durable_session_terminal_empty_assistant_stop"
-                ),
+                terminal_evidence=evidence,
             )
             blocked_error = str(
                 getattr(self, "_last_completion_error", None)
                 or error
-                or "OpenClaw durable parent session ended with an empty stop"
+                or (
+                    "OpenClaw durable parent session ended with an empty stop"
+                    if is_empty_stop
+                    else "OpenClaw durable parent session ended with an "
+                    "incomplete length-truncated turn"
+                )
             )
             self._last_completion_status = self.BLOCKED_INCOMPLETE
             self._last_completion_error = blocked_error
@@ -621,7 +643,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             meta = reconciled_payload["result"].setdefault("meta", {})
             meta["livenessState"] = "blocked"
             meta["replayInvalid"] = False
-            meta["stopReason"] = "stop"
+            meta["stopReason"] = "stop" if is_empty_stop else "length"
             meta["agentBenchBlockedIncomplete"] = True
             snapshot, quiescence = self._quiesce_with_timing(
                 snapshot, logical_parent_terminal=True
@@ -919,15 +941,19 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             self._last_completion_error = completion_error
             return reconciled_payload, completion_error
 
-        if (
-            confirm_non_done_stop
-            and self._is_durable_empty_assistant_stop_terminal(snapshot)
-        ):
+        is_empty_stop = self._is_durable_empty_assistant_stop_terminal(snapshot)
+        is_incomplete_length = self._is_durable_incomplete_length_terminal(
+            snapshot
+        )
+        if confirm_non_done_stop and (is_empty_stop or is_incomplete_length):
+            evidence = (
+                "durable_session_terminal_empty_assistant_stop"
+                if is_empty_stop
+                else "durable_session_terminal_incomplete_length"
+            )
             snapshot = dict(
                 snapshot,
-                terminal_evidence=(
-                    "durable_session_terminal_empty_assistant_stop"
-                ),
+                terminal_evidence=evidence,
             )
             snapshot, quiescence = self._quiesce_with_timing(
                 snapshot, logical_parent_terminal=True
@@ -935,6 +961,9 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             completion_error = (
                 "OpenClaw durable parent session completed with an empty "
                 "assistant stop and no pending native recovery"
+                if is_empty_stop
+                else "OpenClaw durable parent session completed with an "
+                "incomplete length-truncated assistant turn"
             )
             reconciled_payload = (
                 copy.deepcopy(payload) if isinstance(payload, dict) else {}
@@ -945,7 +974,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             meta = result.setdefault("meta", {})
             meta["livenessState"] = "blocked"
             meta["replayInvalid"] = False
-            meta["stopReason"] = "stop"
+            meta["stopReason"] = "stop" if is_empty_stop else "length"
             meta["agentBenchBlockedIncomplete"] = True
             self._attach_lifecycle_summary(
                 reconciled_payload, snapshot, quiescence
@@ -1012,6 +1041,16 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             and not str(snapshot.get("latest_assistant_text") or "").strip()
             and not snapshot.get("latest_assistant_has_payload")
             and not snapshot.get("latest_assistant_has_tool_call")
+            and not snapshot.get("requester_settle_pending")
+        )
+
+    @classmethod
+    def _is_durable_incomplete_length_terminal(cls, snapshot: Dict) -> bool:
+        """Whether a completed requester ended on an incomplete length turn."""
+        return bool(
+            cls._is_durable_assistant_stop_terminal(snapshot)
+            and snapshot.get("latest_assistant_stop_reason") == "length"
+            and not snapshot.get("done_text")
             and not snapshot.get("requester_settle_pending")
         )
 

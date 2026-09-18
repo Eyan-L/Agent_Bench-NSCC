@@ -33,7 +33,7 @@ from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     SETTLED_CONTINUATION_RETRY_MARKER,
     SETTLED_CONTINUATION_TOOL_ERROR_MARKER,
     SHARED_WORKSPACE_SPAWN_MARKER,
-    UNBOUNDED_LENGTH_CONTINUATION_MARKER,
+    BOUNDED_LENGTH_CONTINUATION_MARKER,
     patch_runtime_tree,
     verify_runtime_tree,
 )
@@ -118,9 +118,26 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "  };\n"
         "}\n"
         "function resolveSettledToolBatchEvidence(attempt) {\n"
-        "  return attempt.settledToolEvidence ?? {\n"
-        "    allToolsProvenSettled: false, intentionalTermination: false,\n"
-        "    parkedCodeModeRun: false,\n"
+        "  const messages = attempt.messagesSnapshot ?? [];\n"
+        "  const assistant = messages.findLast((message) =>\n"
+        "    message?.role === 'assistant'\n"
+        "    && (message.content ?? []).some((item) =>\n"
+        "      item?.type === 'toolCall' || item?.type === 'toolUse'));\n"
+        "  const calls = (assistant?.content ?? []).filter((item) =>\n"
+        "    item?.type === 'toolCall' || item?.type === 'toolUse');\n"
+        "  const results = calls.map((call) => messages.findLast((message) =>\n"
+        "    message?.role === 'toolResult' && message?.toolCallId === call.id\n"
+        "    && message?.toolName === call.name));\n"
+        "  return {\n"
+        "    assistant,\n"
+        "    allToolsProvenSettled: calls.length > 0 && results.every(Boolean)\n"
+        "      && attempt.itemLifecycle.startedCount > 0\n"
+        "      && attempt.itemLifecycle.completedCount\n"
+        "        === attempt.itemLifecycle.startedCount\n"
+        "      && attempt.itemLifecycle.activeCount === 0,\n"
+        "    failedToolNames: new Set(calls.filter((_, index) =>\n"
+        "      results[index]?.isError === true).map((call) => call.name)),\n"
+        "    intentionalTermination: false, parkedCodeModeRun: false,\n"
         "  };\n"
         "}\n"
         "function hasCompletedMessagingToolDeliveryEvidence(attempt) {\n"
@@ -171,7 +188,22 @@ def _runtime_tree(tmp_path: Path) -> Path:
     )
     (dist / "embedded-agent-test.js").write_text(
         "function resolveSettledToolBatchEvidence(attempt) {\n"
-        "  return attempt.settledToolEvidence ?? { allToolsProvenSettled: false };\n"
+        "  const messages = attempt.messagesSnapshot ?? [];\n"
+        "  const assistant = messages.findLast((message) =>\n"
+        "    message?.role === 'assistant'\n"
+        "    && (message.content ?? []).some((item) =>\n"
+        "      item?.type === 'toolCall' || item?.type === 'toolUse'));\n"
+        "  const calls = (assistant?.content ?? []).filter((item) =>\n"
+        "    item?.type === 'toolCall' || item?.type === 'toolUse');\n"
+        "  const settled = calls.length > 0 && calls.every((call) =>\n"
+        "    messages.some((message) => message?.role === 'toolResult'\n"
+        "      && message?.toolCallId === call.id\n"
+        "      && message?.toolName === call.name))\n"
+        "    && attempt.itemLifecycle.startedCount > 0\n"
+        "    && attempt.itemLifecycle.completedCount\n"
+        "      === attempt.itemLifecycle.startedCount\n"
+        "    && attempt.itemLifecycle.activeCount === 0;\n"
+        "  return { assistant, allToolsProvenSettled: settled };\n"
         "}\n"
         "function hasMessagingToolDeliveryEvidence(attempt) {\n"
         "  return attempt.didSendViaMessagingTool === true;\n"
@@ -305,13 +337,14 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert EMPTY_STOP_RETRY_LIMIT_MARKER in embedded_text
     assert CONSECUTIVE_EMPTY_STOP_RESET_MARKER in embedded_text
     assert CONSECUTIVE_EMPTY_STOP_RESET_MARKER in worker_text
-    assert UNBOUNDED_LENGTH_CONTINUATION_MARKER in embedded_text
-    assert UNBOUNDED_LENGTH_CONTINUATION_MARKER in worker_text
+    assert BOUNDED_LENGTH_CONTINUATION_MARKER in embedded_text
+    assert BOUNDED_LENGTH_CONTINUATION_MARKER in worker_text
     assert 'Ot.attemptAssistant?.stopReason === "length"' in worker_text
     assert 'input.attemptAssistant?.stopReason === "length"' in embedded_text
     assert "if (__abLengthContinuation)" in embedded_text
-    assert "continuing under the enclosing benchmark deadline" in embedded_text
-    assert "if (!__abLengthContinuation)" not in embedded_text
+    assert "lengthNoProgressAttempts" in embedded_text
+    assert "lastLengthProgressSignature" in embedded_text
+    assert "OPENCLAW_AGENT_BENCH_LENGTH_NO_PROGRESS_RETRIES" in embedded_text
     assert "if (raw === void 0 || raw === \"\") return 1" in embedded_text
     assert "Math.min(parsed, 16)" in embedded_text
     assert "retryState.emptyResponseAttempts = 0" in embedded_text
@@ -370,7 +403,24 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     }
 
 
-def test_v2026_9_2_length_continues_without_consuming_empty_stop_budget(tmp_path):
+def test_v2026_9_2_transformed_retry_bundles_parse_with_real_node(tmp_path):
+    root = _runtime_tree(tmp_path)
+    patch_runtime_tree(root)
+
+    for relative in ("dist/embedded-agent-test.js", "dist/worker-test.mjs"):
+        completed = subprocess.run(
+            [*_node_command(), "--check", str(root / relative)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert completed.returncode == 0, (
+            relative + "\n" + completed.stdout + completed.stderr
+        )
+
+
+def test_v2026_9_2_length_has_independent_no_progress_budget(tmp_path):
     root = _runtime_tree(tmp_path)
 
     patch_runtime_tree(root)
@@ -386,12 +436,14 @@ def test_v2026_9_2_length_continues_without_consuming_empty_stop_budget(tmp_path
     assert "maxEmptyResponseRetryAttempts" in embedded
     assert f"process.env.OPENCLAW_AGENT_BENCH_EMPTY_STOP_RETRIES" in embedded
     assert "Math.min(parsed, 16)" in embedded
-    assert UNBOUNDED_LENGTH_CONTINUATION_MARKER in embedded
+    assert BOUNDED_LENGTH_CONTINUATION_MARKER in embedded
     assert "__abLengthContinuation" in embedded
     assert "retryState.emptyResponseAttempts += 1" in embedded
-    assert embedded.index("if (__abLengthContinuation)") < embedded.index(
-        "retryState.emptyResponseAttempts += 1"
-    )
+    assert "retryState.lengthNoProgressAttempts += 1" in embedded
+    assert "retryState.lastLengthProgressSignature" in embedded
+    assert "OPENCLAW_AGENT_BENCH_LENGTH_NO_PROGRESS_RETRIES" in embedded
+    assert "__abLengthProgressEntries.length > 0" in embedded
+    assert "__abLengthProgressEntries.every(Boolean)" in embedded
 
     safety_guards = (
         "!params.aborted",
@@ -504,6 +556,15 @@ function terminalInput({
   asyncStarted = false, yielded = false, timedOut = false,
   toolFailed = false,
 } = {}) {
+  const toolCall = { type: "toolCall", id: "call-1", name: "edit" };
+  const messagesSnapshot = [{ role: "assistant", content: [toolCall] }];
+  if (settled) {
+    messagesSnapshot.push({
+      role: "toolResult", toolCallId: "call-1", toolName: "edit",
+      isError: toolFailed,
+      content: [{ type: "text", text: toolFailed ? "edit failed" : "edited" }],
+    });
+  }
   return {
     aborted,
     timedOut,
@@ -511,16 +572,16 @@ function terminalInput({
       assistantTexts: ["Historical visible progress before tool calls."],
       currentAttemptAssistant: { content, stopReason: "stop" },
       terminal: { kind: "ok" },
+      messagesSnapshot,
+      itemLifecycle: {
+        startedCount: 1,
+        completedCount: settled ? 1 : 0,
+        activeCount: settled ? 0 : 1,
+      },
       toolMetas: [{ toolCallId: "call-1", asyncStarted }],
       yieldDetected: yielded,
       completedDelivery,
       lastToolError: toolFailed ? { toolName: "edit" } : undefined,
-      settledToolEvidence: {
-        allToolsProvenSettled: settled,
-        failedToolNames: toolFailed ? new Set(["edit"]) : new Set(),
-        intentionalTermination: false,
-        parkedCodeModeRun: false,
-      },
     },
   };
 }
@@ -629,21 +690,35 @@ def test_v2026_9_2_transformed_bundle_executes_retry_state_contract(tmp_path):
     patch_runtime_tree(root)
     bundle = root / "dist/embedded-agent-test.js"
     bundle.write_text(bundle.read_text() + r'''
-function abInput({ progress = "none", outcome = "ok", loopVeto = false } = {}) {
+function abInput({
+  progress = "none", outcome = "ok", loopVeto = false,
+  toolId = "call-1", toolError = false, stopReason = "stop",
+} = {}) {
   const toolProgress = progress === "tool";
+  const toolCall = { type: "toolCall", id: toolId, name: "exec" };
+  const toolResult = {
+    role: "toolResult", toolCallId: toolId, toolName: "exec",
+    isError: toolError,
+    details: loopVeto
+      ? { status: "blocked", deniedReason: "tool-loop" }
+      : { status: "completed" },
+  };
   return {
     attempt: {
       terminal: { kind: outcome === "timeout" ? "timeout" : "ok" },
-      messagesSnapshot: loopVeto ? [{
-        role: "toolResult",
-        details: { status: "blocked", deniedReason: "tool-loop" },
-      }] : [],
-      toolMetas: toolProgress ? [{ toolCallId: "call-1" }] : [],
-      settledToolEvidence: { allToolsProvenSettled: toolProgress },
+      messagesSnapshot: toolProgress
+        ? [{ role: "assistant", content: [toolCall] }, toolResult]
+        : [],
+      itemLifecycle: {
+        startedCount: toolProgress ? 1 : 0,
+        completedCount: toolProgress ? 1 : 0,
+        activeCount: 0,
+      },
+      toolMetas: toolProgress ? [{ toolCallId: toolId, isError: toolError }] : [],
     },
     terminalState: { outcome },
     finalAssistantVisibleText: progress === "assistant" ? "Implemented feature" : "",
-    attemptAssistant: { stopReason: "stop" },
+    attemptAssistant: { stopReason },
     maxEmptyResponseRetryAttempts: 4,
     runParams: { runId: "probe", sessionId: "probe" },
     activeErrorContext: { provider: "probe", model: "probe" },
@@ -652,6 +727,11 @@ function abInput({ progress = "none", outcome = "ok", loopVeto = false } = {}) {
 }
 function empty(state) {
   return retryTerminal(abInput(), state, null, "continue");
+}
+function length(state, options = {}) {
+  return retryTerminal(
+    abInput({ ...options, stopReason: "length" }), state, null, "continue",
+  );
 }
 function assert(value, message) {
   if (!value) throw new Error(message);
@@ -681,14 +761,77 @@ assert(veto.emptyResponseAttempts === 3, "loop veto does not reset streak");
 const timeout = { emptyResponseAttempts: 3 };
 retryTerminal(abInput({ progress: "assistant", outcome: "timeout" }), timeout, null, null);
 assert(timeout.emptyResponseAttempts === 3, "timeout does not reset streak");
+
+const lengthStreak = { emptyResponseAttempts: 2, lengthNoProgressAttempts: 0 };
+for (let i = 0; i < 4; i += 1) {
+  assert(length(lengthStreak)?.action === "retry", "length retry " + i);
+}
+assert(
+  lengthStreak.lengthNoProgressAttempts === 4,
+  "four no-progress length turns consume the independent budget",
+);
+assert(
+  lengthStreak.emptyResponseAttempts === 2,
+  "length retries do not consume the empty-stop budget",
+);
+assert(length(lengthStreak) === undefined, "fifth no-progress length exhausts budget");
+
+process.env.OPENCLAW_AGENT_BENCH_LENGTH_NO_PROGRESS_RETRIES = "1";
+const configuredLength = { emptyResponseAttempts: 0, lengthNoProgressAttempts: 0 };
+assert(length(configuredLength)?.action === "retry", "configured first retry allowed");
+assert(length(configuredLength) === undefined, "configured second retry is blocked");
+delete process.env.OPENCLAW_AGENT_BENCH_LENGTH_NO_PROGRESS_RETRIES;
+
+const lengthToolReset = {
+  emptyResponseAttempts: 4,
+  lengthNoProgressAttempts: 4,
+  lastLengthProgressSignature: "old:exec",
+};
+assert(
+  length(lengthToolReset, { progress: "tool", toolId: "new-call" })?.action
+    === "retry",
+  "new valid settled tool progress resets the length streak",
+);
+assert(
+  lengthToolReset.lengthNoProgressAttempts === 1,
+  "length streak restarts at one after valid progress",
+);
+assert(
+  lengthToolReset.emptyResponseAttempts === 0,
+  "the existing empty streak reset remains independent",
+);
+lengthToolReset.lengthNoProgressAttempts = 4;
+assert(
+  length(lengthToolReset, { progress: "tool", toolId: "new-call" }) === undefined,
+  "replayed settled-tool evidence cannot repeatedly reset length streak",
+);
+
+const lengthText = { emptyResponseAttempts: 0, lengthNoProgressAttempts: 4 };
+assert(
+  length(lengthText, { progress: "assistant" }) === undefined,
+  "assistant text does not reset length no-progress streak",
+);
+const lengthVeto = { emptyResponseAttempts: 0, lengthNoProgressAttempts: 4 };
+assert(
+  length(lengthVeto, { progress: "tool", loopVeto: true }) === undefined,
+  "loop-veto activity does not reset length no-progress streak",
+);
+const lengthFailure = { emptyResponseAttempts: 0, lengthNoProgressAttempts: 4 };
+assert(
+  length(lengthFailure, { progress: "tool", toolError: true }) === undefined,
+  "failed settled tools do not reset length no-progress streak",
+);
 process.stdout.write("TRANSFORMED_RETRY_CONTRACT_OK\n");
 ''')
+    env = dict(os.environ)
+    env["OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY"] = "continue"
     completed = subprocess.run(
         [*_node_command(), str(bundle)],
         check=False,
         capture_output=True,
         text=True,
         timeout=60,
+        env=env,
     )
     assert completed.returncode == 0, completed.stderr
     assert "TRANSFORMED_RETRY_CONTRACT_OK" in completed.stdout
@@ -794,7 +937,7 @@ def test_v2026_9_2_patcher_fails_closed_when_retry_counter_anchor_moves(
         patch_runtime_tree(root)
 
 
-def test_v2026_9_2_patcher_upgrades_counter_patch_without_streak_reset(
+def test_v2026_9_2_patcher_rejects_counter_patch_without_streak_reset(
     tmp_path,
 ):
     root = _runtime_tree(tmp_path)
@@ -812,18 +955,11 @@ def test_v2026_9_2_patcher_upgrades_counter_patch_without_streak_reset(
     assert count == 1
     path.write_text(old_patch)
 
-    upgraded = patch_runtime_tree(root)
-
-    assert CONSECUTIVE_EMPTY_STOP_RESET_MARKER in path.read_text()
-    assert str(path.relative_to(root)) in upgraded[
-        "settled_tool_continuation"
-    ]["files_changed"]
-    assert patch_runtime_tree(root)["settled_tool_continuation"][
-        "files_changed"
-    ] == []
+    with pytest.raises(RuntimeError, match="stale or incomplete"):
+        patch_runtime_tree(root)
 
 
-def test_v2026_9_2_patcher_migrates_legacy_consecutive_reset(tmp_path):
+def test_v2026_9_2_patcher_rejects_legacy_consecutive_reset(tmp_path):
     root = _runtime_tree(tmp_path)
     patch_runtime_tree(root)
     path = root / "dist/embedded-agent-test.js"
@@ -836,15 +972,24 @@ def test_v2026_9_2_patcher_migrates_legacy_consecutive_reset(tmp_path):
     )
     path.write_text(text)
 
-    upgraded = patch_runtime_tree(root)
+    with pytest.raises(RuntimeError, match="stale or incomplete"):
+        patch_runtime_tree(root)
 
-    updated = path.read_text()
-    assert LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_MARKER not in updated
-    assert CONSECUTIVE_EMPTY_STOP_RESET_MARKER in updated
-    assert "classifyAssistantTurn" not in updated
-    assert str(path.relative_to(root)) in upgraded[
-        "settled_tool_continuation"
-    ]["files_changed"]
+
+def test_v2026_9_2_patcher_rejects_unbounded_length_patch(tmp_path):
+    root = _runtime_tree(tmp_path)
+    patch_runtime_tree(root)
+    path = root / "dist/embedded-agent-test.js"
+    path.write_text(
+        path.read_text().replace(
+            BOUNDED_LENGTH_CONTINUATION_MARKER,
+            "AB_HARNESS_OPENCLAW_V2026_9_2_"
+            "UNBOUNDED_LENGTH_CONTINUATION_BEGIN",
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="stale unbounded-length"):
+        patch_runtime_tree(root)
 
 
 def test_v2026_9_2_patcher_fails_closed_on_missing_reset_binding(tmp_path):
@@ -922,7 +1067,8 @@ def test_v2026_9_2_builder_does_not_reapply_legacy_runtime_patches():
     assert NONEMPTY_LENGTH_ELIGIBILITY_MARKER in audit
     assert CURRENT_ASSISTANT_EMPTY_STOP_MARKER in audit
     assert CURRENT_TERMINAL_PAYLOAD_MARKER in audit
-    assert UNBOUNDED_LENGTH_CONTINUATION_MARKER in audit
+    assert BOUNDED_LENGTH_CONTINUATION_MARKER in audit
+    assert "stale_unbounded_length_continuation_present" in audit
     assert CONSECUTIVE_EMPTY_STOP_RESET_MARKER in audit
     assert SETTLED_CONTINUATION_TOOL_ERROR_MARKER in audit
     assert EMPTY_STOP_RETRY_LIMIT_MARKER in audit

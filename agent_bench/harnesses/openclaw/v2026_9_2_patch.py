@@ -60,8 +60,8 @@ CURRENT_ASSISTANT_EMPTY_STOP_MARKER = (
 CURRENT_TERMINAL_PAYLOAD_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_TERMINAL_PAYLOAD_V2_BEGIN"
 )
-UNBOUNDED_LENGTH_CONTINUATION_MARKER = (
-    "AB_HARNESS_OPENCLAW_V2026_9_2_UNBOUNDED_LENGTH_CONTINUATION_BEGIN"
+BOUNDED_LENGTH_CONTINUATION_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_BOUNDED_NO_PROGRESS_LENGTH_V1_BEGIN"
 )
 SETTLED_CONTINUATION_TOOL_ERROR_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_TOOL_ERROR_BEGIN"
@@ -81,6 +81,9 @@ LOOP_VETO_RECOVERY_PROBE_MARKER = (
 
 SETTLED_TOOL_POLICY_ENV = "OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY"
 EMPTY_STOP_RETRIES_ENV = "OPENCLAW_AGENT_BENCH_EMPTY_STOP_RETRIES"
+LENGTH_NO_PROGRESS_RETRIES_ENV = (
+    "OPENCLAW_AGENT_BENCH_LENGTH_NO_PROGRESS_RETRIES"
+)
 LOOP_VETO_RECOVERY_PROBE_ENV = (
     "OPENCLAW_AGENT_BENCH_LOOP_VETO_RECOVERY_PROBE"
 )
@@ -538,7 +541,7 @@ hasCurrentTerminalPayload: (() => {{
         path for path in dist_files
         if length_budget_readable_anchor.search(_read(path))
         or length_budget_minified_anchor.search(_read(path))
-        or UNBOUNDED_LENGTH_CONTINUATION_MARKER in _read(path)
+        or BOUNDED_LENGTH_CONTINUATION_MARKER in _read(path)
     ]
     if not length_budget_targets:
         raise RuntimeError(
@@ -633,97 +636,110 @@ hasCurrentTerminalPayload: (() => {{
         input_name = match.group("input")
         logger = match.group("logger")
         reset_source = consecutive_reset_source(indent, input_name, state)
-        return f'''{indent}/* {UNBOUNDED_LENGTH_CONTINUATION_MARKER} */
+        return f'''{indent}/* {BOUNDED_LENGTH_CONTINUATION_MARKER} */
 {reset_source}
+{indent}const __abLengthRetryLimit = (() => {{
+{indent}\tconst raw = process.env.{LENGTH_NO_PROGRESS_RETRIES_ENV};
+{indent}\tif (raw === void 0 || raw === "") return 4;
+{indent}\tconst parsed = Number.parseInt(raw, 10);
+{indent}\treturn Number.isSafeInteger(parsed) && parsed >= 0
+{indent}\t\t? Math.min(parsed, 16)
+{indent}\t\t: 4;
+{indent}}})();
+{indent}{state}.lengthNoProgressAttempts ??= 0;
+{indent}if (process.env.{SETTLED_TOOL_POLICY_ENV} === "continue"
+{indent}\t&& !isEmbeddedRunTerminalAbort({input_name}.terminalState.outcome)
+{indent}\t&& !isEmbeddedRunTerminalTimeout({input_name}.terminalState.outcome)
+{indent}\t&& {input_name}.attempt?.terminal?.kind !== "failed"
+{indent}\t&& {input_name}.attempt?.terminal?.kind !== "timeout") {{
+{indent}\tconst __abLengthEvidence = resolveSettledToolBatchEvidence({input_name}.attempt);
+{indent}\tconst __abLengthToolCalls = Array.isArray(__abLengthEvidence.assistant?.content)
+{indent}\t\t? __abLengthEvidence.assistant.content.filter(
+{indent}\t\t\t(item) => (item?.type === "toolCall" || item?.type === "toolUse")
+{indent}\t\t\t\t&& typeof item?.id === "string" && item.id.length > 0
+{indent}\t\t)
+{indent}\t\t: [];
+{indent}\tconst __abLengthResults = {input_name}.attempt.messagesSnapshot ?? [];
+{indent}\tconst __abLengthProgressEntries = __abLengthToolCalls.map((call) => {{
+{indent}\t\tconst result = __abLengthResults.findLast(
+{indent}\t\t\t(message) => message?.role === "toolResult"
+{indent}\t\t\t\t&& message?.toolCallId === call.id
+{indent}\t\t);
+{indent}\t\tconst meta = ({input_name}.attempt.toolMetas ?? []).findLast(
+{indent}\t\t\t(entry) => entry?.toolCallId === call.id
+{indent}\t\t);
+{indent}\t\tconst blocked = result?.details?.status === "blocked";
+{indent}\t\tif (!result || result?.isError === true || meta?.isError === true
+{indent}\t\t\t|| meta?.asyncStarted === true || blocked) return null;
+{indent}\t\treturn `${{call.id}}:${{String(call.name ?? "")}}`;
+{indent}\t}});
+{indent}\tconst __abLengthProgressSignature =
+{indent}\t\t__abLengthEvidence.allToolsProvenSettled
+{indent}\t\t&& __abLengthProgressEntries.length > 0
+{indent}\t\t&& __abLengthProgressEntries.every(Boolean)
+{indent}\t\t\t? __abLengthProgressEntries.join("|")
+{indent}\t\t\t: "";
+{indent}\tif (__abLengthProgressSignature
+{indent}\t\t&& __abLengthProgressSignature !== {state}.lastLengthProgressSignature) {{
+{indent}\t\t{state}.lastLengthProgressSignature = __abLengthProgressSignature;
+{indent}\t\t{state}.lengthNoProgressAttempts = 0;
+{indent}\t}}
+{indent}}}
 {indent}const __abLengthContinuation =
 {indent}\tprocess.env.{SETTLED_TOOL_POLICY_ENV} === "continue"
 {indent}\t&& {input_name}.attemptAssistant?.stopReason === "length"
 {indent}\t&& {instruction};
 {indent}if (!{reason} && {instruction}
-{indent}\t&& (__abLengthContinuation
-{indent}\t\t|| {state}.emptyResponseAttempts < {input_name}.maxEmptyResponseRetryAttempts)) {{
+{indent}\t&& ((__abLengthContinuation
+{indent}\t\t&& {state}.lengthNoProgressAttempts < __abLengthRetryLimit)
+{indent}\t\t|| (!__abLengthContinuation
+{indent}\t\t\t&& {state}.emptyResponseAttempts < {input_name}.maxEmptyResponseRetryAttempts))) {{
 {indent}\t{input_name}.activateInternalPrompt({instruction});
 {indent}\tif (__abLengthContinuation) {{
-{indent}\t\t{logger}.warn(`length-truncated response detected: runId=${{{input_name}.runParams.runId}} sessionId=${{{input_name}.runParams.sessionId}} provider=${{{input_name}.activeErrorContext.provider}}/${{{input_name}.activeErrorContext.model}} — continuing under the enclosing benchmark deadline`);
+{indent}\t\t{state}.lengthNoProgressAttempts += 1;
+{indent}\t\t{logger}.warn(`length-truncated response detected: runId=${{{input_name}.runParams.runId}} sessionId=${{{input_name}.runParams.sessionId}} provider=${{{input_name}.activeErrorContext.provider}}/${{{input_name}.activeErrorContext.model}} — retrying ${{{state}.lengthNoProgressAttempts}}/${{__abLengthRetryLimit}} without new settled-tool progress`);
 {indent}\t}} else {{
 {indent}\t\t{state}.emptyResponseAttempts += 1;
 {indent}\t\t{logger}.warn(`empty response detected: runId=${{{input_name}.runParams.runId}} sessionId=${{{input_name}.runParams.sessionId}} provider=${{{input_name}.activeErrorContext.provider}}/${{{input_name}.activeErrorContext.model}} — retrying ${{{state}.emptyResponseAttempts}}/${{{input_name}.maxEmptyResponseRetryAttempts}} with visible-answer continuation`);
 {indent}\t}}
 {indent}\treturn {{ action: "retry" }};
 {indent}}}
-{indent}/* AB_HARNESS_OPENCLAW_V2026_9_2_UNBOUNDED_LENGTH_CONTINUATION_END */'''
+{indent}if (!{reason} && __abLengthContinuation
+{indent}\t&& {state}.lengthNoProgressAttempts >= __abLengthRetryLimit) {{
+{indent}\t{logger}.warn(`length-truncated response retry budget exhausted: runId=${{{input_name}.runParams.runId}} sessionId=${{{input_name}.runParams.sessionId}} attempts=${{{state}.lengthNoProgressAttempts}} limit=${{__abLengthRetryLimit}}`);
+{indent}}}
+{indent}/* AB_HARNESS_OPENCLAW_V2026_9_2_BOUNDED_NO_PROGRESS_LENGTH_V1_END */'''
+
+    stale_unbounded_targets = [
+        path for path in dist_files
+        if "AB_HARNESS_OPENCLAW_V2026_9_2_UNBOUNDED_LENGTH_CONTINUATION_BEGIN"
+        in _read(path)
+    ]
+    if stale_unbounded_targets:
+        raise RuntimeError(
+            "stale unbounded-length continuation patch detected; rebuild from "
+            "the clean v2026.9.2 base: "
+            + ", ".join(str(path) for path in stale_unbounded_targets)
+        )
+
+    stale_or_incomplete_length_targets = [
+        path for path in dist_files
+        if LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_MARKER in _read(path)
+        or (
+            BOUNDED_LENGTH_CONTINUATION_MARKER in _read(path)
+            and CONSECUTIVE_EMPTY_STOP_RESET_MARKER not in _read(path)
+        )
+    ]
+    if stale_or_incomplete_length_targets:
+        raise RuntimeError(
+            "stale or incomplete length-continuation patch detected; rebuild "
+            "from the clean v2026.9.2 base: "
+            + ", ".join(str(path) for path in stale_or_incomplete_length_targets)
+        )
 
     for path in length_budget_targets:
         text = _read(path)
-        if LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_MARKER in text:
-            legacy_pattern = re.compile(
-                rf"(?P<indent>^[ \t]*)/\* "
-                rf"{re.escape(LEGACY_CONSECUTIVE_EMPTY_STOP_RESET_MARKER)} "
-                rf"\*/.*?^(?P=indent)/\* AB_HARNESS_OPENCLAW_V2026_9_2_"
-                rf"CONSECUTIVE_EMPTY_STOP_RESET_END \*/\n?",
-                flags=re.MULTILINE | re.DOTALL,
-            )
-            text, legacy_count = legacy_pattern.subn("", text, count=1)
-            if legacy_count != 1:
-                raise RuntimeError(
-                    f"legacy consecutive-empty reset block is malformed in {path}"
-                )
-            _write(path, text)
-            changed.add(path)
-        if (
-            UNBOUNDED_LENGTH_CONTINUATION_MARKER in text
-            and CONSECUTIVE_EMPTY_STOP_RESET_MARKER not in text
-        ):
-            require_reset_bindings(text, path)
-            marker_matches = list(re.finditer(
-                rf"(?P<indent>^[ \t]*)/\* "
-                rf"{re.escape(UNBOUNDED_LENGTH_CONTINUATION_MARKER)} \*/$",
-                text,
-                flags=re.MULTILINE,
-            ))
-            if len(marker_matches) != 1:
-                raise RuntimeError(
-                    "existing empty-response counter marker is ambiguous in "
-                    f"{path}"
-                )
-            marker_match = marker_matches[0]
-            end_marker = (
-                "AB_HARNESS_OPENCLAW_V2026_9_2_"
-                "UNBOUNDED_LENGTH_CONTINUATION_END"
-            )
-            end = text.find(end_marker, marker_match.end())
-            if end < 0:
-                raise RuntimeError(
-                    f"existing empty-response counter end marker missing in {path}"
-                )
-            block = text[marker_match.end():end]
-            counter_match = re.search(
-                rf"\|\|\s*(?P<state>{ident})\.emptyResponseAttempts"
-                rf"\s*<\s*(?P<input>{ident})"
-                r"\.maxEmptyResponseRetryAttempts",
-                block,
-            )
-            if counter_match is None or not re.search(
-                rf"const\s+__abLengthContinuation\s*=.*?"
-                rf"{re.escape(counter_match.group('input'))}"
-                r"\.attemptAssistant\?\.stopReason",
-                block,
-                flags=re.DOTALL,
-            ):
-                raise RuntimeError(
-                    "existing empty-response counter structure missing in "
-                    f"{path}"
-                )
-            insert_at = marker_match.end()
-            reset_source = consecutive_reset_source(
-                marker_match.group("indent"),
-                counter_match.group("input"),
-                counter_match.group("state"),
-            )
-            text = text[:insert_at] + "\n" + reset_source + text[insert_at:]
-            _write(path, text)
-            changed.add(path)
-        if UNBOUNDED_LENGTH_CONTINUATION_MARKER not in text:
+        if BOUNDED_LENGTH_CONTINUATION_MARKER not in text:
             require_reset_bindings(text, path)
             readable_count = len(length_budget_readable_anchor.findall(text))
             minified_count = len(length_budget_minified_anchor.findall(text))
@@ -1143,9 +1159,9 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
             "dist/**/*",
             CURRENT_TERMINAL_PAYLOAD_MARKER,
         ),
-        "unbounded_length_continuation": (
+        "bounded_no_progress_length": (
             "dist/**/*",
-            UNBOUNDED_LENGTH_CONTINUATION_MARKER,
+            BOUNDED_LENGTH_CONTINUATION_MARKER,
         ),
         "consecutive_empty_stop_reset": (
             "dist/**/*",

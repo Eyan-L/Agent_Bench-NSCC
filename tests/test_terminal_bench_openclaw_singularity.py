@@ -260,6 +260,9 @@ def test_terminal_bench_openclaw_singularity_returns_runtime_handle(tmp_path, mo
     assert "OPENCLAW_AGENT_BENCH_EMPTY_STOP_RETRIES" not in (
         container.specs[1].env
     )
+    assert "OPENCLAW_AGENT_BENCH_LENGTH_NO_PROGRESS_RETRIES" not in (
+        container.specs[1].env
+    )
 
     task_workspace_mounts = [
         mount
@@ -424,6 +427,7 @@ def test_roadmap_v9_enables_tools_capable_empty_turn_continuation(
     assert tb_app._roadmap_v9_continuation_env("roadmap_bench") == {
         "OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY": "continue",
         "OPENCLAW_AGENT_BENCH_EMPTY_STOP_RETRIES": "4",
+        "OPENCLAW_AGENT_BENCH_LENGTH_NO_PROGRESS_RETRIES": "4",
         "OPENCLAW_AGENT_BENCH_LOOP_VETO_RECOVERY_PROBE": "1",
     }
     assert tb_app._roadmap_v9_continuation_env("terminal_bench") == {}
@@ -1094,6 +1098,62 @@ def test_roadmap_done_parent_empty_stop_is_blocked_incomplete(tmp_path):
     assert lifecycle["workspaceQuiesced"] is True
 
 
+def test_roadmap_done_parent_length_is_blocked_and_quiesced(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_assistant_event("partial implementation", stop_reason="length")],
+        child_statuses=(),
+        parent_status="done",
+    )
+
+    class Harness:
+        def quiesce_orphan_children(self, _env_info):
+            return {"workspaceQuiesced": True}
+
+    condition = _roadmap_condition_for_state(tmp_path, Harness())
+    condition.terminal_stop_confirmation_seconds = 0.0
+
+    payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "stale CLI liveness",
+        deadline=time.monotonic() + 10,
+    )
+
+    assert "length-truncated assistant turn" in error
+    assert condition._last_completion_status == "blocked_incomplete"
+    assert payload["result"]["meta"]["livenessState"] == "blocked"
+    assert payload["result"]["meta"]["stopReason"] == "length"
+    lifecycle = payload["result"]["meta"]["agentBenchLifecycle"]
+    assert lifecycle["terminalEvidence"] == (
+        "durable_session_terminal_incomplete_length"
+    )
+    assert lifecycle["workspaceQuiesced"] is True
+
+
+def test_roadmap_explicit_done_length_remains_normal_completion(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [_assistant_event("DONE", stop_reason="length")],
+        child_statuses=(),
+        parent_status="done",
+    )
+    condition = _roadmap_condition_for_state(tmp_path)
+
+    payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "",
+        deadline=time.monotonic() + 10,
+    )
+
+    assert error == ""
+    assert condition._last_completion_status == "normal_completion"
+    assert payload["result"]["meta"]["agentBenchLifecycle"][
+        "terminalEvidence"
+    ] == "explicit_done"
+
+
 def test_roadmap_done_parent_current_payload_is_not_empty_stop(tmp_path):
     sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
     event = _assistant_event("")
@@ -1265,7 +1325,7 @@ def test_roadmap_post_turn_watch_does_not_freeze_transient_failure(
     ] == "explicit_done"
 
 
-def test_roadmap_invocation_watch_accepts_stable_length_termination(tmp_path):
+def test_roadmap_invocation_watch_marks_stable_length_incomplete(tmp_path):
     sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
     _write_roadmap_session_state(
         sessions_dir,
@@ -1278,17 +1338,12 @@ def test_roadmap_invocation_watch_accepts_stable_length_termination(tmp_path):
     signature, status, diagnostic = (
         condition._durable_invocation_terminal_evidence()
     )
-    payload = condition._payload_for_durable_invocation_terminal(
-        status, diagnostic
-    )
-
     assert signature[1] == "done"
-    assert status == "normal_completion"
-    assert payload["result"]["meta"]["done_marker"] is False
-    assert payload["result"]["meta"]["stopReason"] == "length"
-    assert condition._classify_completion(payload) == (
-        "normal_completion", ""
-    )
+    assert status == "blocked_incomplete"
+    assert "length-truncated assistant turn" in diagnostic
+    assert condition._payload_for_durable_invocation_terminal(
+        status, diagnostic
+    ) is None
 
 
 def test_roadmap_invocation_watch_marks_stable_empty_stop_incomplete(tmp_path):
@@ -1331,7 +1386,7 @@ def test_roadmap_invocation_watch_accepts_terminal_parent_with_orphan_child(
 
     assert signature[1] == "done"
     assert signature[6] == 1
-    assert status == "normal_completion"
+    assert status == "blocked_incomplete"
 
 
 def test_roadmap_invocation_watch_rejects_nonstandard_stop_reasons(
@@ -1351,7 +1406,7 @@ def test_roadmap_invocation_watch_rejects_nonstandard_stop_reasons(
         assert condition._durable_invocation_terminal_evidence() is None
 
 
-def test_roadmap_invocation_watch_interrupts_stable_normal_terminal(
+def test_roadmap_invocation_watch_interrupts_stable_incomplete_length(
     tmp_path, monkeypatch
 ):
     sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
@@ -1396,7 +1451,7 @@ def test_roadmap_invocation_watch_interrupts_stable_normal_terminal(
     assert len(killed) == 1
     assert stdout == ""
     assert stderr == "terminated"
-    assert interrupted[0] == "normal_completion"
+    assert interrupted[0] == "blocked_incomplete"
     assert "status=done" in interrupted[1]
 
 
