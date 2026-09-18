@@ -102,8 +102,11 @@ LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V3_MARKER = (
 LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V4_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V4_BEGIN"
 )
-CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER = (
+LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V5_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V5_BEGIN"
+)
+CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V6_BEGIN"
 )
 LEGACY_COMPACTION_LENGTH_STREAK_RESET_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_COMPACTION_LENGTH_STREAK_RESET_V1_BEGIN"
@@ -1279,6 +1282,7 @@ def _patch_context_pressure_terminal_recovery(root: Path) -> list[str]:
         or LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER in _read(path)
         or LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V3_MARKER in _read(path)
         or LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V4_MARKER in _read(path)
+        or LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V5_MARKER in _read(path)
         or LEGACY_COMPACTION_RETRY_STREAK_RESET_MARKER in _read(path)
         or LEGACY_CONTEXT_RECOVERY_STREAK_RESET_V3_MARKER in _read(path)
         or LEGACY_CONTEXT_RECOVERY_STREAK_RESET_V4_MARKER in _read(path)
@@ -1392,6 +1396,13 @@ function __abResolveRoadmapContextPressureTerminal(attempt, assistant) {{
 \t\t...attempt,
 \t\tacceptedSessionSpawns: [],
 \t}});
+\tconst hasCompletionOwningSpawn =
+\t\tArray.isArray(attempt?.acceptedSessionSpawns)
+\t\t&& attempt.acceptedSessionSpawns.some(
+\t\t\t(spawn) => spawn?.expectsCompletionMessage === true
+\t\t);
+\tconst runtimeContinuationStarted =
+\t\tattempt?.runtimeContinuationStarted === true;
 \tconst stopReason = String(assistant?.stopReason ?? "");
 \tconst candidate = stopReason === "length" && !currentReasoningOnly && !explicitDone
 \t\t? "length"
@@ -1422,6 +1433,8 @@ function __abResolveRoadmapContextPressureTerminal(attempt, assistant) {{
 \t\t|| attempt?.terminal?.kind === "timeout"
 \t\t|| Number(attempt?.itemLifecycle?.activeCount ?? 0) > 0
 \t\t|| nonSpawnTerminalOwner
+\t\t|| hasCompletionOwningSpawn
+\t\t|| runtimeContinuationStarted
 \t\t|| evidence.intentionalTermination
 \t\t|| evidence.parkedCodeModeRun) return null;
 \treturn {{
@@ -1432,7 +1445,7 @@ function __abResolveRoadmapContextPressureTerminal(attempt, assistant) {{
 \t\tpromptBudgetBeforeReserve,
 \t}};
 }}
-/* AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V5_END */
+/* AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V6_END */
 '''
 
     required_bindings = (
@@ -1452,6 +1465,7 @@ function __abResolveRoadmapContextPressureTerminal(attempt, assistant) {{
             or LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER in text
             or LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V3_MARKER in text
             or LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V4_MARKER in text
+            or LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V5_MARKER in text
             or LEGACY_COMPACTION_RETRY_STREAK_RESET_MARKER in text
             or LEGACY_CONTEXT_RECOVERY_STREAK_RESET_V3_MARKER in text
             or LEGACY_CONTEXT_RECOVERY_STREAK_RESET_V4_MARKER in text
@@ -2218,7 +2232,7 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
         helper_start = text.find(CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER)
         helper_end = text.find(
             "AB_HARNESS_OPENCLAW_V2026_9_2_"
-            "CONTEXT_PRESSURE_TERMINAL_RECOVERY_V5_END"
+            "CONTEXT_PRESSURE_TERMINAL_RECOVERY_V6_END"
         )
         helper_block = (
             text[helper_start:helper_end]
@@ -2247,6 +2261,7 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
             or LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER in text
             or LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V3_MARKER in text
             or LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V4_MARKER in text
+            or LEGACY_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V5_MARKER in text
             or LEGACY_COMPACTION_RETRY_STREAK_RESET_MARKER in text
             or LEGACY_CONTEXT_RECOVERY_STREAK_RESET_V3_MARKER in text
             or LEGACY_CONTEXT_RECOVERY_STREAK_RESET_V4_MARKER in text
@@ -2260,6 +2275,9 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
             or not re.search(r'emptyResponseAttempts\s*=\s*0', text)
             or "hasNonToolTerminalState({" not in helper_block
             or "acceptedSessionSpawns: []" not in helper_block
+            or "hasCompletionOwningSpawn" not in helper_block
+            or "spawn?.expectsCompletionMessage === true" not in helper_block
+            or "runtimeContinuationStarted === true" not in helper_block
             or "hasOutboundDeliveryEvidence(attempt)" in helper_block
             or "(attempt?.assistantTexts ?? [])" not in helper_block
             or '"accumulated-empty"' not in helper_block
