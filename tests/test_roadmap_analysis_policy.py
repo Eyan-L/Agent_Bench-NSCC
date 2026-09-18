@@ -332,7 +332,9 @@ def test_comparison_bundle_copies_selected_trajectory_evidence(tmp_path):
     (stale / "old-task.jsonl").write_text("stale")
 
     bundle = compare._impl._prepare_bundle_dir(output_dir, "comparison")
-    copied = compare._impl._copy_selected_task_artifacts([record], bundle)
+    copied, shared = compare._impl._copy_selected_task_artifacts(
+        [record], bundle
+    )
 
     assert {path.name for path in bundle.iterdir()} == set(
         compare._impl.BUNDLE_SUBDIRS
@@ -373,3 +375,4 @@ def test_comparison_bundle_copies_selected_trajectory_evidence(tmp_path):
     ).is_file()
     assert len(copied) == 1
     assert copied[0]["instance_id"] == "task/selected"
+    assert shared == []

@@ -238,9 +238,54 @@ def record_to_dict(record) -> dict[str, Any]:
                 phase.get("agent_execution_end_ns")
             ),
             "child_intervals": _child_intervals(record),
+            "artifact_links": _artifact_links(record),
         }
     )
     return result
+
+
+def _artifact_links(record) -> dict[str, str | None]:
+    """Portable links resolved relative to the generated bundle root."""
+    task_dir = _impl._artifact_task_dir(record)
+    arm = record.arm
+    shared_root = _impl.discover_shared_job_root(record.run_dir)
+    timeline_available = (
+        (record.run_dir / "spans_timeline.html").is_file()
+        or (record.run_dir / "spans.jsonl").is_file()
+    )
+
+    def available(category: str, name: str) -> str | None:
+        return (
+            f"{category}/{arm}/{task_dir}/{name}"
+            if (record.run_dir / name).is_file()
+            else None
+        )
+
+    return {
+        "details": f"04_final_workspace_score/{arm}/{task_dir}/index.html",
+        "spans_timeline": (
+            f"02_timeline_model_trace/{arm}/{task_dir}/spans_timeline.html"
+            if timeline_available
+            else None
+        ),
+        "conversation": (
+            f"01_durable_session_records/{arm}/{task_dir}/index.html"
+            if (record.run_dir / "conversation").is_dir()
+            else None
+        ),
+        "resources": available("03_execution_evidence", "util.jsonl"),
+        "execution_log": available(
+            "03_execution_evidence", "openclaw_gateway.log"
+        ),
+        "candidate": available("04_final_workspace_score", "candidate.patch"),
+        "verdict": available("04_final_workspace_score", "verdict.json"),
+        "job_evidence": (
+            f"03_execution_evidence/{arm}/_jobs/"
+            f"{_impl._safe_name(record.job_id)}/index.html"
+            if shared_root is not None
+            else None
+        ),
+    }
 
 
 def summarize_arm(records) -> dict[str, Any]:
@@ -309,6 +354,7 @@ def compare_paired(
         bootstrap_samples=bootstrap_samples,
     )
     sub_map = {record.key: record for record in subagent}
+    single_map = {record.key: record for record in single_agent}
     for row in rows:
         key = (row["instance_id"], row["seed"])
         record = sub_map[key]
@@ -320,6 +366,13 @@ def compare_paired(
             "agent_execution_end_ns"
         )
         row["subagent_child_intervals"] = flat.get("child_intervals") or []
+        row["subagent_artifact_links"] = flat.get("artifact_links") or {}
+        single_record = single_map.get(key)
+        row["single_agent_artifact_links"] = (
+            record_to_dict(single_record).get("artifact_links") or {}
+            if single_record is not None
+            else {}
+        )
     summary["latency"]["metric"] = "agent_execution_seconds"
     summary["latency"]["legacy_fallback"] = None
     return summary, rows
@@ -355,6 +408,7 @@ def render_markdown(
     paired_rows=None,
     duplicate_count: int = 0,
     figure_names: Sequence[str] = (),
+    selection_diagnostics: dict[str, Any] | None = None,
 ) -> str:
     lines = [
         "# RoadmapBench paired accuracy / latency / trajectory report",
@@ -446,8 +500,8 @@ def render_markdown(
                 "",
                 "| Task | Seed | Sub reward | Single reward | Δ reward | Sub latency "
                 "(s) | Single latency (s) | Speedup | Materialized subagents | "
-                "Max concurrent subagents | Trajectory |",
-                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+                "Max concurrent subagents | Trajectory | Artifacts |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
             ]
             for row in paired_rows:
                 trajectory_ok = (
@@ -466,7 +520,8 @@ def render_markdown(
                     f"{_impl._fmt(row['subagent_speedup_single_over_subagent'])}x | "
                     f"{_impl._fmt(row.get('subagent_materialized_subagent_count'), 0)} | "
                     f"{_impl._fmt(row.get('subagent_max_concurrent_subagents'), 0)} | "
-                    f"{trajectory_ok} |"
+                    f"{trajectory_ok} | "
+                    f"{_paired_artifact_markdown(row)} |"
                 )
 
         if paired_summary["subagent_only"] or paired_summary["single_agent_only"]:
@@ -488,6 +543,41 @@ def render_markdown(
                     )
                 )
 
+    if selection_diagnostics:
+        reasons = selection_diagnostics.get("excluded_reason_counts") or {}
+        lines += [
+            "",
+            "## Selection coverage",
+            "",
+            f"- candidate task+seed keys: **{selection_diagnostics.get('candidate_key_count')}**",
+            f"- included pairs: **{selection_diagnostics.get('included_pair_count')}**",
+            f"- excluded pairs: **{selection_diagnostics.get('excluded_pair_count')}**",
+        ]
+        if reasons:
+            lines.append(
+                "- exclusion reasons: "
+                + ", ".join(f"`{key}`={value}" for key, value in sorted(reasons.items()))
+            )
+
+    selected_records = [*subagent, *(single_agent or [])]
+    if selected_records:
+        lines += [
+            "",
+            "## Selected run artifacts",
+            "",
+            "| Task | Seed | Arm | Job | Portable artifacts |",
+            "|---|---:|---|---|---|",
+        ]
+        for record in sorted(
+            selected_records,
+            key=lambda item: (item.instance_id, item.seed, item.arm),
+        ):
+            links = record_to_dict(record).get("artifact_links") or {}
+            lines.append(
+                f"| {record.instance_id} | {record.seed} | {record.arm} | "
+                f"{record.job_id} | {_artifact_markdown(links, 'view')} |"
+            )
+
     if duplicate_count:
         lines += [
             "",
@@ -500,6 +590,37 @@ def render_markdown(
 
     lines.append("")
     return "\n".join(lines)
+
+
+def _artifact_markdown(links: dict[str, Any], label: str) -> str:
+    parts = []
+    for short, key in (
+        ("details", "details"),
+        ("spans", "spans_timeline"),
+        ("chat", "conversation"),
+        ("util", "resources"),
+        ("logs", "execution_log"),
+        ("candidate", "candidate"),
+        ("verdict", "verdict"),
+        ("job", "job_evidence"),
+    ):
+        target = links.get(key)
+        if target:
+            parts.append(f"[{short}]({target})")
+    return f"{label}: " + ("/".join(parts) if parts else "not collected")
+
+
+def _paired_artifact_markdown(row: dict[str, Any]) -> str:
+    return "<br>".join(
+        (
+            _artifact_markdown(
+                row.get("subagent_artifact_links") or {}, "subagent"
+            ),
+            _artifact_markdown(
+                row.get("single_agent_artifact_links") or {}, "single"
+            ),
+        )
+    )
 
 
 def _plot_subagent_count(

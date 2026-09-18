@@ -420,8 +420,8 @@ def _render_markdown(
         "",
         "| Task | Seed | Job | Status | Reward | Test pass | Latency (s) | "
         "Materialized subagents | Max concurrent | Prompt tokens | Tool calls | "
-        "Compactions | Overflows | Loops | Trajectory |",
-        "|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "Compactions | Overflows | Loops | Trajectory | Artifacts |",
+        "|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
     ]
     for row in rows:
         lines.append(
@@ -436,7 +436,8 @@ def _render_markdown(
             f"{base._fmt(base._number(row.get('compaction_count')), 0)} | "
             f"{base._fmt(base._number(row.get('context_overflow_count')), 0)} | "
             f"{base._fmt(base._number(row.get('loop_detected_count')), 0)} | "
-            f"{'yes' if row.get('trajectory_present') else 'NO'} |"
+            f"{'yes' if row.get('trajectory_present') else 'NO'} | "
+            f"{base._artifact_markdown(row.get('artifact_links') or {}, 'view')} |"
         )
 
     if duplicate_count:
@@ -470,16 +471,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     duplicate_count = sum(len(group) - 1 for group in duplicates.values())
 
     basename = base._safe_name(args.name or _default_name(records, args.arm))
+    bundle_dir = base._impl._prepare_bundle_dir(
+        output_dir,
+        basename,
+        source_dirs=base._impl._artifact_source_dirs(records),
+    )
     figure_paths: list[Path] = []
     if not args.no_plots:
         figure_paths = generate_single_arm_plots(
             rows,
-            output_dir,
+            bundle_dir / "05_figures",
             basename,
             arm=args.arm,
             dpi=args.plot_dpi,
         )
-    figure_names = [path.name for path in figure_paths]
+    figure_names = [str(path.relative_to(bundle_dir)) for path in figure_paths]
+
+    copied_index, shared_index = base._impl._copy_selected_task_artifacts(
+        records, bundle_dir
+    )
+    artifact_index_path = bundle_dir / f"{basename}-artifact-index.json"
 
     report = {
         "schema_version": 2,
@@ -495,6 +506,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         "duplicates": base._duplicates_json(duplicates),
         "figures": figure_names,
         "retry_precedence": "rightmost command-line input wins unconditionally",
+        "artifact_bundle": {
+            "subdirectories": list(base._impl.BUNDLE_SUBDIRS),
+            "artifact_index": artifact_index_path.name,
+            "selected_task_count": len(records),
+            "complete_run_count": sum(
+                bool(item.get("complete")) for item in copied_index
+            ),
+            "run_count_with_export_errors": sum(
+                not bool(item.get("complete")) for item in copied_index
+            ),
+            "shared_job_artifact_count": len(shared_index),
+            "shared_job_export_error_count": sum(
+                not bool(item.get("complete")) for item in shared_index
+            ),
+        },
     }
     markdown = _render_markdown(
         records,
@@ -507,10 +533,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         figure_names=figure_names,
     )
 
-    json_path = output_dir / f"{basename}.json"
-    md_path = output_dir / f"{basename}.md"
-    tasks_csv = output_dir / f"{basename}-tasks.csv"
-    trajectories_json = output_dir / f"{basename}-trajectories.json"
+    json_path = bundle_dir / f"{basename}.json"
+    md_path = bundle_dir / f"{basename}.md"
+    tasks_csv = bundle_dir / f"{basename}-tasks.csv"
+    trajectories_json = bundle_dir / f"{basename}-trajectories.json"
 
     json_path.write_text(json.dumps(report, indent=2) + "\n")
     md_path.write_text(markdown)
@@ -518,8 +544,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     trajectories_json.write_text(
         json.dumps(base._trajectory_index(records), indent=2) + "\n"
     )
+    base._impl.finalize_bundle_index(
+        bundle_dir,
+        artifact_index_path,
+        copied_index,
+        shared_indexes=shared_index,
+    )
 
-    generated = [json_path, md_path, tasks_csv, trajectories_json, *figure_paths]
+    generated = [
+        json_path,
+        md_path,
+        tasks_csv,
+        trajectories_json,
+        artifact_index_path,
+        *figure_paths,
+    ]
 
     missing_trajectory = [
         record
@@ -531,6 +570,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     print("Generated:")
     for path in generated:
         print(f"  {path}")
+
+    export_failures = [
+        item
+        for item in [*copied_index, *shared_index]
+        if not bool(item.get("complete"))
+    ]
+    if export_failures:
+        print(
+            "WARNING: artifact export errors for: "
+            + ", ".join(
+                f"{item.get('arm')}:{item.get('instance_id') or item.get('job_id')}"
+                for item in export_failures
+            )
+            + f"; inspect {artifact_index_path}"
+        )
 
     if missing_trajectory:
         print(

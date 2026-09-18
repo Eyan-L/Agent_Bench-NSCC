@@ -97,6 +97,60 @@ find runs/<experiment> -name verdict.json -exec jq -r '.status // "unknown"' {} 
 python3 analyze.py --run runs/<experiment>/<run_id>
 ```
 
+## Portable run analysis
+
+The public analyzer is a read-only exporter and viewer for one run. It accepts
+normal, failed, timed-out, partial, single-agent, and subagent executions
+without applying paired-comparison selection:
+
+```bash
+python3 analyze.py \
+  --run runs/<experiment>/<pbs-run>/runs/<benchmark>/<run-id> \
+  --output-dir reports/analyze \
+  --name run-id
+```
+
+The generated directory contains five artifact groups:
+
+```text
+01_durable_session_records/  complete conversation and durable session state
+02_timeline_model_trace/     steps, spans, trajectory, token accounting, viewer
+03_execution_evidence/       runtime/resource data and raw execution logs
+04_final_workspace_score/    manifest, candidate, verifier result, run details
+05_figures/                  report figures when available
+```
+
+`artifact-index.json` maps original paths to bundle-relative paths and records
+the size, SHA-256, source kind, and export status of every artifact. Existing
+files are not rewritten. If `spans_timeline.html` was not collected but valid
+`spans.jsonl` exists, the analyzer uses the repository's existing span renderer
+to create a viewer in the bundle. The report never changes the source run and
+rejects output paths that overlap it.
+
+Roadmap paired comparison uses the same exporter:
+
+```bash
+python3 scripts/compare_roadmap_runs.py \
+  --subagent <subagent-pbs-jobs...> \
+  --single-agent <single-agent-pbs-jobs...> \
+  --output-dir reports/roadmap \
+  --name roadmap-comparison
+```
+
+Comparison selection and statistics are unchanged: duplicate precedence,
+normal-completion pairing, and actual materialized-subagent requirements still
+control formal metrics. The report records exclusion counts/reasons and links
+each selected run to its portable details, conversation, span timeline,
+resource samples, logs, candidate, and verifier output.
+
+Measurement labels retain their source meaning:
+
+- `steps.jsonl` is a coarse harness trace; `spans.jsonl` is per-call telemetry.
+- logical trajectory tokens are not cumulative serving processed tokens.
+- child intervals are lifecycle observations, not continuous computation.
+- TTFB is not renamed to TTFT.
+- inferred, synthesized, and censored values keep their original quality fields.
+
 ## SWE-bench Scoring
 
 SWE-bench scoring uses the benchmark environment for the selected deployment.

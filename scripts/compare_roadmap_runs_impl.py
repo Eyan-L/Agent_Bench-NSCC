@@ -46,9 +46,18 @@ import math
 from pathlib import Path
 import random
 import re
-import shutil
 import statistics
 from typing import Any, Callable, Iterable, Sequence
+
+from agent_bench.core.run_artifacts import (
+    BUNDLE_SUBDIRS,
+    artifact_task_dir,
+    discover_shared_job_root,
+    export_run_artifacts,
+    export_shared_job_artifacts,
+    finalize_bundle_index,
+    prepare_bundle_dir,
+)
 
 
 PBS_JOB_RE = re.compile(r"(?P<job>\d+\.pbs\d+)")
@@ -1031,6 +1040,7 @@ def render_markdown(
     paired_rows: Sequence[dict[str, Any]] | None = None,
     duplicate_count: int = 0,
     figure_names: Sequence[str] = (),
+    selection_diagnostics: dict[str, Any] | None = None,
 ) -> str:
     lines = [
         "# RoadmapBench paired accuracy / latency / trajectory report",
@@ -1533,28 +1543,71 @@ def _filter_normal_completion_pairs(
     )
 
 
+def _comparison_selection_diagnostics(
+    subagent: Sequence[RunRecord],
+    single_agent: Sequence[RunRecord],
+) -> dict[str, Any]:
+    """Explain the existing paired selection policy without changing it."""
+    sub_map = {record.key: record for record in subagent}
+    single_map = {record.key: record for record in single_agent}
+    included: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    reason_counts: Counter[str] = Counter()
+    for key in sorted(set(sub_map) | set(single_map)):
+        sub = sub_map.get(key)
+        single = single_map.get(key)
+        reasons: list[str] = []
+        if sub is None:
+            reasons.append("missing_subagent_arm")
+        elif not _is_normal_completion(sub):
+            reasons.append("subagent_not_normal_completion")
+        if single is None:
+            reasons.append("missing_single_agent_arm")
+        elif not _is_normal_completion(single):
+            reasons.append("single_agent_not_normal_completion")
+        if sub is not None and _materialized_subagent_count(sub) <= 0:
+            reasons.append("no_materialized_subagent")
+        item = {
+            "instance_id": key[0],
+            "seed": key[1],
+            "reasons": reasons,
+        }
+        if reasons:
+            excluded.append(item)
+            reason_counts.update(reasons)
+        else:
+            included.append(item)
+    return {
+        "candidate_key_count": len(set(sub_map) | set(single_map)),
+        "included_pair_count": len(included),
+        "excluded_pair_count": len(excluded),
+        "excluded_reason_counts": dict(sorted(reason_counts.items())),
+        "included": included,
+        "excluded": excluded,
+        "policy": (
+            "Both arms must be normal_completion and the subagent arm must "
+            "materialize at least one child session."
+        ),
+    }
+
+
 def _artifact_task_dir(record: RunRecord) -> str:
     """Stable directory name for one selected task+seed."""
-    return f"{_safe_name(record.instance_id)}__seed{record.seed}"
+    return artifact_task_dir(record.instance_id, record.seed)
 
 
-BUNDLE_SUBDIRS = (
-    "01_durable_session_records",
-    "02_timeline_model_trace",
-    "03_execution_evidence",
-    "04_final_workspace_score",
-    "05_figures",
-)
-
-
-def _prepare_bundle_dir(output_dir: Path, basename: str) -> Path:
+def _prepare_bundle_dir(
+    output_dir: Path,
+    basename: str,
+    *,
+    source_dirs: Iterable[Path] = (),
+) -> Path:
     """Create an empty bundle and remove outputs from the legacy flat layout."""
-    bundle_dir = output_dir / basename
-    if bundle_dir.exists():
-        shutil.rmtree(bundle_dir)
-    bundle_dir.mkdir(parents=True)
-    for name in BUNDLE_SUBDIRS:
-        (bundle_dir / name).mkdir()
+    bundle_dir = prepare_bundle_dir(
+        output_dir,
+        basename,
+        source_dirs=source_dirs,
+    )
 
     legacy_files = (
         output_dir / f"{basename}.json",
@@ -1572,110 +1625,49 @@ def _prepare_bundle_dir(output_dir: Path, basename: str) -> Path:
     return bundle_dir
 
 
-def _copy_file_if_present(src: Path, dst: Path) -> bool:
-    if not src.is_file():
-        return False
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dst)
-    return True
-
-
 def _copy_selected_task_artifacts(
     records: Sequence[RunRecord],
     bundle_dir: Path,
-) -> list[dict[str, Any]]:
-    """Copy reconstruction artifacts for selected comparison records only."""
-    copied_index: list[dict[str, Any]] = []
-
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Export complete, source-preserving artifacts for selected records."""
+    shared_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    run_indexes: list[dict[str, Any]] = []
     for record in records:
-        task_dir = _artifact_task_dir(record)
-        arm = record.arm
-        run_dir = record.run_dir
-
-        copied: list[str] = []
-
-        # 1. Durable session records.
-        src_sessions = run_dir / "conversation" / "sessions"
-        dst_sessions = (
-            bundle_dir
-            / "01_durable_session_records"
-            / arm
-            / task_dir
-            / "conversation"
-            / "sessions"
-        )
-
-        if src_sessions.is_dir():
-            dst_sessions.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(
-                src_sessions,
-                dst_sessions,
-                dirs_exist_ok=True,
+        shared_root = discover_shared_job_root(record.run_dir)
+        shared = None
+        if shared_root is not None:
+            key = (record.arm, str(shared_root))
+            shared = shared_by_key.get(key)
+            if shared is None:
+                shared = export_shared_job_artifacts(
+                    shared_root,
+                    bundle_dir,
+                    arm=record.arm,
+                    job_id=record.job_id,
+                )
+                shared_by_key[key] = shared
+        run_indexes.append(
+            export_run_artifacts(
+                record.run_dir,
+                bundle_dir,
+                arm=record.arm,
+                instance_id=record.instance_id,
+                seed=record.seed,
+                job_id=record.job_id,
+                related_links=(shared or {}).get("links") or {},
             )
-            for path in sorted(dst_sessions.rglob("*")):
-                if path.is_file():
-                    copied.append(str(path.relative_to(bundle_dir)))
-
-        # 2. Standardized timeline + model trace.
-        dst_timeline = (
-            bundle_dir
-            / "02_timeline_model_trace"
-            / arm
-            / task_dir
         )
+    return run_indexes, list(shared_by_key.values())
 
-        for name in (
-            "trajectory.jsonl",
-            "spans.jsonl",
-        ):
-            dst = dst_timeline / name
-            if _copy_file_if_present(run_dir / name, dst):
-                copied.append(str(dst.relative_to(bundle_dir)))
 
-        # 3. Execution evidence.
-        dst_exec = (
-            bundle_dir
-            / "03_execution_evidence"
-            / arm
-            / task_dir
-        )
-
-        for name in (
-            "openclaw_exec_bridge.jsonl",
-            "openclaw_gateway.log",
-        ):
-            dst = dst_exec / name
-            if _copy_file_if_present(run_dir / name, dst):
-                copied.append(str(dst.relative_to(bundle_dir)))
-
-        # 4. Final workspace + score.
-        dst_final = (
-            bundle_dir
-            / "04_final_workspace_score"
-            / arm
-            / task_dir
-        )
-
-        for name in (
-            "candidate.patch",
-            "verdict.json",
-        ):
-            dst = dst_final / name
-            if _copy_file_if_present(run_dir / name, dst):
-                copied.append(str(dst.relative_to(bundle_dir)))
-
-        copied_index.append(
-            {
-                "arm": arm,
-                "instance_id": record.instance_id,
-                "seed": record.seed,
-                "job_id": record.job_id,
-                "source_run_dir": str(record.run_dir),
-                "copied_files": copied,
-            }
-        )
-
-    return copied_index
+def _artifact_source_dirs(records: Sequence[RunRecord]) -> list[Path]:
+    sources: set[Path] = set()
+    for record in records:
+        sources.add(record.run_dir.resolve())
+        shared_root = discover_shared_job_root(record.run_dir)
+        if shared_root is not None:
+            sources.add(shared_root.resolve())
+    return sorted(sources)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1686,6 +1678,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     comparison = bool(args.subagent)
     figure_paths: list[Path] = []
+    selection_diagnostics: dict[str, Any] | None = None
     if comparison:
         raw_sub = collect_records(
             args.subagent, arm="subagent", runs_root=runs_root
@@ -1695,6 +1688,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         subagent, sub_duplicates = select_best_records(raw_sub)
         single_agent, single_duplicates = select_best_records(raw_single)
+        selection_diagnostics = _comparison_selection_diagnostics(
+            subagent,
+            single_agent,
+        )
 
         # Paired-comparison policy: a task is eligible only when both arms
         # reached normal logical completion. If either side failed/timed out
@@ -1722,7 +1719,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         duplicate_count = sum(len(group) - 1 for group in duplicates.values())
         basename = _safe_name(args.name or _default_name(subagent, single_agent))
         selected = [*subagent, *single_agent]
-        bundle_dir = _prepare_bundle_dir(output_dir, basename)
+        bundle_dir = _prepare_bundle_dir(
+            output_dir,
+            basename,
+            source_dirs=_artifact_source_dirs(selected),
+        )
 
         if not args.no_plots:
             figure_paths = generate_plots(
@@ -1752,6 +1753,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             },
             "duplicates": _duplicates_json(duplicates),
             "figures": figure_names,
+            "selection": selection_diagnostics,
         }
         markdown = render_markdown(
             subagent,
@@ -1762,6 +1764,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             paired_rows=paired_rows,
             duplicate_count=duplicate_count,
             figure_names=figure_names,
+            selection_diagnostics=selection_diagnostics,
         )
     else:
         raw_sub = collect_records(
@@ -1772,7 +1775,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         duplicate_count = sum(len(group) - 1 for group in duplicates.values())
         basename = _safe_name(args.name or _default_name(subagent))
         selected = list(subagent)
-        bundle_dir = _prepare_bundle_dir(output_dir, basename)
+        bundle_dir = _prepare_bundle_dir(
+            output_dir,
+            basename,
+            source_dirs=_artifact_source_dirs(selected),
+        )
         paired_rows: list[dict[str, Any]] = []
         report = {
             "schema_version": 2,
@@ -1795,11 +1802,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     trajectories_json = bundle_dir / f"{basename}-trajectories.json"
     artifact_index_path = bundle_dir / f"{basename}-artifact-index.json"
 
-    copied_index = _copy_selected_task_artifacts(selected, bundle_dir)
+    copied_index, shared_index = _copy_selected_task_artifacts(
+        selected, bundle_dir
+    )
     report["artifact_bundle"] = {
         "subdirectories": list(BUNDLE_SUBDIRS),
         "artifact_index": artifact_index_path.name,
         "selected_task_count": len(selected),
+        "complete_run_count": sum(bool(item.get("complete")) for item in copied_index),
+        "run_count_with_export_errors": sum(
+            not bool(item.get("complete")) for item in copied_index
+        ),
+        "shared_job_artifact_count": len(shared_index),
+        "shared_job_export_error_count": sum(
+            not bool(item.get("complete")) for item in shared_index
+        ),
     }
 
     json_path.write_text(json.dumps(report, indent=2) + "\n")
@@ -1808,8 +1825,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     trajectories_json.write_text(
         json.dumps(_trajectory_index(selected), indent=2) + "\n"
     )
-    artifact_index_path.write_text(json.dumps(copied_index, indent=2) + "\n")
-
     generated = [
         json_path,
         md_path,
@@ -1822,6 +1837,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         _write_csv(paired_csv, paired_rows)
         generated.append(paired_csv)
     generated.extend(figure_paths)
+    finalize_bundle_index(
+        bundle_dir,
+        artifact_index_path,
+        copied_index,
+        shared_indexes=shared_index,
+    )
 
     missing_trajectory = [
         record
@@ -1838,6 +1859,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             "NOTE: no PNG figures were generated. Install matplotlib or use "
             "--no-plots to silence this note."
+        )
+
+    export_failures = [
+        item
+        for item in [*copied_index, *shared_index]
+        if not bool(item.get("complete"))
+    ]
+    if export_failures:
+        print(
+            "WARNING: artifact export errors for: "
+            + ", ".join(
+                f"{item.get('arm')}:{item.get('instance_id') or item.get('job_id')}"
+                for item in export_failures
+            )
+            + f"; inspect {artifact_index_path}"
         )
 
     if missing_trajectory:
