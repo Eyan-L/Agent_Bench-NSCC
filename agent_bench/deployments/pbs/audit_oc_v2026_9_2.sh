@@ -218,10 +218,13 @@ if [[ "$CANDIDATE" -eq 1 ]]; then
             definitions="$(grep -o "function resolveEmptyResponseRetryInstruction(" "$file" | wc -l)"
             markers="$(grep -o "AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_ASSISTANT_EMPTY_STOP_V2_BEGIN" "$file" | wc -l)"
             test "$definitions" -eq "$markers"
+            for helper in classifyAssistantTurn resolveSettledToolBatchEvidence hasCompletedMessagingToolDeliveryEvidence hasAsyncActivity; do
+                grep -q -E "function[[:space:]]+$helper[[:space:]]*\\(|(const|let|var)[[:space:]]+$helper[[:space:]]*=|as[[:space:]]+$helper([^A-Za-z0-9_$]|$)|import[[:space:]]+$helper([[:space:],]|$)" "$file"
+            done
         done'; then
-        echo 'PASS all_resolver_definitions_have_current_empty_logic'
+        echo 'PASS all_resolver_definitions_have_current_empty_logic_and_bindings'
     else
-        echo 'FAIL resolver_definition_current_empty_coverage'
+        echo 'FAIL resolver_definition_current_empty_coverage_or_bindings'
         FAIL=1
     fi
     if run "grep -R -q -E 'AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_ASSISTANT_EMPTY_STOP_BEGIN|AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_TERMINAL_PAYLOAD_V2_BEGIN|hasCurrentTerminalPayload' /app/dist"; then

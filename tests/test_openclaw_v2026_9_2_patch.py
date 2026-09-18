@@ -114,7 +114,7 @@ def _runtime_tree(tmp_path: Path) -> Path:
     (dist / "builtin-openclaw-test.js").write_text(
         "function classifyAssistantTurn(params) {\n"
         "  const assistant = params.attempt.currentAttemptAssistant\n"
-        "    ?? params.attempt.completedAssistant;\n"
+        "    ?? params.attempt.currentAttemptCompletedAssistant;\n"
         "  const visibleText = (params.attempt.assistantTexts ?? []).join('');\n"
         "  return {\n"
         "    assistant, visibleText, reasoningOnly: false,\n"
@@ -132,6 +132,8 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "  const results = calls.map((call) => messages.findLast((message) =>\n"
         "    message?.role === 'toolResult' && message?.toolCallId === call.id\n"
         "    && message?.toolName === call.name));\n"
+        "  const failedToolNames = new Set(calls.filter((_, index) =>\n"
+        "    results[index]?.isError === true).map((call) => call.name));\n"
         "  return {\n"
         "    assistant,\n"
         "    allToolsProvenSettled: calls.length > 0 && results.every(Boolean)\n"
@@ -139,8 +141,9 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "      && attempt.itemLifecycle.completedCount\n"
         "        === attempt.itemLifecycle.startedCount\n"
         "      && attempt.itemLifecycle.activeCount === 0,\n"
-        "    failedToolNames: new Set(calls.filter((_, index) =>\n"
-        "      results[index]?.isError === true).map((call) => call.name)),\n"
+        "    failedToolNames,\n"
+        "    hasUnsettledToolError: Boolean(attempt.lastToolError\n"
+        "      && !failedToolNames.has(attempt.lastToolError.toolName)),\n"
         "    intentionalTermination: false, parkedCodeModeRun: false,\n"
         "  };\n"
         "}\n"
@@ -196,6 +199,29 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "}\n"
     )
     (dist / "resolver-worker-test.js").write_text(
+        "function classifyAssistantTurn(params) {\n"
+        "  const assistant = params.attempt.currentAttemptAssistant\n"
+        "    ?? params.attempt.currentAttemptCompletedAssistant;\n"
+        "  const visibleText = (params.attempt.assistantTexts ?? []).join('');\n"
+        "  return {\n"
+        "    assistant, visibleText, reasoningOnly: false,\n"
+        "    emptyResponse: params.payloadCount === 0\n"
+        "      && visibleText.length === 0,\n"
+        "  };\n"
+        "}\n"
+        "function resolveSettledToolBatchEvidence(attempt) {\n"
+        "  return attempt.settledToolEvidence;\n"
+        "}\n"
+        "function hasCompletedMessagingToolDeliveryEvidence(attempt) {\n"
+        "  return attempt.completedDelivery === true;\n"
+        "}\n"
+        "function hasAsyncActivity(toolMetas) {\n"
+        "  return (toolMetas ?? []).some((entry) => entry.asyncStarted);\n"
+        "}\n"
+        "const EMPTY_RESPONSE_RETRY_INSTRUCTION = "
+        '"The previous attempt did not produce a user-visible answer. Continue '
+        "from the current state and produce the visible answer now. Do not "
+        'restart from scratch.";\n'
         "function resolveEmptyResponseRetryInstruction(params) {\n"
         "  return classifyAssistantTurn(params).emptyResponse\n"
         "    ? EMPTY_RESPONSE_RETRY_INSTRUCTION : null;\n"
@@ -438,6 +464,15 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
         "dist/builtin-openclaw-test.js",
         "dist/resolver-worker-test.js",
     }
+    assert all(
+        set(bindings) == {
+            "classifyAssistantTurn",
+            "resolveSettledToolBatchEvidence",
+            "hasCompletedMessagingToolDeliveryEvidence",
+            "hasAsyncActivity",
+        }
+        for bindings in verified["current_empty_resolver_bindings"].values()
+    )
 
     snapshot = {
         path.name: path.read_text()
@@ -481,6 +516,58 @@ def test_v2026_9_2_transformed_retry_bundles_parse_with_real_node(tmp_path):
         assert completed.returncode == 0, (
             relative + "\n" + completed.stdout + completed.stderr
         )
+
+
+def test_v2026_9_2_second_resolver_executes_with_lexical_bindings(tmp_path):
+    root = _runtime_tree(tmp_path)
+    patch_runtime_tree(root)
+    bundle = root / "dist/resolver-worker-test.js"
+    bundle.write_text(bundle.read_text() + r'''
+const attempt = {
+  assistantTexts: ["Historical visible activity."],
+  currentAttemptCompletedAssistant: { content: [], stopReason: "stop" },
+  terminal: { kind: "ok" },
+  clientToolCalls: false,
+  yieldDetected: false,
+  didSendDeterministicApprovalPrompt: false,
+  hasToolMediaBlockReply: false,
+  completedDelivery: false,
+  toolMetas: [],
+  settledToolEvidence: {
+    allToolsProvenSettled: true,
+    intentionalTermination: false,
+    parkedCodeModeRun: false,
+  },
+};
+const instruction = resolveEmptyResponseRetryInstruction({
+  provider: "agent_model",
+  modelId: "roadmap",
+  modelApi: "openai-completions",
+  executionContract: "strict-agentic",
+  payloadCount: 1,
+  aborted: false,
+  timedOut: false,
+  attempt,
+});
+if (!instruction) throw new Error("second resolver did not continue");
+const decision = attempt.__agentBenchContinuationDecision;
+if (decision?.candidate !== "current-empty" || decision?.decision !== "continue") {
+  throw new Error("second resolver did not materialize current-empty logic");
+}
+process.stdout.write("SECOND_RESOLVER_EXECUTION_OK\n");
+''')
+    env = dict(os.environ)
+    env["OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY"] = "continue"
+    completed = subprocess.run(
+        [*_node_command(), str(bundle)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "SECOND_RESOLVER_EXECUTION_OK" in completed.stdout
 
 
 def test_v2026_9_2_length_has_independent_no_progress_budget(tmp_path):
@@ -627,11 +714,44 @@ function terminalInput({
   asyncStarted = false, yielded = false, timedOut = false,
   toolFailed = false, completedFallback = false,
   historicalText = "Historical visible progress before tool calls.",
-  stopReason = "stop",
+  stopReason = "stop", staleHistoricalMutationError = false,
 } = {}) {
   const toolCall = { type: "toolCall", id: "call-1", name: "edit" };
-  const messagesSnapshot = [{ role: "assistant", content: [toolCall] }];
-  if (settled) {
+  let messagesSnapshot = [{ role: "assistant", content: [toolCall] }];
+  let toolMetas = [{ toolCallId: "call-1", toolName: "edit", asyncStarted }];
+  let startedCount = 1;
+  let completedCount = settled ? 1 : 0;
+  let activeCount = settled ? 0 : 1;
+  let lastToolError = toolFailed ? { toolName: "edit" } : undefined;
+  if (staleHistoricalMutationError) {
+    const batches = [
+      { id: "call-A", name: "apply_patch", isError: true },
+      { id: "call-B", name: "edit", isError: false },
+      { id: "call-C", name: "write", isError: false },
+    ];
+    messagesSnapshot = batches.flatMap((batch) => [
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: batch.id, name: batch.name }],
+      },
+      {
+        role: "toolResult", toolCallId: batch.id, toolName: batch.name,
+        isError: batch.isError,
+        content: [{
+          type: "text",
+          text: batch.isError ? "apply_patch failed" : `${batch.name} succeeded`,
+        }],
+      },
+    ]);
+    toolMetas = batches.map((batch) => ({
+      toolCallId: batch.id, toolName: batch.name,
+      isError: batch.isError, asyncStarted: false,
+    }));
+    startedCount = 3;
+    completedCount = 3;
+    activeCount = 0;
+    lastToolError = { toolName: "apply_patch" };
+  } else if (settled) {
     messagesSnapshot.push({
       role: "toolResult", toolCallId: "call-1", toolName: "edit",
       isError: toolFailed,
@@ -644,19 +764,19 @@ function terminalInput({
     attempt: {
       assistantTexts: [historicalText],
       ...(completedFallback
-        ? { completedAssistant: { content, stopReason } }
+        ? { currentAttemptCompletedAssistant: { content, stopReason } }
         : { currentAttemptAssistant: { content, stopReason } }),
       terminal: { kind: "ok" },
       messagesSnapshot,
       itemLifecycle: {
-        startedCount: 1,
-        completedCount: settled ? 1 : 0,
-        activeCount: settled ? 0 : 1,
+        startedCount,
+        completedCount,
+        activeCount,
       },
-      toolMetas: [{ toolCallId: "call-1", asyncStarted }],
+      toolMetas,
       yieldDetected: yielded,
       completedDelivery,
-      lastToolError: toolFailed ? { toolName: "edit" } : undefined,
+      lastToolError,
     },
   };
 }
@@ -743,6 +863,45 @@ assert(
     historicalText: "Tool warning: edit failed before the latest empty stop.",
   }), { emptyResponseAttempts: 0 }).action === "retry",
   "historical tool-error payloads must not suppress the latest empty stop",
+);
+const staleErrorInput = terminalInput({
+  staleHistoricalMutationError: true,
+  historicalText: "apply_patch failed; later edit and write both succeeded.",
+});
+const staleErrorTerminal = resolveEmbeddedRunTerminal(
+  staleErrorInput, { emptyResponseAttempts: 0 },
+);
+assert(
+  staleErrorTerminal.action === "retry",
+  "stale mutating-tool failure must not block a later settled successful batch",
+);
+const staleErrorDecision =
+  staleErrorInput.attempt.__agentBenchContinuationDecision;
+assert(
+  staleErrorDecision?.candidate === "current-empty"
+    && staleErrorDecision?.all_tools_settled === true
+    && staleErrorDecision?.last_tool_error === true
+    && staleErrorDecision?.decision === "continue"
+    && staleErrorDecision?.deny_reason?.length === 0,
+  "stale historical error diagnostics must preserve the allowed decision",
+);
+const staleErrorRetryState = { emptyResponseAttempts: 0 };
+assert(
+  retryTerminal({
+    ...staleErrorInput,
+    terminalState: { outcome: "ok" },
+    finalAssistantVisibleText: "",
+    attemptAssistant: staleErrorInput.attempt.currentAttemptAssistant,
+    maxEmptyResponseRetryAttempts: 4,
+    runParams: { runId: "stale-error", sessionId: "stale-error" },
+    activeErrorContext: { provider: "probe", model: "probe" },
+    activateInternalPrompt() {},
+  }, staleErrorRetryState, null, staleErrorTerminal.instruction)?.action === "retry",
+  "stale historical error must reach the outer empty retry",
+);
+assert(
+  staleErrorRetryState.emptyResponseAttempts === 1,
+  "stale historical error consumes the first outer empty retry",
 );
 assert(
   resolveEmbeddedRunTerminal(terminalInput({
@@ -855,6 +1014,17 @@ process.stdout.write("CURRENT_EMPTY_STOP_CONTRACT_OK\n");
     assert empty_decision["last_tool_error"] is False
     assert empty_decision["empty_retry_attempt"] == 1
     assert empty_decision["length_retry_attempt"] == 0
+    stale_error_decision = next(
+        item
+        for item in decisions
+        if item["candidate"] == "current-empty"
+        and item["last_tool_error"] is True
+    )
+    assert stale_error_decision["decision"] == "continue"
+    assert stale_error_decision["deny_reason"] == []
+    assert stale_error_decision["all_tools_settled"] is True
+    assert stale_error_decision["cumulative_payload_count"] == 1
+    assert stale_error_decision["empty_retry_attempt"] == 1
     length_decision = next(
         item for item in decisions if item["candidate"] == "length"
     )
@@ -1142,6 +1312,45 @@ def test_v2026_9_2_verify_requires_every_resolver_definition_to_be_patched(
         verify_runtime_tree(root)
 
 
+def test_v2026_9_2_patcher_requires_resolver_lexical_bindings(tmp_path):
+    root = _runtime_tree(tmp_path)
+    path = root / "dist/resolver-worker-test.js"
+    path.write_text(
+        path.read_text().replace(
+            "function hasAsyncActivity(toolMetas) {\n"
+            "  return (toolMetas ?? []).some((entry) => entry.asyncStarted);\n"
+            "}\n",
+            "",
+        )
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="resolver lexical bindings missing.*hasAsyncActivity",
+    ):
+        patch_runtime_tree(root)
+
+
+def test_v2026_9_2_verify_requires_resolver_lexical_bindings(tmp_path):
+    root = _runtime_tree(tmp_path)
+    patch_runtime_tree(root)
+    path = root / "dist/resolver-worker-test.js"
+    path.write_text(
+        path.read_text().replace(
+            "function hasAsyncActivity(toolMetas) {\n"
+            "  return (toolMetas ?? []).some((entry) => entry.asyncStarted);\n"
+            "}\n",
+            "",
+        )
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="resolver lexical bindings missing.*hasAsyncActivity",
+    ):
+        verify_runtime_tree(root)
+
+
 @pytest.mark.parametrize(
     "legacy_marker",
     [
@@ -1327,7 +1536,17 @@ def test_v2026_9_2_builder_does_not_reapply_legacy_runtime_patches():
     assert CURRENT_ASSISTANT_EMPTY_STOP_MARKER in audit
     assert CONTINUATION_DECISION_DIAGNOSTIC_MARKER in audit
     assert LEGACY_CURRENT_TERMINAL_PAYLOAD_MARKER in audit
-    assert "all_resolver_definitions_have_current_empty_logic" in audit
+    assert (
+        "all_resolver_definitions_have_current_empty_logic_and_bindings"
+        in audit
+    )
+    for helper in (
+        "classifyAssistantTurn",
+        "resolveSettledToolBatchEvidence",
+        "hasCompletedMessagingToolDeliveryEvidence",
+        "hasAsyncActivity",
+    ):
+        assert helper in audit
     assert "no_obsolete_cross_bundle_current_empty_contract" in audit
     assert BOUNDED_LENGTH_CONTINUATION_MARKER in audit
     assert LENGTH_SEMANTIC_PROGRESS_MARKER in audit

@@ -142,6 +142,40 @@ def _js_files(root: Path) -> Iterable[Path]:
         yield from root.rglob(suffix)
 
 
+def _has_js_lexical_binding(text: str, name: str) -> bool:
+    escaped = re.escape(name)
+    if re.search(rf"function\s+{escaped}\s*\(", text):
+        return True
+    if re.search(rf"(?:const|let|var)\s+{escaped}\s*=", text):
+        return True
+    if re.search(rf"import\s+\*\s+as\s+{escaped}\s+from", text):
+        return True
+    if re.search(rf"import\s+{escaped}\s*(?:,|from)", text):
+        return True
+    for body in re.findall(
+        r"import\s*\{(?P<body>[^}]*)\}\s*from",
+        text,
+        flags=re.DOTALL,
+    ):
+        for item in body.split(","):
+            declaration = re.sub(r"^\s*type\s+", "", item).strip()
+            if not declaration:
+                continue
+            parts = re.split(r"\s+as\s+", declaration)
+            local_name = parts[-1].strip()
+            if local_name == name:
+                return True
+    return False
+
+
+_SETTLED_CONTINUATION_RESOLVER_BINDINGS = (
+    "classifyAssistantTurn",
+    "resolveSettledToolBatchEvidence",
+    "hasCompletedMessagingToolDeliveryEvidence",
+    "hasAsyncActivity",
+)
+
+
 def _patch_exec_bridge(root: Path) -> list[str]:
     changed: list[str] = []
     candidates = sorted((root / "dist").glob("bash-tools.exec-runtime-*.js"))
@@ -361,6 +395,18 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
         raise RuntimeError(
             "v2026.9.2 empty-response retry eligibility anchor not found"
         )
+    for path in retry_eligibility_targets:
+        text = _read(path)
+        missing = [
+            name
+            for name in _SETTLED_CONTINUATION_RESOLVER_BINDINGS
+            if not _has_js_lexical_binding(text, name)
+        ]
+        if missing:
+            raise RuntimeError(
+                "settled-continuation resolver lexical bindings missing in "
+                f"{path}: {', '.join(missing)}"
+            )
 
     stale_current_empty_targets = [
         path for path in dist_files
@@ -635,20 +681,10 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
         "isEmbeddedRunTerminalTimeout",
     )
 
-    def has_lexical_binding(text: str, name: str) -> bool:
-        return bool(
-            re.search(rf"function\s+{re.escape(name)}\s*\(", text)
-            or re.search(
-                rf"import\s*\{{[^}}]*\b{re.escape(name)}\b[^}}]*\}}\s*from",
-                text,
-                flags=re.DOTALL,
-            )
-        )
-
     def require_reset_bindings(text: str, path: Path) -> None:
         missing = [
             name for name in required_reset_bindings
-            if not has_lexical_binding(text, name)
+            if not _has_js_lexical_binding(text, name)
         ]
         if missing:
             raise RuntimeError(
@@ -1307,6 +1343,7 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
         r"function\s+resolveEmptyResponseRetryInstruction\s*\("
     )
     resolver_files: list[str] = []
+    resolver_bindings: dict[str, list[str]] = {}
     stale_contract_files: list[str] = []
     for path in sorted(_js_files(root / "dist")):
         try:
@@ -1322,7 +1359,21 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
                     f"contains current-empty logic: {path} "
                     f"definitions={definitions} markers={markers}"
                 )
-            resolver_files.append(str(path.relative_to(root)))
+            relative = str(path.relative_to(root))
+            missing = [
+                name
+                for name in _SETTLED_CONTINUATION_RESOLVER_BINDINGS
+                if not _has_js_lexical_binding(text, name)
+            ]
+            if missing:
+                raise RuntimeError(
+                    "settled-continuation resolver lexical bindings missing "
+                    f"in {path}: {', '.join(missing)}"
+                )
+            resolver_files.append(relative)
+            resolver_bindings[relative] = list(
+                _SETTLED_CONTINUATION_RESOLVER_BINDINGS
+            )
         if (
             LEGACY_CURRENT_ASSISTANT_EMPTY_STOP_MARKER in text
             or LEGACY_CURRENT_TERMINAL_PAYLOAD_MARKER in text
@@ -1343,6 +1394,7 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
         "upstream_version": version,
         "markers": found,
         "current_empty_resolver_files": resolver_files,
+        "current_empty_resolver_bindings": resolver_bindings,
         "verified": True,
     }
 
