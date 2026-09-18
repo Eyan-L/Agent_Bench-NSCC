@@ -11,6 +11,8 @@ import pytest
 
 from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     CONSECUTIVE_EMPTY_STOP_RESET_MARKER,
+    COMPACTION_LENGTH_STREAK_RESET_MARKER,
+    CONTEXT_PRESSURE_LENGTH_RECOVERY_MARKER,
     CONTINUATION_DECISION_DIAGNOSTIC_MARKER,
     CURRENT_ASSISTANT_EMPTY_STOP_MARKER,
     EMPTY_STOP_RETRY_LIMIT_MARKER,
@@ -29,6 +31,7 @@ from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     NONEMPTY_LENGTH_ELIGIBILITY_MARKER,
     OPENROUTER_PRICING_URL,
     ROADMAP_CONTINUATION_INSTRUCTION,
+    RUNTIME_OWNER_CONTINUATION_MARKER,
     SANDBOX_MARKER,
     SETTLED_CONTINUATION_INSTRUCTION_MARKER,
     SETTLED_CONTINUATION_LENGTH_MARKER,
@@ -287,6 +290,129 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "  }\n"
         "}\n"
     )
+    (dist / "embedded-recovery-test.js").write_text(
+        "function resolveSettledToolBatchEvidence(attempt) {\n"
+        "  return attempt.settledToolEvidence ?? {\n"
+        "    allToolsProvenSettled: false, intentionalTermination: false,\n"
+        "    parkedCodeModeRun: false, failedToolNames: new Set(),\n"
+        "  };\n"
+        "}\n"
+        "function hasOutboundDeliveryEvidence(attempt) {\n"
+        "  return attempt.completedDelivery === true;\n"
+        "}\n"
+        "function hasAsyncActivity(toolMetas) {\n"
+        "  return (toolMetas ?? []).some((entry) => entry.asyncStarted === true);\n"
+        "}\n"
+        "function projectAgentRunAttemptTerminal(terminal) {\n"
+        "  return {\n"
+        "    aborted: terminal.kind === 'aborted',\n"
+        "    promptErrorSource: terminal.promptErrorSource,\n"
+        "    timedOut: terminal.kind === 'timeout',\n"
+        "  };\n"
+        "}\n"
+        "function isEmbeddedRunTerminalInterrupted(outcome) {\n"
+        "  return outcome === 'aborted' || outcome === 'timeout';\n"
+        "}\n"
+        "function isCurrentAttemptReplaySafe() { return false; }\n"
+        "function hasNonToolTerminalState() { return false; }\n"
+        "function isSilentTransportDropAssistant() { return false; }\n"
+        "function isProviderRefusalAssistantError() { return false; }\n"
+        "function isLikelyContextOverflowError() { return false; }\n"
+        "function isContextOverflow() { return false; }\n"
+        "function formatErrorMessage(error) { return String(error); }\n"
+        "async function compactEmbeddedRunForRecovery(input, recovery) {\n"
+        "  input.events.push(['compact', recovery.tokenBudget]);\n"
+        "  input.state.autoCompactionCount += 1;\n"
+        "  return { result: { ok: true, compacted: true }, previousSessionId: null };\n"
+        "}\n"
+        "async function recoverEmbeddedRunOverflow(input) {\n"
+        "  const contextOverflowError = !input.aborted\n"
+        "    && !input.signalOwnedInterruption ? (() => {\n"
+        "      if (input.promptError) {\n"
+        "        const errorText = formatErrorMessage(input.promptError);\n"
+        "        if (isLikelyContextOverflowError(errorText)) {\n"
+        "          return { text: errorText, source: 'promptError' };\n"
+        "        }\n"
+        "        return null;\n"
+        "      }\n"
+        "      if (isProviderRefusalAssistantError(input.assistantOverflowCandidate)) return null;\n"
+        "      if (input.assistantOverflowCandidate\n"
+        "        && input.contextTokenBudget !== void 0\n"
+        "        && isContextOverflow(input.assistantOverflowCandidate, input.contextTokenBudget)) {\n"
+        "        return { text: 'native overflow', source: 'assistantError' };\n"
+        "      }\n"
+        "      if (input.assistantErrorText\n"
+        "        && isLikelyContextOverflowError(input.assistantErrorText)) {\n"
+        "        return { text: input.assistantErrorText, source: 'assistantError' };\n"
+        "      }\n"
+        "      return null;\n"
+        "    })() : null;\n"
+        "  if (!contextOverflowError || !input.genericCompactionRecoveryAllowed\n"
+        "    || input.contextTokenBudget === void 0) return { action: 'none' };\n"
+        "  const terminal = projectAgentRunAttemptTerminal(input.attempt.terminal);\n"
+        "  const preflightRecovery = input.attempt.preflightRecovery;\n"
+        "  const preflightPromptBudget = terminal.promptErrorSource === \"precheck\" && preflightRecovery?.source === \"mid-turn\" && typeof preflightRecovery.promptBudgetBeforeReserve === 'number' ? preflightRecovery.promptBudgetBeforeReserve : void 0;\n"
+        "  if (input.attemptCompactionCount === 0\n"
+        "    && input.state.overflowCompactionAttempts < 3) {\n"
+        "    input.state.overflowCompactionAttempts += 1;\n"
+        "    const compaction = await compactEmbeddedRunForRecovery(input, {\n"
+        "      tokenBudget: preflightPromptBudget ?? input.contextTokenBudget,\n"
+        "      trigger: 'overflow', attempt: input.state.overflowCompactionAttempts,\n"
+        "    });\n"
+        "    if (compaction.result.compacted) {\n"
+        "      if (preflightRecovery?.route === 'compact_then_truncate') {\n"
+        "        input.truncateToolResults();\n"
+        "      }\n"
+        "      input.runParams.onAutoCompactionSucceeded?.(input.state.autoCompactionCount);\n"
+        "      input.armPostCompactionGuard();\n"
+        "      input.prepareCurrentTranscriptRetry();\n"
+        "      return { action: 'retry' };\n"
+        "    }\n"
+        "  }\n"
+        "  return { action: 'surface', kind: 'context_overflow' };\n"
+        "}\n"
+        "async function recoverEmbeddedRunAttempt(input) {\n"
+        "  const { runInput, normalizedAttempt } = input;\n"
+        "  const { attempt, attemptAssistant, currentAttemptCompletedAssistant,\n"
+        "    terminalState } = normalizedAttempt;\n"
+        "  const { aborted, promptErrorSource, timedOut } =\n"
+        "    projectAgentRunAttemptTerminal(attempt.terminal);\n"
+        "  const terminalInterrupted =\n"
+        "    isEmbeddedRunTerminalInterrupted(terminalState.outcome);\n"
+        "  const currentAttemptReplaySafe = isCurrentAttemptReplaySafe(attempt);\n"
+        "  const settledEvidence = resolveSettledToolBatchEvidence(attempt);\n"
+        "  const midTurnBatchSettled = settledEvidence.allToolsProvenSettled\n"
+        "    || settledEvidence.parkedCodeModeRun;\n"
+        "  const transportBatchSettled = settledEvidence.allToolsProvenSettled\n"
+        "    || settledEvidence.failedToolNames.size === 0\n"
+        "      && settledEvidence.parkedCodeModeRun;\n"
+        "  const canContinueSettledMidTurnOverflow = promptErrorSource === \"precheck\" && attempt.preflightRecovery?.source === \"mid-turn\" && midTurnBatchSettled && !hasAsyncActivity(attempt.toolMetas);\n"
+        "  const settledTransportDropAssistant = false;\n"
+        "  if (!currentAttemptReplaySafe && !canContinueSettledMidTurnOverflow\n"
+        "    && !settledTransportDropAssistant) return { action: 'proceed' };\n"
+        "  const assistantOverflowCandidate = currentAttemptCompletedAssistant\n"
+        "    ?? attemptAssistant;\n"
+        "  const overflowRecovery = await recoverEmbeddedRunOverflow({\n"
+        "    ...input.commonRecoveryInput, aborted, signalOwnedInterruption: false,\n"
+        "    promptError: null, assistantErrorText: null, assistantOverflowCandidate,\n"
+        "    attempt, attemptCompactionCount: 0,\n"
+        "  });\n"
+        "  if (overflowRecovery.action === 'retry') return { action: 'retry' };\n"
+        "  return { action: 'proceed' };\n"
+        "}\n"
+        "async function executeRecoveryContract(input) {\n"
+        "  const { contextRecoveryState, terminalRetryState } = input;\n"
+        "  const recovery = await recoverEmbeddedRunAttempt({\n"
+        "    runInput: input.runInput, normalizedAttempt: input.normalizedAttempt,\n"
+        "    commonRecoveryInput: input.commonRecoveryInput, contextRecoveryState,\n"
+        "  });\n"
+        "  if (recovery.action === \"complete\") return recovery.result;\n"
+        "  if (recovery.action === \"retry\") {\n"
+        "    return { action: 'retry', length: terminalRetryState.lengthNoProgressAttempts };\n"
+        "  }\n"
+        "  return recovery;\n"
+        "}\n"
+    )
     (dist / "worker-test.mjs").write_text(
         "function resolveSettledToolBatchEvidence(attempt){"
         "return attempt.settledToolEvidence??{allToolsProvenSettled:false}}"
@@ -333,6 +459,7 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
         root / "dist/embedded-terminal-call-test.js"
     ).read_text()
     embedded_text = (root / "dist/embedded-agent-test.js").read_text()
+    recovery_text = (root / "dist/embedded-recovery-test.js").read_text()
     resolver_worker_text = (
         root / "dist/resolver-worker-test.js"
     ).read_text()
@@ -360,6 +487,7 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert NONEMPTY_LENGTH_ELIGIBILITY_MARKER in builtin_text
     assert CURRENT_ASSISTANT_EMPTY_STOP_MARKER in builtin_text
     assert CONTINUATION_DECISION_DIAGNOSTIC_MARKER in builtin_text
+    assert RUNTIME_OWNER_CONTINUATION_MARKER in builtin_text
     assert LEGACY_CURRENT_TERMINAL_PAYLOAD_MARKER not in builtin_text
     assert "hasCurrentTerminalPayload" not in builtin_text
     assert "payloadCount, aborted, timedOut, attempt" in embedded_call_text
@@ -368,6 +496,8 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert CURRENT_ASSISTANT_EMPTY_STOP_MARKER in resolver_worker_text
     assert SETTLED_CONTINUATION_TOOL_ERROR_MARKER in builtin_text
     assert "__abSettledToolEvidence.allToolsProvenSettled" in builtin_text
+    assert "&& !__abActiveToolWork" in builtin_text
+    assert 'push("tools_unsettled")' not in builtin_text
     assert "!__abSettledToolEvidence.hasUnsettledToolError" not in builtin_text
     assert "const __abAssistantState = classifyAssistantTurn(params)" in builtin_text
     assert '__abAssistantState.assistant?.stopReason === "length"' in builtin_text
@@ -430,6 +560,14 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert "!__abControlActivity" in embedded_text
     assert "empty_retry_attempt" in embedded_text
     assert "length_retry_attempt" in embedded_text
+    assert CONTEXT_PRESSURE_LENGTH_RECOVERY_MARKER in recovery_text
+    assert COMPACTION_LENGTH_STREAK_RESET_MARKER in recovery_text
+    assert "attempt?.preflightRecovery ?? attempt?.contextBudgetStatus" in (
+        recovery_text
+    )
+    assert 'source: "preflightPressure"' in recovery_text
+    assert 'source: "agent-bench-terminal"' in recovery_text
+    assert "terminalRetryState.lengthNoProgressAttempts = 0" in recovery_text
     assert LOOP_VETO_RECOVERY_PROBE_MARKER in loop_detection_text
     assert "OPENCLAW_AGENT_BENCH_LOOP_VETO_RECOVERY_PROBE" in (
         loop_detection_text
@@ -484,6 +622,7 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert second["sandbox_bypass_files_changed"] == []
     assert second["shared_workspace_spawn_files_changed"] == []
     assert second["settled_tool_continuation"]["files_changed"] == []
+    assert second["context_pressure_length_recovery_files_changed"] == []
     assert second["loop_veto_recovery_probe_files_changed"] == []
     assert second["fs_bridge_files_changed"] == []
     assert second["openrouter_pricing_url_replacements"] == 0
@@ -504,6 +643,7 @@ def test_v2026_9_2_transformed_retry_bundles_parse_with_real_node(tmp_path):
         "dist/resolver-worker-test.js",
         "dist/embedded-terminal-call-test.js",
         "dist/embedded-agent-test.js",
+        "dist/embedded-recovery-test.js",
         "dist/worker-test.mjs",
     ):
         completed = subprocess.run(
@@ -604,7 +744,8 @@ def test_v2026_9_2_length_has_independent_no_progress_budget(tmp_path):
         "!params.attempt.yieldDetected",
         "hasCompletedMessagingToolDeliveryEvidence(params.attempt)",
         "&& !__abCompletedMessagingDelivery",
-        "__abSettledToolEvidence.allToolsProvenSettled",
+        "Number(params.attempt?.itemLifecycle?.activeCount ?? 0) > 0",
+        "&& !__abActiveToolWork",
         "hasAsyncActivity(params.attempt.toolMetas)",
         "&& !__abAsyncActivity",
     )
@@ -843,17 +984,17 @@ const visibleHistoryWithoutToolsResult = resolveEmbeddedRunTerminal(
   visibleHistoryWithoutTools, { emptyResponseAttempts: 0 },
 );
 assert(
-  visibleHistoryWithoutToolsResult.action === "complete",
-  "historical visible text plus latest empty does not continue without tools",
+  visibleHistoryWithoutToolsResult.action === "retry",
+  "historical visible text plus latest empty continues without an active owner",
 );
 assert(
   visibleHistoryWithoutTools.attempt.__agentBenchContinuationDecision
     ?.candidate === "current-empty"
     && visibleHistoryWithoutTools.attempt.__agentBenchContinuationDecision
-      ?.decision === "deny"
+      ?.decision === "continue"
     && visibleHistoryWithoutTools.attempt.__agentBenchContinuationDecision
-      ?.deny_reason?.includes("tools_unsettled"),
-  "no-tool current-empty remains denied by the settled-tool guard",
+      ?.all_tools_settled === false,
+  "settled proof remains observable but is not a continuation hard guard",
 );
 const accumulatedEmptyInput = terminalInput({ historicalText: "" });
 delete accumulatedEmptyInput.attempt.currentAttemptAssistant;
@@ -991,11 +1132,61 @@ assert(
   })(),
   "a current non-text terminal payload must suppress continuation",
 );
+const activeToolInput = terminalInput({ settled: false });
 assert(
-  resolveEmbeddedRunTerminal(terminalInput({
-    settled: false,
-  }), { emptyResponseAttempts: 0 }).action === "complete",
-  "unsettled tools must preserve the existing safety guard",
+  resolveEmbeddedRunTerminal(
+    activeToolInput, { emptyResponseAttempts: 0 },
+  ).action === "complete"
+    && activeToolInput.attempt.__agentBenchContinuationDecision
+      ?.deny_reason?.includes("active_tool_work"),
+  "active tool work must retain ownership and prevent a new model call",
+);
+const noSettledProofInput = terminalInput();
+noSettledProofInput.attempt.messagesSnapshot = [];
+noSettledProofInput.attempt.toolMetas = [];
+noSettledProofInput.attempt.itemLifecycle = {
+  startedCount: 0, completedCount: 0, activeCount: 0,
+};
+assert(
+  resolveEmbeddedRunTerminal(
+    noSettledProofInput, { emptyResponseAttempts: 0 },
+  ).action === "retry",
+  "current-empty without an active owner must not require settled-tool proof",
+);
+const noSettledProofLength = terminalInput({
+  content: [{ type: "text", text: "More implementation remains." }],
+  stopReason: "length",
+});
+noSettledProofLength.attempt.messagesSnapshot = [];
+noSettledProofLength.attempt.toolMetas = [];
+noSettledProofLength.attempt.itemLifecycle = {
+  startedCount: 0, completedCount: 0, activeCount: 0,
+};
+assert(
+  resolveEmbeddedRunTerminal(
+    noSettledProofLength, { emptyResponseAttempts: 0 },
+  ).action === "retry",
+  "length without an active owner must not require settled-tool proof",
+);
+const activeLength = terminalInput({
+  settled: false,
+  content: [{ type: "text", text: "Waiting for the tool result." }],
+  stopReason: "length",
+});
+assert(
+  resolveEmbeddedRunTerminal(
+    activeLength, { emptyResponseAttempts: 0 },
+  ).action === "complete"
+    && activeLength.attempt.__agentBenchContinuationDecision
+      ?.deny_reason?.includes("active_tool_work"),
+  "length must not start another model call while a tool owner is active",
+);
+activeLength.attempt.itemLifecycle.activeCount = 0;
+assert(
+  resolveEmbeddedRunTerminal(
+    activeLength, { emptyResponseAttempts: 0 },
+  ).action === "retry",
+  "length continuation becomes eligible after native tool settlement",
 );
 assert(
   resolveEmbeddedRunTerminal(terminalInput({
@@ -1101,6 +1292,146 @@ process.stdout.write("CURRENT_EMPTY_STOP_CONTRACT_OK\n");
     assert length_decision["decision"] == "continue"
     assert length_decision["empty_retry_attempt"] == 0
     assert length_decision["length_retry_attempt"] == 1
+
+
+def test_v2026_9_2_context_pressure_length_uses_native_recovery(tmp_path):
+    root = _runtime_tree(tmp_path)
+    patch_runtime_tree(root)
+    bundle = root / "dist/embedded-recovery-test.js"
+    bundle.write_text(bundle.read_text() + r'''
+function assert(value, message) {
+  if (!value) throw new Error(message);
+}
+function recoveryInput({
+  activeCount = 0, route = "compact_then_truncate",
+  estimatedPromptTokens = 427191, promptBudgetBeforeReserve = 242144,
+} = {}) {
+  const contextRecoveryState = {
+    autoCompactionCount: 0, overflowCompactionAttempts: 0,
+  };
+  const terminalRetryState = {
+    emptyResponseAttempts: 2, lengthNoProgressAttempts: 3,
+  };
+  const events = [];
+  const attempt = {
+    currentAttemptCompletedAssistant: { content: [], stopReason: "length" },
+    terminal: { kind: "ok" },
+    contextBudgetStatus: {
+      route, source: "pre-prompt-estimate", estimatedPromptTokens,
+      promptBudgetBeforeReserve,
+    },
+    itemLifecycle: { startedCount: 0, completedCount: 0, activeCount },
+    messagesSnapshot: [], toolMetas: [],
+    settledToolEvidence: {
+      allToolsProvenSettled: false, intentionalTermination: false,
+      parkedCodeModeRun: false, failedToolNames: new Set(),
+    },
+  };
+  const workspace = { id: "shared-workspace" };
+  const toolCapability = { exec: true, write: true };
+  return {
+    runInput: { runParams: { runId: "pressure", sessionId: "session" } },
+    normalizedAttempt: {
+      attempt,
+      attemptAssistant: attempt.currentAttemptCompletedAssistant,
+      currentAttemptCompletedAssistant: attempt.currentAttemptCompletedAssistant,
+      terminalState: { outcome: "ok" },
+    },
+    contextRecoveryState,
+    terminalRetryState,
+    commonRecoveryInput: {
+      state: contextRecoveryState,
+      contextTokenBudget: 262144,
+      genericCompactionRecoveryAllowed: true,
+      attempt,
+      runParams: {
+        runId: "pressure", sessionId: "session",
+        onAutoCompactionSucceeded(count) { events.push(["count", count]); },
+      },
+      events,
+      truncateToolResults() { events.push(["truncate"]); },
+      armPostCompactionGuard() { events.push(["guard"]); },
+      prepareCurrentTranscriptRetry() { events.push(["retry-transcript"]); },
+      workspace,
+      toolCapability,
+    },
+    events,
+    workspace,
+    toolCapability,
+  };
+}
+(async () => {
+  process.env.OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY = "continue";
+  const pressure = recoveryInput();
+  const result = await executeRecoveryContract(pressure);
+  assert(result.action === "retry", "pressure length must retry");
+  assert(
+    pressure.contextRecoveryState.autoCompactionCount === 1,
+    "pressure length must perform an actual compaction",
+  );
+  assert(
+    pressure.events.some(([event, budget]) =>
+      event === "compact" && budget === 242144),
+    "native compaction must use the preflight prompt budget",
+  );
+  assert(
+    pressure.events.some(([event]) => event === "truncate"),
+    "compact_then_truncate must retain native post-compaction truncation",
+  );
+  assert(
+    pressure.terminalRetryState.lengthNoProgressAttempts === 0,
+    "successful compaction must reset the independent length streak",
+  );
+  assert(
+    pressure.commonRecoveryInput.workspace === pressure.workspace
+      && pressure.commonRecoveryInput.toolCapability === pressure.toolCapability,
+    "compaction recovery must preserve session workspace and tool capability",
+  );
+
+  const active = recoveryInput({ activeCount: 1 });
+  const whileActive = await executeRecoveryContract(active);
+  assert(
+    whileActive.action === "proceed"
+      && active.contextRecoveryState.autoCompactionCount === 0,
+    "active tool work must not start compaction or another model call",
+  );
+  active.normalizedAttempt.attempt.itemLifecycle.activeCount = 0;
+  const afterCommit = await executeRecoveryContract(active);
+  assert(
+    afterCommit.action === "retry"
+      && active.contextRecoveryState.autoCompactionCount === 1,
+    "recovery may continue only after the tool result owner is quiescent",
+  );
+
+  const compactOnly = recoveryInput({ route: "compact_only" });
+  const compactOnlyResult = await executeRecoveryContract(compactOnly);
+  assert(compactOnlyResult.action === "retry", "compact_only must retry");
+  assert(
+    !compactOnly.events.some(([event]) => event === "truncate"),
+    "compact_only must not run the truncate phase",
+  );
+  process.stdout.write("CONTEXT_PRESSURE_RECOVERY_CONTRACT_OK\n");
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+''')
+    completed = subprocess.run(
+        [*_node_command(), str(bundle)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            **os.environ,
+            "OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY": "continue",
+        },
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "CONTEXT_PRESSURE_RECOVERY_CONTRACT_OK" in completed.stdout
+    assert '"recovery_reason":"context_pressure_compaction"' in (
+        completed.stderr
+    )
 
 
 def test_v2026_9_2_transformed_bundle_executes_retry_state_contract(tmp_path):

@@ -192,8 +192,11 @@ if [[ "$CANDIDATE" -eq 1 ]]; then
         AB_HARNESS_OPENCLAW_V2026_9_2_NONEMPTY_LENGTH_ELIGIBILITY_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_ASSISTANT_EMPTY_STOP_V2_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_CONTINUATION_DECISION_DIAGNOSTIC_V1_BEGIN \
+        AB_HARNESS_OPENCLAW_V2026_9_2_RUNTIME_OWNER_CONTINUATION_V1_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_BOUNDED_NO_PROGRESS_LENGTH_V1_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_LENGTH_SEMANTIC_PROGRESS_V2_BEGIN \
+        AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_LENGTH_RECOVERY_V1_BEGIN \
+        AB_HARNESS_OPENCLAW_V2026_9_2_COMPACTION_LENGTH_STREAK_RESET_V1_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_CONSECUTIVE_EMPTY_STOP_RESET_V2_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_TOOL_ERROR_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_EMPTY_STOP_RETRY_LIMIT_BEGIN \
@@ -217,7 +220,10 @@ if [[ "$CANDIDATE" -eq 1 ]]; then
         for file in $files; do
             definitions="$(grep -o "function resolveEmptyResponseRetryInstruction(" "$file" | wc -l)"
             markers="$(grep -o "AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_ASSISTANT_EMPTY_STOP_V2_BEGIN" "$file" | wc -l)"
+            owner_markers="$(grep -o "AB_HARNESS_OPENCLAW_V2026_9_2_RUNTIME_OWNER_CONTINUATION_V1_BEGIN" "$file" | wc -l)"
             test "$definitions" -eq "$markers"
+            test "$definitions" -eq "$owner_markers"
+            ! grep -q "tools_unsettled" "$file"
             for helper in classifyAssistantTurn resolveSettledToolBatchEvidence hasCompletedMessagingToolDeliveryEvidence hasAsyncActivity; do
                 grep -q -E "function[[:space:]]+$helper[[:space:]]*\\(|(const|let|var)[[:space:]]+$helper[[:space:]]*=|as[[:space:]]+$helper([^A-Za-z0-9_$]|$)|import[[:space:]]+$helper([[:space:],]|$)" "$file"
             done
@@ -225,6 +231,24 @@ if [[ "$CANDIDATE" -eq 1 ]]; then
         echo 'PASS all_resolver_definitions_have_current_empty_logic_and_bindings'
     else
         echo 'FAIL resolver_definition_current_empty_coverage_or_bindings'
+        FAIL=1
+    fi
+    if run 'set -e
+        files="$(grep -R -l "function recoverEmbeddedRunOverflow(" /app/dist 2>/dev/null)"
+        test -n "$files"
+        for file in $files; do
+            grep -q "function compactEmbeddedRunForRecovery(" "$file"
+            grep -q "function recoverEmbeddedRunAttempt(" "$file"
+            grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_LENGTH_RECOVERY_V1_BEGIN" "$file"
+            grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_COMPACTION_LENGTH_STREAK_RESET_V1_BEGIN" "$file"
+            grep -q "attempt?.preflightRecovery ?? attempt?.contextBudgetStatus" "$file"
+            grep -q "source: \"preflightPressure\"" "$file"
+            grep -q "source: \"agent-bench-terminal\"" "$file"
+            grep -q "terminalRetryState.lengthNoProgressAttempts = 0" "$file"
+        done'; then
+        echo 'PASS context_pressure_length_native_recovery_contract'
+    else
+        echo 'FAIL context_pressure_length_native_recovery_contract'
         FAIL=1
     fi
     if run "grep -R -q -E 'AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_ASSISTANT_EMPTY_STOP_BEGIN|AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_TERMINAL_PAYLOAD_V2_BEGIN|hasCurrentTerminalPayload' /app/dist"; then
