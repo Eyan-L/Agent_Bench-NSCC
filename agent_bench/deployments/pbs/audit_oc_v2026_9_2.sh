@@ -195,8 +195,9 @@ if [[ "$CANDIDATE" -eq 1 ]]; then
         AB_HARNESS_OPENCLAW_V2026_9_2_RUNTIME_OWNER_CONTINUATION_V1_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_BOUNDED_NO_PROGRESS_LENGTH_V1_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_LENGTH_SEMANTIC_PROGRESS_V2_BEGIN \
-        AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V2_BEGIN \
-        AB_HARNESS_OPENCLAW_V2026_9_2_COMPACTION_RETRY_STREAK_RESET_V2_BEGIN \
+        AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V3_BEGIN \
+        AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_RECOVERY_STREAK_RESET_V3_BEGIN \
+        AB_HARNESS_OPENCLAW_V2026_9_2_TRUNCATE_ONLY_NATIVE_RECOVERY_V1_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_CONSECUTIVE_EMPTY_STOP_RESET_V2_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_TOOL_ERROR_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_EMPTY_STOP_RETRY_LIMIT_BEGIN \
@@ -239,15 +240,19 @@ if [[ "$CANDIDATE" -eq 1 ]]; then
         for file in $files; do
             grep -q "function compactEmbeddedRunForRecovery(" "$file"
             grep -q "function recoverEmbeddedRunAttempt(" "$file"
-            grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V2_BEGIN" "$file"
-            grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_COMPACTION_RETRY_STREAK_RESET_V2_BEGIN" "$file"
+            grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V3_BEGIN" "$file"
+            grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_RECOVERY_STREAK_RESET_V3_BEGIN" "$file"
+            grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_TRUNCATE_ONLY_NATIVE_RECOVERY_V1_BEGIN" "$file"
             grep -q "attempt?.preflightRecovery ?? attempt?.contextBudgetStatus" "$file"
             grep -q "preflightPressure" "$file"
             grep -q "agent-bench-terminal" "$file"
+            grep -q "truncate_tool_results_only" "$file"
             grep -q -E "lengthNoProgressAttempts[[:space:]]*=[[:space:]]*0" "$file"
             grep -q -E "emptyResponseAttempts[[:space:]]*=[[:space:]]*0" "$file"
             ! grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_LENGTH_RECOVERY_V1_BEGIN" "$file"
             ! grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_COMPACTION_LENGTH_STREAK_RESET_V1_BEGIN" "$file"
+            ! grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V2_BEGIN" "$file"
+            ! grep -q "AB_HARNESS_OPENCLAW_V2026_9_2_COMPACTION_RETRY_STREAK_RESET_V2_BEGIN" "$file"
         done'; then
         echo 'PASS context_pressure_terminal_native_recovery_contract'
     else

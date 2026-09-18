@@ -11,7 +11,7 @@ import pytest
 
 from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     CONSECUTIVE_EMPTY_STOP_RESET_MARKER,
-    COMPACTION_RETRY_STREAK_RESET_MARKER,
+    CONTEXT_RECOVERY_STREAK_RESET_MARKER,
     CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER,
     CONTINUATION_DECISION_DIAGNOSTIC_MARKER,
     CURRENT_ASSISTANT_EMPTY_STOP_MARKER,
@@ -39,6 +39,7 @@ from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     SETTLED_CONTINUATION_RETRY_MARKER,
     SETTLED_CONTINUATION_TOOL_ERROR_MARKER,
     SHARED_WORKSPACE_SPAWN_MARKER,
+    TRUNCATE_ONLY_NATIVE_RECOVERY_MARKER,
     BOUNDED_LENGTH_CONTINUATION_MARKER,
     patch_runtime_tree,
     verify_runtime_tree,
@@ -297,7 +298,7 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "    parkedCodeModeRun: false, failedToolNames: new Set(),\n"
         "  };\n"
         "}\n"
-        "function hasOutboundDeliveryEvidence(attempt) {\n"
+        "function hasMessagingToolDeliveryEvidence(attempt) {\n"
         "  return attempt.completedDelivery === true;\n"
         "}\n"
         "function hasAsyncActivity(toolMetas) {\n"
@@ -365,6 +366,14 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "      }\n"
         "      input.runParams.onAutoCompactionSucceeded?.(input.state.autoCompactionCount);\n"
         "      input.armPostCompactionGuard();\n"
+        "      input.prepareCurrentTranscriptRetry();\n"
+        "      return { action: 'retry' };\n"
+        "    }\n"
+        "  }\n"
+        "  if (!input.state.toolResultTruncationAttempted) {\n"
+        "    input.state.toolResultTruncationAttempted = true;\n"
+        "    const truncResult = input.truncateToolResults();\n"
+        "    if (truncResult.truncated) {\n"
         "      input.prepareCurrentTranscriptRetry();\n"
         "      return { action: 'retry' };\n"
         "    }\n"
@@ -561,7 +570,20 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert "empty_retry_attempt" in embedded_text
     assert "length_retry_attempt" in embedded_text
     assert CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER in recovery_text
-    assert COMPACTION_RETRY_STREAK_RESET_MARKER in recovery_text
+    assert CONTEXT_RECOVERY_STREAK_RESET_MARKER in recovery_text
+    assert TRUNCATE_ONLY_NATIVE_RECOVERY_MARKER in recovery_text
+    recovery_helper = recovery_text.split(
+        CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER, 1
+    )[1].split(
+        "AB_HARNESS_OPENCLAW_V2026_9_2_"
+        "CONTEXT_PRESSURE_TERMINAL_RECOVERY_V3_END",
+        1,
+    )[0]
+    assert "hasMessagingToolDeliveryEvidence(attempt)" in recovery_helper
+    assert "hasOutboundDeliveryEvidence(attempt)" not in recovery_helper
+    assert 'preflight?.route !== "truncate_tool_results_only"' in (
+        recovery_helper
+    )
     assert "attempt?.preflightRecovery ?? attempt?.contextBudgetStatus" in (
         recovery_text
     )
@@ -1306,10 +1328,12 @@ function assert(value, message) {
 function recoveryInput({
   activeCount = 0, route = "compact_then_truncate",
   estimatedPromptTokens = 427191, promptBudgetBeforeReserve = 242144,
-  stopReason = "length", content = [],
+  stopReason = "length", content = [], truncationHelps = true,
+  acceptedSessionSpawns = [], completedDelivery = false,
 } = {}) {
   const contextRecoveryState = {
     autoCompactionCount: 0, overflowCompactionAttempts: 0,
+    toolResultTruncationAttempted: false,
   };
   const terminalRetryState = {
     emptyResponseAttempts: 2, lengthNoProgressAttempts: 3,
@@ -1324,6 +1348,7 @@ function recoveryInput({
     },
     itemLifecycle: { startedCount: 0, completedCount: 0, activeCount },
     messagesSnapshot: [], toolMetas: [],
+    acceptedSessionSpawns, completedDelivery,
     settledToolEvidence: {
       allToolsProvenSettled: false, intentionalTermination: false,
       parkedCodeModeRun: false, failedToolNames: new Set(),
@@ -1351,7 +1376,14 @@ function recoveryInput({
         onAutoCompactionSucceeded(count) { events.push(["count", count]); },
       },
       events,
-      truncateToolResults() { events.push(["truncate"]); },
+      truncateToolResults() {
+        events.push(["truncate"]);
+        return {
+          truncated: truncationHelps,
+          truncatedCount: truncationHelps ? 1 : 0,
+          reason: truncationHelps ? undefined : "nothing reducible",
+        };
+      },
       armPostCompactionGuard() { events.push(["guard"]); },
       prepareCurrentTranscriptRetry() { events.push(["retry-transcript"]); },
       workspace,
@@ -1415,6 +1447,71 @@ function recoveryInput({
   assert(
     !compactOnly.events.some(([event]) => event === "truncate"),
     "compact_only must not run the truncate phase",
+  );
+
+  const settledSpawn = recoveryInput({
+    acceptedSessionSpawns: [{ childSessionKey: "agent:child:one" }],
+  });
+  const settledSpawnResult = await executeRecoveryContract(settledSpawn);
+  assert(
+    settledSpawnResult.action === "retry"
+      && settledSpawn.contextRecoveryState.autoCompactionCount === 1
+      && settledSpawn.terminalRetryState.lengthNoProgressAttempts === 0,
+    "historical settled session spawns must not veto pressure recovery",
+  );
+
+  const completedDelivery = recoveryInput({ completedDelivery: true });
+  const completedDeliveryResult = await executeRecoveryContract(
+    completedDelivery,
+  );
+  assert(
+    completedDeliveryResult.action === "proceed"
+      && completedDelivery.contextRecoveryState.autoCompactionCount === 0,
+    "completed external message delivery must retain terminal ownership",
+  );
+
+  const truncateOnly = recoveryInput({
+    route: "truncate_tool_results_only",
+  });
+  const truncateOnlyResult = await executeRecoveryContract(truncateOnly);
+  assert(truncateOnlyResult.action === "retry", "truncate-only must retry");
+  assert(
+    truncateOnly.contextRecoveryState.autoCompactionCount === 0
+      && truncateOnly.events.some(([event]) => event === "truncate"),
+    "truncate-only must use native truncation without compaction",
+  );
+  assert(
+    truncateOnly.terminalRetryState.lengthNoProgressAttempts === 0
+      && truncateOnly.terminalRetryState.emptyResponseAttempts === 2,
+    "successful truncate-only must reset only the length streak",
+  );
+
+  const truncateOnlyEmpty = recoveryInput({
+    route: "truncate_tool_results_only", stopReason: "stop",
+    acceptedSessionSpawns: [{ childSessionKey: "agent:child:settled" }],
+  });
+  const truncateOnlyEmptyResult = await executeRecoveryContract(
+    truncateOnlyEmpty,
+  );
+  assert(
+    truncateOnlyEmptyResult.action === "retry"
+      && truncateOnlyEmpty.contextRecoveryState.autoCompactionCount === 0
+      && truncateOnlyEmpty.terminalRetryState.emptyResponseAttempts === 0
+      && truncateOnlyEmpty.terminalRetryState.lengthNoProgressAttempts === 3,
+    "pressure empty must share native truncate-only recovery and reset empty",
+  );
+
+  const ineffectiveTruncation = recoveryInput({
+    route: "truncate_tool_results_only", truncationHelps: false,
+  });
+  const ineffectiveTruncationResult = await executeRecoveryContract(
+    ineffectiveTruncation,
+  );
+  assert(
+    ineffectiveTruncationResult.action === "proceed"
+      && ineffectiveTruncation.contextRecoveryState.autoCompactionCount === 0
+      && ineffectiveTruncation.terminalRetryState.lengthNoProgressAttempts === 3,
+    "ineffective truncation must preserve native fallback and retry streak",
   );
 
   const emptyPressure = recoveryInput({ stopReason: "stop" });
@@ -1496,17 +1593,17 @@ def test_v2026_9_2_minified_worker_executes_pressure_recovery(tmp_path):
     bundle = root / "dist/embedded-recovery-minified-test.js"
     bundle.write_text(r'''
 function resolveSettledToolBatchEvidence(Ot){return Ot.settledToolEvidence}
-function hasOutboundDeliveryEvidence(Ot){return Ot.completedDelivery===true}
+function hasMessagingToolDeliveryEvidence(Ot){return Ot.completedDelivery===true}
 function hasAsyncActivity(Ot){return(Ot??[]).some(Zt=>Zt.asyncStarted===true)}
 function projectAgentRunAttemptTerminal(Ot){return{aborted:Ot.kind===`aborted`,promptErrorSource:Ot.promptErrorSource,timedOut:Ot.kind===`timeout`}}
 function isEmbeddedRunTerminalInterrupted(Ot){return Ot===`aborted`||Ot===`timeout`}
 function isProviderRefusalAssistantError(){return false}
 function isLikelyContextOverflowError(Ot){return String(Ot).includes(`Context window exceeded`)}
 async function compactEmbeddedRunForRecovery(Ot,Zt){Ot.events.push([`compact`,Zt.tokenBudget]);Ot.state.autoCompactionCount+=1;return{result:{compacted:true}}}
-async function recoverEmbeddedRunOverflow(Ot){let Zt=!Ot.aborted&&!Ot.signalOwnedInterruption?(()=>{if(isProviderRefusalAssistantError(Ot.assistantOverflowCandidate))return null;return Ot.assistantErrorText&&isLikelyContextOverflowError(Ot.assistantErrorText)?{text:Ot.assistantErrorText,source:`assistantError`}:null})():null;if(!Zt||!Ot.genericCompactionRecoveryAllowed||Ot.contextTokenBudget===void 0)return{action:`none`};let Dn=projectAgentRunAttemptTerminal(Ot.attempt.terminal),cr=Ot.attempt.preflightRecovery,pr=Dn.promptErrorSource===`precheck`&&cr?.source===`mid-turn`&&typeof cr.promptBudgetBeforeReserve==`number`?cr.promptBudgetBeforeReserve:void 0;if(Ot.attemptCompactionCount===0){let Zt=await compactEmbeddedRunForRecovery(Ot,{tokenBudget:pr??Ot.contextTokenBudget});if(Zt.result.compacted){if(cr?.route===`compact_then_truncate`)Ot.truncateToolResults();return{action:`retry`}}}return{action:`surface`}}
+async function recoverEmbeddedRunOverflow(Ot){let Zt=!Ot.aborted&&!Ot.signalOwnedInterruption?(()=>{if(isProviderRefusalAssistantError(Ot.assistantOverflowCandidate))return null;return Ot.assistantErrorText&&isLikelyContextOverflowError(Ot.assistantErrorText)?{text:Ot.assistantErrorText,source:`assistantError`}:null})():null;if(!Zt||!Ot.genericCompactionRecoveryAllowed||Ot.contextTokenBudget===void 0)return{action:`none`};let Dn=projectAgentRunAttemptTerminal(Ot.attempt.terminal),cr=Ot.attempt.preflightRecovery,pr=Dn.promptErrorSource===`precheck`&&cr?.source===`mid-turn`&&typeof cr.promptBudgetBeforeReserve==`number`?cr.promptBudgetBeforeReserve:void 0,Br=false;if(!Br&&Ot.attemptCompactionCount>0&&Ot.state.overflowCompactionAttempts<3)return{action:`retry`};if(!Br&&Ot.attemptCompactionCount===0&&Ot.state.overflowCompactionAttempts<3){let Zt=await compactEmbeddedRunForRecovery(Ot,{tokenBudget:pr??Ot.contextTokenBudget});if(Zt.result.compacted){if(cr?.route===`compact_then_truncate`)Ot.truncateToolResults();return{action:`retry`}}}if(!Ot.state.toolResultTruncationAttempted){Ot.state.toolResultTruncationAttempted=true;let Zt=Ot.truncateToolResults();if(Zt.truncated)return{action:`retry`}}return{action:`surface`}}
 async function recoverEmbeddedRunAttempt(Ot){let{normalizedAttempt:Dn}=Ot,{attempt:pr,sessionIdUsed:xr,attemptAssistant:Mr,currentAttemptAssistant:Pr,currentAttemptCompletedAssistant:Br,terminalState:Hr}=Dn,{aborted:ta,externalAbort:na,promptError:ra,promptErrorSource:ia,timedOut:aa,timedOutDuringCompaction:oa}=projectAgentRunAttemptTerminal(pr.terminal),la=isEmbeddedRunTerminalInterrupted(Hr.outcome),ua=false,ma=false,ha=false,Mi=null,va=Br===void 0?Mr?.stopReason===`error`||Mr?.stopReason===`length`?Mr:void 0:Br.stopReason===`error`||Br.stopReason===`length`?Br:void 0,retry=()=>({action:`retry`});if(!ua&&!ma&&!ha)return{action:`proceed`};let Sa=await recoverEmbeddedRunOverflow({aborted:ta,signalOwnedInterruption:false,promptError:ra,assistantErrorText:Mi,assistantOverflowCandidate:va,attemptCompactionCount:0,attempt:pr,genericCompactionRecoveryAllowed:true,contextTokenBudget:262144,state:Ot.contextRecoveryState,events:Ot.events,truncateToolResults:Ot.truncateToolResults});if(Sa.action===`retry`)return retry();return{action:`proceed`}}
 function createEmbeddedRunTerminalRetryState(){return{emptyResponseAttempts:3,lengthNoProgressAttempts:3}}
-async function executeWorkerContract(stopReason,{activeCount=0,content=[]}={}){let Da=createEmbeddedRunTerminalRetryState(),Sa={autoCompactionCount:0},Br={content,stopReason},pr={terminal:{kind:`ok`},contextBudgetStatus:{route:`compact_then_truncate`,estimatedPromptTokens:427191,promptBudgetBeforeReserve:242144},itemLifecycle:{activeCount},toolMetas:[],settledToolEvidence:{allToolsProvenSettled:false,intentionalTermination:false,parkedCodeModeRun:false}},za={attempt:pr,sessionIdUsed:`s`,attemptAssistant:Br,currentAttemptAssistant:Br,currentAttemptCompletedAssistant:Br,terminalState:{outcome:`ok`}},na={},ev=[],ro=await recoverEmbeddedRunAttempt({runInput:na,normalizedAttempt:za,contextRecoveryState:Sa,events:ev,truncateToolResults:()=>ev.push([`truncate`])});if(ro.action===`complete`)return ro.result;if(ro.action===`retry`)return{action:`retry`,retryState:Da,recoveryState:Sa,events:ev};return{action:`proceed`,retryState:Da,recoveryState:Sa,events:ev}}
+async function executeWorkerContract(stopReason,{activeCount=0,content=[],route=`compact_then_truncate`,truncationHelps=true,acceptedSessionSpawns=[],completedDelivery=false}={}){let Da=createEmbeddedRunTerminalRetryState(),Sa={autoCompactionCount:0,overflowCompactionAttempts:0,toolResultTruncationAttempted:false},Br={content,stopReason},pr={terminal:{kind:`ok`},contextBudgetStatus:{route,estimatedPromptTokens:427191,promptBudgetBeforeReserve:242144},itemLifecycle:{activeCount},toolMetas:[],acceptedSessionSpawns,completedDelivery,settledToolEvidence:{allToolsProvenSettled:false,intentionalTermination:false,parkedCodeModeRun:false}},za={attempt:pr,sessionIdUsed:`s`,attemptAssistant:Br,currentAttemptAssistant:Br,currentAttemptCompletedAssistant:Br,terminalState:{outcome:`ok`}},na={},ev=[],tr=()=>{ev.push([`truncate`]);return{truncated:truncationHelps,truncatedCount:truncationHelps?1:0}},ro=await recoverEmbeddedRunAttempt({runInput:na,normalizedAttempt:za,contextRecoveryState:Sa,events:ev,truncateToolResults:tr});if(ro.action===`complete`)return ro.result;if(ro.action===`retry`)return{action:`retry`,retryState:Da,recoveryState:Sa,events:ev};return{action:`proceed`,retryState:Da,recoveryState:Sa,events:ev}}
 ''')
     patch_runtime_tree(root)
     bundle.write_text(bundle.read_text() + r'''
@@ -1524,6 +1621,15 @@ const length=await executeWorkerContract(`length`);
 assert(length.action===`retry`, `minified pressure length must retry`);
 assert(length.retryState.lengthNoProgressAttempts===0, `length streak must reset`);
 assert(length.retryState.emptyResponseAttempts===3, `length must preserve empty streak`);
+const settledSpawn=await executeWorkerContract(`length`,{acceptedSessionSpawns:[{childSessionKey:`settled`}]});
+assert(settledSpawn.action===`retry`&&settledSpawn.recoveryState.autoCompactionCount===1,`historical spawn must not veto minified recovery`);
+const truncateOnly=await executeWorkerContract(`length`,{route:`truncate_tool_results_only`});
+assert(truncateOnly.action===`retry`, `minified truncate-only must retry`);
+assert(truncateOnly.recoveryState.autoCompactionCount===0, `truncate-only must skip compaction`);
+assert(truncateOnly.events.some(([event])=>event===`truncate`), `truncate-only must use native truncation`);
+assert(truncateOnly.retryState.lengthNoProgressAttempts===0, `truncate-only must reset length streak`);
+const ineffectiveTruncate=await executeWorkerContract(`length`,{route:`truncate_tool_results_only`,truncationHelps:false});
+assert(ineffectiveTruncate.action===`proceed`&&ineffectiveTruncate.retryState.lengthNoProgressAttempts===3,`ineffective truncation must not reset streak`);
 const active=await executeWorkerContract(`stop`,{activeCount:1});
 assert(active.action===`proceed`&&active.recoveryState.autoCompactionCount===0,`active owner must block recovery`);
 const payload=await executeWorkerContract(`stop`,{content:[{type:`image`,data:`x`}]});
@@ -1937,6 +2043,25 @@ def test_v2026_9_2_patcher_rejects_old_length_identity_patch(tmp_path):
     )
 
     with pytest.raises(RuntimeError, match="stale or incomplete"):
+        patch_runtime_tree(root)
+
+
+def test_v2026_9_2_patcher_rejects_pre_truncate_pressure_patch(tmp_path):
+    root = _runtime_tree(tmp_path)
+    patch_runtime_tree(root)
+    path = root / "dist/embedded-recovery-test.js"
+    text = path.read_text().replace(
+        CONTEXT_PRESSURE_TERMINAL_RECOVERY_MARKER,
+        "AB_HARNESS_OPENCLAW_V2026_9_2_"
+        "CONTEXT_PRESSURE_TERMINAL_RECOVERY_V2_BEGIN",
+    ).replace(
+        CONTEXT_RECOVERY_STREAK_RESET_MARKER,
+        "AB_HARNESS_OPENCLAW_V2026_9_2_"
+        "COMPACTION_RETRY_STREAK_RESET_V2_BEGIN",
+    )
+    path.write_text(text)
+
+    with pytest.raises(RuntimeError, match="predates current"):
         patch_runtime_tree(root)
 
 
