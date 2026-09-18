@@ -193,6 +193,7 @@ if [[ "$CANDIDATE" -eq 1 ]]; then
         AB_HARNESS_OPENCLAW_V2026_9_2_CURRENT_ASSISTANT_EMPTY_STOP_V2_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_CONTINUATION_DECISION_DIAGNOSTIC_V1_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_RUNTIME_OWNER_CONTINUATION_V1_BEGIN \
+        AB_HARNESS_OPENCLAW_V2026_9_2_IMPLICIT_CHILD_HANDOFF_OWNERSHIP_V1_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_BOUNDED_NO_PROGRESS_LENGTH_V1_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_LENGTH_SEMANTIC_PROGRESS_V2_BEGIN \
         AB_HARNESS_OPENCLAW_V2026_9_2_CONTEXT_PRESSURE_TERMINAL_RECOVERY_V7_BEGIN \
@@ -215,6 +216,23 @@ if [[ "$CANDIDATE" -eq 1 ]]; then
             FAIL=1
         fi
     done
+    if run 'set -e
+        error="accepted continuation children were not durably registered"
+        files="$(grep -R -l "$error" /app/dist 2>/dev/null)"
+        test -n "$files"
+        for file in $files; do
+            calls="$(grep -o "$error" "$file" | wc -l)"
+            markers="$(grep -o "AB_HARNESS_OPENCLAW_V2026_9_2_IMPLICIT_CHILD_HANDOFF_OWNERSHIP_V1_BEGIN" "$file" | wc -l)"
+            assignments="$(grep -o -E "[A-Za-z_$][A-Za-z0-9_$]*\.runtimeContinuationStarted[[:space:]]*=[[:space:]]*true;" "$file" | wc -l)"
+            test "$calls" -gt 0
+            test "$calls" -eq "$markers"
+            test "$calls" -le "$assignments"
+        done'; then
+        echo 'PASS implicit_child_handoff_ownership_contract'
+    else
+        echo 'FAIL implicit_child_handoff_ownership_contract'
+        FAIL=1
+    fi
     if run 'set -e
         files="$(grep -R -l "function resolveEmptyResponseRetryInstruction(" /app/dist 2>/dev/null)"
         test -n "$files"

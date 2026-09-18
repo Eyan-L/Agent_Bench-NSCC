@@ -69,6 +69,9 @@ CONTINUATION_DECISION_DIAGNOSTIC_MARKER = (
 RUNTIME_OWNER_CONTINUATION_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_RUNTIME_OWNER_CONTINUATION_V1_BEGIN"
 )
+IMPLICIT_CHILD_HANDOFF_OWNERSHIP_MARKER = (
+    "AB_HARNESS_OPENCLAW_V2026_9_2_IMPLICIT_CHILD_HANDOFF_OWNERSHIP_V1_BEGIN"
+)
 BOUNDED_LENGTH_CONTINUATION_MARKER = (
     "AB_HARNESS_OPENCLAW_V2026_9_2_BOUNDED_NO_PROGRESS_LENGTH_V1_BEGIN"
 )
@@ -333,6 +336,83 @@ def _patch_shared_workspace_spawns(root: Path) -> list[str]:
         updated, count = anchor.subn(replacement, text, count=1)
         if count != 1:
             raise RuntimeError(f"shared-workspace spawn anchor missing in {path}")
+        _write(path, updated)
+        changed.append(str(path.relative_to(root)))
+    return changed
+
+
+def _patch_implicit_child_handoff_ownership(root: Path) -> list[str]:
+    """Persist native child handoff ownership on the settled attempt."""
+    changed: list[str] = []
+    error_text = "accepted continuation children were not durably registered"
+    ident = r"[A-Za-z_$][\w$]*"
+    anchor = re.compile(
+        rf"(?P<prefix>"
+        rf"if\s*\(\s*shouldContinueInteractiveAcceptedSessionSpawns\s*\(\s*\{{\s*"
+        rf"attempt\s*:\s*(?P<result>{ident})\s*,\s*"
+        rf"run\s*:\s*{ident}\s*\}}\s*\)\s*\)\s*\{{\s*"
+        rf"if\s*\(\s*markRequesterTurnYielded\s*\(\s*\{{.*?\}}\s*\)\s*"
+        rf"===\s*0\s*\)\s*throw\s+(?:new\s+)?Error\s*\(\s*"
+        rf"(?P<quote>[\"'`]){re.escape(error_text)}(?P=quote)\s*\)\s*;?"
+        rf")",
+        re.DOTALL,
+    )
+    patched_block = re.compile(
+        re.escape(IMPLICIT_CHILD_HANDOFF_OWNERSHIP_MARKER)
+        + r".*?[A-Za-z_$][\w$]*\.runtimeContinuationStarted\s*=\s*true;"
+        + ".*?AB_HARNESS_OPENCLAW_V2026_9_2_"
+        + "IMPLICIT_CHILD_HANDOFF_OWNERSHIP_V1_END",
+        re.DOTALL,
+    )
+    dist_files = sorted(_js_files(root / "dist"))
+    targets = [
+        path for path in dist_files
+        if error_text in _read(path)
+        or IMPLICIT_CHILD_HANDOFF_OWNERSHIP_MARKER in _read(path)
+    ]
+    if not targets:
+        raise RuntimeError(
+            "v2026.9.2 implicit child handoff ownership anchor not found"
+        )
+
+    def replacement(match: re.Match[str]) -> str:
+        result = match.group("result")
+        return (
+            match.group("prefix")
+            + f"\n\t\t\t/* {IMPLICIT_CHILD_HANDOFF_OWNERSHIP_MARKER} */"
+            + f"\n\t\t\t{result}.runtimeContinuationStarted = true;"
+            + "\n\t\t\t/* AB_HARNESS_OPENCLAW_V2026_9_2_"
+            + "IMPLICIT_CHILD_HANDOFF_OWNERSHIP_V1_END */"
+        )
+
+    for path in targets:
+        text = _read(path)
+        call_count = text.count(error_text)
+        marker_count = text.count(IMPLICIT_CHILD_HANDOFF_OWNERSHIP_MARKER)
+        if call_count <= 0:
+            raise RuntimeError(
+                f"implicit child handoff ownership call site missing in {path}"
+            )
+        if marker_count:
+            block_count = len(patched_block.findall(text))
+            if marker_count != call_count or block_count != call_count:
+                raise RuntimeError(
+                    "incomplete implicit child handoff ownership patch in "
+                    f"{path}: calls={call_count} markers={marker_count} "
+                    f"blocks={block_count}"
+                )
+            continue
+        matches = list(anchor.finditer(text))
+        if len(matches) != call_count:
+            raise RuntimeError(
+                "implicit child handoff ownership anchor missing/ambiguous in "
+                f"{path}: calls={call_count} anchors={len(matches)}"
+            )
+        updated, count = anchor.subn(replacement, text)
+        if count != call_count:
+            raise RuntimeError(
+                f"implicit child handoff ownership patch failed in {path}"
+            )
         _write(path, updated)
         changed.append(str(path.relative_to(root)))
     return changed
@@ -2022,6 +2102,9 @@ def patch_runtime_tree(root: Path) -> dict[str, Any]:
     exec_files = _patch_exec_bridge(root)
     sandbox_files = _patch_sandbox_bypass(root)
     shared_workspace_spawn_files = _patch_shared_workspace_spawns(root)
+    implicit_child_handoff_ownership_files = (
+        _patch_implicit_child_handoff_ownership(root)
+    )
     settled_continuation = _patch_settled_tool_continuation(root)
     context_pressure_terminal_recovery_files = (
         _patch_context_pressure_terminal_recovery(root)
@@ -2043,6 +2126,9 @@ def patch_runtime_tree(root: Path) -> dict[str, Any]:
         "exec_bridge_files_changed": exec_files,
         "sandbox_bypass_files_changed": sandbox_files,
         "shared_workspace_spawn_files_changed": shared_workspace_spawn_files,
+        "implicit_child_handoff_ownership_files_changed": (
+            implicit_child_handoff_ownership_files
+        ),
         "settled_tool_continuation": settled_continuation,
         "context_pressure_terminal_recovery_files_changed": (
             context_pressure_terminal_recovery_files
@@ -2096,6 +2182,10 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
         "runtime_owner_continuation": (
             "dist/**/*",
             RUNTIME_OWNER_CONTINUATION_MARKER,
+        ),
+        "implicit_child_handoff_ownership": (
+            "dist/**/*",
+            IMPLICIT_CHILD_HANDOFF_OWNERSHIP_MARKER,
         ),
         "bounded_no_progress_length": (
             "dist/**/*",
@@ -2151,6 +2241,39 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
         if not paths:
             raise RuntimeError(f"missing required v2026.9.2 marker: {name}")
         found[name] = paths
+
+    handoff_error = "accepted continuation children were not durably registered"
+    handoff_files: list[str] = []
+    handoff_block = re.compile(
+        re.escape(IMPLICIT_CHILD_HANDOFF_OWNERSHIP_MARKER)
+        + r".*?[A-Za-z_$][\w$]*\.runtimeContinuationStarted\s*=\s*true;"
+        + ".*?AB_HARNESS_OPENCLAW_V2026_9_2_"
+        + "IMPLICIT_CHILD_HANDOFF_OWNERSHIP_V1_END",
+        re.DOTALL,
+    )
+    for path in sorted(_js_files(root / "dist")):
+        try:
+            text = _read(path)
+        except (OSError, UnicodeDecodeError):
+            continue
+        if (
+            handoff_error not in text
+            and IMPLICIT_CHILD_HANDOFF_OWNERSHIP_MARKER not in text
+        ):
+            continue
+        calls = text.count(handoff_error)
+        markers = text.count(IMPLICIT_CHILD_HANDOFF_OWNERSHIP_MARKER)
+        blocks = len(handoff_block.findall(text))
+        if calls <= 0 or markers != calls or blocks != calls:
+            raise RuntimeError(
+                "incomplete implicit child handoff ownership contract in "
+                f"{path}: calls={calls} markers={markers} blocks={blocks}"
+            )
+        handoff_files.append(str(path.relative_to(root)))
+    if not handoff_files:
+        raise RuntimeError(
+            "no v2026.9.2 implicit child handoff ownership call sites found"
+        )
 
     resolver_anchor = re.compile(
         r"function\s+resolveEmptyResponseRetryInstruction\s*\("
@@ -2307,6 +2430,7 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
         "upstream_version": version,
         "markers": found,
         "current_empty_resolver_files": resolver_files,
+        "implicit_child_handoff_ownership_files": handoff_files,
         "current_empty_resolver_bindings": resolver_bindings,
         "context_pressure_recovery_files": recovery_files,
         "verified": True,

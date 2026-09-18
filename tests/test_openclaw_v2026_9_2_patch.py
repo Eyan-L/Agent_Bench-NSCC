@@ -22,6 +22,7 @@ from agent_bench.harnesses.openclaw.v2026_9_2_patch import (
     FS_READ_MARKER,
     FS_RUN_MARKER,
     FS_WRITE_MARKER,
+    IMPLICIT_CHILD_HANDOFF_OWNERSHIP_MARKER,
     LITELLM_PRICING_URL,
     LEGACY_CURRENT_ASSISTANT_EMPTY_STOP_MARKER,
     LEGACY_CURRENT_TERMINAL_PAYLOAD_MARKER,
@@ -300,6 +301,38 @@ def _runtime_tree(tmp_path: Path) -> Path:
         "}\n"
     )
     (dist / "embedded-recovery-test.js").write_text(
+        "function shouldContinueInteractiveAcceptedSessionSpawns(params) {\n"
+        "  return params.run.implicitContinuation === true;\n"
+        "}\n"
+        "function markRequesterTurnYielded() { return 1; }\n"
+        "function settleRequesterAfterSessionSpawns() {}\n"
+        "function settleImplicitChildHandoff(result, implicitContinuation) {\n"
+        "  const attempt = {\n"
+        "    sessionKey: 'agent:roadmap_bench:main',\n"
+        "    runId: 'parent-run', implicitContinuation,\n"
+        "  };\n"
+        "  const input = { setup: { sessionAgentId: 'roadmap_bench' } };\n"
+        "  if (attempt.sessionKey && result.acceptedSessionSpawns?.length) {\n"
+        "    if (shouldContinueInteractiveAcceptedSessionSpawns({\n"
+        "      attempt: result, run: attempt,\n"
+        "    })) {\n"
+        "      if (markRequesterTurnYielded({\n"
+        "        requesterSessionKey: attempt.sessionKey,\n"
+        "        requesterAgentId: input.setup.sessionAgentId,\n"
+        "        requesterTurnRunId: attempt.runId,\n"
+        "      }) === 0) throw new Error(\n"
+        "        'accepted continuation children were not durably registered'\n"
+        "      );\n"
+        "    } else settleRequesterAfterSessionSpawns({\n"
+        "      requesterSessionKey: attempt.sessionKey,\n"
+        "      requesterAgentId: input.setup.sessionAgentId,\n"
+        "      requesterTurnRunId: attempt.runId,\n"
+        "      requesterYielded: result.yieldDetected === true,\n"
+        "      acceptedSessionSpawns: result.acceptedSessionSpawns,\n"
+        "    });\n"
+        "  }\n"
+        "  return result;\n"
+        "}\n"
         "function resolveSettledToolBatchEvidence(attempt) {\n"
         "  return attempt.settledToolEvidence ?? {\n"
         "    allToolsProvenSettled: false, intentionalTermination: false,\n"
@@ -535,6 +568,8 @@ def test_v2026_9_2_semantic_patcher_is_complete_and_idempotent(tmp_path):
     assert CURRENT_ASSISTANT_EMPTY_STOP_MARKER in builtin_text
     assert CONTINUATION_DECISION_DIAGNOSTIC_MARKER in builtin_text
     assert RUNTIME_OWNER_CONTINUATION_MARKER in builtin_text
+    assert IMPLICIT_CHILD_HANDOFF_OWNERSHIP_MARKER in recovery_text
+    assert "result.runtimeContinuationStarted = true" in recovery_text
     assert LEGACY_CURRENT_TERMINAL_PAYLOAD_MARKER not in builtin_text
     assert "hasCurrentTerminalPayload" not in builtin_text
     assert "payloadCount, aborted, timedOut, attempt" in embedded_call_text
@@ -1550,6 +1585,52 @@ function recoveryInput({
     "a settled spawn receipt must not retain terminal ownership",
   );
 
+  const implicitChildHandoff = recoveryInput({
+    acceptedSessionSpawns: [{
+      childSessionKey: "agent:child:handoff", expectsCompletionMessage: true,
+    }],
+  });
+  settleImplicitChildHandoff(
+    implicitChildHandoff.attemptEnvelope.attempt,
+    true,
+  );
+  assert(
+    implicitChildHandoff.attemptEnvelope.attempt.runtimeContinuationStarted
+      === true,
+    "native implicit handoff must persist runtime ownership on the attempt",
+  );
+  const implicitChildHandoffResult = await executeRecoveryContract(
+    implicitChildHandoff,
+  );
+  assert(
+    implicitChildHandoffResult.action === "proceed"
+      && implicitChildHandoff.contextRecoveryState.autoCompactionCount === 0,
+    "native implicit handoff ownership must veto pressure recovery",
+  );
+
+  const parentContinuesAfterSpawn = recoveryInput({
+    acceptedSessionSpawns: [{
+      childSessionKey: "agent:child:settled", expectsCompletionMessage: true,
+    }],
+  });
+  settleImplicitChildHandoff(
+    parentContinuesAfterSpawn.attemptEnvelope.attempt,
+    false,
+  );
+  assert(
+    parentContinuesAfterSpawn.attemptEnvelope.attempt
+      .runtimeContinuationStarted !== true,
+    "ordinary parent continuation must not acquire native handoff ownership",
+  );
+  const parentContinuesAfterSpawnResult = await executeRecoveryContract(
+    parentContinuesAfterSpawn,
+  );
+  assert(
+    parentContinuesAfterSpawnResult.action === "retry"
+      && parentContinuesAfterSpawn.contextRecoveryState.autoCompactionCount === 1,
+    "parent length output after spawn must remain pressure-recoverable",
+  );
+
   const runtimeContinuation = recoveryInput({
     runtimeContinuationStarted: true,
   });
@@ -1861,6 +1942,10 @@ def test_v2026_9_2_minified_worker_executes_pressure_recovery(tmp_path):
     root = _runtime_tree(tmp_path)
     bundle = root / "dist/embedded-recovery-minified-test.js"
     bundle.write_text(r'''
+function shouldContinueInteractiveAcceptedSessionSpawns(Ot){return Ot.run.implicitContinuation===!0}
+function markRequesterTurnYielded(){return 1}
+function settleRequesterAfterSessionSpawns(){}
+function settleImplicitChildHandoff(Ot,Zt){let _n={sessionKey:`agent:roadmap_bench:main`,runId:`parent-run`,implicitContinuation:Zt},Dn={setup:{sessionAgentId:`roadmap_bench`}};if(_n.sessionKey&&Ot.acceptedSessionSpawns?.length){if(shouldContinueInteractiveAcceptedSessionSpawns({attempt:Ot,run:_n})){if(markRequesterTurnYielded({requesterSessionKey:_n.sessionKey,requesterAgentId:Dn.setup.sessionAgentId,requesterTurnRunId:_n.runId})===0)throw Error(`accepted continuation children were not durably registered`)}else settleRequesterAfterSessionSpawns({requesterSessionKey:_n.sessionKey,requesterAgentId:Dn.setup.sessionAgentId,requesterTurnRunId:_n.runId,requesterYielded:Ot.yieldDetected===!0,acceptedSessionSpawns:Ot.acceptedSessionSpawns})}return Ot}
 function resolveSettledToolBatchEvidence(Ot){return Ot.settledToolEvidence}
 function hasMessagingToolDeliveryEvidence(Ot){return Ot.completedDelivery===true}
 function hasAsyncActivity(Ot){return(Ot??[]).some(Zt=>Zt.asyncStarted===true)}
@@ -1879,6 +1964,11 @@ async function executeWorkerContract(stopReason,{activeCount=0,content=[],route=
     transformed = bundle.read_text()
     assert transformed.count("agentBenchContextPressure") >= 2
     assert "Context window exceeded under preflight pressure" in transformed
+    assert IMPLICIT_CHILD_HANDOFF_OWNERSHIP_MARKER in transformed
+    assert re.search(
+        r"Ot\.runtimeContinuationStarted\s*=\s*true;",
+        transformed,
+    )
     bundle.write_text(bundle.read_text() + r'''
 function assert(value,message){if(!value)throw new Error(message)}
 (async()=>{
@@ -1898,6 +1988,14 @@ const settledSpawn=await executeWorkerContract(`length`,{acceptedSessionSpawns:[
 assert(settledSpawn.action===`retry`&&settledSpawn.recoveryState.autoCompactionCount===1,`historical spawn must not veto minified recovery`);
 const parentContinuedSpawn=await executeWorkerContract(`length`,{acceptedSessionSpawns:[{childSessionKey:`settled`,expectsCompletionMessage:true}]});
 assert(parentContinuedSpawn.action===`retry`&&parentContinuedSpawn.recoveryState.autoCompactionCount===1,`settled completion-message spawn must not veto minified recovery`);
+const implicitAttempt=settleImplicitChildHandoff({acceptedSessionSpawns:[{childSessionKey:`handoff`,expectsCompletionMessage:true}]},true);
+assert(implicitAttempt.runtimeContinuationStarted===true,`minified implicit handoff must persist runtime ownership`);
+const implicitRecovery=await executeWorkerContract(`length`,{acceptedSessionSpawns:implicitAttempt.acceptedSessionSpawns,runtimeContinuationStarted:implicitAttempt.runtimeContinuationStarted});
+assert(implicitRecovery.action===`proceed`&&implicitRecovery.recoveryState.autoCompactionCount===0,`minified implicit handoff must veto pressure recovery`);
+const parentAttempt=settleImplicitChildHandoff({acceptedSessionSpawns:[{childSessionKey:`settled`,expectsCompletionMessage:true}]},false);
+assert(parentAttempt.runtimeContinuationStarted!==true,`minified parent continuation must not acquire handoff ownership`);
+const parentRecovery=await executeWorkerContract(`length`,{acceptedSessionSpawns:parentAttempt.acceptedSessionSpawns,runtimeContinuationStarted:parentAttempt.runtimeContinuationStarted});
+assert(parentRecovery.action===`retry`&&parentRecovery.recoveryState.autoCompactionCount===1,`minified parent continuation must remain pressure-recoverable`);
 const runtimeContinuation=await executeWorkerContract(`length`,{runtimeContinuationStarted:true});
 assert(runtimeContinuation.action===`proceed`&&runtimeContinuation.recoveryState.autoCompactionCount===0,`runtime continuation must veto minified recovery`);
 const nativeHandoff=await executeWorkerContract(`length`,{yieldDetected:true});
