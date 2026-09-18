@@ -503,7 +503,11 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
 	/* {CONTINUATION_DECISION_DIAGNOSTIC_MARKER} */
 	const __abContinuationCandidate = __abCurrentAssistantEmptyShape
 		? "current-empty"
-		: __abIncompleteLength ? "length" : "";
+		: __abIncompleteLength
+			? "length"
+			: __abAssistantState.emptyResponse
+				? "accumulated-empty"
+				: "";
 	if (process.env.{SETTLED_TOOL_POLICY_ENV} === "continue"
 		&& __abContinuationCandidate) {{
 		const __abDenyReasons = [];

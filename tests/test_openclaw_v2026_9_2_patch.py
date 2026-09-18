@@ -827,6 +827,67 @@ assert(
   outerRetryState.emptyResponseAttempts === 1,
   "the outer retry path must consume the first empty attempt",
 );
+const visibleHistoryWithoutTools = {
+  aborted: false,
+  timedOut: false,
+  attempt: {
+    assistantTexts: ["Historical visible activity without tool work."],
+    currentAttemptAssistant: { content: [], stopReason: "stop" },
+    terminal: { kind: "ok" },
+    messagesSnapshot: [],
+    itemLifecycle: { startedCount: 0, completedCount: 0, activeCount: 0 },
+    toolMetas: [],
+  },
+};
+const visibleHistoryWithoutToolsResult = resolveEmbeddedRunTerminal(
+  visibleHistoryWithoutTools, { emptyResponseAttempts: 0 },
+);
+assert(
+  visibleHistoryWithoutToolsResult.action === "complete",
+  "historical visible text plus latest empty does not continue without tools",
+);
+assert(
+  visibleHistoryWithoutTools.attempt.__agentBenchContinuationDecision
+    ?.candidate === "current-empty"
+    && visibleHistoryWithoutTools.attempt.__agentBenchContinuationDecision
+      ?.decision === "deny"
+    && visibleHistoryWithoutTools.attempt.__agentBenchContinuationDecision
+      ?.deny_reason?.includes("tools_unsettled"),
+  "no-tool current-empty remains denied by the settled-tool guard",
+);
+const accumulatedEmptyInput = terminalInput({ historicalText: "" });
+delete accumulatedEmptyInput.attempt.currentAttemptAssistant;
+const accumulatedEmptyTerminal = resolveEmbeddedRunTerminal(
+  accumulatedEmptyInput, { emptyResponseAttempts: 0 },
+);
+assert(
+  accumulatedEmptyTerminal.action === "retry"
+    && accumulatedEmptyInput.attempt.__agentBenchContinuationDecision
+      ?.candidate === "accumulated-empty",
+  "native accumulated empty must be identified without changing eligibility",
+);
+const accumulatedEmptyRetryState = {
+  emptyResponseAttempts: 0, lengthNoProgressAttempts: 0,
+};
+assert(
+  retryTerminal({
+    ...accumulatedEmptyInput,
+    terminalState: { outcome: "ok" },
+    finalAssistantVisibleText: "",
+    attemptAssistant: undefined,
+    maxEmptyResponseRetryAttempts: 4,
+    runParams: { runId: "accumulated-empty", sessionId: "accumulated-empty" },
+    activeErrorContext: { provider: "probe", model: "probe" },
+    activateInternalPrompt() {},
+  }, accumulatedEmptyRetryState, null, accumulatedEmptyTerminal.instruction)
+    ?.action === "retry",
+  "accumulated empty must use the outer empty retry path",
+);
+assert(
+  accumulatedEmptyRetryState.emptyResponseAttempts === 1
+    && accumulatedEmptyRetryState.lengthNoProgressAttempts === 0,
+  "accumulated empty consumes only the empty retry budget",
+);
 const lengthInput = terminalInput({
   content: [{ type: "text", text: "I still need to validate the change." }],
   stopReason: "length",
@@ -1014,6 +1075,15 @@ process.stdout.write("CURRENT_EMPTY_STOP_CONTRACT_OK\n");
     assert empty_decision["last_tool_error"] is False
     assert empty_decision["empty_retry_attempt"] == 1
     assert empty_decision["length_retry_attempt"] == 0
+    accumulated_empty_decision = next(
+        item
+        for item in decisions
+        if item["candidate"] == "accumulated-empty"
+    )
+    assert accumulated_empty_decision["decision"] == "continue"
+    assert accumulated_empty_decision["deny_reason"] == []
+    assert accumulated_empty_decision["empty_retry_attempt"] == 1
+    assert accumulated_empty_decision["length_retry_attempt"] == 0
     stale_error_decision = next(
         item
         for item in decisions
