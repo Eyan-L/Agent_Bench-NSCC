@@ -26,5 +26,5 @@ serving:
     enable_prefix_caching: true
 
   additional_flags:
-    default_chat_template_kwargs: '{"enable_thinking":true}'
+    default_chat_template_kwargs: '{"enable_thinking":false}'
   extra_args: []

@@ -208,26 +208,117 @@ def _transcript_explicit_done_time(path: Path) -> int:
 
 def _child_start_time(
     entry: dict, transcript_first_ns: int
-) -> tuple[int, str, str]:
-    timestamp_ns, field = _entry_time(
-        entry, ("startedAt", "started_at", "createdAt", "created_at")
+) -> tuple[int, str, str, dict]:
+    """Resolve one child's lifecycle start without trusting resumed startedAt.
+
+    ``startedAt`` is mutable in OpenClaw v9 and can move forward when the same
+    child is continued. Creation and the first event in that child's own
+    transcript are durable lifecycle evidence. A transcript that predates the
+    child's creation by more than a small serialization tolerance is treated as
+    inherited/replayed history rather than blindly selected as the minimum.
+    """
+    created_ns, created_field = _entry_time(
+        entry, ("createdAt", "created_at")
     )
-    if timestamp_ns:
-        quality = (
-            "session_state"
-            if field in {"startedAt", "started_at"}
-            else "session_state_inferred"
+    started_ns, started_field = _entry_time(
+        entry, ("startedAt", "started_at", "sessionStartedAt", "session_started_at")
+    )
+    evidence = {
+        key: value
+        for key, value in (
+            (created_field, created_ns),
+            (started_field, started_ns),
+            ("transcript_first_event", transcript_first_ns),
         )
-        return timestamp_ns, field, quality
+        if key and value
+    }
+    durable_starts = [
+        value for value in (created_ns, transcript_first_ns) if value
+    ]
+    conflict = bool(
+        started_ns
+        and durable_starts
+        and started_ns > min(durable_starts) + 5_000_000_000
+    )
+
+    if created_ns:
+        # A much older transcript is likely inherited history. A same-session
+        # header/message close to creation is useful corroborating evidence,
+        # but creation remains the stable lifecycle boundary.
+        transcript_inherited = bool(
+            transcript_first_ns
+            and transcript_first_ns + 5_000_000_000 < created_ns
+        )
+        return created_ns, created_field, "durable_session_creation", {
+            "evidence": evidence,
+            "conflict": conflict or transcript_inherited,
+            "transcript_inherited_or_replayed": transcript_inherited,
+        }
     if transcript_first_ns:
         return (
-            transcript_first_ns, "transcript_first_event", "transcript_inferred"
+            transcript_first_ns,
+            "transcript_first_event",
+            "durable_transcript_creation",
+            {
+                "evidence": evidence,
+                "conflict": conflict,
+                "transcript_inherited_or_replayed": False,
+            },
         )
-    return 0, "", "missing"
+    if started_ns:
+        return started_ns, started_field, "mutable_started_at_fallback", {
+            "evidence": evidence,
+            "conflict": False,
+            "transcript_inherited_or_replayed": False,
+        }
+    return 0, "", "missing", {
+        "evidence": evidence,
+        "conflict": False,
+        "transcript_inherited_or_replayed": False,
+    }
+
+
+def _transcript_terminal_time(path: Optional[Path]) -> tuple[int, str, str]:
+    """Return a final terminal assistant event from one durable transcript.
+
+    A stop/length/error in the middle of a transcript is not terminal evidence.
+    This helper only accepts the last durable message and is used together with
+    a terminal session state; unknown sessions require stronger runtime evidence.
+    """
+    if path is None or not path.is_file():
+        return 0, "", "missing"
+    latest: Optional[dict] = None
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return 0, "", "missing"
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "message":
+            latest = event
+    if latest is None:
+        return 0, "", "missing"
+    message = latest.get("message") or {}
+    if message.get("role") != "assistant":
+        return 0, "", "missing"
+    stop_reason = str(message.get("stopReason") or "").strip().lower()
+    if stop_reason not in {"stop", "length", "error"}:
+        return 0, "", "missing"
+    timestamp_ns = _timestamp_ns(
+        message.get("timestamp") or latest.get("timestamp")
+    )
+    if not timestamp_ns:
+        return 0, "", "missing"
+    return timestamp_ns, "transcript_final_assistant", (
+        f"transcript_terminal_{stop_reason}"
+    )
 
 
 def _child_terminal_time(
-    entry: dict, transcript_last_ns: int
+    entry: dict, transcript: Optional[Path]
 ) -> tuple[int, str, str]:
     timestamp_ns, field = _entry_time(
         entry,
@@ -238,12 +329,62 @@ def _child_terminal_time(
     )
     if timestamp_ns:
         return timestamp_ns, field, "session_state"
-    timestamp_ns, field = _entry_time(entry, ("updatedAt", "updated_at"))
-    if timestamp_ns:
-        return timestamp_ns, field, "session_state_inferred"
-    if transcript_last_ns:
-        return transcript_last_ns, "transcript_last_event", "transcript_inferred"
-    return 0, "", "missing"
+    return _transcript_terminal_time(transcript)
+
+
+def _gateway_child_failures(run_dir: Path) -> dict[str, dict]:
+    """Map children to definitive failed embedded-run terminal evidence."""
+    trace = run_dir / "conversation" / "cache-trace.jsonl"
+    gateway = run_dir / "openclaw_gateway.log"
+    if not trace.is_file() or not gateway.is_file():
+        return {}
+
+    run_identity: dict[str, tuple[str, str]] = {}
+    ambiguous: set[str] = set()
+    for line in trace.read_text(errors="replace").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        run_id = str(event.get("runId") or "").strip()
+        session_id = str(event.get("sessionId") or "").strip()
+        session_key = str(event.get("sessionKey") or "").strip()
+        if not run_id or not session_id or not session_key:
+            continue
+        identity = (session_id, session_key)
+        if run_id in run_identity and run_identity[run_id] != identity:
+            ambiguous.add(run_id)
+        else:
+            run_identity[run_id] = identity
+    for run_id in ambiguous:
+        run_identity.pop(run_id, None)
+
+    pattern = re.compile(
+        r"^(\S+)\s+\[agent/embedded\]\s+embedded run agent end:\s+"
+        r"runId=(\S+)\s+isError=true\b(?P<rest>.*)$"
+    )
+    failures: dict[str, dict] = {}
+    for line in gateway.read_text(errors="replace").splitlines():
+        match = pattern.match(line)
+        if not match:
+            continue
+        identity = run_identity.get(match.group(2))
+        timestamp_ns = _timestamp_ns(match.group(1))
+        if identity is None or not timestamp_ns:
+            continue
+        session_id, session_key = identity
+        raw_error = re.search(r"\brawError=(.*)$", match.group("rest"))
+        evidence = {
+            "session_id": session_id,
+            "session_key": session_key,
+            "run_id": match.group(2),
+            "timestamp_ns": timestamp_ns,
+            "error": raw_error.group(1).strip() if raw_error else None,
+            "source": "gateway_embedded_run_error",
+        }
+        failures[session_key] = evidence
+        failures[session_id] = evidence
+    return failures
 
 
 def _child_state_time(
@@ -252,10 +393,10 @@ def _child_state_time(
     timestamp_ns, field = _entry_time(
         entry, ("updatedAt", "updated_at", "lastActivityAt", "last_activity_at")
     )
+    if transcript_last_ns > timestamp_ns:
+        return transcript_last_ns, "transcript_last_event", "transcript_inferred"
     if timestamp_ns:
         return timestamp_ns, field, "session_state"
-    if transcript_last_ns:
-        return transcript_last_ns, "transcript_last_event", "transcript_inferred"
     return 0, "", "missing"
 
 
@@ -464,11 +605,29 @@ def _session_events(run_dir: Path, agent_id: str) -> list[dict]:
                     event_type="assistant_stop", text=text,
                     stop_reason=stop_reason, session_state=session_state,
                 )
-                if re.search(r"(?im)^\s*DONE(?:\s*$|\b)", text):
+                strict_done = bool(
+                    re.search(r"(?im)^\s*DONE(?:\s*$|\b)", text)
+                )
+                markdown_done = bool(
+                    re.search(
+                        r"(?im)^\s*(?:\*\*|__)+DONE(?:\*\*|__)+(?:\s*$|\b)",
+                        text,
+                    )
+                )
+                if strict_done:
                     _append(
                         events, timestamp_ns=timestamp_ns, session_id=session_id,
                         session_key=session_key, role=role, event_type="done",
                         text=text, session_state=session_state,
+                        marker_style="strict_bare_done",
+                    )
+                elif markdown_done:
+                    _append(
+                        events, timestamp_ns=timestamp_ns, session_id=session_id,
+                        session_key=session_key, role=role,
+                        event_type="done_declaration", text=text,
+                        session_state=session_state,
+                        marker_style="markdown_done_declaration",
                     )
 
         session_bounds[session_key] = (
@@ -486,12 +645,14 @@ def _session_events(run_dir: Path, agent_id: str) -> list[dict]:
             "timed_out": "child_timeout",
         }.get(status, "child_state")
         _first_ns, last_ns = session_bounds.get(str(session_key), (0, 0))
+        name = _session_file_name(entry)
+        transcript = sessions_dir / name if name else None
         if status in {
             "done", "completed", "failed", "error", "timeout", "timed_out",
             "cancelled", "canceled",
         }:
             source_ns, source_field, timestamp_quality = _child_terminal_time(
-                entry, last_ns
+                entry, transcript
             )
         else:
             source_ns, source_field, timestamp_quality = _child_state_time(
@@ -518,6 +679,7 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
     index = _session_index(sessions_dir) if sessions_dir.is_dir() else {}
     children: dict[str, dict] = {}
     intervals: list[tuple[int, int]] = []
+    lower_bound_intervals: list[tuple[int, int]] = []
     terminal_states = {
         "done", "completed", "failed", "error", "timeout", "timed_out",
         "cancelled", "canceled",
@@ -526,6 +688,7 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
     observation_end_ns, observation_end_source, observation_end_quality = (
         _lifecycle_observation_boundary(run_dir, measurement_observed_ns)
     )
+    child_failures = _gateway_child_failures(run_dir)
 
     for session_key, entry in index.items():
         if not isinstance(entry, dict) or not entry.get("spawnedBy"):
@@ -537,29 +700,84 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
             _transcript_time_bounds(transcript)
             if transcript is not None else (0, 0)
         )
-        start_ns, start_source, start_quality = _child_start_time(entry, first_ns)
-        status = str(entry.get("status") or "unknown").lower()
-        is_terminal = status in terminal_states
+        (
+            start_ns,
+            start_source,
+            start_quality,
+            start_diagnostic,
+        ) = _child_start_time(entry, first_ns)
+        observed_status = str(entry.get("status") or "unknown").lower()
+        measured_status = observed_status
+        is_terminal = observed_status in terminal_states
+        terminal_evidence = None
         if is_terminal:
-            end_ns, end_source, end_quality = _child_terminal_time(entry, last_ns)
+            end_ns, end_source, end_quality = _child_terminal_time(
+                entry, transcript
+            )
+            terminal_evidence = (
+                end_source if end_ns else None
+            )
         else:
-            end_ns = observation_end_ns
-            end_source = observation_end_source
-            end_quality = observation_end_quality
+            failure = child_failures.get(session_key) or child_failures.get(
+                str(entry.get("sessionId") or "")
+            )
+            if (
+                isinstance(failure, dict)
+                and failure.get("session_key") == session_key
+                and failure.get("session_id")
+                == str(entry.get("sessionId") or "")
+                and _int(failure.get("timestamp_ns")) >= last_ns
+            ):
+                measured_status = "failed"
+                is_terminal = True
+                end_ns = _int(failure.get("timestamp_ns"))
+                end_source = str(failure.get("source") or "")
+                end_quality = "matched_runtime_terminal_evidence"
+                terminal_evidence = dict(failure)
+            else:
+                end_ns = 0
+                end_source = ""
+                end_quality = "missing"
+
+        last_observed_ns, last_observed_source, last_observed_quality = (
+            _child_state_time(entry, last_ns)
+        )
 
         runtime_seconds = None
         if start_ns and end_ns and end_ns >= start_ns:
             runtime_seconds = (end_ns - start_ns) / 1e9
             intervals.append((start_ns, end_ns))
+            lower_bound_intervals.append((start_ns, end_ns))
+        runtime_lower_bound_seconds = None
+        if (
+            runtime_seconds is None
+            and start_ns
+            and last_observed_ns
+            and last_observed_ns >= start_ns
+        ):
+            runtime_lower_bound_seconds = (
+                last_observed_ns - start_ns
+            ) / 1e9
+            lower_bound_intervals.append((start_ns, last_observed_ns))
 
         children[session_key] = {
             "session_id": str(entry.get("sessionId") or "") or None,
             "spawned_by": entry.get("spawnedBy"),
-            "status": status,
+            "status": measured_status,
+            "observed_status": observed_status,
+            "status_source": (
+                "matched_runtime_terminal_evidence"
+                if measured_status != observed_status else "session_index"
+            ),
             "start_timestamp": _iso_from_ns(start_ns),
             "start_timestamp_ns": start_ns or None,
             "start_timestamp_source": start_source or None,
             "start_timestamp_quality": start_quality,
+            "start_timestamp_evidence": start_diagnostic["evidence"],
+            "start_timestamp_conflict": start_diagnostic["conflict"],
+            "start_transcript_inherited_or_replayed": start_diagnostic[
+                "transcript_inherited_or_replayed"
+            ],
             "terminal_timestamp": _iso_from_ns(end_ns) if is_terminal else None,
             "terminal_timestamp_ns": (end_ns or None) if is_terminal else None,
             "terminal_timestamp_source": (
@@ -568,15 +786,29 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
             "terminal_timestamp_quality": (
                 end_quality if is_terminal else "missing"
             ),
-            "interval_end_timestamp": _iso_from_ns(end_ns),
-            "interval_end_timestamp_ns": end_ns or None,
-            "interval_end_timestamp_source": end_source or None,
-            "interval_end_timestamp_quality": end_quality,
+            "terminal_evidence": terminal_evidence,
+            "interval_end_timestamp": (
+                _iso_from_ns(end_ns) if runtime_seconds is not None else None
+            ),
+            "interval_end_timestamp_ns": (
+                end_ns if runtime_seconds is not None else None
+            ),
+            "interval_end_timestamp_source": (
+                (end_source or None) if runtime_seconds is not None else None
+            ),
+            "interval_end_timestamp_quality": (
+                end_quality if runtime_seconds is not None else "missing"
+            ),
+            "last_observed_timestamp": _iso_from_ns(last_observed_ns),
+            "last_observed_timestamp_ns": last_observed_ns or None,
+            "last_observed_timestamp_source": last_observed_source or None,
+            "last_observed_timestamp_quality": last_observed_quality,
             "measurement_observed_timestamp": _iso_from_ns(measurement_observed_ns),
             "measurement_observed_timestamp_ns": measurement_observed_ns,
             "runtime_seconds": runtime_seconds,
+            "runtime_lower_bound_seconds": runtime_lower_bound_seconds,
             "runtime_complete": is_terminal and runtime_seconds is not None,
-            "runtime_censored": not is_terminal and runtime_seconds is not None,
+            "runtime_censored": runtime_seconds is None,
             "label": entry.get("label"),
         }
 
@@ -589,6 +821,12 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
         if child.get("runtime_seconds") is not None
     ]
     runtime_sum = sum(float(child["runtime_seconds"]) for child in observed)
+    runtime_lower_bound_sum = sum(
+        float(child.get("runtime_seconds") or 0.0)
+        if child.get("runtime_seconds") is not None
+        else float(child.get("runtime_lower_bound_seconds") or 0.0)
+        for child in children.values()
+    )
 
     union_ns = 0
     if intervals:
@@ -599,6 +837,16 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
             else:
                 merged[-1][1] = max(merged[-1][1], end_ns)
         union_ns = sum(end - start for start, end in merged)
+
+    lower_bound_union_ns = 0
+    if lower_bound_intervals:
+        merged_lower: list[list[int]] = []
+        for start_ns, end_ns in sorted(lower_bound_intervals):
+            if not merged_lower or start_ns > merged_lower[-1][1]:
+                merged_lower.append([start_ns, end_ns])
+            else:
+                merged_lower[-1][1] = max(merged_lower[-1][1], end_ns)
+        lower_bound_union_ns = sum(end - start for start, end in merged_lower)
 
     max_concurrent = 0
     concurrent = 0
@@ -621,6 +869,20 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
         concurrent += delta
         max_concurrent = max(max_concurrent, concurrent)
         previous_timestamp_ns = timestamp_ns_value
+
+    lower_bound_max_concurrent = 0
+    lower_bound_concurrent = 0
+    lower_bound_points = []
+    for start_ns, end_ns in lower_bound_intervals:
+        lower_bound_points.append((start_ns, 1))
+        lower_bound_points.append((end_ns, -1))
+    for _timestamp_ns_value, delta in sorted(
+        lower_bound_points, key=lambda item: (item[0], item[1])
+    ):
+        lower_bound_concurrent += delta
+        lower_bound_max_concurrent = max(
+            lower_bound_max_concurrent, lower_bound_concurrent
+        )
 
     timeline_agents = []
     parent_candidates = [
@@ -646,7 +908,7 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
         parent_terminal = parent_status in terminal_states or bool(explicit_done_ns)
         if parent_status in terminal_states:
             parent_end_ns, parent_end_source, parent_end_quality = (
-                _child_terminal_time(parent_entry, parent_last_ns)
+                _child_terminal_time(parent_entry, parent_transcript)
             )
         elif explicit_done_ns:
             parent_end_ns = explicit_done_ns
@@ -676,7 +938,9 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
     for session_key, child in children.items():
         start_ns = _int(child.get("start_timestamp_ns"))
         end_ns = _int(child.get("interval_end_timestamp_ns"))
-        if not start_ns or not end_ns or end_ns < start_ns:
+        lower_bound_end_ns = _int(child.get("last_observed_timestamp_ns"))
+        display_end_ns = end_ns or lower_bound_end_ns
+        if not start_ns or not display_end_ns or display_end_ns < start_ns:
             continue
         timeline_agents.append({
             "role": "child",
@@ -687,11 +951,23 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
             "start_timestamp": child.get("start_timestamp"),
             "start_timestamp_ns": start_ns,
             "start_timestamp_source": child.get("start_timestamp_source"),
-            "end_timestamp": child.get("interval_end_timestamp"),
-            "end_timestamp_ns": end_ns,
-            "end_timestamp_source": child.get("interval_end_timestamp_source"),
-            "end_timestamp_quality": child.get("interval_end_timestamp_quality"),
+            "end_timestamp": (
+                child.get("interval_end_timestamp")
+                or child.get("last_observed_timestamp")
+            ),
+            "end_timestamp_ns": display_end_ns,
+            "end_timestamp_source": (
+                child.get("interval_end_timestamp_source")
+                or child.get("last_observed_timestamp_source")
+            ),
+            "end_timestamp_quality": (
+                child.get("interval_end_timestamp_quality")
+                if end_ns else "observed_lower_bound"
+            ),
             "duration_seconds": child.get("runtime_seconds"),
+            "runtime_lower_bound_seconds": child.get(
+                "runtime_lower_bound_seconds"
+            ),
             "runtime_censored": child.get("runtime_censored", False),
         })
     timeline_agents.sort(
@@ -703,16 +979,100 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
     )
 
     union_seconds = union_ns / 1e9
+    unknown_count = sum(
+        not child.get("runtime_complete") for child in children.values()
+    )
+    lifecycle = None
+    response_path = run_dir / "openclaw_response.json"
+    try:
+        response = json.loads(response_path.read_text(errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        response = {}
+    pending = [response]
+    while pending:
+        value = pending.pop()
+        if not isinstance(value, dict):
+            continue
+        candidate = value.get("agentBenchLifecycle")
+        if isinstance(candidate, dict):
+            lifecycle = candidate
+            break
+        pending.extend(item for item in value.values() if isinstance(item, dict))
+
+    state_counts: dict[str, int] = defaultdict(int)
+    for child in children.values():
+        state_counts[str(child.get("status") or "unknown")] += 1
+    projection_sources = {
+        str(entry.get("agentBenchProjectionSource") or "")
+        for entry in index.values()
+        if isinstance(entry, dict) and entry.get("spawnedBy")
+    }
+    projection_source_known = bool(projection_sources) and projection_sources <= {
+        "online_index",
+        "restored_archived_transcript",
+    }
+    online_index_child_count = None
+    restored_archived_child_count = None
+    if not children:
+        online_index_child_count = 0
+        restored_archived_child_count = 0
+        child_count_source_quality = "exact_no_materialized_children"
+    elif projection_source_known:
+        online_index_child_count = sum(
+            entry.get("agentBenchProjectionSource") == "online_index"
+            for entry in index.values()
+            if isinstance(entry, dict) and entry.get("spawnedBy")
+        )
+        restored_archived_child_count = sum(
+            entry.get("agentBenchProjectionSource")
+            == "restored_archived_transcript"
+            for entry in index.values()
+            if isinstance(entry, dict) and entry.get("spawnedBy")
+        )
+        child_count_source_quality = "projection_sources_exact"
+    else:
+        child_count_source_quality = (
+            "legacy_projection_online_split_unavailable"
+        )
     return {
         "child_session_count": len(children),
+        "materialized_child_session_count": len(children),
+        "online_index_child_count_at_archive": online_index_child_count,
+        "restored_archived_child_count": restored_archived_child_count,
+        "child_count_source_quality": child_count_source_quality,
         "child_runtime_complete_count": len(complete),
+        "child_runtime_unknown_count": unknown_count,
         "child_runtime_observed_count": len(observed),
         "child_runtime_by_session": children,
         "child_sum_runtime_seconds": runtime_sum,
+        "child_sum_runtime_lower_bound_seconds": runtime_lower_bound_sum,
         "child_union_active_seconds": union_seconds,
+        "child_union_active_lower_bound_seconds": lower_bound_union_ns / 1e9,
         "child_overlap_wall_seconds": overlap_wall_ns / 1e9,
         "child_concurrency_excess_seconds": concurrency_excess_ns / 1e9,
         "max_concurrent_children": max_concurrent,
+        "max_concurrent_children_lower_bound": lower_bound_max_concurrent,
+        "child_derived_metrics_quality": (
+            "complete" if unknown_count == 0 else "partial_excludes_unknown"
+        ),
+        "reconstructed_child_state_counts": dict(state_counts),
+        "parent_terminal_child_snapshot": {
+            "total_children": (
+                lifecycle.get("totalChildren") if lifecycle else None
+            ),
+            "completed_children": (
+                lifecycle.get("completedChildren") if lifecycle else None
+            ),
+            "pending_children": (
+                lifecycle.get("pendingChildrenAtParentTerminal")
+                if lifecycle else None
+            ),
+            "child_states": (
+                lifecycle.get("childStatesAtParentTerminal")
+                if lifecycle else None
+            ),
+            "source": "agentBenchLifecycle" if lifecycle else None,
+        },
         "agent_timeline": {
             "observation_end_timestamp": _iso_from_ns(observation_end_ns),
             "observation_end_timestamp_ns": observation_end_ns,
@@ -722,12 +1082,12 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
         },
         "child_runtime_policy": {
             "definition": (
-                "durable child start to terminal time; non-terminal materialized "
-                "children are right-censored at the agent-writer quiescence fence"
+                "durable child lifecycle start to matched terminal evidence; "
+                "this is elapsed lifecycle time, not GPU-active time"
             ),
             "censored_runtime": (
-                "included in observed runtime and concurrency, excluded from "
-                "child_runtime_complete_count"
+                "unknown terminal time is reported only as an observed lower "
+                "bound and excluded from precise runtime/concurrency aggregates"
             ),
             "overlap_wall_definition": (
                 "wall-clock time with at least two child sessions active"
@@ -1277,6 +1637,14 @@ def _runtime_observability(
     loop_events = [
         event for event in events if event.get("event_type") == "loop_detected"
     ]
+    strict_done_events = [
+        event for event in events if event.get("event_type") == "done"
+    ]
+    markdown_done_events = [
+        event for event in events
+        if event.get("event_type") == "done_declaration"
+        and event.get("marker_style") == "markdown_done_declaration"
+    ]
     announce_groups: dict[str, dict] = {}
     for event in [*announce_timeouts, *announces]:
         group_key = str(
@@ -1375,6 +1743,12 @@ def _runtime_observability(
             ),
         },
         "loop_detection_count": len(loop_events),
+        "strict_done_marker_count": len(strict_done_events),
+        "markdown_done_declaration_count": len(markdown_done_events),
+        "done_marker_policy": {
+            "strict_bare_done": "runtime completion evidence",
+            "markdown_done_declaration": "measurement-only declaration",
+        },
         "loop_detections": [
             {
                 "timestamp": event.get("timestamp"),

@@ -827,7 +827,7 @@ def test_roadmap_requester_settle_waits_for_native_retry_before_quiesce(
     class Harness:
         def quiesce_orphan_children(self, _env_info):
             calls.append("quiesce")
-            return {"workspaceQuiesced": True}
+            return _verified_roadmap_quiescence()
 
     condition = _roadmap_condition_for_state(tmp_path, Harness())
     clock = [0.0]
@@ -902,7 +902,7 @@ def test_roadmap_post_terminal_settle_error_quiesces_then_completes(tmp_path):
     class Harness:
         def quiesce_orphan_children(self, _env_info):
             calls.append("quiesce")
-            return {"workspaceQuiesced": True, "taskRuntimeRestarted": True}
+            return _verified_roadmap_quiescence()
 
     condition = _roadmap_condition_for_state(tmp_path, Harness())
     payload, error = condition._await_post_turn_lifecycle(
@@ -966,6 +966,17 @@ def _roadmap_condition_for_state(tmp_path, harness=None):
     condition._last_completion_status = condition.BLOCKED_INCOMPLETE
     condition._last_completion_error = "stale CLI liveness"
     return condition
+
+
+def _verified_roadmap_quiescence(**updates):
+    result = {
+        "workspaceQuiesced": True,
+        "openClawRuntimeStopped": True,
+        "execBridgeStopped": True,
+        "taskRuntimeRestarted": True,
+    }
+    result.update(updates)
+    return result
 
 
 def test_roadmap_lifecycle_summary_retains_pruned_completed_children(tmp_path):
@@ -1070,7 +1081,7 @@ def test_roadmap_done_parent_empty_stop_is_blocked_incomplete(tmp_path):
     )
     class Harness:
         def quiesce_orphan_children(self, _env_info):
-            return {"workspaceQuiesced": True}
+            return _verified_roadmap_quiescence()
 
     condition = _roadmap_condition_for_state(tmp_path, Harness())
     condition.terminal_stop_confirmation_seconds = 0.0
@@ -1109,7 +1120,7 @@ def test_roadmap_done_parent_length_is_blocked_and_quiesced(tmp_path):
 
     class Harness:
         def quiesce_orphan_children(self, _env_info):
-            return {"workspaceQuiesced": True}
+            return _verified_roadmap_quiescence()
 
     condition = _roadmap_condition_for_state(tmp_path, Harness())
     condition.terminal_stop_confirmation_seconds = 0.0
@@ -1227,7 +1238,7 @@ def test_roadmap_post_turn_watch_quiesces_stable_durable_failure(
     class Harness:
         def quiesce_orphan_children(self, _env_info):
             calls.append("quiesce")
-            return {"workspaceQuiesced": True}
+            return _verified_roadmap_quiescence()
 
     condition = _roadmap_condition_for_state(tmp_path, Harness())
     clock = [0.0]
@@ -1277,7 +1288,7 @@ def test_roadmap_post_turn_watch_does_not_freeze_transient_failure(
 
     class Harness:
         def quiesce_orphan_children(self, _env_info):
-            return {"workspaceQuiesced": True}
+            return _verified_roadmap_quiescence()
 
     condition = _roadmap_condition_for_state(tmp_path, Harness())
     clock = [0.0]
@@ -1862,7 +1873,7 @@ def test_roadmap_parent_done_abandons_running_child_without_waiting(tmp_path):
     class Harness:
         def quiesce_orphan_children(self, _env_info):
             order.append("quiesce")
-            return {"workspaceQuiesced": True, "taskRuntimeRestarted": True}
+            return _verified_roadmap_quiescence()
 
     condition = _roadmap_condition_for_state(tmp_path, Harness())
 
@@ -1892,7 +1903,7 @@ def test_roadmap_parent_done_without_child_needs_no_quiescence(tmp_path):
 
     class Harness:
         def quiesce_orphan_children(self, _env_info):
-            return {"workspaceQuiesced": True}
+            return _verified_roadmap_quiescence()
 
     condition = _roadmap_condition_for_state(tmp_path, Harness())
 
@@ -1924,7 +1935,7 @@ def test_roadmap_durable_parent_stop_quiesces_running_child(
     class Harness:
         def quiesce_orphan_children(self, _env_info):
             clock.append("quiesce")
-            return {"workspaceQuiesced": True}
+            return _verified_roadmap_quiescence()
 
     condition = _roadmap_condition_for_state(tmp_path, Harness())
     monkeypatch.setattr(
@@ -2996,10 +3007,7 @@ def test_roadmap_abnormal_terminal_quiesces_running_children(tmp_path):
 
         def quiesce_orphan_children(self, _env_info):
             self.calls += 1
-            return {
-                "workspaceQuiesced": True,
-                "taskRuntimeRestarted": True,
-            }
+            return _verified_roadmap_quiescence()
 
     cases = [
         (

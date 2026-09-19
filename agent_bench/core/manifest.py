@@ -43,6 +43,8 @@ class RunManifest:
     benchmark_invalid_reason: Optional[str] = None
     verifier_eligible: Optional[bool] = None
     verifier_status: Optional[str] = None
+    verifier_skipped: Optional[bool] = None
+    failure_phase: Optional[str] = None
     reward: Optional[float] = None
     test_pass_rate: Optional[float] = None
     trajectory_path: Optional[str] = None
@@ -83,6 +85,8 @@ class RunManifest:
             "benchmark_invalid_reason": self.benchmark_invalid_reason,
             "verifier_eligible": self.verifier_eligible,
             "verifier_status": self.verifier_status,
+            "verifier_skipped": self.verifier_skipped,
+            "failure_phase": self.failure_phase,
             "reward": self.reward,
             "test_pass_rate": self.test_pass_rate,
             "trajectory_path": self.trajectory_path,
@@ -124,6 +128,8 @@ class RunManifest:
             benchmark_invalid_reason=data.get("benchmark_invalid_reason"),
             verifier_eligible=data.get("verifier_eligible"),
             verifier_status=data.get("verifier_status"),
+            verifier_skipped=data.get("verifier_skipped"),
+            failure_phase=data.get("failure_phase"),
             reward=data.get("reward"),
             test_pass_rate=data.get("test_pass_rate"),
             trajectory_path=data.get("trajectory_path"),

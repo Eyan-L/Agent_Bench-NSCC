@@ -306,6 +306,54 @@ def _finalize_roadmap_verdict(
     return merged
 
 
+def _preserve_partial_agent_result(
+    manifest: RunManifest,
+    result: dict,
+    *,
+    failure_phase: str,
+    failure_message: str,
+) -> None:
+    """Persist execution facts known before an artifact/verifier failure.
+
+    This deliberately does not synthesize a verifier result or reward. The run
+    remains an infrastructure ERROR while retaining the orthogonal agent outcome.
+    """
+    completion_status = str(
+        result.get("agent_execution_outcome")
+        or result.get("agent_completion_status")
+        or ""
+    ).strip() or None
+    manifest.step_trace_path = result.get("step_trace_path")
+    manifest.telemetry_path = result.get("telemetry_path")
+    manifest.exit_code = result.get("exit_code")
+    manifest.agent_runtime_mode = result.get("agent_runtime_mode")
+    manifest.agent_execution_outcome = completion_status
+    manifest.agent_completion_error = result.get("agent_completion_error")
+    manifest.agent_lifecycle = result.get("agent_lifecycle")
+    manifest.agent_execution_seconds = result.get("agent_execution_seconds")
+    manifest.phase_timing = result.get("phase_timing")
+    manifest.trajectory_path = result.get("trajectory_path")
+    manifest.token_accounting_path = result.get("token_accounting_path")
+    manifest.trajectory_tokens = result.get("trajectory_tokens")
+    manifest.serving_tokens = result.get("serving_tokens")
+    manifest.runtime_observability_path = result.get(
+        "runtime_observability_path"
+    )
+    manifest.runtime_observability = result.get("runtime_observability")
+    manifest.total_prompt_tokens = int(result.get("total_prompt_tokens") or 0)
+    manifest.total_completion_tokens = int(
+        result.get("total_completion_tokens") or 0
+    )
+    manifest.failure_phase = failure_phase
+    manifest.benchmark_valid = False
+    manifest.benchmark_invalid_reason = failure_message
+    manifest.verifier_eligible = False
+    manifest.verifier_status = "SKIPPED"
+    manifest.verifier_skipped = True
+    manifest.reward = None
+    manifest.test_pass_rate = None
+
+
 def execute_run(run_config: RunConfig, harness: SWEBenchHarness, 
                 instance_data: dict, retry_errors: bool = True) -> RunManifest:
     """Execute a single run."""
@@ -340,6 +388,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
     prepare_phase_timing: dict[str, Any] = {}
     harness_spans_path = run_dir / "spans.jsonl"
     trace_container = getattr(harness, "container", None)
+    failure_phase = "environment_prepare"
     if hasattr(trace_container, "set_trace_path"):
         trace_container.set_trace_path(harness_spans_path)
     try:
@@ -379,6 +428,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         container_id = env_info["container_id"]
         
         # Execute condition
+        failure_phase = "agent_execution"
         condition_type = run_config.condition.condition_type
         
         if condition_type == "ar_issue_only":
@@ -604,6 +654,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 "agent_exit_code": agent_exit_code,
             }
         elif skip_patch_gate or (patch_path.exists() and patch_path.stat().st_size > 0):
+            failure_phase = "verifier"
             verifier_start_ns = time.time_ns()
             if is_roadmapbench:
                 _append_roadmap_trajectory_event(
@@ -722,6 +773,8 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         manifest.agent_execution_seconds = result.get("agent_execution_seconds")
         manifest.phase_timing = result.get("phase_timing")
         manifest.verifier_status = verdict.get("verifier_status")
+        manifest.verifier_skipped = bool(verdict.get("verifier_skipped"))
+        manifest.failure_phase = None
         manifest.reward = verdict.get("reward")
         manifest.test_pass_rate = verdict.get("test_pass_rate")
         manifest.trajectory_path = result.get("trajectory_path")
@@ -744,6 +797,23 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         logger.error(f"Run {run_id} failed with error: {e}", exc_info=True)
         manifest.status = "ERROR"
         manifest.error_message = str(e)[:500]
+        partial_result = None
+        if "condition" in locals():
+            partial_result = getattr(
+                condition, "_partial_execution_result", None
+            )
+        if isinstance(partial_result, dict):
+            failure_phase = str(
+                partial_result.get("failure_phase") or failure_phase
+            )
+            _preserve_partial_agent_result(
+                manifest,
+                partial_result,
+                failure_phase=failure_phase,
+                failure_message=str(e),
+            )
+        else:
+            manifest.failure_phase = failure_phase
     
     finally:
         # Preserve legacy duration_seconds (pre-cleanup) for historical comparability.

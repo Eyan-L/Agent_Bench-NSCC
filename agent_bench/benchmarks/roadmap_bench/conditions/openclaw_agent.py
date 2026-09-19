@@ -1162,12 +1162,80 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     def _terminal_activity_signature(snapshot: Dict) -> Tuple:
         """Return transcript activity that must not change across the freeze fence."""
         return (
-            snapshot.get("parent_session_id"),
-            snapshot.get("parent_session_status"),
             snapshot.get("message_count"),
             snapshot.get("transcript_size_bytes"),
             snapshot.get("yield_count"),
             snapshot.get("latest_parent_event"),
+            snapshot.get("latest_assistant_stop_reason"),
+            snapshot.get("latest_assistant_text"),
+            snapshot.get("latest_assistant_has_tool_call"),
+            snapshot.get("latest_assistant_has_payload"),
+        )
+
+    @staticmethod
+    def _terminal_identity_signature(snapshot: Dict) -> Tuple:
+        return (
+            snapshot.get("parent_session_key"),
+            snapshot.get("parent_session_id"),
+            snapshot.get("parent_last_run_id"),
+        )
+
+    @staticmethod
+    def _terminal_fence_snapshot(snapshot: Dict) -> Dict:
+        """Persist a compact, reviewable fence state without transcript data."""
+        return {
+            "parent_session_key": snapshot.get("parent_session_key"),
+            "parent_session_id": snapshot.get("parent_session_id"),
+            "parent_last_run_id": snapshot.get("parent_last_run_id"),
+            "parent_session_status": snapshot.get("parent_session_status"),
+            "message_count": snapshot.get("message_count"),
+            "transcript_size_bytes": snapshot.get("transcript_size_bytes"),
+            "yield_count": snapshot.get("yield_count"),
+            "latest_parent_event": snapshot.get("latest_parent_event"),
+            "latest_assistant_stop_reason": snapshot.get(
+                "latest_assistant_stop_reason"
+            ),
+            "pending_children": snapshot.get("pending_children"),
+        }
+
+    @classmethod
+    def _terminal_fence_decision(
+        cls,
+        before: Dict,
+        after: Dict,
+        *,
+        logical_parent_terminal: bool,
+    ) -> Tuple[bool, str]:
+        """Accept only stable activity or a safe active-to-done convergence."""
+        if not logical_parent_terminal:
+            return False, "missing_logical_terminal_evidence"
+        if cls._terminal_identity_signature(before) != (
+            cls._terminal_identity_signature(after)
+        ):
+            return False, "parent_execution_identity_changed"
+        if cls._terminal_activity_signature(before) != (
+            cls._terminal_activity_signature(after)
+        ):
+            return False, "parent_execution_activity_changed"
+
+        before_status = str(
+            before.get("parent_session_status") or "unknown"
+        ).lower()
+        after_status = str(
+            after.get("parent_session_status") or "unknown"
+        ).lower()
+        if before_status == after_status:
+            return True, "stable_terminal_fence"
+
+        has_explicit_terminal_evidence = bool(before.get("done_text"))
+        if (
+            before_status in cls._ACTIVE_PARENT_STATES
+            and after_status in cls._NORMAL_DURABLE_PARENT_STATES
+            and has_explicit_terminal_evidence
+        ):
+            return True, "safe_status_convergence"
+        return False, (
+            f"unsafe_parent_status_transition:{before_status}->{after_status}"
         )
 
     def _quiesce_with_timing(
@@ -1186,8 +1254,11 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         ):
             timed_snapshot["parent_terminal_observed_ns"] = time.time_ns()
 
-        before_activity = self._terminal_activity_signature(snapshot)
         quiescence = self._quiesce_terminal_children(snapshot)
+        quiescence = {
+            **quiescence,
+            "terminalFenceBefore": self._terminal_fence_snapshot(snapshot),
+        }
 
         if quiescence.get("workspaceQuiesced") is True and logical_parent_terminal:
             sessions_dir = self._live_sessions_dir()
@@ -1204,21 +1275,76 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                     **quiescence,
                     "workspaceQuiesced": False,
                     "terminalFenceStable": False,
+                    "terminalFenceDecision": "after_state_unavailable",
                     "lifecycleError": error,
                 }
-            elif self._terminal_activity_signature(after_snapshot) != before_activity:
+            else:
+                quiescence["terminalFenceAfter"] = (
+                    self._terminal_fence_snapshot(after_snapshot)
+                )
+                stable, decision = self._terminal_fence_decision(
+                    snapshot,
+                    after_snapshot,
+                    logical_parent_terminal=logical_parent_terminal,
+                )
+                if not stable:
+                    error = (
+                        "Roadmap parent activity changed while establishing the "
+                        f"terminal quiescence fence ({decision})"
+                    )
+                    quiescence = {
+                        **quiescence,
+                        "workspaceQuiesced": False,
+                        "terminalFenceStable": False,
+                        "terminalFenceDecision": decision,
+                        "lifecycleError": error,
+                    }
+                else:
+                    quiescence = {
+                        **quiescence,
+                        "terminalFenceStable": True,
+                        "terminalFenceDecision": decision,
+                    }
+
+        if quiescence.get("workspaceQuiesced") is True:
+            writer_fields = (
+                "openClawRuntimeStopped",
+                "execBridgeStopped",
+                "taskRuntimeRestarted",
+            )
+            failed_writer_stops = [
+                field for field in writer_fields
+                if quiescence.get(field) is False
+            ]
+            if failed_writer_stops:
                 error = (
-                    "Roadmap parent activity changed while establishing the "
-                    "terminal quiescence fence"
+                    "Roadmap agent-writer stop boundary was not established: "
+                    + ", ".join(failed_writer_stops)
                 )
                 quiescence = {
                     **quiescence,
                     "workspaceQuiesced": False,
                     "terminalFenceStable": False,
+                    "terminalFenceDecision": "writer_stop_failed",
                     "lifecycleError": error,
                 }
             else:
-                quiescence = {**quiescence, "terminalFenceStable": True}
+                unverified_writer_stops = [
+                    field for field in writer_fields
+                    if quiescence.get(field) is not True
+                ]
+                if unverified_writer_stops:
+                    error = (
+                        "Roadmap agent-writer stop boundary is unverified: "
+                        + ", ".join(unverified_writer_stops)
+                    )
+                    quiescence = {
+                        **quiescence,
+                        "workspaceQuiesced": False,
+                        "terminalFenceStable": False,
+                        "terminalFenceDecision": "writer_stop_unverified",
+                        "lifecycleError": error,
+                    }
 
         if quiescence.get("workspaceQuiesced") is True:
             self._env_info["roadmap_workspace_quiesced"] = True

@@ -340,6 +340,13 @@ def _restore_archived_child_index(sessions_dir: Path, agent_id: str) -> int:
         return 0
     identities = _cache_trace_child_identities(sessions_dir.parent, agent_id)
     restored = 0
+    projection_annotated = False
+    for entry in index.values():
+        if not isinstance(entry, dict) or not entry.get("spawnedBy"):
+            continue
+        if "agentBenchProjectionSource" not in entry:
+            entry["agentBenchProjectionSource"] = "online_index"
+            projection_annotated = True
     for session_id, session_key in identities.items():
         if session_key in index:
             continue
@@ -356,6 +363,7 @@ def _restore_archived_child_index(sessions_dir: Path, agent_id: str) -> int:
             "status": status,
             "spawnedBy": parent_key,
             "parentSessionKey": parent_key,
+            "agentBenchProjectionSource": "restored_archived_transcript",
         }
         if first_timestamp is not None:
             entry["createdAt"] = first_timestamp
@@ -367,7 +375,7 @@ def _restore_archived_child_index(sessions_dir: Path, agent_id: str) -> int:
         index[session_key] = entry
         restored += 1
 
-    if restored:
+    if restored or projection_annotated:
         temporary = index_path.with_name(f".{index_path.name}.tmp")
         temporary.write_text(
             json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8"

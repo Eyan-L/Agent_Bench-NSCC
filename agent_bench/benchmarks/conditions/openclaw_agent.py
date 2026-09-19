@@ -486,14 +486,38 @@ class OpenClawAgentCondition:
             except Exception:
                 logger.exception("trajectory orphan cleanup event write failed")
 
+        partial_result = {
+            "step_trace_path": str(step_trace_path),
+            "total_prompt_tokens": prompt_tokens,
+            "total_completion_tokens": completion_tokens,
+            "telemetry_path": str(spans_path) if spans_path else None,
+            "exit_code": getattr(self, "_last_exit_code", 0),
+            "error_message": err or None,
+            "agent_completion_status": self._last_completion_status,
+            "agent_completion_error": self._last_completion_error or None,
+            "agent_runtime_mode": self._detect_agent_runtime_mode(payload),
+            "agent_lifecycle": agent_lifecycle,
+            "agent_execution_seconds": phase_timing["agent_execution_seconds"],
+            "phase_timing": phase_timing,
+            **measurement,
+        }
+        self._partial_execution_result = partial_result
+
         # 4. Collect benchmark-specific artifacts (patch for SWE-bench; nothing
         #    for TB). Always write candidate.patch — driver gates on its
         #    existence + size, and the empty-patch case is allowed for TB via
         #    skip_patch_gate at driver.py:187.
         candidate_freeze_start_ns = time.time_ns()
-        patch_text = self._collect_artifacts(
-            container_id, self._env_info, run_dir, workspace_root,
-        ) or ""
+        try:
+            patch_text = self._collect_artifacts(
+                container_id, self._env_info, run_dir, workspace_root,
+            ) or ""
+        except Exception:
+            phase_timing["candidate_freeze_start_ns"] = candidate_freeze_start_ns
+            phase_timing["candidate_freeze_error_ns"] = time.time_ns()
+            partial_result["failure_phase"] = "candidate_freeze"
+            self._partial_execution_result = partial_result
+            raise
         patch_path = run_dir / "candidate.patch"
         patch_path.write_text(patch_text)
         candidate_freeze_end_ns = time.time_ns()
@@ -526,20 +550,8 @@ class OpenClawAgentCondition:
                 logger.exception("trajectory candidate freeze event write failed")
 
         return {
-            "step_trace_path": str(step_trace_path),
+            **partial_result,
             "patch_path": str(patch_path),
-            "total_prompt_tokens": prompt_tokens,
-            "total_completion_tokens": completion_tokens,
-            "telemetry_path": str(spans_path) if spans_path else None,
-            "exit_code": getattr(self, "_last_exit_code", 0),
-            "error_message": err or None,
-            "agent_completion_status": self._last_completion_status,
-            "agent_completion_error": self._last_completion_error or None,
-            "agent_runtime_mode": self._detect_agent_runtime_mode(payload),
-            "agent_lifecycle": agent_lifecycle,
-            "agent_execution_seconds": phase_timing["agent_execution_seconds"],
-            "phase_timing": phase_timing,
-            **measurement,
         }
 
     # ------------------------------------------------------------------

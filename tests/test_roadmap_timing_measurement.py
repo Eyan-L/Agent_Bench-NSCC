@@ -7,6 +7,7 @@ from agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent import (
     RoadmapBenchOpenClawCondition,
 )
 from agent_bench.core.manifest import RunManifest
+from agent_bench.runtime.driver import _preserve_partial_agent_result
 
 
 def _write_jsonl(path, rows):
@@ -32,6 +33,55 @@ def test_manifest_round_trip_preserves_agent_phase_timing():
     assert restored.total_instance_seconds == 110.0
     assert restored.agent_execution_seconds == 60.0
     assert restored.phase_timing == {"verifier_seconds": 30.0}
+
+
+def test_freeze_error_preserves_execution_facts_without_fake_verifier():
+    manifest = RunManifest(
+        run_id="run",
+        condition_id="condition",
+        instance_id="instance",
+        seed=42,
+        serving_config_id="serving",
+        status="ERROR",
+    )
+    lifecycle = {
+        "terminalEvidence": "explicit_done",
+        "workspaceQuiesced": False,
+    }
+    _preserve_partial_agent_result(
+        manifest,
+        {
+            "agent_completion_status": "normal_completion",
+            "agent_runtime_mode": "gateway",
+            "agent_lifecycle": lifecycle,
+            "agent_execution_seconds": 12.5,
+            "phase_timing": {"agent_execution_seconds": 12.5},
+            "trajectory_path": "/run/trajectory.jsonl",
+            "runtime_observability_path": "/run/runtime_observability.json",
+            "total_prompt_tokens": 100,
+            "total_completion_tokens": 20,
+        },
+        failure_phase="candidate_freeze",
+        failure_message="freeze refused",
+    )
+
+    assert manifest.status == "ERROR"
+    assert manifest.agent_execution_outcome == "normal_completion"
+    assert manifest.agent_runtime_mode == "gateway"
+    assert manifest.agent_lifecycle == lifecycle
+    assert manifest.agent_execution_seconds == 12.5
+    assert manifest.failure_phase == "candidate_freeze"
+    assert manifest.verifier_eligible is False
+    assert manifest.verifier_status == "SKIPPED"
+    assert manifest.verifier_skipped is True
+    assert manifest.reward is None
+    assert manifest.test_pass_rate is None
+
+    restored = RunManifest.from_dict(manifest.to_dict())
+    assert restored.failure_phase == "candidate_freeze"
+    assert restored.verifier_status == "SKIPPED"
+    assert restored.verifier_skipped is True
+    assert restored.agent_execution_outcome == "normal_completion"
 
 
 def test_explicit_parent_and_runtime_waits_are_measured_separately(tmp_path):
@@ -234,6 +284,40 @@ def test_parent_timeline_and_resumes_use_durable_v9_transcript(tmp_path):
     assert parent["runtime_censored"] is False
 
 
+def test_markdown_done_is_observed_without_relaxing_strict_done(tmp_path):
+    sessions = tmp_path / "conversation" / "sessions"
+    sessions.mkdir(parents=True)
+    parent_key = "agent:roadmap_bench:main"
+    (sessions / "sessions.json").write_text(json.dumps({
+        parent_key: {
+            "sessionId": "parent-id",
+            "sessionFile": "parent.jsonl",
+            "status": "done",
+            "createdAt": "2026-01-01T00:00:01Z",
+            "endedAt": "2026-01-01T00:00:02Z",
+        },
+    }))
+    _write_jsonl(sessions / "parent.jsonl", [{
+        "type": "message",
+        "message": {
+            "role": "assistant",
+            "timestamp": "2026-01-01T00:00:02Z",
+            "stopReason": "stop",
+            "content": [{"type": "text", "text": "**DONE**"}],
+        },
+    }])
+
+    obs = build_openclaw_measurement(
+        tmp_path, agent_id="roadmap_bench"
+    )["runtime_observability"]
+
+    assert obs["strict_done_marker_count"] == 0
+    assert obs["markdown_done_declaration_count"] == 1
+    assert obs["done_marker_policy"]["markdown_done_declaration"] == (
+        "measurement-only declaration"
+    )
+
+
 def test_roadmap_quiescence_timing_separates_parent_terminal(monkeypatch, tmp_path):
     class Harness:
         def quiesce_orphan_children(self, _env_info):
@@ -362,6 +446,196 @@ def test_roadmap_terminal_fence_rejects_status_only_resume(monkeypatch, tmp_path
     assert "workspace_quiesced_ns" not in timed_snapshot
 
 
+def test_roadmap_terminal_fence_allows_safe_running_to_done_convergence(
+    monkeypatch, tmp_path
+):
+    class Harness:
+        def quiesce_orphan_children(self, _env_info):
+            return {
+                "workspaceQuiesced": True,
+                "quiescenceMethod": "stop-agent-and-restart-task-runtime",
+                "openClawRuntimeStopped": True,
+                "execBridgeStopped": True,
+                "taskRuntimeRestarted": True,
+            }
+
+    condition = object.__new__(RoadmapBenchOpenClawCondition)
+    condition._env_info = {"_harness": Harness(), "state_dir": str(tmp_path)}
+    snapshot = {
+        "parent_session_key": "agent:roadmap_bench:explicit:run",
+        "parent_session_id": "parent",
+        "parent_last_run_id": "parent-run",
+        "parent_terminal": True,
+        "parent_session_terminal": False,
+        "parent_session_status": "running",
+        "message_count": 1,
+        "transcript_size_bytes": 10,
+        "yield_count": 0,
+        "latest_parent_event": "assistant_stop",
+        "latest_assistant_stop_reason": "stop",
+        "done_text": "DONE",
+        "pending_child_sessions": [],
+    }
+    settled = dict(
+        snapshot,
+        parent_session_status="done",
+        parent_session_terminal=True,
+    )
+    monkeypatch.setattr(
+        condition, "_read_yield_snapshot", lambda _sessions_dir: settled
+    )
+
+    timed_snapshot, quiescence = condition._quiesce_with_timing(
+        snapshot, logical_parent_terminal=True
+    )
+
+    assert quiescence["workspaceQuiesced"] is True
+    assert quiescence["terminalFenceStable"] is True
+    assert quiescence["terminalFenceDecision"] == "safe_status_convergence"
+    assert quiescence["terminalFenceBefore"]["parent_session_status"] == "running"
+    assert quiescence["terminalFenceAfter"]["parent_session_status"] == "done"
+    assert condition._env_info["roadmap_workspace_quiesced"] is True
+    assert "workspace_quiesced_ns" in timed_snapshot
+
+
+def test_roadmap_terminal_fence_rejects_writer_stop_failure(monkeypatch, tmp_path):
+    class Harness:
+        def quiesce_orphan_children(self, _env_info):
+            return {
+                "workspaceQuiesced": True,
+                "openClawRuntimeStopped": False,
+                "execBridgeStopped": True,
+                "taskRuntimeRestarted": True,
+            }
+
+    condition = object.__new__(RoadmapBenchOpenClawCondition)
+    condition._env_info = {"_harness": Harness(), "state_dir": str(tmp_path)}
+    snapshot = {
+        "parent_session_key": "agent:roadmap_bench:explicit:run",
+        "parent_session_id": "parent",
+        "parent_last_run_id": "parent-run",
+        "parent_terminal": True,
+        "parent_session_terminal": True,
+        "parent_session_status": "done",
+        "message_count": 1,
+        "transcript_size_bytes": 10,
+        "yield_count": 0,
+        "latest_parent_event": "assistant_stop",
+        "latest_assistant_stop_reason": "stop",
+        "done_text": "DONE",
+        "pending_child_sessions": [],
+    }
+    monkeypatch.setattr(
+        condition, "_read_yield_snapshot", lambda _sessions_dir: snapshot
+    )
+
+    timed_snapshot, quiescence = condition._quiesce_with_timing(
+        snapshot, logical_parent_terminal=True
+    )
+
+    assert quiescence["workspaceQuiesced"] is False
+    assert quiescence["terminalFenceStable"] is False
+    assert quiescence["terminalFenceDecision"] == "writer_stop_failed"
+    assert "workspace_quiesced_ns" not in timed_snapshot
+
+
+def test_roadmap_terminal_fence_rejects_changed_execution_identity():
+    before = {
+        "parent_session_key": "agent:roadmap_bench:explicit:run",
+        "parent_session_id": "parent",
+        "parent_last_run_id": "run-a",
+        "parent_session_status": "running",
+        "message_count": 1,
+        "transcript_size_bytes": 10,
+        "yield_count": 0,
+        "latest_parent_event": "assistant_stop",
+        "latest_assistant_stop_reason": "stop",
+        "done_text": "DONE",
+    }
+    after = dict(
+        before,
+        parent_last_run_id="run-b",
+        parent_session_status="done",
+    )
+
+    stable, decision = RoadmapBenchOpenClawCondition._terminal_fence_decision(
+        before, after, logical_parent_terminal=True
+    )
+
+    assert stable is False
+    assert decision == "parent_execution_identity_changed"
+
+
+def test_roadmap_terminal_fence_allows_orphan_child_state_convergence():
+    before = {
+        "parent_session_key": "agent:roadmap_bench:explicit:run",
+        "parent_session_id": "parent",
+        "parent_last_run_id": "run",
+        "parent_session_status": "running",
+        "message_count": 1,
+        "transcript_size_bytes": 10,
+        "yield_count": 0,
+        "latest_parent_event": "assistant_stop",
+        "latest_assistant_stop_reason": "stop",
+        "done_text": "DONE",
+        "pending_children": 1,
+        "child_states": [{"session_id": "child", "status": "running"}],
+    }
+    after = dict(
+        before,
+        parent_session_status="done",
+        pending_children=0,
+        child_states=[{"session_id": "child", "status": "killed"}],
+    )
+
+    stable, decision = RoadmapBenchOpenClawCondition._terminal_fence_decision(
+        before, after, logical_parent_terminal=True
+    )
+
+    assert stable is True
+    assert decision == "safe_status_convergence"
+
+
+def test_roadmap_terminal_fence_requires_verified_writer_stop(monkeypatch, tmp_path):
+    class Harness:
+        def quiesce_orphan_children(self, _env_info):
+            return {
+                "workspaceQuiesced": True,
+                "openClawRuntimeStopped": True,
+                "execBridgeStopped": True,
+                # Missing taskRuntimeRestarted is not proof of a write fence.
+            }
+
+    condition = object.__new__(RoadmapBenchOpenClawCondition)
+    condition._env_info = {"_harness": Harness(), "state_dir": str(tmp_path)}
+    snapshot = {
+        "parent_session_key": "agent:roadmap_bench:explicit:run",
+        "parent_session_id": "parent",
+        "parent_last_run_id": "run",
+        "parent_terminal": True,
+        "parent_session_terminal": True,
+        "parent_session_status": "done",
+        "message_count": 1,
+        "transcript_size_bytes": 10,
+        "yield_count": 0,
+        "latest_parent_event": "assistant_stop",
+        "latest_assistant_stop_reason": "stop",
+        "done_text": "DONE",
+        "pending_child_sessions": [],
+    }
+    monkeypatch.setattr(
+        condition, "_read_yield_snapshot", lambda _sessions_dir: snapshot
+    )
+
+    timed_snapshot, quiescence = condition._quiesce_with_timing(
+        snapshot, logical_parent_terminal=True
+    )
+
+    assert quiescence["workspaceQuiesced"] is False
+    assert quiescence["terminalFenceDecision"] == "writer_stop_unverified"
+    assert "workspace_quiesced_ns" not in timed_snapshot
+
+
 def test_roadmap_candidate_freeze_requires_validated_quiescence(tmp_path):
     condition = object.__new__(RoadmapBenchOpenClawCondition)
     condition.container = None
@@ -462,8 +736,8 @@ def test_child_runtime_and_unmaterialized_spawn_are_distinct(tmp_path):
     assert obs["child_runtime_by_session"][child_a]["start_timestamp_source"] == "createdAt"
     assert obs["child_runtime_by_session"][child_a]["terminal_timestamp_source"] == "endedAt"
     assert obs["child_runtime_by_session"][child_b]["runtime_seconds"] == 3.0
-    assert obs["child_runtime_by_session"][child_b]["start_timestamp_quality"] == "transcript_inferred"
-    assert obs["child_runtime_by_session"][child_b]["terminal_timestamp_quality"] == "transcript_inferred"
+    assert obs["child_runtime_by_session"][child_b]["start_timestamp_quality"] == "durable_transcript_creation"
+    assert obs["child_runtime_by_session"][child_b]["terminal_timestamp_quality"] == "transcript_terminal_stop"
     assert obs["child_sum_runtime_seconds"] == 6.0
     assert obs["child_union_active_seconds"] == 6.0
     assert obs["child_overlap_wall_seconds"] == 0.0
@@ -483,8 +757,8 @@ def test_child_runtime_and_unmaterialized_spawn_are_distinct(tmp_path):
     assert completions[child_a]["timestamp_quality"] == "session_state"
     assert completions[child_a]["measurement_observed_timestamp_ns"] is not None
     assert "observed_timestamp_ns" not in completions[child_a]
-    assert completions[child_b]["source_timestamp_field"] == "transcript_last_event"
-    assert completions[child_b]["timestamp_quality"] == "transcript_inferred"
+    assert completions[child_b]["source_timestamp_field"] == "transcript_final_assistant"
+    assert completions[child_b]["timestamp_quality"] == "transcript_terminal_stop"
 
 
 def test_three_child_overlap_distinguishes_wall_from_excess(tmp_path):
@@ -520,7 +794,7 @@ def test_three_child_overlap_distinguishes_wall_from_excess(tmp_path):
     assert obs["max_concurrent_children"] == 3
 
 
-def test_nonterminal_children_are_right_censored_for_concurrency(tmp_path):
+def test_nonterminal_children_are_lower_bounds_not_precise_concurrency(tmp_path):
     sessions = tmp_path / "conversation" / "sessions"
     sessions.mkdir(parents=True)
     parent_key = "agent:roadmap_bench:main"
@@ -559,28 +833,265 @@ def test_nonterminal_children_are_right_censored_for_concurrency(tmp_path):
 
     assert obs["child_session_count"] == 3
     assert obs["child_runtime_complete_count"] == 0
-    assert obs["child_runtime_observed_count"] == 3
-    assert obs["child_sum_runtime_seconds"] == 18.0
-    assert obs["child_union_active_seconds"] == 8.0
-    assert obs["child_overlap_wall_seconds"] == 6.0
-    assert obs["child_concurrency_excess_seconds"] == 10.0
-    assert obs["max_concurrent_children"] == 3
+    assert obs["child_runtime_unknown_count"] == 3
+    assert obs["child_runtime_observed_count"] == 0
+    assert obs["child_sum_runtime_seconds"] == 0.0
+    assert obs["child_sum_runtime_lower_bound_seconds"] == 0.0
+    assert obs["child_union_active_seconds"] == 0.0
+    assert obs["child_overlap_wall_seconds"] == 0.0
+    assert obs["child_concurrency_excess_seconds"] == 0.0
+    assert obs["max_concurrent_children"] == 0
+    assert obs["max_concurrent_children_lower_bound"] == 0
 
     child = obs["child_runtime_by_session"][
         "agent:roadmap_bench:subagent:a"
     ]
-    assert child["runtime_seconds"] == 8.0
+    assert child["runtime_seconds"] is None
+    assert child["runtime_lower_bound_seconds"] is None
     assert child["runtime_complete"] is False
     assert child["runtime_censored"] is True
     assert child["terminal_timestamp"] is None
-    assert child["interval_end_timestamp_ns"] == quiesced_ns
-    assert child["interval_end_timestamp_source"] == "workspaceQuiescedNs"
+    assert child["interval_end_timestamp_ns"] is None
+    assert child["interval_end_timestamp_source"] is None
 
     timeline = obs["agent_timeline"]
     assert timeline["observation_end_timestamp_ns"] == quiesced_ns
-    assert [agent["role"] for agent in timeline["agents"]] == [
-        "parent", "child", "child", "child",
-    ]
+    assert [agent["role"] for agent in timeline["agents"]] == ["parent"]
     assert sum(
         bool(agent["runtime_censored"]) for agent in timeline["agents"]
-    ) == 3
+    ) == 0
+
+
+def test_child_continuation_started_at_does_not_truncate_lifecycle(tmp_path):
+    sessions = tmp_path / "conversation" / "sessions"
+    sessions.mkdir(parents=True)
+    parent_key = "agent:roadmap_bench:main"
+    child_key = "agent:roadmap_bench:subagent:child"
+    (sessions / "sessions.json").write_text(json.dumps({
+        parent_key: {
+            "sessionId": "parent-id",
+            "status": "done",
+        },
+        child_key: {
+            "sessionId": "child-id",
+            "sessionFile": "child.jsonl",
+            "spawnedBy": parent_key,
+            "status": "done",
+            "createdAt": "2026-01-01T00:00:02Z",
+            # OpenClaw refreshes this when continuing the same child.
+            "startedAt": "2026-01-01T00:00:08Z",
+            "endedAt": "2026-01-01T00:00:10Z",
+        },
+    }))
+    _write_jsonl(sessions / "child.jsonl", [{
+        "type": "session",
+        "timestamp": "2026-01-01T00:00:02.100Z",
+    }, {
+        "type": "message",
+        "message": {
+            "role": "assistant",
+            "timestamp": "2026-01-01T00:00:09Z",
+            "stopReason": "stop",
+            "content": [{"type": "text", "text": "done"}],
+        },
+    }])
+
+    obs = build_openclaw_measurement(
+        tmp_path, agent_id="roadmap_bench"
+    )["runtime_observability"]
+    child = obs["child_runtime_by_session"][child_key]
+
+    assert child["start_timestamp_ns"] == 1_767_225_602_000_000_000
+    assert child["start_timestamp_source"] == "createdAt"
+    assert child["runtime_seconds"] == 8.0
+    assert child["start_timestamp_conflict"] is True
+    assert "startedAt" in child["start_timestamp_evidence"]
+
+
+def test_child_counts_distinguish_online_and_restored_archive_projection(tmp_path):
+    sessions = tmp_path / "conversation" / "sessions"
+    sessions.mkdir(parents=True)
+    parent_key = "agent:roadmap_bench:main"
+    (sessions / "sessions.json").write_text(json.dumps({
+        parent_key: {"sessionId": "parent-id", "status": "done"},
+        "agent:roadmap_bench:subagent:online": {
+            "sessionId": "online-id",
+            "spawnedBy": parent_key,
+            "status": "done",
+            "createdAt": "2026-01-01T00:00:01Z",
+            "endedAt": "2026-01-01T00:00:02Z",
+            "agentBenchProjectionSource": "online_index",
+        },
+        "agent:roadmap_bench:subagent:archived": {
+            "sessionId": "archived-id",
+            "spawnedBy": parent_key,
+            "status": "done",
+            "createdAt": "2026-01-01T00:00:03Z",
+            "endedAt": "2026-01-01T00:00:04Z",
+            "agentBenchProjectionSource": "restored_archived_transcript",
+        },
+    }))
+
+    obs = build_openclaw_measurement(
+        tmp_path, agent_id="roadmap_bench"
+    )["runtime_observability"]
+
+    assert obs["materialized_child_session_count"] == 2
+    assert obs["online_index_child_count_at_archive"] == 1
+    assert obs["restored_archived_child_count"] == 1
+    assert obs["child_count_source_quality"] == "projection_sources_exact"
+
+
+def test_unknown_child_has_lower_bound_but_no_precise_runtime(tmp_path):
+    sessions = tmp_path / "conversation" / "sessions"
+    sessions.mkdir(parents=True)
+    parent_key = "agent:roadmap_bench:main"
+    child_key = "agent:roadmap_bench:subagent:child"
+    (sessions / "sessions.json").write_text(json.dumps({
+        parent_key: {
+            "sessionId": "parent-id",
+            "status": "done",
+        },
+        child_key: {
+            "sessionId": "child-id",
+            "sessionFile": "child.jsonl",
+            "spawnedBy": parent_key,
+            "status": "unknown",
+            "createdAt": "2026-01-01T00:00:02Z",
+            "updatedAt": "2026-01-01T00:00:03Z",
+        },
+    }))
+    _write_jsonl(sessions / "child.jsonl", [{
+        "type": "message",
+        "message": {
+            "role": "assistant",
+            "timestamp": "2026-01-01T00:00:05Z",
+            "stopReason": "toolUse",
+            "content": [],
+        },
+    }])
+    (tmp_path / "openclaw_response.json").write_text(json.dumps({
+        "result": {"meta": {"agentBenchLifecycle": {
+            "workspaceQuiescedNs": 1_767_225_610_000_000_000,
+        }}}
+    }))
+
+    obs = build_openclaw_measurement(
+        tmp_path, agent_id="roadmap_bench"
+    )["runtime_observability"]
+    child = obs["child_runtime_by_session"][child_key]
+
+    assert child["runtime_seconds"] is None
+    assert child["runtime_complete"] is False
+    assert child["runtime_censored"] is True
+    assert child["runtime_lower_bound_seconds"] == 3.0
+    assert child["last_observed_timestamp_source"] == "transcript_last_event"
+    assert child["interval_end_timestamp_ns"] is None
+    assert obs["child_runtime_unknown_count"] == 1
+    assert obs["child_sum_runtime_seconds"] == 0.0
+    assert obs["child_sum_runtime_lower_bound_seconds"] == 3.0
+    assert obs["child_derived_metrics_quality"] == "partial_excludes_unknown"
+
+
+def test_matched_gateway_run_failure_is_child_terminal_evidence(tmp_path):
+    sessions = tmp_path / "conversation" / "sessions"
+    sessions.mkdir(parents=True)
+    parent_key = "agent:roadmap_bench:main"
+    child_key = "agent:roadmap_bench:subagent:child"
+    (sessions / "sessions.json").write_text(json.dumps({
+        parent_key: {"sessionId": "parent-id", "status": "done"},
+        child_key: {
+            "sessionId": "child-id",
+            "sessionFile": "child.jsonl",
+            "spawnedBy": parent_key,
+            "status": "unknown",
+            "createdAt": "2026-01-01T00:00:02Z",
+        },
+    }))
+    _write_jsonl(sessions / "child.jsonl", [{
+        "type": "message",
+        "message": {
+            "role": "assistant",
+            "timestamp": "2026-01-01T00:00:04Z",
+            "stopReason": "error",
+            "content": [],
+        },
+    }])
+    _write_jsonl(tmp_path / "conversation" / "cache-trace.jsonl", [{
+        "runId": "child-run",
+        "sessionId": "child-id",
+        "sessionKey": child_key,
+        "stage": "session:loaded",
+    }])
+    (tmp_path / "openclaw_gateway.log").write_text(
+        "2026-01-01T00:00:05Z [sqlite/transaction] lock wait failed\n"
+        "2026-01-01T00:00:06Z [agent/embedded] embedded run agent end: "
+        "runId=child-run isError=true model=model provider=provider "
+        "rawError=database is locked\n"
+    )
+
+    obs = build_openclaw_measurement(
+        tmp_path, agent_id="roadmap_bench"
+    )["runtime_observability"]
+    child = obs["child_runtime_by_session"][child_key]
+
+    assert child["observed_status"] == "unknown"
+    assert child["status"] == "failed"
+    assert child["terminal_timestamp_ns"] == 1_767_225_606_000_000_000
+    assert child["terminal_timestamp_source"] == "gateway_embedded_run_error"
+    assert child["runtime_seconds"] == 4.0
+    assert child["terminal_evidence"]["run_id"] == "child-run"
+
+
+def test_child_activity_after_gateway_error_keeps_terminal_unknown(tmp_path):
+    sessions = tmp_path / "conversation" / "sessions"
+    sessions.mkdir(parents=True)
+    parent_key = "agent:roadmap_bench:main"
+    child_key = "agent:roadmap_bench:subagent:child"
+    (sessions / "sessions.json").write_text(json.dumps({
+        parent_key: {"sessionId": "parent-id", "status": "done"},
+        child_key: {
+            "sessionId": "child-id",
+            "sessionFile": "child.jsonl",
+            "spawnedBy": parent_key,
+            "status": "unknown",
+            "createdAt": "2026-01-01T00:00:02Z",
+        },
+    }))
+    _write_jsonl(sessions / "child.jsonl", [{
+        "type": "message",
+        "message": {
+            "role": "assistant",
+            "timestamp": "2026-01-01T00:00:04Z",
+            "stopReason": "error",
+            "content": [],
+        },
+    }, {
+        "type": "message",
+        "message": {
+            "role": "assistant",
+            "timestamp": "2026-01-01T00:00:07Z",
+            "stopReason": "toolUse",
+            "content": [{"type": "toolCall", "name": "read", "id": "call"}],
+        },
+    }])
+    _write_jsonl(tmp_path / "conversation" / "cache-trace.jsonl", [{
+        "runId": "failed-run",
+        "sessionId": "child-id",
+        "sessionKey": child_key,
+    }])
+    (tmp_path / "openclaw_gateway.log").write_text(
+        "2026-01-01T00:00:05Z [agent/embedded] embedded run agent end: "
+        "runId=failed-run isError=true rawError=database is locked\n"
+    )
+
+    obs = build_openclaw_measurement(
+        tmp_path, agent_id="roadmap_bench"
+    )["runtime_observability"]
+    child = obs["child_runtime_by_session"][child_key]
+
+    assert child["observed_status"] == "unknown"
+    assert child["status"] == "unknown"
+    assert child["terminal_timestamp_ns"] is None
+    assert child["runtime_seconds"] is None
+    assert child["runtime_lower_bound_seconds"] == 5.0
