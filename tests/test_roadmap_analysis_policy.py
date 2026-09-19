@@ -199,7 +199,7 @@ def test_valid_retry_is_selected_over_scored_infrastructure_error(tmp_path):
     assert selected == [valid]
 
 
-def test_roadmap_profile_and_prompt_allow_sixteen_concurrent_subagents():
+def test_roadmap_profile_requires_conditional_subagent_fanout():
     root = Path(__file__).resolve().parents[1]
     profile = (
         root / "profiles" / "harnesses" / "openclaw_roadmapbench.yaml"
@@ -213,13 +213,36 @@ def test_roadmap_profile_and_prompt_allow_sixteen_concurrent_subagents():
         / "agents"
         / "AGENTS.md"
     ).read_text()
+    normalized = " ".join(prompt.split())
 
     assert "maxConcurrent: 16" in profile
     assert "maxChildrenPerAgent: 16" in profile
     assert "Up to sixteen subagents may run concurrently." in prompt
-    assert "you are encouraged" in prompt
-    assert "Delegation is preferred" in prompt
+    assert "delegate at least one of them to a subagent" in normalized
+    assert "Delegation is required for genuine fan-out." in prompt
+    assert "invoke `sessions_spawn`" in prompt
+    assert "merely planning or saying that you will delegate" in normalized
     assert "MUST spawn" not in prompt
+
+
+def test_roadmap_prompt_requires_loop_discipline():
+    root = Path(__file__).resolve().parents[1]
+    prompt = (
+        root
+        / "agent_bench"
+        / "benchmarks"
+        / "roadmap_bench"
+        / "openclaw"
+        / "agents"
+        / "AGENTS.md"
+    ).read_text()
+    normalized = " ".join(prompt.split())
+
+    assert "Do not repeat the same or semantically equivalent tool action" in normalized
+    assert "no pending child completion is owned by the current turn" in normalized
+    assert "Changing only `message` or `acknowledgment`" in normalized
+    assert "Treat a tool-loop warning as a hard checkpoint" in normalized
+    assert "Never retry an action rejected by a critical loop veto." in normalized
 
 
 def test_roadmap_prompt_requires_incremental_deduplicated_child_integration():
