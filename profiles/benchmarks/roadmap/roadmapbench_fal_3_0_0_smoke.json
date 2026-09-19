@@ -1,0 +1,29 @@
+{
+  "_doc": "RoadmapBench Falcon 3.0.0 natural fan-out smoke from subset10c.",
+  "sweep_name": "roadmapbench_fal_3_0_0_smoke",
+  "plan_version": "roadmapbench-59184e779909-fal-3.0.0",
+  "application": "terminal_bench",
+  "source_dataset": "UnipatAI/RoadmapBench",
+  "source_commit": "59184e779909300a5a0150b06b945d39da81a099",
+  "source_dataset_task_count": 115,
+  "tasks_root": "$SCRATCH/datasets/roadmapbench-59184e779909-subagent-subset30",
+  "instances": [
+    "fal-3.0.0-roadmap"
+  ],
+  "repo_mapping": {
+    "fal-3.0.0-roadmap": {
+      "repo_id": "roadmapbench/fal-3.0.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 7200,
+  "output_dir": "roadmapbench_fal_3_0_0_smoke",
+  "seeds": [
+    42
+  ],
+  "selection": {
+    "method": "single-task RoadmapBench smoke",
+    "rationale": "Rerun Falcon 3.0.0 because its only historical attempt ended in a runtime error without a valid reward."
+  }
+}

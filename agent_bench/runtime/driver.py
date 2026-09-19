@@ -1156,19 +1156,33 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
             return None
 
     if max_workers <= 1:
-        results_iter = (_one(rc) for rc in run_configs)
+        results_iter = ((rc, _one(rc)) for rc in run_configs)
     else:
         pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="oc-eval-run")
-        futures = [pool.submit(_one, rc) for rc in run_configs]
-        results_iter = (f.result() for f in as_completed(futures))
+        futures = {pool.submit(_one, rc): rc for rc in run_configs}
+        results_iter = ((futures[f], f.result()) for f in as_completed(futures))
 
-    for manifest in results_iter:
+    log_task_completion = _telemetry_bool(os.environ.get("AB_LOG_TASK_COMPLETION")) is True
+    for rc, manifest in results_iter:
         if manifest is None:
             failed += 1
+            task_status = "ERROR"
         elif manifest.status in ("PASS", "FAIL", "TIMEOUT", "DEFERRED"):
             completed += 1
+            task_status = manifest.status
         elif manifest.status == "ERROR":
             failed += 1
+            task_status = manifest.status
+        else:
+            task_status = manifest.status
+        if log_task_completion:
+            logger.info(
+                "[TASK_FINISHED] task=%s status=%s progress=%d/%d",
+                rc.instance_id,
+                task_status,
+                completed + failed,
+                total,
+            )
         logger.info(
             f"Progress: {completed + failed}/{total} "
             f"({completed} completed, {failed} errors)"
