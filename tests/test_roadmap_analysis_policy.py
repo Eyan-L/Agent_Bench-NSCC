@@ -227,22 +227,33 @@ def test_roadmap_profile_requires_conditional_subagent_fanout():
 
 def test_roadmap_prompt_requires_loop_discipline():
     root = Path(__file__).resolve().parents[1]
-    prompt = (
-        root
-        / "agent_bench"
-        / "benchmarks"
-        / "roadmap_bench"
-        / "openclaw"
-        / "agents"
-        / "AGENTS.md"
+    prompt_root = (
+        root / "agent_bench" / "benchmarks" / "roadmap_bench" / "openclaw"
+    )
+    subagent_prompt = (prompt_root / "agents" / "AGENTS.md").read_text()
+    single_agent_prompt = (
+        prompt_root / "agents_single_agent" / "AGENTS.md"
     ).read_text()
-    normalized = " ".join(prompt.split())
 
-    assert "Do not repeat the same or semantically equivalent tool action" in normalized
-    assert "no pending child completion is owned by the current turn" in normalized
-    assert "Changing only `message` or `acknowledgment`" in normalized
-    assert "Treat a tool-loop warning as a hard checkpoint" in normalized
-    assert "Never retry an action rejected by a critical loop veto." in normalized
+    for prompt in (subagent_prompt, single_agent_prompt):
+        normalized = " ".join(prompt.split())
+        assert (
+            "Do not repeat the same or semantically equivalent tool action"
+            in normalized
+        )
+        assert "Treat a tool-loop warning as a hard checkpoint" in normalized
+        assert (
+            "Never retry an action rejected by a critical loop veto." in normalized
+        )
+
+    subagent_normalized = " ".join(subagent_prompt.split())
+    assert (
+        "no pending child completion is owned by the current turn"
+        in subagent_normalized
+    )
+    assert (
+        "Changing only `message` or `acknowledgment`" in subagent_normalized
+    )
 
 
 def test_roadmap_prompt_requires_incremental_deduplicated_child_integration():
