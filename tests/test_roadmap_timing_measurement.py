@@ -84,6 +84,30 @@ def test_freeze_error_preserves_execution_facts_without_fake_verifier():
     assert restored.agent_execution_outcome == "normal_completion"
 
 
+def test_verifier_exception_is_attempted_error_not_skipped():
+    manifest = RunManifest(
+        run_id="run",
+        condition_id="condition",
+        instance_id="instance",
+        seed=42,
+        serving_config_id="serving",
+        status="ERROR",
+    )
+    _preserve_partial_agent_result(
+        manifest,
+        {"agent_completion_status": "normal_completion"},
+        failure_phase="verifier",
+        failure_message="verifier crashed",
+        verifier_attempted=True,
+    )
+
+    assert manifest.failure_phase == "verifier"
+    assert manifest.verifier_eligible is True
+    assert manifest.verifier_status == "ERROR"
+    assert manifest.verifier_skipped is False
+    assert manifest.reward is None
+
+
 def test_explicit_parent_and_runtime_waits_are_measured_separately(tmp_path):
     sessions = tmp_path / "conversation" / "sessions"
     sessions.mkdir(parents=True)
@@ -906,6 +930,10 @@ def test_child_continuation_started_at_does_not_truncate_lifecycle(tmp_path):
     assert child["runtime_seconds"] == 8.0
     assert child["start_timestamp_conflict"] is True
     assert "startedAt" in child["start_timestamp_evidence"]
+    assert obs["child_derived_metrics_quality"] == (
+        "complete_with_qualified_timestamps"
+    )
+    assert obs["child_start_timestamp_conflict_count"] == 1
 
 
 def test_child_counts_distinguish_online_and_restored_archive_projection(tmp_path):
@@ -985,12 +1013,44 @@ def test_unknown_child_has_lower_bound_but_no_precise_runtime(tmp_path):
     assert child["runtime_complete"] is False
     assert child["runtime_censored"] is True
     assert child["runtime_lower_bound_seconds"] == 3.0
-    assert child["last_observed_timestamp_source"] == "transcript_last_event"
+    assert child["last_observed_timestamp_source"] == (
+        "transcript_last_assistant_execution"
+    )
+    assert child["last_observed_timestamp_quality"] == (
+        "durable_transcript_execution"
+    )
     assert child["interval_end_timestamp_ns"] is None
     assert obs["child_runtime_unknown_count"] == 1
     assert obs["child_sum_runtime_seconds"] == 0.0
     assert obs["child_sum_runtime_lower_bound_seconds"] == 3.0
     assert obs["child_derived_metrics_quality"] == "partial_excludes_unknown"
+
+
+def test_unknown_child_metadata_update_is_not_execution_lower_bound(tmp_path):
+    sessions = tmp_path / "conversation" / "sessions"
+    sessions.mkdir(parents=True)
+    parent_key = "agent:roadmap_bench:main"
+    child_key = "agent:roadmap_bench:subagent:child"
+    (sessions / "sessions.json").write_text(json.dumps({
+        parent_key: {"sessionId": "parent-id", "status": "done"},
+        child_key: {
+            "sessionId": "child-id",
+            "spawnedBy": parent_key,
+            "status": "unknown",
+            "createdAt": "2026-01-01T00:00:02Z",
+            "updatedAt": "2026-01-01T00:00:20Z",
+        },
+    }))
+
+    obs = build_openclaw_measurement(
+        tmp_path, agent_id="roadmap_bench"
+    )["runtime_observability"]
+    child = obs["child_runtime_by_session"][child_key]
+
+    assert child["runtime_seconds"] is None
+    assert child["runtime_lower_bound_seconds"] is None
+    assert child["last_observed_timestamp_ns"] is None
+    assert obs["child_sum_runtime_lower_bound_seconds"] == 0.0
 
 
 def test_matched_gateway_run_failure_is_child_terminal_evidence(tmp_path):
@@ -1041,6 +1101,13 @@ def test_matched_gateway_run_failure_is_child_terminal_evidence(tmp_path):
     assert child["terminal_timestamp_source"] == "gateway_embedded_run_error"
     assert child["runtime_seconds"] == 4.0
     assert child["terminal_evidence"]["run_id"] == "child-run"
+    assert child["terminal_evidence"]["identity_quality"] == (
+        "session_match_run_unavailable"
+    )
+    assert obs["child_terminal_identity_qualified_count"] == 1
+    assert obs["child_derived_metrics_quality"] == (
+        "complete_with_qualified_timestamps"
+    )
 
 
 def test_child_activity_after_gateway_error_keeps_terminal_unknown(tmp_path):
@@ -1095,3 +1162,38 @@ def test_child_activity_after_gateway_error_keeps_terminal_unknown(tmp_path):
     assert child["terminal_timestamp_ns"] is None
     assert child["runtime_seconds"] is None
     assert child["runtime_lower_bound_seconds"] == 5.0
+
+
+def test_gateway_failure_for_stale_run_is_not_terminal_evidence(tmp_path):
+    sessions = tmp_path / "conversation" / "sessions"
+    sessions.mkdir(parents=True)
+    parent_key = "agent:roadmap_bench:main"
+    child_key = "agent:roadmap_bench:subagent:child"
+    (sessions / "sessions.json").write_text(json.dumps({
+        parent_key: {"sessionId": "parent-id", "status": "done"},
+        child_key: {
+            "sessionId": "child-id",
+            "spawnedBy": parent_key,
+            "status": "unknown",
+            "lastRunId": "recovery-run",
+            "createdAt": "2026-01-01T00:00:02Z",
+        },
+    }))
+    _write_jsonl(tmp_path / "conversation" / "cache-trace.jsonl", [{
+        "runId": "failed-run",
+        "sessionId": "child-id",
+        "sessionKey": child_key,
+    }])
+    (tmp_path / "openclaw_gateway.log").write_text(
+        "2026-01-01T00:00:05Z [agent/embedded] embedded run agent end: "
+        "runId=failed-run isError=true rawError=database is locked\n"
+    )
+
+    obs = build_openclaw_measurement(
+        tmp_path, agent_id="roadmap_bench"
+    )["runtime_observability"]
+    child = obs["child_runtime_by_session"][child_key]
+
+    assert child["status"] == "unknown"
+    assert child["terminal_timestamp_ns"] is None
+    assert child["runtime_seconds"] is None

@@ -1184,6 +1184,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     def _terminal_fence_snapshot(snapshot: Dict) -> Dict:
         """Persist a compact, reviewable fence state without transcript data."""
         return {
+            "session_store": snapshot.get("session_store"),
             "parent_session_key": snapshot.get("parent_session_key"),
             "parent_session_id": snapshot.get("parent_session_id"),
             "parent_last_run_id": snapshot.get("parent_last_run_id"),
@@ -1195,6 +1196,8 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             "latest_assistant_stop_reason": snapshot.get(
                 "latest_assistant_stop_reason"
             ),
+            "done_marker": bool(snapshot.get("done_text")),
+            "terminal_evidence": snapshot.get("terminal_evidence"),
             "pending_children": snapshot.get("pending_children"),
         }
 
@@ -1716,6 +1719,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         )
 
         return {
+            "session_store": "json_projection",
             "parent_session_key": str(parent_key),
             "parent_session_id": str(parent_session_id),
             "parent_session_status": parent_session_status,

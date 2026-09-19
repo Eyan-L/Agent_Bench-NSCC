@@ -121,12 +121,7 @@ def _runtime_observability(record) -> tuple[dict[str, Any], Path | None]:
 
 
 def _child_intervals(record) -> list[dict[str, Any]]:
-    """Return observable child lifetimes, including right-censored children.
-
-    Naturally completed children use ``terminal_timestamp_ns``. A child that is
-    still active when the parent reaches its terminal boundary instead uses the
-    harness-observed ``interval_end_timestamp_ns`` as a censored endpoint.
-    """
+    """Return exact child lifetimes plus execution-evidence lower bounds."""
     obs, _path = _runtime_observability(record)
     children = obs.get("child_runtime_by_session") or {}
     if not isinstance(children, dict):
@@ -140,15 +135,25 @@ def _child_intervals(record) -> list[dict[str, Any]]:
         start_ns = _impl._number(child.get("start_timestamp_ns"))
         terminal_ns = _impl._number(child.get("terminal_timestamp_ns"))
         interval_end_ns = _impl._number(child.get("interval_end_timestamp_ns"))
+        lower_bound_end_ns = _impl._number(
+            child.get("last_observed_timestamp_ns")
+        )
 
         if terminal_ns is not None:
             end_ns = terminal_ns
             end_source = child.get("terminal_timestamp_source")
             end_quality = child.get("terminal_timestamp_quality")
         else:
-            end_ns = interval_end_ns
-            end_source = child.get("interval_end_timestamp_source")
-            end_quality = child.get("interval_end_timestamp_quality")
+            end_ns = interval_end_ns or lower_bound_end_ns
+            end_source = (
+                child.get("interval_end_timestamp_source")
+                or child.get("last_observed_timestamp_source")
+            )
+            end_quality = (
+                child.get("interval_end_timestamp_quality")
+                if interval_end_ns is not None
+                else child.get("last_observed_timestamp_quality")
+            )
 
         if start_ns is None or end_ns is None or end_ns < start_ns:
             continue
@@ -168,8 +173,16 @@ def _child_intervals(record) -> list[dict[str, Any]]:
                     int(interval_end_ns) if interval_end_ns is not None else None
                 ),
                 "runtime_seconds": _impl._number(child.get("runtime_seconds")),
+                "runtime_lower_bound_seconds": _impl._number(
+                    child.get("runtime_lower_bound_seconds")
+                ),
                 "runtime_complete": bool(child.get("runtime_complete")),
                 "runtime_censored": bool(child.get("runtime_censored")),
+                "start_timestamp_source": child.get("start_timestamp_source"),
+                "start_timestamp_quality": child.get("start_timestamp_quality"),
+                "start_timestamp_conflict": bool(
+                    child.get("start_timestamp_conflict")
+                ),
                 "end_timestamp_source": end_source,
                 "end_timestamp_quality": end_quality,
             }
@@ -200,7 +213,11 @@ def record_to_dict(record) -> dict[str, Any]:
         result.pop(key, None)
 
     obs, obs_path = _runtime_observability(record)
-    child_count = _impl._number(obs.get("child_session_count"))
+    child_count = _impl._number(
+        obs.get("materialized_child_session_count")
+        if obs.get("materialized_child_session_count") is not None
+        else obs.get("child_session_count")
+    )
     max_concurrent = _impl._number(obs.get("max_concurrent_children"))
     phase = record.manifest.get("phase_timing") or {}
     if not isinstance(phase, dict):
@@ -208,6 +225,8 @@ def record_to_dict(record) -> dict[str, Any]:
 
     result.update(
         {
+            "failure_phase": record.manifest.get("failure_phase"),
+            "verifier_skipped": record.manifest.get("verifier_skipped"),
             "runtime_observability_present": obs_path is not None,
             "runtime_observability_path": str(obs_path) if obs_path else None,
             "materialized_subagent_count": (
@@ -216,14 +235,36 @@ def record_to_dict(record) -> dict[str, Any]:
             "child_runtime_complete_count": _impl._number(
                 obs.get("child_runtime_complete_count")
             ),
+            "child_runtime_unknown_count": _impl._number(
+                obs.get("child_runtime_unknown_count")
+            ),
+            "child_count_source_quality": obs.get("child_count_source_quality"),
+            "child_derived_metrics_quality": obs.get(
+                "child_derived_metrics_quality"
+            ),
+            "child_start_timestamp_conflict_count": _impl._number(
+                obs.get("child_start_timestamp_conflict_count")
+            ),
+            "child_terminal_identity_qualified_count": _impl._number(
+                obs.get("child_terminal_identity_qualified_count")
+            ),
             "max_concurrent_subagents": (
                 int(max_concurrent) if max_concurrent is not None else None
+            ),
+            "max_concurrent_subagents_lower_bound": _impl._number(
+                obs.get("max_concurrent_children_lower_bound")
             ),
             "child_sum_runtime_seconds": _impl._number(
                 obs.get("child_sum_runtime_seconds")
             ),
+            "child_sum_runtime_lower_bound_seconds": _impl._number(
+                obs.get("child_sum_runtime_lower_bound_seconds")
+            ),
             "child_union_active_seconds": _impl._number(
                 obs.get("child_union_active_seconds")
+            ),
+            "child_union_active_lower_bound_seconds": _impl._number(
+                obs.get("child_union_active_lower_bound_seconds")
             ),
             "child_overlap_wall_seconds": _impl._number(
                 obs.get("child_overlap_wall_seconds")
@@ -342,6 +383,17 @@ def compare_paired(
             "agent_execution_end_ns"
         )
         row["subagent_child_intervals"] = flat.get("child_intervals") or []
+        for field in (
+            "child_count_source_quality",
+            "child_derived_metrics_quality",
+            "child_runtime_unknown_count",
+            "child_start_timestamp_conflict_count",
+            "child_terminal_identity_qualified_count",
+            "child_sum_runtime_lower_bound_seconds",
+            "child_union_active_lower_bound_seconds",
+            "max_concurrent_subagents_lower_bound",
+        ):
+            row[f"subagent_{field}"] = flat.get(field)
         row["subagent_artifact_links"] = flat.get("artifact_links") or {}
         single_record = single_map.get(key)
         row["single_agent_artifact_links"] = (
@@ -476,8 +528,8 @@ def render_markdown(
                 "",
                 "| Task | Seed | Sub reward | Single reward | Δ reward | Sub latency "
                 "(s) | Single latency (s) | Speedup | Materialized subagents | "
-                "Max concurrent subagents | Trajectory | Artifacts |",
-                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
+                "Max concurrent subagents | Child timing quality | Trajectory | Artifacts |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|",
             ]
             for row in paired_rows:
                 trajectory_ok = (
@@ -496,6 +548,7 @@ def render_markdown(
                     f"{_impl._fmt(row['subagent_speedup_single_over_subagent'])}x | "
                     f"{_impl._fmt(row.get('subagent_materialized_subagent_count'), 0)} | "
                     f"{_impl._fmt(row.get('subagent_max_concurrent_subagents'), 0)} | "
+                    f"{row.get('subagent_child_derived_metrics_quality') or 'unknown'} | "
                     f"{trajectory_ok} | "
                     f"{_paired_artifact_markdown(row)} |"
                 )
@@ -642,7 +695,7 @@ def _plot_subagent_concurrency_trajectory(
     path: Path,
     dpi: int,
 ) -> bool:
-    """Heatmap of actual child concurrency over normalized agent execution."""
+    """Heatmap of exact child concurrency over normalized agent execution."""
     bins = 120
     prepared: list[tuple[str, list[int]]] = []
     maximum = 0
@@ -650,7 +703,12 @@ def _plot_subagent_concurrency_trajectory(
     for row in sorted(rows, key=lambda item: str(item["instance_id"])):
         start = _impl._number(row.get("subagent_agent_execution_start_ns"))
         end = _impl._number(row.get("subagent_agent_execution_end_ns"))
-        intervals = row.get("subagent_child_intervals") or []
+        intervals = [
+            interval
+            for interval in (row.get("subagent_child_intervals") or [])
+            if isinstance(interval, dict)
+            and not bool(interval.get("runtime_censored"))
+        ]
         if start is None or end is None or end <= start:
             continue
 
@@ -704,7 +762,7 @@ def _plot_subagent_concurrency_trajectory(
         ["0%", "25%", "50%", "75%", "100%"],
     )
     ax.set_xlabel("Normalized agent execution trajectory")
-    ax.set_title("Actual child concurrency over the agent trajectory")
+    ax.set_title("Exact child concurrency over the agent trajectory")
     colorbar = fig.colorbar(image, ax=ax)
     colorbar.set_label("Active materialized subagents")
     fig.tight_layout()

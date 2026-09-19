@@ -449,6 +449,7 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
     latest_assistant_run_id = ""
     latest_assistant_has_tool_call = False
     latest_assistant_has_payload = False
+    post_terminal_settle_error = ""
     heartbeat_turn = False
 
     for event in messages[latest_yield + 1 :]:
@@ -519,6 +520,20 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
             if isinstance(openclaw_meta, dict)
             else ""
         )
+        if (
+            done_text
+            and stop_reason == "error"
+            and not text
+            and not has_tool_payload
+            and run_id.startswith("announce:requester-settle:")
+        ):
+            # Match the JSON projection path: a transport error appended by a
+            # requester-settle retry does not erase an earlier durable DONE.
+            post_terminal_settle_error = str(
+                message.get("errorMessage") or "requester-settle error"
+            )
+            latest_event_kind = "post_terminal_settle_error"
+            continue
         latest_assistant_stop_reason = stop_reason
         latest_assistant_text = text
         latest_assistant_run_id = run_id
@@ -593,6 +608,7 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
             )
         ),
         "post_yield_prompt_error": post_yield_prompt_error,
+        "post_terminal_settle_error": post_terminal_settle_error,
         "done_text": done_text,
         "parent_active": bool(
             (

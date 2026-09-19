@@ -61,7 +61,30 @@ def _make_run(
         run / "runtime_observability.json",
         {
             "child_session_count": child_count,
+            "materialized_child_session_count": child_count,
+            "online_index_child_count_at_archive": child_count,
+            "restored_archived_child_count": 0,
+            "child_count_source_quality": "projection_sources_exact",
+            "child_runtime_complete_count": max(0, child_count - 1),
+            "child_runtime_unknown_count": 1 if child_count else 0,
             "max_concurrent_children": child_count,
+            "max_concurrent_children_lower_bound": child_count,
+            "child_sum_runtime_seconds": 3.0 if child_count else 0.0,
+            "child_sum_runtime_lower_bound_seconds": 5.0 if child_count else 0.0,
+            "child_union_active_seconds": 3.0 if child_count else 0.0,
+            "child_union_active_lower_bound_seconds": 5.0 if child_count else 0.0,
+            "child_derived_metrics_quality": (
+                "partial_excludes_unknown" if child_count else "complete"
+            ),
+            "child_start_timestamp_quality_counts": {
+                "durable_session_creation": child_count,
+            },
+            "child_terminal_timestamp_quality_counts": {
+                "session_state": max(0, child_count - 1),
+                "missing": 1 if child_count else 0,
+            },
+            "child_start_timestamp_conflict_count": 0,
+            "child_terminal_identity_qualified_count": 0,
             "agent_timeline": {
                 "agents": [
                     {
@@ -454,6 +477,15 @@ def test_compare_and_analyze_share_common_run_metrics(tmp_path):
         == analysis["lifecycle"]["child_session_count"]
     )
     assert compare_row["tool_call_count"] == analysis["activity"]["tool_call_count"]
+    assert compare_row["child_count_source_quality"] == (
+        analysis["lifecycle"]["child_count_source_quality"]
+    )
+    assert compare_row["child_derived_metrics_quality"] == (
+        analysis["lifecycle"]["child_derived_metrics_quality"]
+    )
+    assert compare_row["child_sum_runtime_lower_bound_seconds"] == (
+        analysis["lifecycle"]["child_sum_runtime_lower_bound_seconds"]
+    )
 
 
 def test_analyze_cli_remains_compatible_and_exports_bundle(tmp_path, capsys):
@@ -699,6 +731,10 @@ def test_compare_cli_exports_both_arms_with_portable_links(tmp_path, capsys):
     assert report["tasks"]["paired"][0]["single_agent_artifact_links"] == (
         exported_links["single-agent"]
     )
+    assert report["tasks"]["paired"][0][
+        "subagent_child_derived_metrics_quality"
+    ] == "partial_excludes_unknown"
+    assert "Child timing quality" in markdown
     assert "subagent: not collected" not in markdown
     assert "single: not collected" not in markdown
     assert not any(

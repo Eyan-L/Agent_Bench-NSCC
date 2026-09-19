@@ -128,6 +128,75 @@ def test_actual_subagent_count_comes_from_runtime_observability(tmp_path):
     assert "model_request_count" not in row
 
 
+def test_compare_preserves_censored_child_quality_and_execution_lower_bound(
+    tmp_path,
+):
+    record = _record(tmp_path, agent_execution_seconds=60.0)
+    record.manifest["runtime_observability_path"] = str(
+        record.run_dir / "runtime_observability.json"
+    )
+    (record.run_dir / "runtime_observability.json").write_text(json.dumps({
+        "materialized_child_session_count": 1,
+        "child_runtime_complete_count": 0,
+        "child_runtime_unknown_count": 1,
+        "child_count_source_quality": "projection_sources_exact",
+        "child_derived_metrics_quality": "partial_excludes_unknown",
+        "max_concurrent_children": 0,
+        "max_concurrent_children_lower_bound": 1,
+        "child_sum_runtime_seconds": 0.0,
+        "child_sum_runtime_lower_bound_seconds": 7.0,
+        "child_union_active_seconds": 0.0,
+        "child_union_active_lower_bound_seconds": 7.0,
+        "child_runtime_by_session": {
+            "child-a": {
+                "start_timestamp_ns": 5_000_000_000,
+                "start_timestamp_source": "createdAt",
+                "start_timestamp_quality": "durable_session_creation",
+                "last_observed_timestamp_ns": 12_000_000_000,
+                "last_observed_timestamp_source": (
+                    "transcript_last_assistant_execution"
+                ),
+                "last_observed_timestamp_quality": (
+                    "durable_transcript_execution"
+                ),
+                "runtime_lower_bound_seconds": 7.0,
+                "runtime_seconds": None,
+                "runtime_complete": False,
+                "runtime_censored": True,
+            },
+        },
+    }))
+
+    row = compare.record_to_dict(record)
+
+    assert row["child_derived_metrics_quality"] == "partial_excludes_unknown"
+    assert row["max_concurrent_subagents"] == 0
+    assert row["max_concurrent_subagents_lower_bound"] == 1
+    assert row["child_sum_runtime_lower_bound_seconds"] == 7.0
+    assert len(row["child_intervals"]) == 1
+    interval = row["child_intervals"][0]
+    assert interval["runtime_censored"] is True
+    assert interval["runtime_lower_bound_seconds"] == 7.0
+    assert interval["end_timestamp_quality"] == "durable_transcript_execution"
+
+
+def test_concurrency_plot_does_not_treat_censored_bounds_as_exact(tmp_path):
+    row = {
+        "instance_id": "task-1",
+        "subagent_agent_execution_start_ns": 1_000_000_000,
+        "subagent_agent_execution_end_ns": 20_000_000_000,
+        "subagent_child_intervals": [{
+            "start_timestamp_ns": 5_000_000_000,
+            "end_timestamp_ns": 12_000_000_000,
+            "runtime_censored": True,
+        }],
+    }
+
+    assert compare._plot_subagent_concurrency_trajectory(
+        None, [row], tmp_path / "concurrency.png", 96
+    ) is False
+
+
 def test_invalid_benchmark_keeps_diagnostics_but_not_formal_metrics(tmp_path):
     valid = _record(
         tmp_path,

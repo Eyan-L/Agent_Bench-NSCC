@@ -596,11 +596,14 @@ def analyze_run(run_dir: Path) -> dict[str, Any]:
             if "agent_exit_code" in verdict
             else manifest.get("exit_code"),
             "agent_completion_error": manifest.get("agent_completion_error"),
+            "error_message": manifest.get("error_message"),
+            "failure_phase": manifest.get("failure_phase"),
             "benchmark_valid": manifest.get("benchmark_valid"),
             "benchmark_invalid_reason": manifest.get("benchmark_invalid_reason"),
             "verifier_eligible": manifest.get("verifier_eligible"),
             "verifier_status": manifest.get("verifier_status")
             or verdict.get("verifier_status"),
+            "verifier_skipped": manifest.get("verifier_skipped"),
             "reward": manifest.get("reward", verdict.get("reward")),
             "test_pass_rate": manifest.get(
                 "test_pass_rate", verdict.get("test_pass_rate")
@@ -647,13 +650,65 @@ def analyze_run(run_dir: Path) -> dict[str, Any]:
             if observability_doc.status != "not_collected"
             else ("embedded_in_manifest" if observability else "not_collected"),
             "child_session_count": observability.get("child_session_count"),
+            "materialized_child_session_count": observability.get(
+                "materialized_child_session_count"
+            ),
+            "online_index_child_count_at_archive": observability.get(
+                "online_index_child_count_at_archive"
+            ),
+            "restored_archived_child_count": observability.get(
+                "restored_archived_child_count"
+            ),
+            "child_count_source_quality": observability.get(
+                "child_count_source_quality"
+            ),
+            "child_runtime_complete_count": observability.get(
+                "child_runtime_complete_count"
+            ),
+            "child_runtime_unknown_count": observability.get(
+                "child_runtime_unknown_count"
+            ),
             "max_concurrent_children": observability.get("max_concurrent_children"),
+            "max_concurrent_children_lower_bound": observability.get(
+                "max_concurrent_children_lower_bound"
+            ),
             "child_sum_runtime_seconds": observability.get("child_sum_runtime_seconds"),
+            "child_sum_runtime_lower_bound_seconds": observability.get(
+                "child_sum_runtime_lower_bound_seconds"
+            ),
             "child_union_active_seconds": observability.get("child_union_active_seconds"),
+            "child_union_active_lower_bound_seconds": observability.get(
+                "child_union_active_lower_bound_seconds"
+            ),
             "child_overlap_wall_seconds": observability.get("child_overlap_wall_seconds"),
             "child_concurrency_excess_seconds": observability.get(
                 "child_concurrency_excess_seconds"
             ),
+            "child_derived_metrics_quality": observability.get(
+                "child_derived_metrics_quality"
+            ),
+            "child_start_timestamp_quality_counts": observability.get(
+                "child_start_timestamp_quality_counts"
+            ),
+            "child_terminal_timestamp_quality_counts": observability.get(
+                "child_terminal_timestamp_quality_counts"
+            ),
+            "child_start_timestamp_conflict_count": observability.get(
+                "child_start_timestamp_conflict_count"
+            ),
+            "child_terminal_identity_qualified_count": observability.get(
+                "child_terminal_identity_qualified_count"
+            ),
+            "reconstructed_child_state_counts": observability.get(
+                "reconstructed_child_state_counts"
+            ),
+            "parent_terminal_child_snapshot": observability.get(
+                "parent_terminal_child_snapshot"
+            ),
+            "child_runtime_by_session": observability.get(
+                "child_runtime_by_session"
+            ),
+            "child_runtime_policy": observability.get("child_runtime_policy"),
             "agent_timeline": observability.get("agent_timeline"),
             "notes": [
                 "Child lifetime intervals describe lifecycle, not continuous compute utilization.",
@@ -1250,6 +1305,7 @@ th{{background:#edf2f7}}pre{{background:#f6f8fa;padding:1rem;overflow:auto}}.met
 <div class="card"><strong>Benchmark valid</strong><br>{html.escape(str(result.get('benchmark_valid')))}</div>
 <div class="card"><strong>Verifier</strong><br>{html.escape(str(result.get('verifier_status')))}</div>
 <div class="card"><strong>Reward</strong><br>{html.escape(str(result.get('reward')))}</div>
+<div class="card"><strong>Failure phase</strong><br>{html.escape(str(result.get('failure_phase')))}</div>
 </div>
 <h2>Measurement semantics</h2><ul>
 <li><code>steps.jsonl</code> is coarse; <code>spans.jsonl</code> is the per-call trace.</li>
@@ -1407,9 +1463,12 @@ def render_single_run_markdown(index: Mapping[str, Any]) -> str:
         f"- agent outcome: `{result.get('agent_execution_outcome')}`",
         f"- benchmark valid: `{result.get('benchmark_valid')}`",
         f"- verifier / reward: `{result.get('verifier_status')}` / `{result.get('reward')}`",
+        f"- failure phase / verifier skipped: `{result.get('failure_phase')}` / `{result.get('verifier_skipped')}`",
         f"- agent execution seconds: `{timing.get('agent_execution_seconds')}`",
         f"- materialized children: `{lifecycle.get('child_session_count')}`; "
         f"max concurrent: `{lifecycle.get('max_concurrent_children')}`",
+        f"- child timing quality: `{lifecycle.get('child_derived_metrics_quality')}`; "
+        f"unknown terminal times: `{lifecycle.get('child_runtime_unknown_count')}`",
         f"- resource samples: `{resources.get('sample_count')}` ({resources.get('status')})",
         "",
         "## View",

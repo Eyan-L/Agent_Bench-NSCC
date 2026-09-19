@@ -153,6 +153,48 @@ def _transcript_time_bounds(path: Path) -> tuple[int, int]:
     return first, last
 
 
+def _transcript_last_execution_time(path: Optional[Path]) -> tuple[int, str, str]:
+    """Return the latest durable child execution event, excluding metadata.
+
+    Session/index timestamps and replayed receipts prove that storage changed,
+    not that the child executed. A child runtime lower bound therefore advances
+    only on an assistant/model event or a persisted tool result from that
+    child's own transcript.
+    """
+    if path is None or not path.is_file():
+        return 0, "", "missing"
+    latest_ns = 0
+    latest_role = ""
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return 0, "", "missing"
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") != "message":
+            continue
+        message = event.get("message") or {}
+        role = str(message.get("role") or "")
+        if role not in {"assistant", "tool", "toolResult"}:
+            continue
+        timestamp_ns = _timestamp_ns(
+            message.get("timestamp") or event.get("timestamp")
+        )
+        if timestamp_ns >= latest_ns:
+            latest_ns = timestamp_ns
+            latest_role = role
+    if not latest_ns:
+        return 0, "", "missing"
+    return (
+        latest_ns,
+        f"transcript_last_{latest_role}_execution",
+        "durable_transcript_execution",
+    )
+
+
 def _parent_start_time(
     entry: dict, transcript_first_ns: int
 ) -> tuple[int, str]:
@@ -710,6 +752,9 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
         measured_status = observed_status
         is_terminal = observed_status in terminal_states
         terminal_evidence = None
+        execution_last_ns, execution_last_source, execution_last_quality = (
+            _transcript_last_execution_time(transcript)
+        )
         if is_terminal:
             end_ns, end_source, end_quality = _child_terminal_time(
                 entry, transcript
@@ -721,27 +766,39 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
             failure = child_failures.get(session_key) or child_failures.get(
                 str(entry.get("sessionId") or "")
             )
+            current_run_id = str(entry.get("lastRunId") or "").strip()
             if (
                 isinstance(failure, dict)
                 and failure.get("session_key") == session_key
                 and failure.get("session_id")
                 == str(entry.get("sessionId") or "")
-                and _int(failure.get("timestamp_ns")) >= last_ns
+                and (
+                    not current_run_id
+                    or failure.get("run_id") == current_run_id
+                )
+                and _int(failure.get("timestamp_ns")) >= execution_last_ns
             ):
                 measured_status = "failed"
                 is_terminal = True
                 end_ns = _int(failure.get("timestamp_ns"))
                 end_source = str(failure.get("source") or "")
                 end_quality = "matched_runtime_terminal_evidence"
-                terminal_evidence = dict(failure)
+                terminal_evidence = {
+                    **failure,
+                    "identity_quality": (
+                        "session_and_current_run_match"
+                        if current_run_id
+                        else "session_match_run_unavailable"
+                    ),
+                }
             else:
                 end_ns = 0
                 end_source = ""
                 end_quality = "missing"
 
-        last_observed_ns, last_observed_source, last_observed_quality = (
-            _child_state_time(entry, last_ns)
-        )
+        last_observed_ns = execution_last_ns
+        last_observed_source = execution_last_source
+        last_observed_quality = execution_last_quality
 
         runtime_seconds = None
         if start_ns and end_ns and end_ns >= start_ns:
@@ -1002,6 +1059,30 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
     state_counts: dict[str, int] = defaultdict(int)
     for child in children.values():
         state_counts[str(child.get("status") or "unknown")] += 1
+    start_quality_counts: dict[str, int] = defaultdict(int)
+    terminal_quality_counts: dict[str, int] = defaultdict(int)
+    start_conflict_count = 0
+    qualified_terminal_identity_count = 0
+    for child in children.values():
+        start_quality_counts[
+            str(child.get("start_timestamp_quality") or "missing")
+        ] += 1
+        terminal_quality_counts[
+            str(child.get("terminal_timestamp_quality") or "missing")
+        ] += 1
+        start_conflict_count += bool(child.get("start_timestamp_conflict"))
+        evidence = child.get("terminal_evidence")
+        if (
+            isinstance(evidence, dict)
+            and evidence.get("identity_quality")
+            == "session_match_run_unavailable"
+        ):
+            qualified_terminal_identity_count += 1
+    has_qualified_timestamps = bool(
+        start_conflict_count
+        or start_quality_counts.get("mutable_started_at_fallback", 0)
+        or qualified_terminal_identity_count
+    )
     projection_sources = {
         str(entry.get("agentBenchProjectionSource") or "")
         for entry in index.values()
@@ -1053,7 +1134,21 @@ def _child_runtime_observability(run_dir: Path, agent_id: str) -> dict:
         "max_concurrent_children": max_concurrent,
         "max_concurrent_children_lower_bound": lower_bound_max_concurrent,
         "child_derived_metrics_quality": (
-            "complete" if unknown_count == 0 else "partial_excludes_unknown"
+            "partial_excludes_unknown"
+            if unknown_count
+            else (
+                "complete_with_qualified_timestamps"
+                if has_qualified_timestamps
+                else "complete"
+            )
+        ),
+        "child_start_timestamp_quality_counts": dict(start_quality_counts),
+        "child_terminal_timestamp_quality_counts": dict(
+            terminal_quality_counts
+        ),
+        "child_start_timestamp_conflict_count": start_conflict_count,
+        "child_terminal_identity_qualified_count": (
+            qualified_terminal_identity_count
         ),
         "reconstructed_child_state_counts": dict(state_counts),
         "parent_terminal_child_snapshot": {

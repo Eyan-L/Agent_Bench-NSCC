@@ -184,6 +184,8 @@ class OpenClawAgentCondition:
         self._last_completion_status = self.RUNTIME_ERROR
         self._last_completion_error = "OpenClaw invocation did not complete"
         self._selected_agent_runtime_mode = None
+        self._failure_phase = "agent_execution"
+        self._partial_execution_result = None
         instance_id = instance_data["instance_id"]
         logger.info("Running OpenClaw agent (%s) for %s", self.agent_id, instance_id)
 
@@ -248,6 +250,28 @@ class OpenClawAgentCondition:
             "agent_execution_end_ns": step_end_ns,
             "agent_execution_seconds": (step_end_ns - step_start_ns) / 1e9,
         }
+        prompt_tokens, completion_tokens = self._parse_usage(payload)
+        response_text = self._parse_text(payload)
+        initial_agent_lifecycle = (
+            (self._unwrap(payload).get("meta") or {}).get(
+                "agentBenchLifecycle"
+            )
+            if payload else None
+        )
+        self._failure_phase = "agent_artifact_collection"
+        self._partial_execution_result = {
+            "total_prompt_tokens": prompt_tokens,
+            "total_completion_tokens": completion_tokens,
+            "exit_code": getattr(self, "_last_exit_code", 0),
+            "error_message": err or None,
+            "agent_completion_status": self._last_completion_status,
+            "agent_completion_error": self._last_completion_error or None,
+            "agent_runtime_mode": self._detect_agent_runtime_mode(payload),
+            "agent_lifecycle": initial_agent_lifecycle,
+            "agent_execution_seconds": phase_timing["agent_execution_seconds"],
+            "phase_timing": phase_timing,
+            "failure_phase": self._failure_phase,
+        }
 
         # diagnostics-otel uses BatchSpanProcessor under the hood. Spans only
         # flush on `sdk.shutdown()`, which runs when the gateway process exits.
@@ -276,9 +300,6 @@ class OpenClawAgentCondition:
         spans_path = snapshot_otel_spans(
             otel_trace_file, pre_offset, run_dir, expected_run_id=run_dir.name,
         )
-
-        prompt_tokens, completion_tokens = self._parse_usage(payload)
-        response_text = self._parse_text(payload)
 
         # 3. Log the run as a single LLM_INFER step. We note the subtype so
         #    downstream analysis can flag that this step aggregates OpenClaw's
@@ -508,18 +529,19 @@ class OpenClawAgentCondition:
         #    existence + size, and the empty-patch case is allowed for TB via
         #    skip_patch_gate at driver.py:187.
         candidate_freeze_start_ns = time.time_ns()
+        self._failure_phase = "candidate_freeze"
+        partial_result["failure_phase"] = self._failure_phase
         try:
             patch_text = self._collect_artifacts(
                 container_id, self._env_info, run_dir, workspace_root,
             ) or ""
+            patch_path = run_dir / "candidate.patch"
+            patch_path.write_text(patch_text)
         except Exception:
             phase_timing["candidate_freeze_start_ns"] = candidate_freeze_start_ns
             phase_timing["candidate_freeze_error_ns"] = time.time_ns()
-            partial_result["failure_phase"] = "candidate_freeze"
             self._partial_execution_result = partial_result
             raise
-        patch_path = run_dir / "candidate.patch"
-        patch_path.write_text(patch_text)
         candidate_freeze_end_ns = time.time_ns()
         phase_timing.update({
             "post_agent_before_freeze_seconds": max(
@@ -549,6 +571,8 @@ class OpenClawAgentCondition:
             except Exception:
                 logger.exception("trajectory candidate freeze event write failed")
 
+        self._failure_phase = "post_agent_result"
+        partial_result.pop("failure_phase", None)
         return {
             **partial_result,
             "patch_path": str(patch_path),

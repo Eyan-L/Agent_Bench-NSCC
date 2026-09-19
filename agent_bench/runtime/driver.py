@@ -312,6 +312,7 @@ def _preserve_partial_agent_result(
     *,
     failure_phase: str,
     failure_message: str,
+    verifier_attempted: bool = False,
 ) -> None:
     """Persist execution facts known before an artifact/verifier failure.
 
@@ -347,9 +348,9 @@ def _preserve_partial_agent_result(
     manifest.failure_phase = failure_phase
     manifest.benchmark_valid = False
     manifest.benchmark_invalid_reason = failure_message
-    manifest.verifier_eligible = False
-    manifest.verifier_status = "SKIPPED"
-    manifest.verifier_skipped = True
+    manifest.verifier_eligible = True if verifier_attempted else False
+    manifest.verifier_status = "ERROR" if verifier_attempted else "SKIPPED"
+    manifest.verifier_skipped = not verifier_attempted
     manifest.reward = None
     manifest.test_pass_rate = None
 
@@ -595,6 +596,8 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         else:
             raise ValueError(f"Unknown condition type: {condition_type}")
         
+        failure_phase = "post_agent_result"
+
         # Score via SWE-bench run_evaluation directly. Do NOT try to apply the
         # patch ourselves first — SWE-bench's harness handles both "patch does
         # not apply" and "tests fail" cleanly, and the verdicts it produces
@@ -678,6 +681,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                     instance_data=instance_data,
                     run_dir=run_dir,
                 )
+                failure_phase = "result_finalize"
             except BaseException as exc:
                 if is_roadmapbench:
                     _append_roadmap_trajectory_event(
@@ -704,6 +708,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             }
 
         if is_roadmapbench:
+            failure_phase = "result_finalize"
             verdict = _finalize_roadmap_verdict(
                 verdict,
                 result,
@@ -811,9 +816,42 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 partial_result,
                 failure_phase=failure_phase,
                 failure_message=str(e),
+                verifier_attempted=(
+                    "verifier_start_ns" in locals()
+                    and isinstance(verifier_start_ns, int)
+                ),
             )
         else:
-            manifest.failure_phase = failure_phase
+            condition_phase = (
+                getattr(condition, "_failure_phase", None)
+                if "condition" in locals() else None
+            )
+            manifest.failure_phase = str(condition_phase or failure_phase)
+            verifier_attempted = (
+                "verifier_start_ns" in locals()
+                and isinstance(verifier_start_ns, int)
+            )
+            manifest.verifier_eligible = True if verifier_attempted else False
+            manifest.verifier_status = "ERROR" if verifier_attempted else "SKIPPED"
+            manifest.verifier_skipped = not verifier_attempted
+            manifest.reward = None
+            manifest.test_pass_rate = None
+        if (
+            failure_phase == "result_finalize"
+            and "verdict" in locals()
+            and isinstance(verdict, dict)
+        ):
+            # The verifier already produced evidence; a later merge/write
+            # failure invalidates the benchmark artifact, not that evidence.
+            manifest.verifier_status = (
+                verdict.get("verifier_status") or verdict.get("status")
+            )
+            manifest.verifier_skipped = bool(
+                verdict.get("verifier_skipped", False)
+            )
+            manifest.verifier_eligible = not manifest.verifier_skipped
+            manifest.reward = verdict.get("reward")
+            manifest.test_pass_rate = verdict.get("test_pass_rate")
     
     finally:
         # Preserve legacy duration_seconds (pre-cleanup) for historical comparability.
