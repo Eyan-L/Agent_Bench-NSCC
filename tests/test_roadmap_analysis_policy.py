@@ -245,6 +245,11 @@ def test_roadmap_prompt_requires_loop_discipline():
         assert (
             "Never retry an action rejected by a critical loop veto." in normalized
         )
+        assert "when changing test scope" in normalized
+        assert "specific unresolved diagnostic question" in normalized
+        assert "changing only output formatting" in normalized
+        assert "repository state and files each validation result covered" in normalized
+        assert "revalidate the affected checks" in normalized
 
     subagent_normalized = " ".join(subagent_prompt.split())
     assert (
@@ -277,6 +282,57 @@ def test_roadmap_prompt_requires_incremental_deduplicated_child_integration():
         "reveals a concrete dependency, conflict, or regression"
     ) in normalized
     assert "finish the parent's current coherent step" in normalized
+
+
+def test_roadmap_prompt_supports_bounded_late_validation_delegation():
+    root = Path(__file__).resolve().parents[1]
+    prompt = (
+        root
+        / "agent_bench"
+        / "benchmarks"
+        / "roadmap_bench"
+        / "openclaw"
+        / "agents"
+        / "AGENTS.md"
+    ).read_text()
+    normalized = " ".join(prompt.split())
+
+    assert "delegation is not limited to initial implementation" in normalized
+    assert (
+        "integration, debugging, and validation checkpoints" in normalized
+    )
+    assert "bounded validation workstreams" in normalized
+    assert "Keep validation assignments distinct." in prompt
+    assert (
+        "Do not ask multiple children to rerun the same unchanged" in normalized
+    )
+    assert "Do not spawn merely because the run has entered validation." in prompt
+    assert "final integrated validation" in normalized
+    assert "Child validation supplements but does not replace" in normalized
+    assert "repository state and files covered" in normalized
+    assert "Reuse still-applicable child evidence" in normalized
+    assert "rather than mechanically rerunning every child command" in normalized
+
+
+def test_roadmap_common_execution_sections_match_between_profiles():
+    root = Path(__file__).resolve().parents[1]
+    prompt_root = (
+        root / "agent_bench" / "benchmarks" / "roadmap_bench" / "openclaw"
+    )
+    subagent_prompt = (prompt_root / "agents" / "AGENTS.md").read_text()
+    single_agent_prompt = (
+        prompt_root / "agents_single_agent" / "AGENTS.md"
+    ).read_text()
+
+    def section(prompt: str, heading: str) -> str:
+        start = prompt.index(f"## {heading}")
+        end = prompt.find("\n## ", start + 3)
+        return prompt[start:] if end == -1 else prompt[start:end]
+
+    for heading in ("Loop Discipline", "Workspace", "Rules"):
+        assert section(subagent_prompt, heading) == section(
+            single_agent_prompt, heading
+        )
 
 
 def test_roadmap_subagents_cannot_park_with_sessions_yield():

@@ -31,9 +31,9 @@ dependency analysis, implementation, integration, and final validation.
 
 ## Loop Discipline
 
-- Keep a concise checklist of roadmap targets, fixes, and validation evidence.
-  Update it when state changes; do not restart a broad review merely because
-  the same old result remains in context.
+- Keep a concise checklist of roadmap targets, workstream status, fixes, and
+  validation evidence. Update it when state changes; do not restart a broad
+  review merely because the same old result remains in context.
 - Do not repeat the same or semantically equivalent tool action when the
   repository and runtime state have not changed. Changing only wording,
   output truncation, or an equivalent shell wrapper is not a new approach.
@@ -45,9 +45,13 @@ dependency analysis, implementation, integration, and final validation.
   inspect the accumulated evidence, and either take a materially different
   step or finish with an explicit blocker. Never retry an action rejected by a
   critical loop veto.
-- Re-run validation only after a relevant code, environment, or test-state
-  change, or when moving from a focused check to a broader regression check.
-  Repeated unchanged success or failure is not additional evidence.
+- Re-run validation after a relevant code, environment, or test-state change,
+  when changing test scope, or to answer a specific unresolved diagnostic
+  question. Reuse existing results whenever sufficient; changing only output
+  formatting is not a reason to repeat an already answered check.
+- Record which repository state and files each validation result covered. If
+  later changes affect that scope, revalidate the affected checks before
+  replying `DONE`.
 
 ## Workspace
 
