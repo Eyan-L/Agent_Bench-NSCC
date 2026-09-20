@@ -479,6 +479,23 @@ def test_roadmap_subagents_cannot_park_with_sessions_yield():
     assert "    - sessions_yield" in subagent_profile
 
 
+def test_roadmap_single_agent_explicitly_denies_delegation_tools():
+    root = Path(__file__).resolve().parents[1]
+    subagent_profile = (
+        root / "profiles" / "harnesses" / "openclaw_roadmapbench.yaml"
+    ).read_text()
+    single_agent_profile = (
+        root
+        / "profiles"
+        / "harnesses"
+        / "openclaw_roadmapbench_single_agent.yaml"
+    ).read_text()
+
+    deny = "    deny:\n    - sessions_spawn\n    - sessions_yield\n    - subagents"
+    assert deny in single_agent_profile
+    assert deny not in subagent_profile
+
+
 def test_roadmap_profile_uses_only_the_benchmark_execution_deadline():
     root = Path(__file__).resolve().parents[1]
     subagent_profile = (

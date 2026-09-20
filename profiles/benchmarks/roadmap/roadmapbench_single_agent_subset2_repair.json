@@ -1,0 +1,34 @@
+{
+  "_doc": "RoadmapBench single-agent repair subset for the invalid pyg-2.3.0 and dsl-2.2.0 samples.",
+  "sweep_name": "roadmapbench_single_agent_subset2_repair",
+  "plan_version": "roadmapbench-59184e779909-single-agent-subset2-repair",
+  "application": "terminal_bench",
+  "source_dataset": "UnipatAI/RoadmapBench",
+  "source_commit": "59184e779909300a5a0150b06b945d39da81a099",
+  "source_dataset_task_count": 115,
+  "tasks_root": "$SCRATCH/datasets/roadmapbench-59184e779909-subagent-subset30",
+  "instances": [
+    "pyg-2.3.0-roadmap",
+    "dsl-2.2.0-roadmap"
+  ],
+  "repo_mapping": {
+    "pyg-2.3.0-roadmap": {
+      "repo_id": "roadmapbench/pyg-2.3.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "dsl-2.2.0-roadmap": {
+      "repo_id": "roadmapbench/dsl-2.2.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 7200,
+  "output_dir": "roadmapbench_single_agent_subset2_repair",
+  "seeds": [
+    42
+  ],
+  "selection": {
+    "method": "manual fixed RoadmapBench single-agent repair subset",
+    "rationale": "Rerun pyg-2.3.0 after environment preparation failure and dsl-2.2.0 after single-agent isolation and runtime failures."
+  }
+}

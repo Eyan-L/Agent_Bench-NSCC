@@ -1,0 +1,74 @@
+{
+  "_doc": "RoadmapBench repair subset for rerunning subagent infra failures, zero-subagent outcomes, and incomplete child measurements.",
+  "sweep_name": "roadmapbench_subset10_repair",
+  "plan_version": "roadmapbench-59184e779909-subset10-repair",
+  "application": "terminal_bench",
+  "source_dataset": "UnipatAI/RoadmapBench",
+  "source_commit": "59184e779909300a5a0150b06b945d39da81a099",
+  "source_dataset_task_count": 115,
+  "tasks_root": "$SCRATCH/datasets/roadmapbench-59184e779909-subagent-subset30",
+  "instances": [
+    "pyg-2.3.0-roadmap",
+    "fal-2.0.0-roadmap",
+    "ktx-0.6.0-roadmap",
+    "pyg-1.7.2-roadmap",
+    "fyn-2.2.0-roadmap",
+    "fbr-2.40.0-roadmap",
+    "ktx-0.9.0-roadmap",
+    "pyg-2.6.0-roadmap",
+    "dsl-2.2.0-roadmap",
+    "opt-4.0.0-roadmap"
+  ],
+  "repo_mapping": {
+    "pyg-2.3.0-roadmap": {
+      "repo_id": "roadmapbench/pyg-2.3.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "fal-2.0.0-roadmap": {
+      "repo_id": "roadmapbench/fal-2.0.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "ktx-0.6.0-roadmap": {
+      "repo_id": "roadmapbench/ktx-0.6.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "pyg-1.7.2-roadmap": {
+      "repo_id": "roadmapbench/pyg-1.7.2-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "fyn-2.2.0-roadmap": {
+      "repo_id": "roadmapbench/fyn-2.2.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "fbr-2.40.0-roadmap": {
+      "repo_id": "roadmapbench/fbr-2.40.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "ktx-0.9.0-roadmap": {
+      "repo_id": "roadmapbench/ktx-0.9.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "pyg-2.6.0-roadmap": {
+      "repo_id": "roadmapbench/pyg-2.6.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "dsl-2.2.0-roadmap": {
+      "repo_id": "roadmapbench/dsl-2.2.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "opt-4.0.0-roadmap": {
+      "repo_id": "roadmapbench/opt-4.0.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 7200,
+  "output_dir": "roadmapbench_subset10_repair",
+  "seeds": [
+    42
+  ],
+  "selection": {
+    "method": "manual fixed RoadmapBench repair subset",
+    "rationale": "Reruns two prior infrastructure failures, five zero-subagent outcomes, one incomplete task, and two tasks with incomplete child-derived measurement quality."
+  }
+}

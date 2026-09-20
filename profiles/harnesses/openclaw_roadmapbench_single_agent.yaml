@@ -42,6 +42,10 @@ openclaw:
     exec:
       host: gateway
       security: full
+    deny:
+    - sessions_spawn
+    - sessions_yield
+    - subagents
     loopDetection:
       enabled: true
     alsoAllow:
