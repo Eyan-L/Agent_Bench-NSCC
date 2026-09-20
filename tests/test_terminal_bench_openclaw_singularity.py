@@ -695,19 +695,55 @@ def _assistant_event(
     stop_reason="stop",
     run_id=None,
     error_message=None,
+    event_id=None,
+    parent_id=None,
+    extra_content=None,
 ):
     message = {
         "role": "assistant",
-        "content": [{"type": "text", "text": text}],
+        "content": [
+            {"type": "text", "text": text},
+            *(extra_content or []),
+        ],
         "stopReason": stop_reason,
     }
     if run_id is not None:
         message["__openclaw"] = {"runId": run_id}
     if error_message is not None:
         message["errorMessage"] = error_message
-    return {
+    event = {
         "type": "message",
         "message": message,
+    }
+    if event_id is not None:
+        event["id"] = event_id
+    if parent_id is not None:
+        event["parentId"] = parent_id
+    return event
+
+
+def _requester_settle_notice(done_event_id, settle_run, *, event_id="settle-notice"):
+    return {
+        "type": "message",
+        "id": event_id,
+        "parentId": done_event_id,
+        "message": {
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": (
+                    "[Subagent Context] Every subagent spawned from this "
+                    "session has now settled — none are still running or "
+                    "awaiting completion delivery."
+                ),
+            }],
+            "idempotencyKey": f"{settle_run}:user",
+            "provenance": {
+                "kind": "inter_session",
+                "sourceChannel": "internal",
+                "sourceTool": "subagent_announce",
+            },
+        },
     }
 
 
@@ -722,14 +758,21 @@ def test_roadmap_snapshot_preserves_done_across_post_terminal_settle_error(
     _write_roadmap_session_state(
         sessions_dir,
         [
-            _assistant_event("Integrated and validated.\n\nDONE", run_id=settle_run),
+            _assistant_event(
+                "Integrated and validated.\n\nDONE",
+                run_id="parent-run",
+                event_id="done-event",
+            ),
+            _requester_settle_notice("done-event", settle_run),
             _assistant_event(
                 "",
                 stop_reason="error",
-                run_id=settle_run.replace("retry-1", "retry-2"),
+                run_id=settle_run,
                 error_message=(
                     "Session transcript keyed user is outside the current turn"
                 ),
+                event_id="settle-error",
+                parent_id="settle-notice",
             ),
         ],
         child_statuses=("running",),
@@ -786,6 +829,7 @@ def test_roadmap_requester_settle_no_reply_is_not_terminal(tmp_path):
     assert snapshot["latest_assistant_text"] == "NO_REPLY"
     assert snapshot["parent_last_run_id"] == settle_run
     assert snapshot["requester_settle_pending"] is True
+    assert RoadmapBenchOpenClawCondition._requester_settle_pending(snapshot)
     assert snapshot["parent_terminal"] is False
     assert snapshot["post_yield_parent_terminal"] is False
     assert snapshot["post_yield_terminal_reason"] == ""
@@ -798,21 +842,18 @@ def test_roadmap_done_survives_requester_settle_no_reply(tmp_path, monkeypatch):
     _write_roadmap_session_state(
         sessions_dir,
         [
-            _assistant_event("DONE\nAll targets validated.", run_id="parent-run"),
-            {
-                "type": "message",
-                "message": {
-                    "role": "user",
-                    "content": [{
-                        "type": "text",
-                        "text": (
-                            "[Subagent Context] Every subagent spawned from "
-                            "this session has now settled."
-                        ),
-                    }],
-                },
-            },
-            _assistant_event("NO_REPLY", run_id=settle_run),
+            _assistant_event(
+                "DONE\nAll targets validated.",
+                run_id="parent-run",
+                event_id="done-event",
+            ),
+            _requester_settle_notice("done-event", settle_run),
+            _assistant_event(
+                "NO_REPLY",
+                run_id=settle_run,
+                event_id="settle-response",
+                parent_id="settle-notice",
+            ),
         ],
         child_statuses=("done", "completed"),
         parent_status="done",
@@ -828,6 +869,8 @@ def test_roadmap_done_survives_requester_settle_no_reply(tmp_path, monkeypatch):
     assert snapshot["pending_children"] == 0
     assert snapshot["post_yield_terminal_reason"] == "explicit_done"
     assert snapshot["latest_parent_event"] == "post_terminal_settle_no_reply"
+    assert snapshot["settled_done_event_id"] == "done-event"
+    assert snapshot["requester_settle_notice_event_id"] == "settle-notice"
 
     condition = _roadmap_condition_for_state(tmp_path)
     evidence = condition._durable_invocation_terminal_evidence()
@@ -881,6 +924,138 @@ def test_roadmap_later_normal_activity_invalidates_pre_settle_done(tmp_path):
     assert snapshot is not None
     assert snapshot["done_text"] == ""
     assert snapshot["post_yield_terminal_reason"] == "assistant_stop"
+
+
+def test_roadmap_ordinary_request_cannot_restore_stale_done(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    settle_run = "announce:requester-settle:roadmap_bench:parent:retry-1"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [
+            _assistant_event("DONE", event_id="done-event"),
+            {
+                "type": "message",
+                "id": "ordinary-request",
+                "parentId": "done-event",
+                "message": {"role": "user", "content": "Continue working"},
+            },
+            _requester_settle_notice("ordinary-request", settle_run),
+            _assistant_event(
+                "NO_REPLY",
+                run_id=settle_run,
+                event_id="response",
+                parent_id="settle-notice",
+            ),
+        ],
+        child_statuses=(),
+        parent_status="done",
+        parent_last_run_id=settle_run,
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot is not None
+    assert snapshot["done_text"] == ""
+    assert snapshot["requester_settle_pending"] is True
+
+
+def test_roadmap_settle_no_reply_with_extra_payload_does_not_restore_done(
+    tmp_path,
+):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    settle_run = "announce:requester-settle:roadmap_bench:parent:retry-1"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [
+            _assistant_event("DONE", event_id="done-event"),
+            _requester_settle_notice("done-event", settle_run),
+            _assistant_event(
+                "NO_REPLY",
+                run_id=settle_run,
+                event_id="settle-response",
+                parent_id="settle-notice",
+                extra_content=[{"type": "image", "url": "result.png"}],
+            ),
+        ],
+        child_statuses=(),
+        parent_status="done",
+        parent_last_run_id=settle_run,
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot is not None
+    assert snapshot["done_text"] == ""
+    assert snapshot["requester_settle_pending"] is False
+    assert not RoadmapBenchOpenClawCondition._requester_settle_pending(snapshot)
+    assert snapshot["latest_assistant_has_payload"] is True
+
+
+def test_roadmap_unknown_settle_error_does_not_restore_done(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    settle_run = "announce:requester-settle:roadmap_bench:parent:retry-1"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [
+            _assistant_event("DONE", event_id="done-event"),
+            _requester_settle_notice("done-event", settle_run),
+            _assistant_event(
+                "",
+                stop_reason="error",
+                run_id=settle_run,
+                error_message="provider failed",
+                event_id="settle-error",
+                parent_id="settle-notice",
+            ),
+        ],
+        child_statuses=(),
+        parent_status="failed",
+        parent_last_run_id=settle_run,
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot is not None
+    assert snapshot["done_text"] == ""
+    assert snapshot["latest_assistant_stop_reason"] == "error"
+    assert snapshot["post_terminal_settle_error"] == ""
+
+
+def test_roadmap_restored_done_is_not_reused_by_later_settle_exchange(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    first_run = "announce:requester-settle:roadmap_bench:parent:first"
+    second_run = "announce:requester-settle:roadmap_bench:parent:second"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [
+            _assistant_event("DONE", event_id="done-event"),
+            _requester_settle_notice("done-event", first_run, event_id="notice-1"),
+            _assistant_event(
+                "NO_REPLY",
+                run_id=first_run,
+                event_id="response-1",
+                parent_id="notice-1",
+            ),
+            _requester_settle_notice(
+                "response-1", second_run, event_id="notice-2"
+            ),
+            _assistant_event(
+                "NO_REPLY",
+                run_id=second_run,
+                event_id="response-2",
+                parent_id="notice-2",
+            ),
+        ],
+        child_statuses=(),
+        parent_status="done",
+        parent_last_run_id=second_run,
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot is not None
+    assert snapshot["done_text"] == ""
+    assert snapshot["requester_settle_pending"] is True
 
 
 def test_roadmap_no_reply_with_ordinary_run_id_keeps_terminal_behavior(tmp_path):
@@ -975,14 +1150,21 @@ def test_roadmap_post_terminal_settle_error_quiesces_then_completes(tmp_path):
     _write_roadmap_session_state(
         sessions_dir,
         [
-            _assistant_event("Integrated.\n\nDONE", run_id=settle_run),
+            _assistant_event(
+                "Integrated.\n\nDONE",
+                run_id="parent-run",
+                event_id="done-event",
+            ),
+            _requester_settle_notice("done-event", settle_run),
             _assistant_event(
                 "",
                 stop_reason="error",
-                run_id=settle_run.replace("retry-1", "retry-2"),
+                run_id=settle_run,
                 error_message=(
                     "Session transcript keyed user is outside the current turn"
                 ),
+                event_id="settle-error",
+                parent_id="settle-notice",
             ),
         ],
         child_statuses=("running",),

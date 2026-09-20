@@ -449,8 +449,12 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
     latest_assistant_run_id = ""
     latest_assistant_has_tool_call = False
     latest_assistant_has_payload = False
+    latest_assistant_is_control_only_no_reply = False
     post_terminal_settle_error = ""
-    pre_settle_done_text = ""
+    done_evidence = None
+    requester_settle_candidate = None
+    settled_done_event_id = ""
+    requester_settle_notice_event_id = ""
     heartbeat_turn = False
 
     for event in messages[latest_yield + 1 :]:
@@ -463,7 +467,8 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
             post_yield_prompt_error = str(raw_error or "OpenClaw prompt error")
             post_yield_parent_terminal = False
             done_text = ""
-            pre_settle_done_text = ""
+            done_evidence = None
+            requester_settle_candidate = None
             latest_event_kind = "prompt_error"
             continue
 
@@ -488,12 +493,19 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
                 continue
             heartbeat_turn = False
             post_yield_parent_terminal = False
-            pre_settle_done_text = done_text
+            requester_settle_candidate = cls._requester_settle_candidate(
+                event,
+                message,
+                text,
+                done_evidence,
+            )
+            done_evidence = None
             done_text = ""
             latest_assistant_text = ""
             latest_assistant_run_id = ""
             latest_assistant_has_tool_call = False
             latest_assistant_has_payload = False
+            latest_assistant_is_control_only_no_reply = False
             latest_event_kind = "resume"
             continue
 
@@ -504,7 +516,8 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
             post_yield_parent_activity = True
             post_yield_parent_terminal = False
             done_text = ""
-            pre_settle_done_text = ""
+            done_evidence = None
+            requester_settle_candidate = None
             latest_event_kind = "tool_result"
             continue
 
@@ -525,48 +538,66 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
             else ""
         )
         requester_settle_run = run_id.startswith(
-            "announce:requester-settle:"
+            cls._REQUESTER_SETTLE_RUN_PREFIX
         )
+        response_matches = cls._requester_settle_response_matches(
+            event,
+            run_id,
+            requester_settle_candidate,
+        )
+        control_only_no_reply = cls._is_control_only_no_reply(message)
         if (
-            pre_settle_done_text
-            and requester_settle_run
-            and stop_reason == "stop"
-            and text.strip() == "NO_REPLY"
-            and not has_tool_payload
+            response_matches
+            and control_only_no_reply
         ):
-            done_text = pre_settle_done_text
-            pre_settle_done_text = ""
+            settled = requester_settle_candidate or {}
+            original_done = settled.get("done") or {}
+            notice = settled.get("notice") or {}
+            done_text = str(original_done.get("text") or "")
+            settled_done_event_id = str(original_done.get("event_id") or "")
+            requester_settle_notice_event_id = str(
+                notice.get("event_id") or ""
+            )
+            done_evidence = None
+            requester_settle_candidate = None
             latest_assistant_stop_reason = stop_reason
             latest_assistant_text = text
             latest_assistant_run_id = run_id
             latest_assistant_has_tool_call = False
             latest_assistant_has_payload = has_current_payload
+            latest_assistant_is_control_only_no_reply = True
             post_yield_parent_activity = True
             post_yield_parent_terminal = True
             latest_event_kind = "post_terminal_settle_no_reply"
             continue
         if (
-            (done_text or pre_settle_done_text)
-            and stop_reason == "error"
-            and not text
-            and not has_tool_payload
+            response_matches
             and requester_settle_run
+            and cls._is_requester_settle_transport_error(message)
         ):
             # Match the JSON projection path: a transport error appended by a
             # requester-settle retry does not erase an earlier durable DONE.
-            post_terminal_settle_error = str(
-                message.get("errorMessage") or "requester-settle error"
+            settled = requester_settle_candidate or {}
+            original_done = settled.get("done") or {}
+            notice = settled.get("notice") or {}
+            post_terminal_settle_error = str(message.get("errorMessage"))
+            done_text = str(original_done.get("text") or "")
+            settled_done_event_id = str(original_done.get("event_id") or "")
+            requester_settle_notice_event_id = str(
+                notice.get("event_id") or ""
             )
-            done_text = done_text or pre_settle_done_text
-            pre_settle_done_text = ""
+            done_evidence = None
+            requester_settle_candidate = None
             latest_event_kind = "post_terminal_settle_error"
             continue
-        pre_settle_done_text = ""
+        done_evidence = None
+        requester_settle_candidate = None
         latest_assistant_stop_reason = stop_reason
         latest_assistant_text = text
         latest_assistant_run_id = run_id
         latest_assistant_has_tool_call = has_tool_payload
         latest_assistant_has_payload = has_current_payload
+        latest_assistant_is_control_only_no_reply = control_only_no_reply
         post_yield_parent_activity = True
         post_yield_parent_terminal = (
             stop_reason in cls._DURABLE_ASSISTANT_STOP_REASONS
@@ -580,16 +611,27 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
             and re.search(r"(?im)^\s*DONE(?:\s*$|\b)", text)
         ):
             done_text = text
+            done_evidence = {
+                "text": text,
+                "event_id": cls._event_identity(event),
+                "run_id": run_id,
+                "restored": False,
+            }
         else:
             done_text = ""
 
     parent_last_run_id = str(
         parent.get("lastRunId") or latest_assistant_run_id or ""
     ).strip()
-    requester_settle_pending = bool(
-        not done_text
-        and latest_assistant_text.strip() == "NO_REPLY"
-        and parent_last_run_id.startswith("announce:requester-settle:")
+    requester_settle_pending = cls._requester_settle_pending(
+        {
+            "done_text": done_text,
+            "latest_assistant_run_id": latest_assistant_run_id,
+            "parent_last_run_id": parent_last_run_id,
+            "latest_assistant_is_control_only_no_reply": (
+                latest_assistant_is_control_only_no_reply
+            ),
+        }
     )
     assistant_stop_candidate = post_yield_parent_terminal
     logical_parent_terminal = bool(
@@ -638,6 +680,8 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
         ),
         "post_yield_prompt_error": post_yield_prompt_error,
         "post_terminal_settle_error": post_terminal_settle_error,
+        "settled_done_event_id": settled_done_event_id,
+        "requester_settle_notice_event_id": requester_settle_notice_event_id,
         "done_text": done_text,
         "parent_active": bool(
             (
@@ -656,8 +700,12 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
         "latest_parent_event": latest_event_kind,
         "latest_assistant_stop_reason": latest_assistant_stop_reason,
         "latest_assistant_text": latest_assistant_text,
+        "latest_assistant_run_id": latest_assistant_run_id,
         "latest_assistant_has_tool_call": latest_assistant_has_tool_call,
         "latest_assistant_has_payload": latest_assistant_has_payload,
+        "latest_assistant_is_control_only_no_reply": (
+            latest_assistant_is_control_only_no_reply
+        ),
         "requester_settle_pending": requester_settle_pending,
     }
 

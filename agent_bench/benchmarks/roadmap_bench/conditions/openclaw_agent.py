@@ -52,6 +52,13 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     })
     _TIMEOUT_DURABLE_PARENT_STATES = frozenset({"timed_out", "timeout"})
     _DURABLE_ASSISTANT_STOP_REASONS = frozenset({"stop", "length"})
+    _REQUESTER_SETTLE_RUN_PREFIX = "announce:requester-settle:"
+    _REQUESTER_SETTLE_NOTICE = (
+        "[Subagent Context] Every subagent spawned from this session has now settled"
+    )
+    _REQUESTER_SETTLE_TRANSPORT_ERRORS = (
+        "session transcript keyed user is outside the current turn",
+    )
     # A turn-level stop can precede an OpenClaw retry/resume. Require the
     # durable session and transcript to remain terminal across multiple
     # watcher reads before accepting a non-DONE stop as logical completion.
@@ -1093,14 +1100,117 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         return "\n".join(texts).strip(), has_tool_call, has_payload
 
     @staticmethod
-    def _requester_settle_pending(snapshot: Dict) -> bool:
-        """Whether OpenClaw has scheduled its native requester retry."""
+    def _event_identity(event: Dict) -> str:
+        """Return the durable transcript identity used to bind settle events."""
+        return str(event.get("id") or "").strip()
+
+    @classmethod
+    def _native_requester_settle_notice(
+        cls,
+        event: Dict,
+        message: Dict,
+        text: str,
+    ) -> Optional[Dict]:
+        """Return native notice identity, excluding ordinary requester text."""
+        idempotency_key = str(message.get("idempotencyKey") or "").strip()
+        provenance = message.get("provenance") or {}
+        event_id = cls._event_identity(event)
+        if (
+            not event_id
+            or cls._REQUESTER_SETTLE_NOTICE not in text
+            or not idempotency_key.startswith(cls._REQUESTER_SETTLE_RUN_PREFIX)
+            or not idempotency_key.endswith(":user")
+            or not isinstance(provenance, dict)
+            or provenance.get("kind") != "inter_session"
+            or provenance.get("sourceChannel") != "internal"
+            or provenance.get("sourceTool") != "subagent_announce"
+        ):
+            return None
+        return {
+            "event_id": event_id,
+            "run_id": idempotency_key[:-len(":user")],
+        }
+
+    @classmethod
+    def _requester_settle_candidate(
+        cls,
+        event: Dict,
+        message: Dict,
+        text: str,
+        done_evidence: Optional[Dict],
+    ) -> Optional[Dict]:
+        """Bind an original DONE to its immediate native settle notice."""
+        if not done_evidence or done_evidence.get("restored"):
+            return None
+        notice = cls._native_requester_settle_notice(event, message, text)
+        if (
+            notice is None
+            or not done_evidence.get("event_id")
+            or str(event.get("parentId") or "") != done_evidence["event_id"]
+        ):
+            return None
+        return {"done": dict(done_evidence), "notice": notice}
+
+    @classmethod
+    def _requester_settle_response_matches(
+        cls,
+        event: Dict,
+        run_id: str,
+        candidate: Optional[Dict],
+    ) -> bool:
+        if not candidate:
+            return False
+        notice = candidate.get("notice") or {}
         return bool(
-            str(snapshot.get("latest_assistant_text") or "").strip()
-            == "NO_REPLY"
-            and str(snapshot.get("parent_last_run_id") or "").startswith(
-                "announce:requester-settle:"
+            run_id
+            and run_id == notice.get("run_id")
+            and str(event.get("parentId") or "") == notice.get("event_id")
+        )
+
+    @staticmethod
+    def _is_control_only_no_reply(message: Dict) -> bool:
+        """Accept NO_REPLY only when it is the sole assistant payload."""
+        if str(message.get("stopReason") or "").strip().lower() != "stop":
+            return False
+        content = message.get("content")
+        return bool(
+            isinstance(content, list)
+            and len(content) == 1
+            and isinstance(content[0], dict)
+            and content[0].get("type") == "text"
+            and str(content[0].get("text") or "").strip() == "NO_REPLY"
+        )
+
+    @classmethod
+    def _is_requester_settle_transport_error(cls, message: Dict) -> bool:
+        """Recognize the confirmed empty requester-settle transport race."""
+        if str(message.get("stopReason") or "").strip().lower() != "error":
+            return False
+        text, has_tool_call, has_payload = cls._assistant_content_evidence(message)
+        error = str(message.get("errorMessage") or "").strip().lower()
+        return bool(
+            not text
+            and not has_tool_call
+            and not has_payload
+            and error
+            and any(
+                marker in error
+                for marker in cls._REQUESTER_SETTLE_TRANSPORT_ERRORS
             )
+        )
+
+    @classmethod
+    def _requester_settle_pending(cls, snapshot: Dict) -> bool:
+        """Whether OpenClaw has scheduled its native requester retry."""
+        run_id = str(
+            snapshot.get("latest_assistant_run_id")
+            or snapshot.get("parent_last_run_id")
+            or ""
+        ).strip()
+        return bool(
+            not snapshot.get("done_text")
+            and snapshot.get("latest_assistant_is_control_only_no_reply") is True
+            and run_id.startswith(cls._REQUESTER_SETTLE_RUN_PREFIX)
         )
 
     @classmethod
@@ -1579,8 +1689,12 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         latest_assistant_run_id = ""
         latest_assistant_has_tool_call = False
         latest_assistant_has_payload = False
+        latest_assistant_is_control_only_no_reply = False
         post_terminal_settle_error = ""
-        pre_settle_done_text = ""
+        done_evidence = None
+        requester_settle_candidate = None
+        settled_done_event_id = ""
+        requester_settle_notice_event_id = ""
         heartbeat_turn = False
 
         for event in messages[latest_yield + 1:]:
@@ -1603,7 +1717,8 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 )
                 post_yield_parent_terminal = False
                 done_text = ""
-                pre_settle_done_text = ""
+                done_evidence = None
+                requester_settle_candidate = None
                 latest_event_kind = "prompt_error"
                 continue
 
@@ -1632,12 +1747,19 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
 
                 heartbeat_turn = False
                 post_yield_parent_terminal = False
-                pre_settle_done_text = done_text
+                requester_settle_candidate = cls._requester_settle_candidate(
+                    event,
+                    message,
+                    text,
+                    done_evidence,
+                )
+                done_evidence = None
                 done_text = ""
                 latest_assistant_text = ""
                 latest_assistant_run_id = ""
                 latest_assistant_has_tool_call = False
                 latest_assistant_has_payload = False
+                latest_assistant_is_control_only_no_reply = False
                 latest_event_kind = "resume"
                 continue
 
@@ -1648,7 +1770,8 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 post_yield_parent_activity = True
                 post_yield_parent_terminal = False
                 done_text = ""
-                pre_settle_done_text = ""
+                done_evidence = None
+                requester_settle_candidate = None
                 latest_event_kind = "tool_result"
                 continue
 
@@ -1672,53 +1795,71 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 else ""
             )
             requester_settle_run = run_id.startswith(
-                "announce:requester-settle:"
+                cls._REQUESTER_SETTLE_RUN_PREFIX
             )
+            response_matches = cls._requester_settle_response_matches(
+                event,
+                run_id,
+                requester_settle_candidate,
+            )
+            control_only_no_reply = cls._is_control_only_no_reply(message)
             if (
-                pre_settle_done_text
-                and requester_settle_run
-                and stop_reason == "stop"
-                and text.strip() == "NO_REPLY"
-                and not has_tool_payload
+                response_matches
+                and control_only_no_reply
             ):
                 # Native requester settlement can append a control-only
                 # NO_REPLY after the parent has already reached a durable
                 # explicit DONE. It must not erase that logical terminal.
-                done_text = pre_settle_done_text
-                pre_settle_done_text = ""
+                settled = requester_settle_candidate or {}
+                original_done = settled.get("done") or {}
+                notice = settled.get("notice") or {}
+                done_text = str(original_done.get("text") or "")
+                settled_done_event_id = str(original_done.get("event_id") or "")
+                requester_settle_notice_event_id = str(
+                    notice.get("event_id") or ""
+                )
+                done_evidence = None
+                requester_settle_candidate = None
                 latest_assistant_stop_reason = stop_reason
                 latest_assistant_text = text
                 latest_assistant_run_id = run_id
                 latest_assistant_has_tool_call = False
                 latest_assistant_has_payload = has_current_payload
+                latest_assistant_is_control_only_no_reply = True
                 post_yield_parent_activity = True
                 post_yield_parent_terminal = True
                 latest_event_kind = "post_terminal_settle_no_reply"
                 continue
             if (
-                (done_text or pre_settle_done_text)
-                and stop_reason == "error"
-                and not text
-                and not has_tool_payload
+                response_matches
                 and requester_settle_run
+                and cls._is_requester_settle_transport_error(message)
             ):
                 # A requester-settle retry can race with the terminal turn and
                 # append an empty transport error after a durable DONE. It is
                 # post-terminal evidence, not a new logical parent turn.
-                post_terminal_settle_error = str(
-                    message.get("errorMessage") or "requester-settle error"
+                settled = requester_settle_candidate or {}
+                original_done = settled.get("done") or {}
+                notice = settled.get("notice") or {}
+                post_terminal_settle_error = str(message.get("errorMessage"))
+                done_text = str(original_done.get("text") or "")
+                settled_done_event_id = str(original_done.get("event_id") or "")
+                requester_settle_notice_event_id = str(
+                    notice.get("event_id") or ""
                 )
-                done_text = done_text or pre_settle_done_text
-                pre_settle_done_text = ""
+                done_evidence = None
+                requester_settle_candidate = None
                 latest_event_kind = "post_terminal_settle_error"
                 continue
 
-            pre_settle_done_text = ""
+            done_evidence = None
+            requester_settle_candidate = None
             latest_assistant_stop_reason = stop_reason
             latest_assistant_text = text
             latest_assistant_run_id = run_id
             latest_assistant_has_tool_call = has_tool_payload
             latest_assistant_has_payload = has_current_payload
+            latest_assistant_is_control_only_no_reply = control_only_no_reply
             post_yield_parent_activity = True
             post_yield_parent_terminal = (
                 stop_reason in cls._DURABLE_ASSISTANT_STOP_REASONS
@@ -1738,16 +1879,28 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 )
             ):
                 done_text = text
+                done_evidence = {
+                    "text": text,
+                    "event_id": cls._event_identity(event),
+                    "run_id": run_id,
+                    "restored": False,
+                }
             else:
                 done_text = ""
 
         parent_last_run_id = str(
             parent.get("lastRunId") or latest_assistant_run_id or ""
         ).strip()
-        requester_settle_pending = bool(
-            not done_text
-            and latest_assistant_text.strip() == "NO_REPLY"
-            and parent_last_run_id.startswith("announce:requester-settle:")
+        pending_snapshot = {
+            "done_text": done_text,
+            "latest_assistant_run_id": latest_assistant_run_id,
+            "parent_last_run_id": parent_last_run_id,
+            "latest_assistant_is_control_only_no_reply": (
+                latest_assistant_is_control_only_no_reply
+            ),
+        }
+        requester_settle_pending = cls._requester_settle_pending(
+            pending_snapshot
         )
         assistant_stop_candidate = post_yield_parent_terminal
         logical_parent_terminal = bool(
@@ -1800,6 +1953,10 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             ),
             "post_yield_prompt_error": post_yield_prompt_error,
             "post_terminal_settle_error": post_terminal_settle_error,
+            "settled_done_event_id": settled_done_event_id,
+            "requester_settle_notice_event_id": (
+                requester_settle_notice_event_id
+            ),
             "done_text": done_text,
             "parent_active": bool(
                 (
@@ -1822,10 +1979,14 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             "latest_parent_event": latest_event_kind,
             "latest_assistant_stop_reason": latest_assistant_stop_reason,
             "latest_assistant_text": latest_assistant_text,
+            "latest_assistant_run_id": latest_assistant_run_id,
             "latest_assistant_has_tool_call": (
                 latest_assistant_has_tool_call
             ),
             "latest_assistant_has_payload": latest_assistant_has_payload,
+            "latest_assistant_is_control_only_no_reply": (
+                latest_assistant_is_control_only_no_reply
+            ),
             "requester_settle_pending": requester_settle_pending,
         }
 

@@ -17,8 +17,44 @@ from agent_bench.benchmarks.roadmap_bench.conditions.sqlite_session_compat impor
 )
 
 
-def _event(message: dict) -> str:
-    return json.dumps({"type": "message", "message": message})
+def _event(
+    message: dict,
+    *,
+    event_id: str | None = None,
+    parent_id: str | None = None,
+) -> str:
+    event = {"type": "message", "message": message}
+    if event_id is not None:
+        event["id"] = event_id
+    if parent_id is not None:
+        event["parentId"] = parent_id
+    return json.dumps(event)
+
+
+def _settle_notice(
+    done_event_id: str,
+    settle_run: str,
+    *,
+    event_id: str = "settle-notice",
+) -> str:
+    return _event(
+        {
+            "role": "user",
+            "content": (
+                "[Subagent Context] Every subagent spawned from this session "
+                "has now settled — none are still running or awaiting "
+                "completion delivery."
+            ),
+            "idempotencyKey": f"{settle_run}:user",
+            "provenance": {
+                "kind": "inter_session",
+                "sourceChannel": "internal",
+                "sourceTool": "subagent_announce",
+            },
+        },
+        event_id=event_id,
+        parent_id=done_event_id,
+    )
 
 
 def _build_sqlite_store(
@@ -226,6 +262,7 @@ def test_sqlite_watcher_keeps_requester_settle_no_reply_pending(tmp_path: Path):
     assert snapshot["latest_assistant_text"] == "NO_REPLY"
     assert snapshot["parent_last_run_id"] == settle_run
     assert snapshot["requester_settle_pending"] is True
+    assert RoadmapBenchOpenClawCondition._requester_settle_pending(snapshot)
     assert snapshot["parent_terminal"] is False
     assert snapshot["post_yield_parent_terminal"] is False
     assert snapshot["post_yield_terminal_reason"] == ""
@@ -237,31 +274,28 @@ def test_sqlite_watcher_preserves_done_across_requester_settle_no_reply(
 ):
     settle_run = "announce:requester-settle:roadmap_bench:parent:retry-1"
     events = [
-        _event({
-            "role": "assistant",
-            "content": [{"type": "text", "text": "DONE\nValidated."}],
-            "stopReason": "stop",
-            "timestamp": 2000,
-            "__openclaw": {"runId": "parent-run"},
-        }),
-        _event({
-            "role": "user",
-            "content": [{
-                "type": "text",
-                "text": (
-                    "[Subagent Context] Every subagent spawned from this "
-                    "session has now settled."
-                ),
-            }],
-            "timestamp": 2500,
-        }),
-        _event({
-            "role": "assistant",
-            "content": [{"type": "text", "text": "NO_REPLY"}],
-            "stopReason": "stop",
-            "timestamp": 3000,
-            "__openclaw": {"runId": settle_run},
-        }),
+        _event(
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "DONE\nValidated."}],
+                "stopReason": "stop",
+                "timestamp": 2000,
+                "__openclaw": {"runId": "parent-run"},
+            },
+            event_id="done-event",
+        ),
+        _settle_notice("done-event", settle_run),
+        _event(
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "NO_REPLY"}],
+                "stopReason": "stop",
+                "timestamp": 3000,
+                "__openclaw": {"runId": settle_run},
+            },
+            event_id="settle-response",
+            parent_id="settle-notice",
+        ),
     ]
     sessions_dir, _db_path, _parent_key = _build_sqlite_store(
         tmp_path,
@@ -279,6 +313,8 @@ def test_sqlite_watcher_preserves_done_across_requester_settle_no_reply(
     assert snapshot["parent_terminal"] is True
     assert snapshot["post_yield_terminal_reason"] == "explicit_done"
     assert snapshot["latest_parent_event"] == "post_terminal_settle_no_reply"
+    assert snapshot["settled_done_event_id"] == "done-event"
+    assert snapshot["requester_settle_notice_event_id"] == "settle-notice"
 
 
 def test_sqlite_watcher_preserves_done_across_post_terminal_settle_error(
@@ -286,21 +322,31 @@ def test_sqlite_watcher_preserves_done_across_post_terminal_settle_error(
 ):
     settle_run = "announce:requester-settle:roadmap_bench:parent:retry-1"
     events = [
-        _event({
-            "role": "assistant",
-            "content": [{"type": "text", "text": "DONE\nValidated."}],
-            "stopReason": "stop",
-            "timestamp": 2000,
-            "__openclaw": {"runId": "parent-run"},
-        }),
-        _event({
-            "role": "assistant",
-            "content": [],
-            "stopReason": "error",
-            "errorMessage": "requester settle transport error",
-            "timestamp": 3000,
-            "__openclaw": {"runId": settle_run},
-        }),
+        _event(
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "DONE\nValidated."}],
+                "stopReason": "stop",
+                "timestamp": 2000,
+                "__openclaw": {"runId": "parent-run"},
+            },
+            event_id="done-event",
+        ),
+        _settle_notice("done-event", settle_run),
+        _event(
+            {
+                "role": "assistant",
+                "content": [],
+                "stopReason": "error",
+                "errorMessage": (
+                    "Session transcript keyed user is outside the current turn"
+                ),
+                "timestamp": 3000,
+                "__openclaw": {"runId": settle_run},
+            },
+            event_id="settle-error",
+            parent_id="settle-notice",
+        ),
     ]
     sessions_dir, _db_path, _parent_key = _build_sqlite_store(
         tmp_path,
@@ -315,9 +361,185 @@ def test_sqlite_watcher_preserves_done_across_post_terminal_settle_error(
     assert snapshot["done_text"].startswith("DONE")
     assert snapshot["parent_terminal"] is True
     assert snapshot["latest_parent_event"] == "post_terminal_settle_error"
-    assert "transport error" in snapshot["post_terminal_settle_error"]
+    assert "outside the current turn" in snapshot["post_terminal_settle_error"]
     assert snapshot["post_yield_terminal_reason"] == "explicit_done"
     assert RoadmapBenchOpenClawCondition._terminal_stop_signature(snapshot) is None
+
+
+def test_sqlite_ordinary_request_cannot_restore_stale_done(tmp_path: Path):
+    settle_run = "announce:requester-settle:roadmap_bench:parent:retry-1"
+    events = [
+        _event(
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "DONE"}],
+                "stopReason": "stop",
+            },
+            event_id="done-event",
+        ),
+        _event(
+            {"role": "user", "content": "Continue working"},
+            event_id="ordinary-request",
+            parent_id="done-event",
+        ),
+        _settle_notice("ordinary-request", settle_run),
+        _event(
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "NO_REPLY"}],
+                "stopReason": "stop",
+                "__openclaw": {"runId": settle_run},
+            },
+            event_id="settle-response",
+            parent_id="settle-notice",
+        ),
+    ]
+    sessions_dir, _db_path, _parent_key = _build_sqlite_store(
+        tmp_path,
+        parent_status="done",
+        parent_events=events,
+        parent_last_run_id=settle_run,
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot is not None
+    assert snapshot["done_text"] == ""
+    assert snapshot["requester_settle_pending"] is True
+
+
+def test_sqlite_settle_no_reply_with_extra_payload_does_not_restore_done(
+    tmp_path: Path,
+):
+    settle_run = "announce:requester-settle:roadmap_bench:parent:retry-1"
+    events = [
+        _event(
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "DONE"}],
+                "stopReason": "stop",
+            },
+            event_id="done-event",
+        ),
+        _settle_notice("done-event", settle_run),
+        _event(
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "NO_REPLY"},
+                    {"type": "image", "url": "result.png"},
+                ],
+                "stopReason": "stop",
+                "__openclaw": {"runId": settle_run},
+            },
+            event_id="settle-response",
+            parent_id="settle-notice",
+        ),
+    ]
+    sessions_dir, _db_path, _parent_key = _build_sqlite_store(
+        tmp_path,
+        parent_status="done",
+        parent_events=events,
+        parent_last_run_id=settle_run,
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot is not None
+    assert snapshot["done_text"] == ""
+    assert snapshot["requester_settle_pending"] is False
+    assert not RoadmapBenchOpenClawCondition._requester_settle_pending(snapshot)
+    assert snapshot["latest_assistant_has_payload"] is True
+
+
+def test_sqlite_unknown_settle_error_does_not_restore_done(tmp_path: Path):
+    settle_run = "announce:requester-settle:roadmap_bench:parent:retry-1"
+    events = [
+        _event(
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "DONE"}],
+                "stopReason": "stop",
+            },
+            event_id="done-event",
+        ),
+        _settle_notice("done-event", settle_run),
+        _event(
+            {
+                "role": "assistant",
+                "content": [],
+                "stopReason": "error",
+                "errorMessage": "provider failed",
+                "__openclaw": {"runId": settle_run},
+            },
+            event_id="settle-error",
+            parent_id="settle-notice",
+        ),
+    ]
+    sessions_dir, _db_path, _parent_key = _build_sqlite_store(
+        tmp_path,
+        parent_status="failed",
+        parent_events=events,
+        parent_last_run_id=settle_run,
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot is not None
+    assert snapshot["done_text"] == ""
+    assert snapshot["latest_assistant_stop_reason"] == "error"
+    assert snapshot["post_terminal_settle_error"] == ""
+
+
+def test_sqlite_restored_done_is_not_reused_by_later_settle_exchange(
+    tmp_path: Path,
+):
+    first_run = "announce:requester-settle:roadmap_bench:parent:first"
+    second_run = "announce:requester-settle:roadmap_bench:parent:second"
+    events = [
+        _event(
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "DONE"}],
+                "stopReason": "stop",
+            },
+            event_id="done-event",
+        ),
+        _settle_notice("done-event", first_run, event_id="notice-1"),
+        _event(
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "NO_REPLY"}],
+                "stopReason": "stop",
+                "__openclaw": {"runId": first_run},
+            },
+            event_id="response-1",
+            parent_id="notice-1",
+        ),
+        _settle_notice("response-1", second_run, event_id="notice-2"),
+        _event(
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "NO_REPLY"}],
+                "stopReason": "stop",
+                "__openclaw": {"runId": second_run},
+            },
+            event_id="response-2",
+            parent_id="notice-2",
+        ),
+    ]
+    sessions_dir, _db_path, _parent_key = _build_sqlite_store(
+        tmp_path,
+        parent_status="done",
+        parent_events=events,
+        parent_last_run_id=second_run,
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot is not None
+    assert snapshot["done_text"] == ""
+    assert snapshot["requester_settle_pending"] is True
 
 
 def test_sqlite_watcher_classifies_done_empty_stop_as_incomplete(
