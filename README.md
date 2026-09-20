@@ -14,9 +14,25 @@ python3 run.py --config experiments/nscc_vllm.toml --render-job
 python3 analyze.py --run runs/<run_id>
 ```
 
+`analyze.py` writes a portable, read-only report bundle under
+`reports/analyze/` by default. Use `--output-dir` or `--name` to choose another
+location, and `--json` for the same structured summary on stdout:
+
+```bash
+python3 analyze.py \
+  --run runs/<experiment>/<run_id> \
+  --output-dir reports/analyze \
+  --name my-run
+```
+
+The bundle preserves the source run artifacts byte-for-byte, records SHA-256
+and export status in `artifact-index.json`, and provides `index.html` plus the
+existing span timeline. Missing optional telemetry remains explicitly marked
+as not collected rather than being represented as zero.
+
 Experiments compose reusable profiles from `profiles/`:
 
-- benchmark: SWE-bench, Terminal-Bench, DeepResearch-Bench, or LongBench
+- benchmark: SWE-bench, Terminal-Bench, RoadmapBench, DeepResearch-Bench, or LongBench
 - harness: OpenClaw, OpenHands, Hermes, ReAct, or AR
 - model: model alias, context window, and token limits
 - serving: vLLM, SGLang, LiteLLM, or an existing OpenAI-compatible endpoint

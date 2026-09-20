@@ -22,6 +22,7 @@ from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
+_OPENCLAW_V9 = "2026.9.2"
 _TERMINAL_CHILD_STATES = frozenset(
     {"done", "completed", "failed", "error", "timeout", "timed_out", "cancelled", "canceled", "killed"}
 )
@@ -111,8 +112,8 @@ def _read_sqlite_store(
         connection = _readonly_connection(db_path)
         connection.execute("BEGIN")
         required = {"session_nodes", "session_windows", "transcript_events"}
-        # ``sqlite_schema`` is only an alias on newer SQLite releases. Python
-        # can be linked against an older library, while
+        # ``sqlite_schema`` is only an alias on newer SQLite releases.  NSCC's
+        # Python runtime can be linked against an older library, while
         # ``sqlite_master`` is supported by both old and new versions.
         rows = connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
@@ -339,6 +340,13 @@ def _restore_archived_child_index(sessions_dir: Path, agent_id: str) -> int:
         return 0
     identities = _cache_trace_child_identities(sessions_dir.parent, agent_id)
     restored = 0
+    projection_annotated = False
+    for entry in index.values():
+        if not isinstance(entry, dict) or not entry.get("spawnedBy"):
+            continue
+        if "agentBenchProjectionSource" not in entry:
+            entry["agentBenchProjectionSource"] = "online_index"
+            projection_annotated = True
     for session_id, session_key in identities.items():
         if session_key in index:
             continue
@@ -355,6 +363,7 @@ def _restore_archived_child_index(sessions_dir: Path, agent_id: str) -> int:
             "status": status,
             "spawnedBy": parent_key,
             "parentSessionKey": parent_key,
+            "agentBenchProjectionSource": "restored_archived_transcript",
         }
         if first_timestamp is not None:
             entry["createdAt"] = first_timestamp
@@ -366,7 +375,7 @@ def _restore_archived_child_index(sessions_dir: Path, agent_id: str) -> int:
         index[session_key] = entry
         restored += 1
 
-    if restored:
+    if restored or projection_annotated:
         temporary = index_path.with_name(f".{index_path.name}.tmp")
         temporary.write_text(
             json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -435,6 +444,17 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
     post_yield_parent_terminal = False
     post_yield_prompt_error = ""
     latest_event_kind = ""
+    latest_assistant_stop_reason = ""
+    latest_assistant_text = ""
+    latest_assistant_run_id = ""
+    latest_assistant_has_tool_call = False
+    latest_assistant_has_payload = False
+    latest_assistant_is_control_only_no_reply = False
+    post_terminal_settle_error = ""
+    done_evidence = None
+    requester_settle_candidate = None
+    settled_done_event_id = ""
+    requester_settle_notice_event_id = ""
     heartbeat_turn = False
 
     for event in messages[latest_yield + 1 :]:
@@ -447,6 +467,8 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
             post_yield_prompt_error = str(raw_error or "OpenClaw prompt error")
             post_yield_parent_terminal = False
             done_text = ""
+            done_evidence = None
+            requester_settle_candidate = None
             latest_event_kind = "prompt_error"
             continue
 
@@ -455,12 +477,11 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
 
         message = event.get("message") or {}
         role = message.get("role")
-        parts = [
-            str(item.get("text") or "")
-            for item in message.get("content") or []
-            if isinstance(item, dict) and item.get("type") == "text"
-        ]
-        text = "\n".join(part for part in parts if part).strip()
+        (
+            text,
+            has_tool_payload,
+            has_current_payload,
+        ) = cls._assistant_content_evidence(message)
 
         if role in {"user", "assistant", "toolResult"}:
             post_yield_prompt_error = ""
@@ -472,7 +493,19 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
                 continue
             heartbeat_turn = False
             post_yield_parent_terminal = False
+            requester_settle_candidate = cls._requester_settle_candidate(
+                event,
+                message,
+                text,
+                done_evidence,
+            )
+            done_evidence = None
             done_text = ""
+            latest_assistant_text = ""
+            latest_assistant_run_id = ""
+            latest_assistant_has_tool_call = False
+            latest_assistant_has_payload = False
+            latest_assistant_is_control_only_no_reply = False
             latest_event_kind = "resume"
             continue
 
@@ -483,6 +516,8 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
             post_yield_parent_activity = True
             post_yield_parent_terminal = False
             done_text = ""
+            done_evidence = None
+            requester_settle_candidate = None
             latest_event_kind = "tool_result"
             continue
 
@@ -496,8 +531,77 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
                 heartbeat_turn = False
             continue
 
+        openclaw_meta = message.get("__openclaw") or {}
+        run_id = str(
+            openclaw_meta.get("runId") or ""
+            if isinstance(openclaw_meta, dict)
+            else ""
+        )
+        requester_settle_run = run_id.startswith(
+            cls._REQUESTER_SETTLE_RUN_PREFIX
+        )
+        response_matches = cls._requester_settle_response_matches(
+            event,
+            run_id,
+            requester_settle_candidate,
+        )
+        control_only_no_reply = cls._is_control_only_no_reply(message)
+        if (
+            response_matches
+            and control_only_no_reply
+        ):
+            settled = requester_settle_candidate or {}
+            original_done = settled.get("done") or {}
+            notice = settled.get("notice") or {}
+            done_text = str(original_done.get("text") or "")
+            settled_done_event_id = str(original_done.get("event_id") or "")
+            requester_settle_notice_event_id = str(
+                notice.get("event_id") or ""
+            )
+            done_evidence = None
+            requester_settle_candidate = None
+            latest_assistant_stop_reason = stop_reason
+            latest_assistant_text = text
+            latest_assistant_run_id = run_id
+            latest_assistant_has_tool_call = False
+            latest_assistant_has_payload = has_current_payload
+            latest_assistant_is_control_only_no_reply = True
+            post_yield_parent_activity = True
+            post_yield_parent_terminal = True
+            latest_event_kind = "post_terminal_settle_no_reply"
+            continue
+        if (
+            response_matches
+            and requester_settle_run
+            and cls._is_requester_settle_transport_error(message)
+        ):
+            # Match the JSON projection path: a transport error appended by a
+            # requester-settle retry does not erase an earlier durable DONE.
+            settled = requester_settle_candidate or {}
+            original_done = settled.get("done") or {}
+            notice = settled.get("notice") or {}
+            post_terminal_settle_error = str(message.get("errorMessage"))
+            done_text = str(original_done.get("text") or "")
+            settled_done_event_id = str(original_done.get("event_id") or "")
+            requester_settle_notice_event_id = str(
+                notice.get("event_id") or ""
+            )
+            done_evidence = None
+            requester_settle_candidate = None
+            latest_event_kind = "post_terminal_settle_error"
+            continue
+        done_evidence = None
+        requester_settle_candidate = None
+        latest_assistant_stop_reason = stop_reason
+        latest_assistant_text = text
+        latest_assistant_run_id = run_id
+        latest_assistant_has_tool_call = has_tool_payload
+        latest_assistant_has_payload = has_current_payload
+        latest_assistant_is_control_only_no_reply = control_only_no_reply
         post_yield_parent_activity = True
-        post_yield_parent_terminal = stop_reason == "stop"
+        post_yield_parent_terminal = (
+            stop_reason in cls._DURABLE_ASSISTANT_STOP_REASONS
+        )
         latest_event_kind = (
             "assistant_stop" if post_yield_parent_terminal else "assistant_active"
         )
@@ -507,18 +611,43 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
             and re.search(r"(?im)^\s*DONE(?:\s*$|\b)", text)
         ):
             done_text = text
+            done_evidence = {
+                "text": text,
+                "event_id": cls._event_identity(event),
+                "run_id": run_id,
+                "restored": False,
+            }
         else:
             done_text = ""
 
+    parent_last_run_id = str(
+        parent.get("lastRunId") or latest_assistant_run_id or ""
+    ).strip()
+    requester_settle_pending = cls._requester_settle_pending(
+        {
+            "done_text": done_text,
+            "latest_assistant_run_id": latest_assistant_run_id,
+            "parent_last_run_id": parent_last_run_id,
+            "latest_assistant_is_control_only_no_reply": (
+                latest_assistant_is_control_only_no_reply
+            ),
+        }
+    )
     assistant_stop_candidate = post_yield_parent_terminal
     logical_parent_terminal = bool(
-        done_text or (assistant_stop_candidate and parent_session_terminal)
+        done_text
+        or (
+            assistant_stop_candidate
+            and parent_session_terminal
+            and not requester_settle_pending
+        )
     )
     return {
         "session_store": "sqlite",
         "parent_session_key": str(parent_key),
         "parent_session_id": parent_session_id,
         "parent_session_status": parent_session_status,
+        "parent_last_run_id": parent_last_run_id,
         "parent_session_active": parent_session_active,
         "parent_session_terminal": parent_session_terminal,
         "total_children": len(child_entries),
@@ -532,18 +661,27 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
         "transcript_size_bytes": transcript_sizes.get(parent_session_id, 0),
         "post_yield_parent_activity": post_yield_parent_activity,
         "post_yield_parent_terminal": (
-            assistant_stop_candidate and parent_session_terminal
+            assistant_stop_candidate
+            and parent_session_terminal
+            and not requester_settle_pending
         ),
         "post_yield_terminal_reason": (
             "explicit_done"
             if done_text
             else (
                 "assistant_stop"
-                if assistant_stop_candidate and parent_session_terminal
+                if (
+                    assistant_stop_candidate
+                    and parent_session_terminal
+                    and not requester_settle_pending
+                )
                 else ""
             )
         ),
         "post_yield_prompt_error": post_yield_prompt_error,
+        "post_terminal_settle_error": post_terminal_settle_error,
+        "settled_done_event_id": settled_done_event_id,
+        "requester_settle_notice_event_id": requester_settle_notice_event_id,
         "done_text": done_text,
         "parent_active": bool(
             (
@@ -560,6 +698,15 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
         "parent_terminal": logical_parent_terminal,
         "assistant_stop_candidate": assistant_stop_candidate,
         "latest_parent_event": latest_event_kind,
+        "latest_assistant_stop_reason": latest_assistant_stop_reason,
+        "latest_assistant_text": latest_assistant_text,
+        "latest_assistant_run_id": latest_assistant_run_id,
+        "latest_assistant_has_tool_call": latest_assistant_has_tool_call,
+        "latest_assistant_has_payload": latest_assistant_has_payload,
+        "latest_assistant_is_control_only_no_reply": (
+            latest_assistant_is_control_only_no_reply
+        ),
+        "requester_settle_pending": requester_settle_pending,
     }
 
 
@@ -599,7 +746,7 @@ def _archive_sqlite_database(db_path: Path, destination: Path) -> None:
         target = sqlite3.connect(destination)
         source.backup(target)
     except sqlite3.Error:
-        # OpenClaw v9 uses STRICT tables, which the host Python-linked SQLite
+        # OpenClaw v9 uses STRICT tables, which NSCC's Python-linked SQLite
         # 3.26 cannot parse. The gateway has stopped before archival, so a
         # direct copy is a consistent fallback without requiring host SQLite.
         if target is not None:
@@ -640,3 +787,152 @@ def _measurement_parent_key(run_dir: Path, agent_id: str) -> str:
     if main in roots:
         return main
     return roots[0] if len(roots) == 1 else ""
+
+
+def _count_parent_resumes(run_dir: Path, parent_key: str) -> int:
+    return openclaw_measurement._parent_resume_count(
+        run_dir,
+        "roadmap_bench",
+        parent_session_key=parent_key,
+    )
+
+
+def _runtime_version() -> str:
+    raw = str(os.environ.get("AB_AGENT_RUNTIME_VERSION") or "").strip()
+    if not raw:
+        return "v2026.4.22"
+    return raw if raw.startswith("v") else f"v{raw}"
+
+
+def install_roadmap_sqlite_session_compat() -> None:
+    """Install SQLite lifecycle, archival, and measurement compatibility once."""
+    from agent_bench.benchmarks.conditions.openclaw_agent import OpenClawAgentCondition
+    from agent_bench.benchmarks.conditions import openclaw_measurement
+    from .openclaw_agent import RoadmapBenchOpenClawCondition
+
+    # Lifecycle: prefer the v9 SQLite store, retain the existing JSON fallback.
+    current_read = RoadmapBenchOpenClawCondition._read_yield_snapshot
+    underlying_read = getattr(current_read, "__func__", current_read)
+    if not getattr(underlying_read, "_roadmap_sqlite_session_compat", False):
+        def read_snapshot(cls, sessions_dir: Path):
+            # The runtime-side Node exporter can read v9 STRICT databases even
+            # when host Python cannot. Prefer that durable projection when it
+            # has been published, retaining direct SQLite for tests/new hosts.
+            snapshot = underlying_read(cls, sessions_dir)
+            if snapshot is not None:
+                return snapshot
+            return _sqlite_yield_snapshot(cls, sessions_dir)
+
+        setattr(read_snapshot, "_roadmap_sqlite_session_compat", True)
+        RoadmapBenchOpenClawCondition._read_yield_snapshot = classmethod(read_snapshot)
+
+    # Archive a stable legacy-compatible projection after the gateway stops so
+    # existing post-run measurement code can consume v9 without schema forks.
+    current_archive = OpenClawAgentCondition._archive_session_artifacts
+    if not getattr(current_archive, "_roadmap_sqlite_session_compat", False):
+        def archive(self, container_id, run_dir: Path, session_id: str):
+            current_archive(self, container_id, run_dir, session_id)
+            if getattr(self, "agent_id", "") != "roadmap_bench":
+                return
+            out_dir = run_dir / "conversation"
+            sessions_out = out_dir / "sessions"
+            env_info = getattr(self, "_env_info", {}) or {}
+            state_dir = env_info.get("state_dir") or env_info.get("host_state_dir")
+            try:
+                db_path = (
+                    _agent_db_from_state_dir(Path(state_dir), self.agent_id)
+                    if state_dir else None
+                )
+                if (
+                    db_path is not None
+                    and db_path.is_file()
+                    and not (sessions_out / "sessions.json").is_file()
+                ):
+                    if _export_sqlite_store(db_path, sessions_out):
+                        logger.info("  archived OpenClaw SQLite session projection")
+                restored = _restore_archived_child_index(
+                    sessions_out, self.agent_id
+                )
+                if restored:
+                    logger.info(
+                        "  restored %d archived OpenClaw child session(s)",
+                        restored,
+                    )
+                if db_path is not None and db_path.is_file():
+                    _archive_sqlite_database(
+                        db_path, out_dir / "openclaw-agent.sqlite"
+                    )
+            except Exception as exc:  # noqa: BLE001 - measurement remains best-effort
+                logger.warning("OpenClaw SQLite session archive failed: %s", exc)
+
+        setattr(archive, "_roadmap_sqlite_session_compat", True)
+        OpenClawAgentCondition._archive_session_artifacts = archive
+
+    # Preserve exact explicit session keys in the exported projection while
+    # teaching the legacy measurement aggregation which root is the parent.
+    current_session_events = openclaw_measurement._session_events
+    if not getattr(current_session_events, "_roadmap_sqlite_session_compat", False):
+        def session_events(run_dir: Path, agent_id: str):
+            events = current_session_events(run_dir, agent_id)
+            if agent_id != "roadmap_bench":
+                return events
+            parent_key = _measurement_parent_key(run_dir, agent_id)
+            if parent_key:
+                for event in events:
+                    if event.get("session_key") == parent_key:
+                        event["role"] = "parent"
+            return events
+
+        setattr(session_events, "_roadmap_sqlite_session_compat", True)
+        openclaw_measurement._session_events = session_events
+
+    current_logical = openclaw_measurement._logical_tokens
+    if not getattr(current_logical, "_roadmap_sqlite_session_compat", False):
+        def logical_tokens(run_dir: Path, agent_id: str):
+            logical, events = current_logical(run_dir, agent_id)
+            if agent_id != "roadmap_bench":
+                return logical, events
+            parent_key = _measurement_parent_key(run_dir, agent_id)
+            legacy_main = f"agent:{agent_id}:main"
+            if parent_key and parent_key != legacy_main:
+                children = logical.get("children") or {}
+                explicit_parent = children.pop(parent_key, None)
+                if isinstance(explicit_parent, dict):
+                    parent = dict(explicit_parent)
+                    parent["resumed_turns"] = _count_parent_resumes(
+                        run_dir, parent_key
+                    )
+                    logical["parent"] = parent
+            return logical, events
+
+        setattr(logical_tokens, "_roadmap_sqlite_session_compat", True)
+        openclaw_measurement._logical_tokens = logical_tokens
+
+    current_runtime = openclaw_measurement._runtime_observability
+    if not getattr(current_runtime, "_roadmap_sqlite_session_compat", False):
+        def runtime_observability(
+            run_dir: Path,
+            events: list[dict],
+            agent_id: str,
+            *,
+            execution_start_ns: int = 0,
+            execution_end_ns: int = 0,
+        ):
+            result = current_runtime(
+                run_dir,
+                events,
+                agent_id,
+                execution_start_ns=execution_start_ns,
+                execution_end_ns=execution_end_ns,
+            )
+            if agent_id != "roadmap_bench":
+                return result
+            version = _runtime_version()
+            result["runtime_version"] = version
+            policy = result.get("stuck_diagnostic_policy")
+            if isinstance(policy, dict):
+                policy["runtime_version"] = version
+            return result
+
+        setattr(runtime_observability, "_roadmap_sqlite_session_compat", True)
+        openclaw_measurement._runtime_observability = runtime_observability

@@ -44,10 +44,6 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     # as final after one model idle-timeout window plus margin.
     prompt_error_grace_seconds = 600.0
     _ACTIVE_CHILD_STATES = frozenset({"accepted", "queued", "pending", "running"})
-    _TERMINAL_CHILD_STATES = frozenset({
-        "done", "completed", "failed", "error", "timeout", "timed_out",
-        "cancelled", "canceled", "killed",
-    })
     _ACTIVE_PARENT_STATES = frozenset({
         "accepted", "queued", "pending", "processing", "running",
     })
@@ -62,6 +58,13 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     })
     _TIMEOUT_DURABLE_PARENT_STATES = frozenset({"timed_out", "timeout"})
     _DURABLE_ASSISTANT_STOP_REASONS = frozenset({"stop", "length"})
+    _REQUESTER_SETTLE_RUN_PREFIX = "announce:requester-settle:"
+    _REQUESTER_SETTLE_NOTICE = (
+        "[Subagent Context] Every subagent spawned from this session has now settled"
+    )
+    _REQUESTER_SETTLE_TRANSPORT_ERRORS = (
+        "session transcript keyed user is outside the current turn",
+    )
     # A turn-level stop can precede an OpenClaw retry/resume. Require the
     # durable session and transcript to remain terminal across multiple
     # watcher reads before accepting a non-DONE stop as logical completion.
@@ -76,7 +79,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         sessions_dir = self._live_sessions_dir()
         if sessions_dir is None:
             return None
-        snapshot = self._read_lifecycle_snapshot(sessions_dir)
+        snapshot = self._read_yield_snapshot(sessions_dir)
         if not snapshot:
             return None
         parent_status = str(
@@ -89,17 +92,43 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             return failure
         if parent_status not in normal_terminal_states:
             return None
+        explicit_done = bool(snapshot.get("done_text"))
         if (
-            parent_status in normal_terminal_states
+            not explicit_done
             and not self._is_durable_assistant_stop_terminal(snapshot)
         ):
             return None
-        completion_status = self.NORMAL_COMPLETION
-        diagnostic = (
-            "OpenClaw durable parent session completed while the CLI was "
-            f"still running (status={parent_status}, "
-            f"session={snapshot['parent_session_id']})"
-        )
+        if explicit_done:
+            snapshot = dict(snapshot, terminal_evidence="explicit_done")
+            completion_status = self.NORMAL_COMPLETION
+            diagnostic = (
+                "OpenClaw durable parent session completed with explicit "
+                f"DONE (status={parent_status}, "
+                f"session={snapshot['parent_session_id']})"
+            )
+        elif self._is_durable_empty_assistant_stop_terminal(snapshot):
+            completion_status = self.BLOCKED_INCOMPLETE
+            diagnostic = (
+                "OpenClaw durable parent session completed with an empty "
+                "assistant stop and no pending native recovery "
+                f"(status={parent_status}, "
+                f"session={snapshot['parent_session_id']})"
+            )
+        elif self._is_durable_incomplete_length_terminal(snapshot):
+            completion_status = self.BLOCKED_INCOMPLETE
+            diagnostic = (
+                "OpenClaw durable parent session completed with a "
+                "length-truncated assistant turn and no explicit DONE "
+                f"(status={parent_status}, "
+                f"session={snapshot['parent_session_id']})"
+            )
+        else:
+            completion_status = self.NORMAL_COMPLETION
+            diagnostic = (
+                "OpenClaw durable parent session completed while the CLI was "
+                f"still running (status={parent_status}, "
+                f"session={snapshot['parent_session_id']})"
+            )
         signature = (
             snapshot.get("parent_session_id"),
             parent_status,
@@ -109,6 +138,9 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             snapshot.get("latest_assistant_stop_reason"),
             snapshot.get("pending_children"),
             diagnostic,
+            snapshot.get("latest_assistant_text"),
+            snapshot.get("latest_assistant_has_tool_call"),
+            snapshot.get("latest_assistant_has_payload"),
         )
         self._durable_invocation_snapshot = snapshot
         return signature, completion_status, diagnostic
@@ -175,7 +207,6 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         container_id: Optional[str],
         env_info: Optional[Dict] = None,
     ) -> Dict:
-        self._observed_child_sessions = {}
         runtime_env = env_info if env_info is not None else {}
         runtime_env["roadmap_workspace_quiesced"] = False
         workspace = Path(str(runtime_env.get("workspace_host_path") or ""))
@@ -581,7 +612,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         # outcome. Abnormal parent termination must quiesce pending children
         # just like DONE / terminal-stop, otherwise they may keep writing the
         # shared workspace while the verifier starts.
-        snapshot = self._read_lifecycle_snapshot(sessions_dir)
+        snapshot = self._read_yield_snapshot(sessions_dir)
 
         if self._is_durable_runtime_termination_payload(payload):
             if not snapshot:
@@ -607,6 +638,62 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 payload, snapshot
             )
             return payload, getattr(self, "_last_completion_error", error)
+
+        durable_interrupt_snapshot = getattr(
+            self, "_durable_invocation_snapshot", None
+        )
+        if (
+            getattr(self, "_last_completion_status", None)
+            == self.BLOCKED_INCOMPLETE
+            and isinstance(durable_interrupt_snapshot, dict)
+            and snapshot
+            and (
+                self._is_durable_empty_assistant_stop_terminal(snapshot)
+                or self._is_durable_incomplete_length_terminal(snapshot)
+            )
+        ):
+            is_empty_stop = self._is_durable_empty_assistant_stop_terminal(
+                snapshot
+            )
+            evidence = (
+                "durable_session_terminal_empty_assistant_stop"
+                if is_empty_stop
+                else "durable_session_terminal_incomplete_length"
+            )
+            snapshot = dict(
+                snapshot,
+                terminal_evidence=evidence,
+            )
+            blocked_error = str(
+                getattr(self, "_last_completion_error", None)
+                or error
+                or (
+                    "OpenClaw durable parent session ended with an empty stop"
+                    if is_empty_stop
+                    else "OpenClaw durable parent session ended with an "
+                    "incomplete length-truncated turn"
+                )
+            )
+            self._last_completion_status = self.BLOCKED_INCOMPLETE
+            self._last_completion_error = blocked_error
+            reconciled_payload = (
+                copy.deepcopy(payload) if isinstance(payload, dict) else {}
+            )
+            if not isinstance(reconciled_payload.get("result"), dict):
+                reconciled_payload["result"] = {}
+            meta = reconciled_payload["result"].setdefault("meta", {})
+            meta["livenessState"] = "blocked"
+            meta["replayInvalid"] = False
+            meta["stopReason"] = "stop" if is_empty_stop else "length"
+            meta["agentBenchBlockedIncomplete"] = True
+            snapshot, quiescence = self._quiesce_with_timing(
+                snapshot, logical_parent_terminal=True
+            )
+            self._attach_lifecycle_summary(
+                reconciled_payload, snapshot, quiescence
+            )
+            payload = reconciled_payload
+            return payload, blocked_error
 
         # The CLI payload can lag behind the durable requester transcript. In
         # particular, a no-yield requester can have appended a terminal DONE
@@ -671,7 +758,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         )
 
         while time.monotonic() < deadline:
-            snapshot = self._read_lifecycle_snapshot(sessions_dir)
+            snapshot = self._read_yield_snapshot(sessions_dir)
             if snapshot:
                 last_snapshot = snapshot
                 if snapshot["parent_session_id"] != parent_session_id:
@@ -895,6 +982,48 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             self._last_completion_error = completion_error
             return reconciled_payload, completion_error
 
+        is_empty_stop = self._is_durable_empty_assistant_stop_terminal(snapshot)
+        is_incomplete_length = self._is_durable_incomplete_length_terminal(
+            snapshot
+        )
+        if confirm_non_done_stop and (is_empty_stop or is_incomplete_length):
+            evidence = (
+                "durable_session_terminal_empty_assistant_stop"
+                if is_empty_stop
+                else "durable_session_terminal_incomplete_length"
+            )
+            snapshot = dict(
+                snapshot,
+                terminal_evidence=evidence,
+            )
+            snapshot, quiescence = self._quiesce_with_timing(
+                snapshot, logical_parent_terminal=True
+            )
+            completion_error = (
+                "OpenClaw durable parent session completed with an empty "
+                "assistant stop and no pending native recovery"
+                if is_empty_stop
+                else "OpenClaw durable parent session completed with an "
+                "incomplete length-truncated assistant turn"
+            )
+            reconciled_payload = (
+                copy.deepcopy(payload) if isinstance(payload, dict) else {}
+            )
+            if not isinstance(reconciled_payload.get("result"), dict):
+                reconciled_payload["result"] = {}
+            result = reconciled_payload["result"]
+            meta = result.setdefault("meta", {})
+            meta["livenessState"] = "blocked"
+            meta["replayInvalid"] = False
+            meta["stopReason"] = "stop" if is_empty_stop else "length"
+            meta["agentBenchBlockedIncomplete"] = True
+            self._attach_lifecycle_summary(
+                reconciled_payload, snapshot, quiescence
+            )
+            self._last_completion_status = self.BLOCKED_INCOMPLETE
+            self._last_completion_error = completion_error
+            return reconciled_payload, completion_error
+
         # A durable completed requester is the logical runtime boundary even
         # when its CLI RPC does not deliver a final reply. Stability
         # confirmation prevents a mutable transcript read from ending early.
@@ -934,12 +1063,179 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         requiring them to finish here can deadlock when a child yielded and
         is waiting for a requester that can no longer resume it.
         """
+        if cls._requester_settle_pending(snapshot):
+            return False
         return bool(
             snapshot.get("parent_session_status")
             in cls._NORMAL_DURABLE_PARENT_STATES
             and snapshot.get("latest_parent_event") == "assistant_stop"
             and snapshot.get("latest_assistant_stop_reason")
             in cls._DURABLE_ASSISTANT_STOP_REASONS
+        )
+
+    @classmethod
+    def _is_durable_empty_assistant_stop_terminal(cls, snapshot: Dict) -> bool:
+        """Whether a durably completed requester ended on an empty stop."""
+        return bool(
+            cls._is_durable_assistant_stop_terminal(snapshot)
+            and snapshot.get("latest_assistant_stop_reason") == "stop"
+            and not str(snapshot.get("latest_assistant_text") or "").strip()
+            and not snapshot.get("latest_assistant_has_payload")
+            and not snapshot.get("latest_assistant_has_tool_call")
+            and not snapshot.get("requester_settle_pending")
+        )
+
+    @classmethod
+    def _is_durable_incomplete_length_terminal(cls, snapshot: Dict) -> bool:
+        """Whether a completed requester ended on an incomplete length turn."""
+        return bool(
+            cls._is_durable_assistant_stop_terminal(snapshot)
+            and snapshot.get("latest_assistant_stop_reason") == "length"
+            and not snapshot.get("done_text")
+            and not snapshot.get("requester_settle_pending")
+        )
+
+    @staticmethod
+    def _assistant_content_evidence(message: Dict) -> Tuple[str, bool, bool]:
+        """Return visible text, tool-call presence, and current payload evidence."""
+        content = message.get("content")
+        if isinstance(content, str):
+            text = content.strip()
+            return text, False, bool(text)
+
+        texts = []
+        has_tool_call = False
+        has_payload = False
+        for item in content or []:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "")
+            if item_type == "text":
+                item_text = str(item.get("text") or "")
+                if item_text.strip():
+                    texts.append(item_text)
+                    has_payload = True
+                continue
+            if item_type in {"toolCall", "toolUse"}:
+                has_tool_call = True
+                has_payload = True
+                continue
+            if item_type not in {"thinking", "reasoning"}:
+                has_payload = True
+        return "\n".join(texts).strip(), has_tool_call, has_payload
+
+    @staticmethod
+    def _event_identity(event: Dict) -> str:
+        """Return the durable transcript identity used to bind settle events."""
+        return str(event.get("id") or "").strip()
+
+    @classmethod
+    def _native_requester_settle_notice(
+        cls,
+        event: Dict,
+        message: Dict,
+        text: str,
+    ) -> Optional[Dict]:
+        """Return native notice identity, excluding ordinary requester text."""
+        idempotency_key = str(message.get("idempotencyKey") or "").strip()
+        provenance = message.get("provenance") or {}
+        event_id = cls._event_identity(event)
+        if (
+            not event_id
+            or cls._REQUESTER_SETTLE_NOTICE not in text
+            or not idempotency_key.startswith(cls._REQUESTER_SETTLE_RUN_PREFIX)
+            or not idempotency_key.endswith(":user")
+            or not isinstance(provenance, dict)
+            or provenance.get("kind") != "inter_session"
+            or provenance.get("sourceChannel") != "internal"
+            or provenance.get("sourceTool") != "subagent_announce"
+        ):
+            return None
+        return {
+            "event_id": event_id,
+            "run_id": idempotency_key[:-len(":user")],
+        }
+
+    @classmethod
+    def _requester_settle_candidate(
+        cls,
+        event: Dict,
+        message: Dict,
+        text: str,
+        done_evidence: Optional[Dict],
+    ) -> Optional[Dict]:
+        """Bind an original DONE to its immediate native settle notice."""
+        if not done_evidence or done_evidence.get("restored"):
+            return None
+        notice = cls._native_requester_settle_notice(event, message, text)
+        if (
+            notice is None
+            or not done_evidence.get("event_id")
+            or str(event.get("parentId") or "") != done_evidence["event_id"]
+        ):
+            return None
+        return {"done": dict(done_evidence), "notice": notice}
+
+    @classmethod
+    def _requester_settle_response_matches(
+        cls,
+        event: Dict,
+        run_id: str,
+        candidate: Optional[Dict],
+    ) -> bool:
+        if not candidate:
+            return False
+        notice = candidate.get("notice") or {}
+        return bool(
+            run_id
+            and run_id == notice.get("run_id")
+            and str(event.get("parentId") or "") == notice.get("event_id")
+        )
+
+    @staticmethod
+    def _is_control_only_no_reply(message: Dict) -> bool:
+        """Accept NO_REPLY only when it is the sole assistant payload."""
+        if str(message.get("stopReason") or "").strip().lower() != "stop":
+            return False
+        content = message.get("content")
+        return bool(
+            isinstance(content, list)
+            and len(content) == 1
+            and isinstance(content[0], dict)
+            and content[0].get("type") == "text"
+            and str(content[0].get("text") or "").strip() == "NO_REPLY"
+        )
+
+    @classmethod
+    def _is_requester_settle_transport_error(cls, message: Dict) -> bool:
+        """Recognize the confirmed empty requester-settle transport race."""
+        if str(message.get("stopReason") or "").strip().lower() != "error":
+            return False
+        text, has_tool_call, has_payload = cls._assistant_content_evidence(message)
+        error = str(message.get("errorMessage") or "").strip().lower()
+        return bool(
+            not text
+            and not has_tool_call
+            and not has_payload
+            and error
+            and any(
+                marker in error
+                for marker in cls._REQUESTER_SETTLE_TRANSPORT_ERRORS
+            )
+        )
+
+    @classmethod
+    def _requester_settle_pending(cls, snapshot: Dict) -> bool:
+        """Whether OpenClaw has scheduled its native requester retry."""
+        run_id = str(
+            snapshot.get("latest_assistant_run_id")
+            or snapshot.get("parent_last_run_id")
+            or ""
+        ).strip()
+        return bool(
+            not snapshot.get("done_text")
+            and snapshot.get("latest_assistant_is_control_only_no_reply") is True
+            and run_id.startswith(cls._REQUESTER_SETTLE_RUN_PREFIX)
         )
 
     @classmethod
@@ -957,6 +1253,9 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             snapshot.get("transcript_size_bytes"),
             snapshot.get("latest_parent_event"),
             snapshot.get("latest_assistant_stop_reason"),
+            snapshot.get("latest_assistant_text"),
+            snapshot.get("latest_assistant_has_tool_call"),
+            snapshot.get("latest_assistant_has_payload"),
         )
 
     @staticmethod
@@ -1007,12 +1306,83 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
     def _terminal_activity_signature(snapshot: Dict) -> Tuple:
         """Return transcript activity that must not change across the freeze fence."""
         return (
-            snapshot.get("parent_session_id"),
-            snapshot.get("parent_session_status"),
             snapshot.get("message_count"),
             snapshot.get("transcript_size_bytes"),
             snapshot.get("yield_count"),
             snapshot.get("latest_parent_event"),
+            snapshot.get("latest_assistant_stop_reason"),
+            snapshot.get("latest_assistant_text"),
+            snapshot.get("latest_assistant_has_tool_call"),
+            snapshot.get("latest_assistant_has_payload"),
+        )
+
+    @staticmethod
+    def _terminal_identity_signature(snapshot: Dict) -> Tuple:
+        return (
+            snapshot.get("parent_session_key"),
+            snapshot.get("parent_session_id"),
+            snapshot.get("parent_last_run_id"),
+        )
+
+    @staticmethod
+    def _terminal_fence_snapshot(snapshot: Dict) -> Dict:
+        """Persist a compact, reviewable fence state without transcript data."""
+        return {
+            "session_store": snapshot.get("session_store"),
+            "parent_session_key": snapshot.get("parent_session_key"),
+            "parent_session_id": snapshot.get("parent_session_id"),
+            "parent_last_run_id": snapshot.get("parent_last_run_id"),
+            "parent_session_status": snapshot.get("parent_session_status"),
+            "message_count": snapshot.get("message_count"),
+            "transcript_size_bytes": snapshot.get("transcript_size_bytes"),
+            "yield_count": snapshot.get("yield_count"),
+            "latest_parent_event": snapshot.get("latest_parent_event"),
+            "latest_assistant_stop_reason": snapshot.get(
+                "latest_assistant_stop_reason"
+            ),
+            "done_marker": bool(snapshot.get("done_text")),
+            "terminal_evidence": snapshot.get("terminal_evidence"),
+            "pending_children": snapshot.get("pending_children"),
+        }
+
+    @classmethod
+    def _terminal_fence_decision(
+        cls,
+        before: Dict,
+        after: Dict,
+        *,
+        logical_parent_terminal: bool,
+    ) -> Tuple[bool, str]:
+        """Accept only stable activity or a safe active-to-done convergence."""
+        if not logical_parent_terminal:
+            return False, "missing_logical_terminal_evidence"
+        if cls._terminal_identity_signature(before) != (
+            cls._terminal_identity_signature(after)
+        ):
+            return False, "parent_execution_identity_changed"
+        if cls._terminal_activity_signature(before) != (
+            cls._terminal_activity_signature(after)
+        ):
+            return False, "parent_execution_activity_changed"
+
+        before_status = str(
+            before.get("parent_session_status") or "unknown"
+        ).lower()
+        after_status = str(
+            after.get("parent_session_status") or "unknown"
+        ).lower()
+        if before_status == after_status:
+            return True, "stable_terminal_fence"
+
+        has_explicit_terminal_evidence = bool(before.get("done_text"))
+        if (
+            before_status in cls._ACTIVE_PARENT_STATES
+            and after_status in cls._NORMAL_DURABLE_PARENT_STATES
+            and has_explicit_terminal_evidence
+        ):
+            return True, "safe_status_convergence"
+        return False, (
+            f"unsafe_parent_status_transition:{before_status}->{after_status}"
         )
 
     def _quiesce_with_timing(
@@ -1031,13 +1401,16 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         ):
             timed_snapshot["parent_terminal_observed_ns"] = time.time_ns()
 
-        before_activity = self._terminal_activity_signature(snapshot)
         quiescence = self._quiesce_terminal_children(snapshot)
+        quiescence = {
+            **quiescence,
+            "terminalFenceBefore": self._terminal_fence_snapshot(snapshot),
+        }
 
         if quiescence.get("workspaceQuiesced") is True and logical_parent_terminal:
             sessions_dir = self._live_sessions_dir()
             after_snapshot = (
-                self._read_lifecycle_snapshot(sessions_dir)
+                self._read_yield_snapshot(sessions_dir)
                 if sessions_dir is not None else None
             )
             if after_snapshot is None:
@@ -1049,21 +1422,76 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                     **quiescence,
                     "workspaceQuiesced": False,
                     "terminalFenceStable": False,
+                    "terminalFenceDecision": "after_state_unavailable",
                     "lifecycleError": error,
                 }
-            elif self._terminal_activity_signature(after_snapshot) != before_activity:
+            else:
+                quiescence["terminalFenceAfter"] = (
+                    self._terminal_fence_snapshot(after_snapshot)
+                )
+                stable, decision = self._terminal_fence_decision(
+                    snapshot,
+                    after_snapshot,
+                    logical_parent_terminal=logical_parent_terminal,
+                )
+                if not stable:
+                    error = (
+                        "Roadmap parent activity changed while establishing the "
+                        f"terminal quiescence fence ({decision})"
+                    )
+                    quiescence = {
+                        **quiescence,
+                        "workspaceQuiesced": False,
+                        "terminalFenceStable": False,
+                        "terminalFenceDecision": decision,
+                        "lifecycleError": error,
+                    }
+                else:
+                    quiescence = {
+                        **quiescence,
+                        "terminalFenceStable": True,
+                        "terminalFenceDecision": decision,
+                    }
+
+        if quiescence.get("workspaceQuiesced") is True:
+            writer_fields = (
+                "openClawRuntimeStopped",
+                "execBridgeStopped",
+                "taskRuntimeRestarted",
+            )
+            failed_writer_stops = [
+                field for field in writer_fields
+                if quiescence.get(field) is False
+            ]
+            if failed_writer_stops:
                 error = (
-                    "Roadmap parent activity changed while establishing the "
-                    "terminal quiescence fence"
+                    "Roadmap agent-writer stop boundary was not established: "
+                    + ", ".join(failed_writer_stops)
                 )
                 quiescence = {
                     **quiescence,
                     "workspaceQuiesced": False,
                     "terminalFenceStable": False,
+                    "terminalFenceDecision": "writer_stop_failed",
                     "lifecycleError": error,
                 }
             else:
-                quiescence = {**quiescence, "terminalFenceStable": True}
+                unverified_writer_stops = [
+                    field for field in writer_fields
+                    if quiescence.get(field) is not True
+                ]
+                if unverified_writer_stops:
+                    error = (
+                        "Roadmap agent-writer stop boundary is unverified: "
+                        + ", ".join(unverified_writer_stops)
+                    )
+                    quiescence = {
+                        **quiescence,
+                        "workspaceQuiesced": False,
+                        "terminalFenceStable": False,
+                        "terminalFenceDecision": "writer_stop_unverified",
+                        "lifecycleError": error,
+                    }
 
         if quiescence.get("workspaceQuiesced") is True:
             self._env_info["roadmap_workspace_quiesced"] = True
@@ -1111,11 +1539,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         run = payload.setdefault("result", {})
         meta = run.setdefault("meta", {})
         pending = list(snapshot.get("pending_child_sessions") or [])
-        child_states = list(
-            snapshot.get("observed_child_states")
-            or snapshot.get("child_states")
-            or []
-        )
+        child_states = list(snapshot.get("child_states") or [])
         lifecycle = {
             "parentState": "terminal",
             "parentSessionStatusAtTerminal": snapshot.get(
@@ -1143,16 +1567,8 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 else None
             ),
             "yieldCount": int(snapshot.get("yield_count") or 0),
-            "totalChildren": int(
-                snapshot.get("observed_total_children")
-                if snapshot.get("observed_total_children") is not None
-                else snapshot.get("total_children") or 0
-            ),
-            "completedChildren": int(
-                snapshot.get("observed_completed_children")
-                if snapshot.get("observed_completed_children") is not None
-                else snapshot.get("completed_children") or 0
-            ),
+            "totalChildren": int(snapshot.get("total_children") or 0),
+            "completedChildren": int(snapshot.get("completed_children") or 0),
             "pendingChildrenAtParentTerminal": len(pending),
             "abandonedChildren": pending,
             "orphanChildIds": [
@@ -1168,50 +1584,6 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             ]
         meta["agentBenchLifecycle"] = lifecycle
 
-    def _archive_session_artifacts(
-        self,
-        container_id: Optional[str],
-        run_dir: Path,
-        session_id: str,
-    ) -> None:
-        super()._archive_session_artifacts(container_id, run_dir, session_id)
-
-        from agent_bench.benchmarks.roadmap_bench.conditions.sqlite_session_compat import (
-            _agent_db_from_state_dir,
-            _archive_sqlite_database,
-            _export_sqlite_store,
-            _restore_archived_child_index,
-        )
-
-        out_dir = run_dir / "conversation"
-        sessions_out = out_dir / "sessions"
-        state_dir = self._env_info.get("state_dir") or self._env_info.get(
-            "host_state_dir"
-        )
-        if not state_dir:
-            return
-        try:
-            db_path = _agent_db_from_state_dir(Path(state_dir), self.agent_id)
-            if (
-                db_path.is_file()
-                and not (sessions_out / "sessions.json").is_file()
-            ):
-                _export_sqlite_store(db_path, sessions_out)
-            restored = _restore_archived_child_index(
-                sessions_out, self.agent_id
-            )
-            if restored:
-                logger.info(
-                    "  restored %d archived OpenClaw child session(s)",
-                    restored,
-                )
-            if db_path.is_file():
-                _archive_sqlite_database(
-                    db_path, out_dir / "openclaw-agent.sqlite"
-                )
-        except Exception as exc:  # noqa: BLE001 - archival is best-effort
-            logger.warning("OpenClaw SQLite session archive failed: %s", exc)
-
     def _live_sessions_dir(self) -> Optional[Path]:
         state_dir = self._env_info.get("state_dir") or self._env_info.get(
             "host_state_dir"
@@ -1219,60 +1591,6 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         if not state_dir:
             return None
         return Path(state_dir) / "agents" / self.agent_id / "sessions"
-
-    def _read_lifecycle_snapshot(self, sessions_dir: Path) -> Optional[Dict]:
-        """Read current lifecycle state and retain children seen this run.
-
-        OpenClaw may prune completed child entries from ``sessions.json``.
-        The registry is summary-only and invocation-local; current durable
-        state still controls parent terminal and workspace quiescence.
-        """
-        snapshot = self._read_yield_snapshot(sessions_dir)
-        if snapshot is None:
-            return None
-        registry = getattr(self, "_observed_child_sessions", None)
-        if not isinstance(registry, dict):
-            registry = {}
-            self._observed_child_sessions = registry
-
-        for child in snapshot.get("child_states") or []:
-            if not isinstance(child, dict):
-                continue
-            identity = str(
-                child.get("session_id") or child.get("session_key") or ""
-            )
-            if not identity:
-                continue
-            previous = registry.get(identity)
-            current = dict(child)
-            if (
-                isinstance(previous, dict)
-                and str(previous.get("status") or "")
-                in self._TERMINAL_CHILD_STATES
-                and str(current.get("status") or "")
-                in self._ACTIVE_CHILD_STATES
-            ):
-                continue
-            registry[identity] = current
-
-        if not registry:
-            return snapshot
-
-        merged = dict(snapshot)
-        child_states = [dict(child) for child in registry.values()]
-        merged["observed_child_states"] = child_states
-        merged["observed_total_children"] = max(
-            int(snapshot.get("total_children") or 0), len(child_states)
-        )
-        merged["observed_completed_children"] = sum(
-            str(child.get("status") or "") in self._TERMINAL_CHILD_STATES
-            for child in child_states
-        )
-        merged["observed_child_timeout"] = any(
-            str(child.get("status") or "") in {"timeout", "timed_out"}
-            for child in child_states
-        )
-        return merged
 
     @staticmethod
     def _is_heartbeat_request(text: str) -> bool:
@@ -1336,7 +1654,10 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         ]
         pending_children = len(pending_child_sessions)
         completed_children = sum(
-            child["status"] in cls._TERMINAL_CHILD_STATES
+            child["status"] in {
+                "done", "completed", "failed", "error", "timeout",
+                "timed_out", "cancelled", "canceled",
+            }
             for child in child_entries
         )
         child_timeout = any(
@@ -1389,7 +1710,16 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         post_yield_prompt_error = ""
         latest_event_kind = ""
         latest_assistant_stop_reason = ""
+        latest_assistant_text = ""
+        latest_assistant_run_id = ""
+        latest_assistant_has_tool_call = False
+        latest_assistant_has_payload = False
+        latest_assistant_is_control_only_no_reply = False
         post_terminal_settle_error = ""
+        done_evidence = None
+        requester_settle_candidate = None
+        settled_done_event_id = ""
+        requester_settle_notice_event_id = ""
         heartbeat_turn = False
 
         for event in messages[latest_yield + 1:]:
@@ -1412,6 +1742,8 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 )
                 post_yield_parent_terminal = False
                 done_text = ""
+                done_evidence = None
+                requester_settle_candidate = None
                 latest_event_kind = "prompt_error"
                 continue
 
@@ -1420,15 +1752,11 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
 
             message = event.get("message") or {}
             role = message.get("role")
-            parts = [
-                str(item.get("text") or "")
-                for item in message.get("content") or []
-                if isinstance(item, dict)
-                and item.get("type") == "text"
-            ]
-            text = "\n".join(
-                part for part in parts if part
-            ).strip()
+            (
+                text,
+                has_tool_payload,
+                has_current_payload,
+            ) = cls._assistant_content_evidence(message)
 
             # A later requester/model/tool message proves that any earlier
             # prompt error was transient.
@@ -1444,7 +1772,19 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
 
                 heartbeat_turn = False
                 post_yield_parent_terminal = False
+                requester_settle_candidate = cls._requester_settle_candidate(
+                    event,
+                    message,
+                    text,
+                    done_evidence,
+                )
+                done_evidence = None
                 done_text = ""
+                latest_assistant_text = ""
+                latest_assistant_run_id = ""
+                latest_assistant_has_tool_call = False
+                latest_assistant_has_payload = False
+                latest_assistant_is_control_only_no_reply = False
                 latest_event_kind = "resume"
                 continue
 
@@ -1455,6 +1795,8 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 post_yield_parent_activity = True
                 post_yield_parent_terminal = False
                 done_text = ""
+                done_evidence = None
+                requester_settle_candidate = None
                 latest_event_kind = "tool_result"
                 continue
 
@@ -1477,28 +1819,72 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 if isinstance(openclaw_meta, dict)
                 else ""
             )
-            has_tool_payload = any(
-                isinstance(item, dict)
-                and item.get("type") in {"toolCall", "toolUse"}
-                for item in message.get("content") or []
+            requester_settle_run = run_id.startswith(
+                cls._REQUESTER_SETTLE_RUN_PREFIX
             )
+            response_matches = cls._requester_settle_response_matches(
+                event,
+                run_id,
+                requester_settle_candidate,
+            )
+            control_only_no_reply = cls._is_control_only_no_reply(message)
             if (
-                done_text
-                and stop_reason == "error"
-                and not text
-                and not has_tool_payload
-                and run_id.startswith("announce:requester-settle:")
+                response_matches
+                and control_only_no_reply
+            ):
+                # Native requester settlement can append a control-only
+                # NO_REPLY after the parent has already reached a durable
+                # explicit DONE. It must not erase that logical terminal.
+                settled = requester_settle_candidate or {}
+                original_done = settled.get("done") or {}
+                notice = settled.get("notice") or {}
+                done_text = str(original_done.get("text") or "")
+                settled_done_event_id = str(original_done.get("event_id") or "")
+                requester_settle_notice_event_id = str(
+                    notice.get("event_id") or ""
+                )
+                done_evidence = None
+                requester_settle_candidate = None
+                latest_assistant_stop_reason = stop_reason
+                latest_assistant_text = text
+                latest_assistant_run_id = run_id
+                latest_assistant_has_tool_call = False
+                latest_assistant_has_payload = has_current_payload
+                latest_assistant_is_control_only_no_reply = True
+                post_yield_parent_activity = True
+                post_yield_parent_terminal = True
+                latest_event_kind = "post_terminal_settle_no_reply"
+                continue
+            if (
+                response_matches
+                and requester_settle_run
+                and cls._is_requester_settle_transport_error(message)
             ):
                 # A requester-settle retry can race with the terminal turn and
                 # append an empty transport error after a durable DONE. It is
                 # post-terminal evidence, not a new logical parent turn.
-                post_terminal_settle_error = str(
-                    message.get("errorMessage") or "requester-settle error"
+                settled = requester_settle_candidate or {}
+                original_done = settled.get("done") or {}
+                notice = settled.get("notice") or {}
+                post_terminal_settle_error = str(message.get("errorMessage"))
+                done_text = str(original_done.get("text") or "")
+                settled_done_event_id = str(original_done.get("event_id") or "")
+                requester_settle_notice_event_id = str(
+                    notice.get("event_id") or ""
                 )
+                done_evidence = None
+                requester_settle_candidate = None
                 latest_event_kind = "post_terminal_settle_error"
                 continue
 
+            done_evidence = None
+            requester_settle_candidate = None
             latest_assistant_stop_reason = stop_reason
+            latest_assistant_text = text
+            latest_assistant_run_id = run_id
+            latest_assistant_has_tool_call = has_tool_payload
+            latest_assistant_has_payload = has_current_payload
+            latest_assistant_is_control_only_no_reply = control_only_no_reply
             post_yield_parent_activity = True
             post_yield_parent_terminal = (
                 stop_reason in cls._DURABLE_ASSISTANT_STOP_REASONS
@@ -1518,22 +1904,45 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 )
             ):
                 done_text = text
+                done_evidence = {
+                    "text": text,
+                    "event_id": cls._event_identity(event),
+                    "run_id": run_id,
+                    "restored": False,
+                }
             else:
                 done_text = ""
 
+        parent_last_run_id = str(
+            parent.get("lastRunId") or latest_assistant_run_id or ""
+        ).strip()
+        pending_snapshot = {
+            "done_text": done_text,
+            "latest_assistant_run_id": latest_assistant_run_id,
+            "parent_last_run_id": parent_last_run_id,
+            "latest_assistant_is_control_only_no_reply": (
+                latest_assistant_is_control_only_no_reply
+            ),
+        }
+        requester_settle_pending = cls._requester_settle_pending(
+            pending_snapshot
+        )
         assistant_stop_candidate = post_yield_parent_terminal
         logical_parent_terminal = bool(
             done_text
             or (
                 assistant_stop_candidate
                 and parent_session_terminal
+                and not requester_settle_pending
             )
         )
 
         return {
+            "session_store": "json_projection",
             "parent_session_key": str(parent_key),
             "parent_session_id": str(parent_session_id),
             "parent_session_status": parent_session_status,
+            "parent_last_run_id": parent_last_run_id,
             "parent_session_error": parent_session_error,
             "parent_session_active": parent_session_active,
             "parent_session_terminal": parent_session_terminal,
@@ -1550,19 +1959,29 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 post_yield_parent_activity
             ),
             "post_yield_parent_terminal": (
-                assistant_stop_candidate and parent_session_terminal
+                assistant_stop_candidate
+                and parent_session_terminal
+                and not requester_settle_pending
             ),
             "post_yield_terminal_reason": (
                 "explicit_done"
                 if done_text
                 else (
                     "assistant_stop"
-                    if assistant_stop_candidate and parent_session_terminal
+                    if (
+                        assistant_stop_candidate
+                        and parent_session_terminal
+                        and not requester_settle_pending
+                    )
                     else ""
                 )
             ),
             "post_yield_prompt_error": post_yield_prompt_error,
             "post_terminal_settle_error": post_terminal_settle_error,
+            "settled_done_event_id": settled_done_event_id,
+            "requester_settle_notice_event_id": (
+                requester_settle_notice_event_id
+            ),
             "done_text": done_text,
             "parent_active": bool(
                 (
@@ -1584,6 +2003,16 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             "assistant_stop_candidate": assistant_stop_candidate,
             "latest_parent_event": latest_event_kind,
             "latest_assistant_stop_reason": latest_assistant_stop_reason,
+            "latest_assistant_text": latest_assistant_text,
+            "latest_assistant_run_id": latest_assistant_run_id,
+            "latest_assistant_has_tool_call": (
+                latest_assistant_has_tool_call
+            ),
+            "latest_assistant_has_payload": latest_assistant_has_payload,
+            "latest_assistant_is_control_only_no_reply": (
+                latest_assistant_is_control_only_no_reply
+            ),
+            "requester_settle_pending": requester_settle_pending,
         }
 
     @classmethod

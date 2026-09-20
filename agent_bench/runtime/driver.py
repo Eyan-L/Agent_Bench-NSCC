@@ -320,6 +320,55 @@ def _finalize_roadmap_verdict(
     return merged
 
 
+def _preserve_partial_agent_result(
+    manifest: RunManifest,
+    result: dict,
+    *,
+    failure_phase: str,
+    failure_message: str,
+    verifier_attempted: bool = False,
+) -> None:
+    """Persist execution facts known before an artifact/verifier failure.
+
+    This deliberately does not synthesize a verifier result or reward. The run
+    remains an infrastructure ERROR while retaining the orthogonal agent outcome.
+    """
+    completion_status = str(
+        result.get("agent_execution_outcome")
+        or result.get("agent_completion_status")
+        or ""
+    ).strip() or None
+    manifest.step_trace_path = result.get("step_trace_path")
+    manifest.telemetry_path = result.get("telemetry_path")
+    manifest.exit_code = result.get("exit_code")
+    manifest.agent_runtime_mode = result.get("agent_runtime_mode")
+    manifest.agent_execution_outcome = completion_status
+    manifest.agent_completion_error = result.get("agent_completion_error")
+    manifest.agent_lifecycle = result.get("agent_lifecycle")
+    manifest.agent_execution_seconds = result.get("agent_execution_seconds")
+    manifest.phase_timing = result.get("phase_timing")
+    manifest.trajectory_path = result.get("trajectory_path")
+    manifest.token_accounting_path = result.get("token_accounting_path")
+    manifest.trajectory_tokens = result.get("trajectory_tokens")
+    manifest.serving_tokens = result.get("serving_tokens")
+    manifest.runtime_observability_path = result.get(
+        "runtime_observability_path"
+    )
+    manifest.runtime_observability = result.get("runtime_observability")
+    manifest.total_prompt_tokens = int(result.get("total_prompt_tokens") or 0)
+    manifest.total_completion_tokens = int(
+        result.get("total_completion_tokens") or 0
+    )
+    manifest.failure_phase = failure_phase
+    manifest.benchmark_valid = False
+    manifest.benchmark_invalid_reason = failure_message
+    manifest.verifier_eligible = True if verifier_attempted else False
+    manifest.verifier_status = "ERROR" if verifier_attempted else "SKIPPED"
+    manifest.verifier_skipped = not verifier_attempted
+    manifest.reward = None
+    manifest.test_pass_rate = None
+
+
 def execute_run(run_config: RunConfig, harness: SWEBenchHarness, 
                 instance_data: dict, retry_errors: bool = True) -> RunManifest:
     """Execute a single run."""
@@ -354,6 +403,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
     prepare_phase_timing: dict[str, Any] = {}
     harness_spans_path = run_dir / "spans.jsonl"
     trace_container = getattr(harness, "container", None)
+    failure_phase = "environment_prepare"
     if hasattr(trace_container, "set_trace_path"):
         trace_container.set_trace_path(harness_spans_path)
     try:
@@ -393,6 +443,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         container_id = env_info["container_id"]
         
         # Execute condition
+        failure_phase = "agent_execution"
         condition_type = run_config.condition.condition_type
         
         if condition_type == "ar_issue_only":
@@ -558,6 +609,8 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         else:
             raise ValueError(f"Unknown condition type: {condition_type}")
         
+        failure_phase = "post_agent_result"
+
         # Score via SWE-bench run_evaluation directly. Do NOT try to apply the
         # patch ourselves first — SWE-bench's harness handles both "patch does
         # not apply" and "tests fail" cleanly, and the verdicts it produces
@@ -617,6 +670,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 "agent_exit_code": agent_exit_code,
             }
         elif skip_patch_gate or (patch_path.exists() and patch_path.stat().st_size > 0):
+            failure_phase = "verifier"
             verifier_start_ns = time.time_ns()
             if is_roadmapbench:
                 _append_roadmap_trajectory_event(
@@ -640,6 +694,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                     instance_data=instance_data,
                     run_dir=run_dir,
                 )
+                failure_phase = "result_finalize"
             except BaseException as exc:
                 if is_roadmapbench:
                     _append_roadmap_trajectory_event(
@@ -666,6 +721,7 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
             }
 
         if is_roadmapbench:
+            failure_phase = "result_finalize"
             verdict = _finalize_roadmap_verdict(
                 verdict,
                 result,
@@ -735,6 +791,8 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         manifest.agent_execution_seconds = result.get("agent_execution_seconds")
         manifest.phase_timing = result.get("phase_timing")
         manifest.verifier_status = verdict.get("verifier_status")
+        manifest.verifier_skipped = bool(verdict.get("verifier_skipped"))
+        manifest.failure_phase = None
         manifest.reward = verdict.get("reward")
         manifest.test_pass_rate = verdict.get("test_pass_rate")
         manifest.trajectory_path = result.get("trajectory_path")
@@ -757,6 +815,56 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         logger.error(f"Run {run_id} failed with error: {e}", exc_info=True)
         manifest.status = "ERROR"
         manifest.error_message = str(e)[:500]
+        partial_result = None
+        if "condition" in locals():
+            partial_result = getattr(
+                condition, "_partial_execution_result", None
+            )
+        if isinstance(partial_result, dict):
+            failure_phase = str(
+                partial_result.get("failure_phase") or failure_phase
+            )
+            _preserve_partial_agent_result(
+                manifest,
+                partial_result,
+                failure_phase=failure_phase,
+                failure_message=str(e),
+                verifier_attempted=(
+                    "verifier_start_ns" in locals()
+                    and isinstance(verifier_start_ns, int)
+                ),
+            )
+        else:
+            condition_phase = (
+                getattr(condition, "_failure_phase", None)
+                if "condition" in locals() else None
+            )
+            manifest.failure_phase = str(condition_phase or failure_phase)
+            verifier_attempted = (
+                "verifier_start_ns" in locals()
+                and isinstance(verifier_start_ns, int)
+            )
+            manifest.verifier_eligible = True if verifier_attempted else False
+            manifest.verifier_status = "ERROR" if verifier_attempted else "SKIPPED"
+            manifest.verifier_skipped = not verifier_attempted
+            manifest.reward = None
+            manifest.test_pass_rate = None
+        if (
+            failure_phase == "result_finalize"
+            and "verdict" in locals()
+            and isinstance(verdict, dict)
+        ):
+            # The verifier already produced evidence; a later merge/write
+            # failure invalidates the benchmark artifact, not that evidence.
+            manifest.verifier_status = (
+                verdict.get("verifier_status") or verdict.get("status")
+            )
+            manifest.verifier_skipped = bool(
+                verdict.get("verifier_skipped", False)
+            )
+            manifest.verifier_eligible = not manifest.verifier_skipped
+            manifest.reward = verdict.get("reward")
+            manifest.test_pass_rate = verdict.get("test_pass_rate")
     
     finally:
         # Preserve legacy duration_seconds (pre-cleanup) for historical comparability.
@@ -1212,19 +1320,33 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
             return None
 
     if max_workers <= 1:
-        results_iter = (_one(rc) for rc in run_configs)
+        results_iter = ((rc, _one(rc)) for rc in run_configs)
     else:
         pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="oc-eval-run")
-        futures = [pool.submit(_one, rc) for rc in run_configs]
-        results_iter = (f.result() for f in as_completed(futures))
+        futures = {pool.submit(_one, rc): rc for rc in run_configs}
+        results_iter = ((futures[f], f.result()) for f in as_completed(futures))
 
-    for manifest in results_iter:
+    log_task_completion = _telemetry_bool(os.environ.get("AB_LOG_TASK_COMPLETION")) is True
+    for rc, manifest in results_iter:
         if manifest is None:
             failed += 1
+            task_status = "ERROR"
         elif manifest.status in ("PASS", "FAIL", "TIMEOUT", "DEFERRED"):
             completed += 1
+            task_status = manifest.status
         elif manifest.status == "ERROR":
             failed += 1
+            task_status = manifest.status
+        else:
+            task_status = manifest.status
+        if log_task_completion:
+            logger.info(
+                "[TASK_FINISHED] task=%s status=%s progress=%d/%d",
+                rc.instance_id,
+                task_status,
+                completed + failed,
+                total,
+            )
         logger.info(
             f"Progress: {completed + failed}/{total} "
             f"({completed} completed, {failed} errors)"

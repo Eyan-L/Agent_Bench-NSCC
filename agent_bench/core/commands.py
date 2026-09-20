@@ -17,6 +17,7 @@ from agent_bench.core.execution import (
     run_experiment_stages,
 )
 from agent_bench.core.spec import ConfigError, load_resolved_experiment
+from agent_bench.core.run_artifacts import create_single_run_bundle
 from agent_bench.deployments import plan_deployment
 
 
@@ -177,9 +178,17 @@ def _apply_cli_serving_mode(backend: object, value: str) -> None:
 
 
 def analyze_main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Inspect an Agent Bench run directory.")
+    parser = argparse.ArgumentParser(
+        description="Inspect and export a portable Agent Bench run report."
+    )
     parser.add_argument("--run", required=True, help="Path to a run directory.")
     parser.add_argument("--json", action="store_true", help="Emit JSON summary.")
+    parser.add_argument(
+        "--output-dir",
+        default="reports/analyze",
+        help="Parent directory for the portable report bundle.",
+    )
+    parser.add_argument("--name", help="Optional report bundle name.")
     args = parser.parse_args(argv)
 
     run_path = Path(args.run).expanduser()
@@ -190,10 +199,27 @@ def analyze_main(argv: Sequence[str] | None = None) -> int:
         print(f"run path is not a directory: {run_path}", file=sys.stderr)
         return 2
 
+    try:
+        bundle_dir, report = create_single_run_bundle(
+            run_path,
+            Path(args.output_dir),
+            name=args.name,
+        )
+    except (OSError, ValueError) as exc:
+        print(f"could not generate analysis bundle: {exc}", file=sys.stderr)
+        return 2
+
     summary = {
         "run": str(run_path.resolve()),
-        "manifest": str((run_path / "manifest.json").resolve()) if (run_path / "manifest.json").exists() else None,
+        "manifest": (
+            str((run_path / "manifest.json").resolve())
+            if (run_path / "manifest.json").exists()
+            else None
+        ),
         "result_files": sorted(path.name for path in run_path.glob("*.json")),
+        "bundle": str(bundle_dir.resolve()),
+        "index": str((bundle_dir / "index.html").resolve()),
+        **report,
     }
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))
@@ -201,4 +227,19 @@ def analyze_main(argv: Sequence[str] | None = None) -> int:
         print(f"run: {summary['run']}")
         print(f"manifest: {summary['manifest'] or 'not found'}")
         print(f"json files: {len(summary['result_files'])}")
+        print(f"bundle: {summary['bundle']}")
+        print(f"viewer: {summary['index']}")
+        result = report.get("summary", {}).get("result", {})
+        print(
+            "outcome: "
+            f"{result.get('agent_execution_outcome') or 'unknown'}; "
+            f"verifier={result.get('verifier_status') or 'unknown'}; "
+            f"reward={result.get('reward')}"
+        )
+        artifact_bundle = report.get("artifact_bundle", {})
+        print(
+            "artifacts: "
+            f"complete={artifact_bundle.get('complete')}; "
+            f"statuses={artifact_bundle.get('status_counts')}"
+        )
     return 0

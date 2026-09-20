@@ -23,19 +23,15 @@ class RoadmapBenchOpenClawHarness(TerminalBenchOpenClawHarness):
         if agent_id != "roadmap_bench":
             return {}
 
-        policy = {
-            "OPENCLAW_AGENT_BENCH_REQUIRE_GATEWAY": "1",
-            "OPENCLAW_DISABLE_PRICING_FETCH": "1",
-            "LITELLM_LOCAL_MODEL_COST_MAP": "True",
-        }
         version = str(os.environ.get("AB_AGENT_RUNTIME_VERSION") or "").lstrip("v")
-        if version == "2026.9.2":
-            policy.update({
-                "OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY": "continue",
-                "OPENCLAW_AGENT_BENCH_EMPTY_STOP_RETRIES": "4",
-                "OPENCLAW_AGENT_BENCH_LOOP_VETO_RECOVERY_PROBE": "1",
-            })
-        return policy
+        if version != "2026.9.2":
+            return {}
+        return {
+            "OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY": "continue",
+            "OPENCLAW_AGENT_BENCH_EMPTY_STOP_RETRIES": "4",
+            "OPENCLAW_AGENT_BENCH_LENGTH_NO_PROGRESS_RETRIES": "4",
+            "OPENCLAW_AGENT_BENCH_LOOP_VETO_RECOVERY_PROBE": "1",
+        }
 
     def _start_session_exporter(
         self,
@@ -77,35 +73,3 @@ class RoadmapBenchOpenClawHarness(TerminalBenchOpenClawHarness):
             )
         logger.info("  started Roadmap SQLite session exporter pid=%s", pid)
         return pid
-
-    def _verifier_environment(
-        self,
-        host_logs: Path,
-        instance_data: Optional[Dict],
-    ) -> Dict[str, str]:
-        # Some task images expose a read-only system Cargo home.
-        (host_logs / "cargo-home").mkdir(parents=True, exist_ok=True)
-        return {"CARGO_HOME": "/logs/verifier/cargo-home"}
-
-    def _verifier_infrastructure_error(
-        self,
-        stdout: str,
-        stderr: str,
-        instance_data: Optional[Dict],
-    ) -> Optional[str]:
-        output = f"{stdout}\n{stderr}".lower()
-        known_storage = any(
-            path in output
-            for path in ("/usr/local/cargo/", "/logs/verifier/cargo-home/")
-        )
-        filesystem_failure = any(
-            token in output
-            for token in (
-                "read-only file system",
-                "permission denied",
-                "no space left on device",
-            )
-        )
-        if known_storage and filesystem_failure:
-            return "Cargo verifier storage was unavailable or read-only"
-        return None

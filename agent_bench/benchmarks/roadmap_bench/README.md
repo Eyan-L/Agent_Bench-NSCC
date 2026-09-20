@@ -37,8 +37,10 @@ The repository's default OpenClaw runtime remains the pinned v2026.4.22
 release. To use v2026.9.2, explicitly set `AB_AGENT_RUNTIME_VERSION=2026.9.2`
 and configure `AB_AGENT_RUNTIME_SIF` or `AB_AGENT_RUNTIME_DOCKER` to point at a
 runtime prepared with the semantic compatibility patch below. Version-specific
-empty-turn continuation and SQLite export are enabled only for v2026.9.2;
-Gateway-only execution is required for every RoadmapBench runtime version.
+bounded empty/length continuation, context-pressure recovery, loop handling,
+and SQLite export are enabled only for v2026.9.2. Gateway and fallback runtime
+modes are recorded independently from execution success; formal RoadmapBench
+validity still requires the configured gateway runtime.
 
 The semantic runtime compatibility patch operates on an extracted OpenClaw
 tree and fails closed when release anchors are missing:

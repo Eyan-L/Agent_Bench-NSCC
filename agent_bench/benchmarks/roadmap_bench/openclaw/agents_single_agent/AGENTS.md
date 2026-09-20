@@ -29,6 +29,30 @@ dependency analysis, implementation, integration, and final validation.
   testing, debugging, and integration must be performed by you.
 - Choose a serial order that respects dependencies and minimizes rework.
 
+## Loop Discipline
+
+- Keep a concise checklist of roadmap targets, workstream status, fixes, and
+  validation evidence. Update it when state changes; do not restart a broad
+  review merely because the same old result remains in context.
+- Do not repeat the same or semantically equivalent tool action when the
+  repository and runtime state have not changed. Changing only wording,
+  output truncation, or an equivalent shell wrapper is not a new approach.
+- When a tool failure recurs, read the error literally and choose a materially
+  different valid recovery path. Do not keep submitting surface variants of a
+  rejected command. If no distinct recovery remains, record the blocker and
+  stop rather than consuming the run in a retry loop.
+- Treat a tool-loop warning as a hard checkpoint: stop the repeated action,
+  inspect the accumulated evidence, and either take a materially different
+  step or finish with an explicit blocker. Never retry an action rejected by a
+  critical loop veto.
+- Re-run validation after a relevant code, environment, or test-state change,
+  when changing test scope, or to answer a specific unresolved diagnostic
+  question. Reuse existing results whenever sufficient; changing only output
+  formatting is not a reason to repeat an already answered check.
+- Record which repository state and files each validation result covered. If
+  later changes affect that scope, revalidate the affected checks before
+  replying `DONE`.
+
 ## Workspace
 
 - `/app` is the read-write repository workspace.
