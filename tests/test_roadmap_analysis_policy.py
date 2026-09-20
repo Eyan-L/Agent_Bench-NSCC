@@ -60,6 +60,64 @@ def _record(
     )
 
 
+def test_compare_defaults_to_scratch_run_store(tmp_path, monkeypatch):
+    scratch = tmp_path / "scratch"
+    runs_root = scratch / "agent-bench" / "runs"
+    runs_root.mkdir(parents=True)
+    monkeypatch.delenv("AB_RUNS_ROOT", raising=False)
+    monkeypatch.setenv("SCRATCH", str(scratch))
+
+    assert Path(compare.default_runs_root()) == runs_root
+
+
+def test_compare_reports_job_and_prefers_resolved_run_artifacts(
+    tmp_path, capsys
+):
+    runs_root = tmp_path / "scratch" / "agent-bench" / "runs"
+    pbs_run = runs_root / "experiment" / "2026-09-20_12345678.pbs101"
+    run_dir = pbs_run / "runs" / "roadmap" / "run-1"
+    run_dir.mkdir(parents=True)
+    external = tmp_path / "home" / "trajectory.jsonl"
+    external.parent.mkdir()
+    external.write_text('{"event_type":"external"}\n')
+    local = run_dir / "trajectory.jsonl"
+    local.write_text('{"event_type":"local"}\n')
+    manifest = {
+        "instance_id": "task-1",
+        "seed": 42,
+        "status": "DONE",
+        "trajectory_path": str(external),
+    }
+    (run_dir / "manifest.json").write_text(json.dumps(manifest))
+
+    records = compare.collect_records(
+        ["12345678.pbs101"], arm="subagent", runs_root=runs_root
+    )
+
+    assert len(records) == 1
+    assert records[0].job_id == "12345678.pbs101"
+    assert records[0].pbs_run_dir == pbs_run.resolve()
+    assert records[0].trajectory_path == local.resolve()
+    assert records[0].trajectory["event_types"] == {"local": 1}
+    output = capsys.readouterr().out
+    assert "Resolved subagent PBS job 12345678.pbs101" in output
+    assert str(pbs_run.resolve()) in output
+
+
+def test_compare_prefers_local_observability_over_stale_absolute_path(tmp_path):
+    record = _record(tmp_path, agent_execution_seconds=10.0)
+    external = tmp_path / "home-observability.json"
+    external.write_text(json.dumps({"materialized_child_session_count": 99}))
+    local = record.run_dir / "runtime_observability.json"
+    local.write_text(json.dumps({"materialized_child_session_count": 2}))
+    record.manifest["runtime_observability_path"] = str(external)
+
+    observability, path = compare._runtime_observability(record)
+
+    assert path == local.resolve()
+    assert observability["materialized_child_session_count"] == 2
+
+
 def test_latency_never_falls_back_to_duration(tmp_path):
     record = _record(tmp_path, duration_seconds=123.0)
     assert record.duration_seconds == 123.0

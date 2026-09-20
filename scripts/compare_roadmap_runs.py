@@ -90,14 +90,15 @@ def _runtime_observability(record) -> tuple[dict[str, Any], Path | None]:
         return cached
 
     raw = str(record.manifest.get("runtime_observability_path") or "").strip()
-    candidates: list[Path] = []
+    # Keep the measurement source in the same resolved run tree. A copied
+    # Scratch run can retain a historical Home path in its source manifest.
+    candidates: list[Path] = [record.run_dir / "runtime_observability.json"]
     if raw:
         raw_path = Path(raw).expanduser()
-        candidates.append(raw_path)
         if not raw_path.is_absolute():
             candidates.append(record.run_dir / raw_path)
         candidates.append(record.run_dir / raw_path.name)
-    candidates.append(record.run_dir / "runtime_observability.json")
+        candidates.append(raw_path)
 
     seen: set[Path] = set()
     for candidate in candidates:

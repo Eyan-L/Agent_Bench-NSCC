@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 import math
+import os
 from pathlib import Path
 import random
 import re
@@ -285,6 +286,19 @@ def _exact_sign_test_two_sided(wins: int, losses: int) -> float | None:
     return min(1.0, 2.0 * tail)
 
 
+def default_runs_root() -> str:
+    """Return the authoritative run store for this environment."""
+    configured = str(os.environ.get("AB_RUNS_ROOT") or "").strip()
+    if configured:
+        return configured
+    scratch = str(os.environ.get("SCRATCH") or "").strip()
+    if scratch:
+        scratch_runs = Path(scratch).expanduser() / "agent-bench" / "runs"
+        if scratch_runs.is_dir():
+            return str(scratch_runs)
+    return "runs"
+
+
 def resolve_pbs_run(spec: str, runs_root: Path) -> Path:
     """Resolve a PBS job id such as 16056107.pbs101 or an explicit path."""
     explicit = Path(spec).expanduser()
@@ -329,14 +343,16 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def _find_trajectory(run_dir: Path, manifest: dict[str, Any]) -> Path | None:
     raw = str(manifest.get("trajectory_path") or "").strip()
-    candidates: list[Path] = []
+    # Copied/reconciled runs intentionally retain their immutable source
+    # manifests. Prefer the artifact beside the resolved manifest so a
+    # Scratch run cannot silently read a stale Home absolute path.
+    candidates: list[Path] = [run_dir / "trajectory.jsonl"]
     if raw:
         path = Path(raw).expanduser()
-        candidates.append(path)
         if not path.is_absolute():
             candidates.append(run_dir / path)
         candidates.append(run_dir / path.name)
-    candidates.append(run_dir / "trajectory.jsonl")
+        candidates.append(path)
 
     seen: set[Path] = set()
     for candidate in candidates:
@@ -448,6 +464,10 @@ def collect_records(
     for spec in specs:
         pbs_run_dir = resolve_pbs_run(spec, runs_root)
         job_id = _job_id(pbs_run_dir)
+        print(
+            f"Resolved {arm} PBS job {job_id}: {pbs_run_dir} "
+            f"(input={spec})"
+        )
         manifests = sorted(pbs_run_dir.rglob("manifest.json"))
         if not manifests:
             raise FileNotFoundError(
@@ -1441,8 +1461,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--runs-root",
-        default="runs",
-        help="Runs root used to resolve PBS job ids (default: runs).",
+        default=default_runs_root(),
+        help=(
+            "Runs root used to resolve PBS job ids (default: AB_RUNS_ROOT, "
+            "$SCRATCH/agent-bench/runs when available, otherwise runs)."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -1675,6 +1698,7 @@ def _artifact_source_dirs(records: Sequence[RunRecord]) -> list[Path]:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     runs_root = Path(args.runs_root).expanduser().resolve()
+    print(f"Roadmap runs root: {runs_root}")
     output_dir = Path(args.output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
 

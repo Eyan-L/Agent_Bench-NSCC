@@ -17,6 +17,27 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value) + "\n", encoding="utf-8")
 
 
+def test_resolve_run_artifact_prefers_copied_run_over_stale_absolute_path(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "scratch-run"
+    run_dir.mkdir()
+    local = run_dir / "verdict.json"
+    local.write_text('{"source":"scratch"}\n')
+    external = tmp_path / "home" / "verdict.json"
+    external.parent.mkdir()
+    external.write_text('{"source":"home"}\n')
+
+    resolved = run_artifacts.resolve_run_artifact(
+        run_dir,
+        {"verdict_path": str(external)},
+        field="verdict_path",
+        fallback="verdict.json",
+    )
+
+    assert resolved == local
+
+
 def _make_run(
     root: Path,
     *,

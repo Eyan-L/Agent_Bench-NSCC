@@ -259,17 +259,29 @@ def resolve_run_artifact(
     field: str,
     fallback: str,
 ) -> Path:
-    """Resolve a run artifact using the manifest contract, then its root fallback."""
+    """Resolve an artifact locally first, then use its manifest reference.
+
+    Copied runs preserve source manifests byte-for-byte, including historical
+    absolute paths. The resolved run directory is authoritative when it has
+    the requested artifact; external/custom manifest references remain a
+    compatibility fallback.
+    """
     run_dir = run_dir.expanduser().resolve()
     raw = manifest.get(field)
-    candidates = (
+    referenced = (
         _manifest_reference_candidates(run_dir, raw)
         if isinstance(raw, str) and raw
         else []
     )
     fallback_path = run_dir / fallback
-    if fallback_path not in candidates:
-        candidates.append(fallback_path)
+    candidates = [fallback_path]
+    for path in referenced:
+        local_basename = run_dir / path.name
+        if local_basename not in candidates:
+            candidates.append(local_basename)
+    for path in referenced:
+        if path not in candidates:
+            candidates.append(path)
     return next((path for path in candidates if path.is_file()), candidates[0])
 
 
