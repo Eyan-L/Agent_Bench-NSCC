@@ -1,0 +1,14 @@
+{
+  "_doc": "Qwen3-8B single-GPU model copied from the formal Roadmap smoke model profile.",
+  "model": {
+    "config_id": "qwen3_8b",
+    "name": "Qwen/Qwen3-8B",
+    "provider": "custom",
+    "api_key": "EMPTY",
+    "temperature": 0.0,
+    "max_tokens": 8192,
+    "context_window": 40960,
+    "tool_call_parser": "qwen",
+    "reasoning_parser": "qwen3"
+  }
+}

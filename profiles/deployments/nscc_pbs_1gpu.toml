@@ -1,0 +1,10 @@
+[deployment]
+name = "nscc_pbs_1gpu"
+kind = "nscc_pbs"
+requires_gpu = true
+container_runtime = "singularity"
+queue = "normal"
+walltime = "02:00:00"
+nodes = 1
+gpus = 1
+description = "NSCC ASPIRE2A one-GPU deployment for the Qwen3-8B TP=1 Roadmap smoke."

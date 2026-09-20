@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+#PBS -N offline-dsl-24420702
+#PBS -P personal-n2602695
+#PBS -l select=1:ncpus=8:mem=64gb
+#PBS -l walltime=06:00:00
+#PBS -q normal
+#PBS -j oe
+
+set -euo pipefail
+
+module load python/3.10.9
+module load apptainer/1.5.0
+
+export SCRATCH=/scratch/users/ntu/$USER
+export APPTAINER_CACHEDIR="$SCRATCH/.sing_cache"
+export APPTAINER_TMPDIR="$SCRATCH/.sing_tmp"
+unset SINGULARITY_BINDPATH
+unset APPTAINER_BINDPATH
+unset SINGULARITY_BIND
+unset APPTAINER_BIND
+
+SOURCE_ROOT="$SCRATCH/agent-bench/runs/nscc_qwen36_35b_a3b_roadmapbench_subagent_subset10_repair/2026-09-20_14-40-55_24420702.pbs101"
+SOURCE_RUN="$SOURCE_ROOT/runs/roadmapbench_subset10_repair/2446fdc8243601fd"
+TASK_ROOT="$SCRATCH/datasets/roadmapbench-59184e779909-subagent-subset30/dsl-2.2.0-roadmap"
+SIF="$SCRATCH/task-images/znpt__roadmapbench-dsl-2.2.0-roadmap.sif"
+RESULT_BASE="$SCRATCH/agent-bench/offline-reverify/24420702.pbs101"
+WORK="$RESULT_BASE/${PBS_JOBID//[^A-Za-z0-9._-]/_}"
+WORKSPACE="$WORK/workspace"
+TESTS="$WORK/tests"
+LOGS="$WORK/logs"
+
+mkdir -p "$WORKSPACE" "$TESTS" "$LOGS/cargo-home" "$LOGS/cargo-target"
+
+apptainer exec --containall "$SIF" sh -lc 'cd /app && tar -cf - .' \
+  | tar -C "$WORKSPACE" -xf -
+apptainer exec --containall "$SIF" sh -lc 'cd /usr/local/cargo && tar -cf - .' \
+  | tar -C "$LOGS/cargo-home" -xf -
+cp -a "$TASK_ROOT/tests/." "$TESTS/"
+
+apptainer exec --containall \
+  --bind "$WORKSPACE:/app,$SOURCE_RUN:/source:ro" \
+  "$SIF" git -c safe.directory=/app -C /app rev-parse --verify HEAD \
+  > "$WORK/baseline_head.txt"
+apptainer exec --containall \
+  --bind "$WORKSPACE:/app,$SOURCE_RUN:/source:ro" \
+  "$SIF" git -c safe.directory=/app -C /app apply --check --binary \
+  /source/candidate.patch
+apptainer exec --containall \
+  --bind "$WORKSPACE:/app,$SOURCE_RUN:/source:ro" \
+  "$SIF" git -c safe.directory=/app -C /app apply --binary \
+  /source/candidate.patch
+
+rm -rf "$WORKSPACE/.cargo_target"
+apptainer exec --containall --bind "$WORKSPACE:/app" "$SIF" \
+  git -c safe.directory=/app -C /app add -A
+apptainer exec --containall --bind "$WORKSPACE:/app" "$SIF" \
+  git -c safe.directory=/app -C /app diff --cached --binary HEAD -- . \
+  > "$WORK/clean_candidate.patch"
+
+test -s "$WORK/clean_candidate.patch"
+if grep -q '^diff --git a/\.cargo_target/' "$WORK/clean_candidate.patch"; then
+  echo "clean candidate still contains .cargo_target" >&2
+  exit 3
+fi
+apptainer exec --containall --bind "$WORKSPACE:/app" "$SIF" \
+  git -c safe.directory=/app -C /app diff --cached --name-only HEAD \
+  > "$WORK/clean_candidate.files"
+sha256sum "$SOURCE_RUN/candidate.patch" > "$WORK/original_candidate.sha256"
+sha256sum "$WORK/clean_candidate.patch" > "$WORK/clean_candidate.sha256"
+
+set +e
+apptainer exec --containall \
+  --bind "$WORKSPACE:/app,$TESTS:/tests,$LOGS:/logs" \
+  --env CARGO_HOME=/logs/cargo-home \
+  --env CARGO_TARGET_DIR=/logs/cargo-target \
+  "$SIF" bash /tests/test.sh \
+  > "$WORK/verifier.stdout" 2> "$WORK/verifier.stderr"
+VERIFIER_RC=$?
+set -e
+
+printf '%s\n' "$VERIFIER_RC" > "$WORK/verifier.rc"
+test -s "$LOGS/verifier/reward.json"
+cp "$LOGS/verifier/reward.json" "$WORK/reward.json"
+cp "$LOGS/verifier/reward.txt" "$WORK/reward.txt"
+printf 'DONE\n'

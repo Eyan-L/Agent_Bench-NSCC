@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#PBS -N build-oc-9.2-shared-ws
+#PBS -P personal-n2602695
+#PBS -l select=1:ncpus=8:mem=32gb
+#PBS -l walltime=04:00:00
+#PBS -q normal
+#PBS -j oe
+
+set -euo pipefail
+
+module load python/3.10.9
+module load apptainer/1.5.0
+
+export SCRATCH=/scratch/users/ntu/$USER
+export APPTAINER_CACHEDIR="$SCRATCH/.sing_cache"
+export APPTAINER_TMPDIR="$SCRATCH/.sing_tmp"
+
+unset SINGULARITY_BINDPATH
+unset APPTAINER_BINDPATH
+unset SINGULARITY_BIND
+unset APPTAINER_BIND
+
+mkdir -p "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"
+cd "${PBS_O_WORKDIR:-$PWD}"
+
+SIF="$SCRATCH/sif_images/openclaw_2026.9.2_agentbench.sif"
+bash agent_bench/deployments/pbs/build_oc_v2026_9_2_sif.sh \
+    --allow-nscc \
+    --repo-root "$PWD" \
+    --base "$SIF" \
+    --out "$SIF"
