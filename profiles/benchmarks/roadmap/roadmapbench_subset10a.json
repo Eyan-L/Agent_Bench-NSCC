@@ -9,7 +9,7 @@
   "tasks_root": "$SCRATCH/datasets/roadmapbench-59184e779909-subagent-subset30",
   "instances": [
     "pyg-2.3.0-roadmap",
-    "fal-2.0.0-roadmap",
+    "fyn-2.5.0-roadmap",
     "ktx-0.6.0-roadmap",
     "fbr-2.37.0-roadmap",
     "pyg-1.7.2-roadmap",
@@ -24,8 +24,8 @@
       "repo_id": "roadmapbench/pyg-2.3.0-roadmap",
       "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
     },
-    "fal-2.0.0-roadmap": {
-      "repo_id": "roadmapbench/fal-2.0.0-roadmap",
+    "fyn-2.5.0-roadmap": {
+      "repo_id": "roadmapbench/fyn-2.5.0-roadmap",
       "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
     },
     "ktx-0.6.0-roadmap": {
@@ -69,6 +69,6 @@
   ],
   "selection": {
     "method": "manual fixed high-fanout RoadmapBench subset",
-    "rationale": "Ten retained tasks after pilot-result curation, preserving the existing subset10a tasks and adding three retained former subset10c tasks."
+    "rationale": "Ten retained tasks after pilot-result curation; Fyne 2.5.0 replaces Falcon 2.0.0 because its seven independent targets have demonstrated natural subagent fan-out."
   }
 }

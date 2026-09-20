@@ -1,0 +1,27 @@
+{
+  "_doc": "RoadmapBench Fyne 2.5.0 paired subagent/single-agent smoke from subset10c.",
+  "sweep_name": "roadmapbench_fyn_2_5_0_paired_smoke",
+  "plan_version": "roadmapbench-59184e779909-fyn-2.5.0-paired-smoke",
+  "application": "terminal_bench",
+  "source_dataset": "UnipatAI/RoadmapBench",
+  "source_commit": "59184e779909300a5a0150b06b945d39da81a099",
+  "source_dataset_task_count": 115,
+  "tasks_root": "$SCRATCH/datasets/roadmapbench-59184e779909-subagent-subset30",
+  "instances": [
+    "fyn-2.5.0-roadmap"
+  ],
+  "repo_mapping": {
+    "fyn-2.5.0-roadmap": {
+      "repo_id": "roadmapbench/fyn-2.5.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 7200,
+  "output_dir": "roadmapbench_fyn_2_5_0_paired_smoke",
+  "seeds": [42],
+  "selection": {
+    "method": "single-task paired high-fanout smoke",
+    "rationale": "Seven independent targets span i18n, window containers, undo/redo, widgets, collections, layout, and data binding."
+  }
+}
