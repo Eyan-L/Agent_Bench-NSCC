@@ -450,6 +450,7 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
     latest_assistant_has_tool_call = False
     latest_assistant_has_payload = False
     post_terminal_settle_error = ""
+    pre_settle_done_text = ""
     heartbeat_turn = False
 
     for event in messages[latest_yield + 1 :]:
@@ -462,6 +463,7 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
             post_yield_prompt_error = str(raw_error or "OpenClaw prompt error")
             post_yield_parent_terminal = False
             done_text = ""
+            pre_settle_done_text = ""
             latest_event_kind = "prompt_error"
             continue
 
@@ -486,6 +488,7 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
                 continue
             heartbeat_turn = False
             post_yield_parent_terminal = False
+            pre_settle_done_text = done_text
             done_text = ""
             latest_assistant_text = ""
             latest_assistant_run_id = ""
@@ -501,6 +504,7 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
             post_yield_parent_activity = True
             post_yield_parent_terminal = False
             done_text = ""
+            pre_settle_done_text = ""
             latest_event_kind = "tool_result"
             continue
 
@@ -520,20 +524,44 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
             if isinstance(openclaw_meta, dict)
             else ""
         )
+        requester_settle_run = run_id.startswith(
+            "announce:requester-settle:"
+        )
         if (
-            done_text
+            pre_settle_done_text
+            and requester_settle_run
+            and stop_reason == "stop"
+            and text.strip() == "NO_REPLY"
+            and not has_tool_payload
+        ):
+            done_text = pre_settle_done_text
+            pre_settle_done_text = ""
+            latest_assistant_stop_reason = stop_reason
+            latest_assistant_text = text
+            latest_assistant_run_id = run_id
+            latest_assistant_has_tool_call = False
+            latest_assistant_has_payload = has_current_payload
+            post_yield_parent_activity = True
+            post_yield_parent_terminal = True
+            latest_event_kind = "post_terminal_settle_no_reply"
+            continue
+        if (
+            (done_text or pre_settle_done_text)
             and stop_reason == "error"
             and not text
             and not has_tool_payload
-            and run_id.startswith("announce:requester-settle:")
+            and requester_settle_run
         ):
             # Match the JSON projection path: a transport error appended by a
             # requester-settle retry does not erase an earlier durable DONE.
             post_terminal_settle_error = str(
                 message.get("errorMessage") or "requester-settle error"
             )
+            done_text = done_text or pre_settle_done_text
+            pre_settle_done_text = ""
             latest_event_kind = "post_terminal_settle_error"
             continue
+        pre_settle_done_text = ""
         latest_assistant_stop_reason = stop_reason
         latest_assistant_text = text
         latest_assistant_run_id = run_id
@@ -559,7 +587,8 @@ def _sqlite_yield_snapshot(cls, sessions_dir: Path) -> Optional[Dict]:
         parent.get("lastRunId") or latest_assistant_run_id or ""
     ).strip()
     requester_settle_pending = bool(
-        latest_assistant_text.strip() == "NO_REPLY"
+        not done_text
+        and latest_assistant_text.strip() == "NO_REPLY"
         and parent_last_run_id.startswith("announce:requester-settle:")
     )
     assistant_stop_candidate = post_yield_parent_terminal

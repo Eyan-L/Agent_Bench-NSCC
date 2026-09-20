@@ -79,12 +79,21 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             return failure
         if parent_status not in normal_terminal_states:
             return None
+        explicit_done = bool(snapshot.get("done_text"))
         if (
-            parent_status in normal_terminal_states
+            not explicit_done
             and not self._is_durable_assistant_stop_terminal(snapshot)
         ):
             return None
-        if self._is_durable_empty_assistant_stop_terminal(snapshot):
+        if explicit_done:
+            snapshot = dict(snapshot, terminal_evidence="explicit_done")
+            completion_status = self.NORMAL_COMPLETION
+            diagnostic = (
+                "OpenClaw durable parent session completed with explicit "
+                f"DONE (status={parent_status}, "
+                f"session={snapshot['parent_session_id']})"
+            )
+        elif self._is_durable_empty_assistant_stop_terminal(snapshot):
             completion_status = self.BLOCKED_INCOMPLETE
             diagnostic = (
                 "OpenClaw durable parent session completed with an empty "
@@ -1571,6 +1580,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
         latest_assistant_has_tool_call = False
         latest_assistant_has_payload = False
         post_terminal_settle_error = ""
+        pre_settle_done_text = ""
         heartbeat_turn = False
 
         for event in messages[latest_yield + 1:]:
@@ -1593,6 +1603,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 )
                 post_yield_parent_terminal = False
                 done_text = ""
+                pre_settle_done_text = ""
                 latest_event_kind = "prompt_error"
                 continue
 
@@ -1621,6 +1632,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
 
                 heartbeat_turn = False
                 post_yield_parent_terminal = False
+                pre_settle_done_text = done_text
                 done_text = ""
                 latest_assistant_text = ""
                 latest_assistant_run_id = ""
@@ -1636,6 +1648,7 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 post_yield_parent_activity = True
                 post_yield_parent_terminal = False
                 done_text = ""
+                pre_settle_done_text = ""
                 latest_event_kind = "tool_result"
                 continue
 
@@ -1658,12 +1671,36 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 if isinstance(openclaw_meta, dict)
                 else ""
             )
+            requester_settle_run = run_id.startswith(
+                "announce:requester-settle:"
+            )
             if (
-                done_text
+                pre_settle_done_text
+                and requester_settle_run
+                and stop_reason == "stop"
+                and text.strip() == "NO_REPLY"
+                and not has_tool_payload
+            ):
+                # Native requester settlement can append a control-only
+                # NO_REPLY after the parent has already reached a durable
+                # explicit DONE. It must not erase that logical terminal.
+                done_text = pre_settle_done_text
+                pre_settle_done_text = ""
+                latest_assistant_stop_reason = stop_reason
+                latest_assistant_text = text
+                latest_assistant_run_id = run_id
+                latest_assistant_has_tool_call = False
+                latest_assistant_has_payload = has_current_payload
+                post_yield_parent_activity = True
+                post_yield_parent_terminal = True
+                latest_event_kind = "post_terminal_settle_no_reply"
+                continue
+            if (
+                (done_text or pre_settle_done_text)
                 and stop_reason == "error"
                 and not text
                 and not has_tool_payload
-                and run_id.startswith("announce:requester-settle:")
+                and requester_settle_run
             ):
                 # A requester-settle retry can race with the terminal turn and
                 # append an empty transport error after a durable DONE. It is
@@ -1671,9 +1708,12 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
                 post_terminal_settle_error = str(
                     message.get("errorMessage") or "requester-settle error"
                 )
+                done_text = done_text or pre_settle_done_text
+                pre_settle_done_text = ""
                 latest_event_kind = "post_terminal_settle_error"
                 continue
 
+            pre_settle_done_text = ""
             latest_assistant_stop_reason = stop_reason
             latest_assistant_text = text
             latest_assistant_run_id = run_id
@@ -1705,7 +1745,8 @@ class RoadmapBenchOpenClawCondition(OpenClawAgentCondition):
             parent.get("lastRunId") or latest_assistant_run_id or ""
         ).strip()
         requester_settle_pending = bool(
-            latest_assistant_text.strip() == "NO_REPLY"
+            not done_text
+            and latest_assistant_text.strip() == "NO_REPLY"
             and parent_last_run_id.startswith("announce:requester-settle:")
         )
         assistant_stop_candidate = post_yield_parent_terminal

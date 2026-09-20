@@ -792,6 +792,97 @@ def test_roadmap_requester_settle_no_reply_is_not_terminal(tmp_path):
     assert RoadmapBenchOpenClawCondition._terminal_stop_signature(snapshot) is None
 
 
+def test_roadmap_done_survives_requester_settle_no_reply(tmp_path, monkeypatch):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    settle_run = "announce:requester-settle:roadmap_bench:parent:retry-1"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [
+            _assistant_event("DONE\nAll targets validated.", run_id="parent-run"),
+            {
+                "type": "message",
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": (
+                            "[Subagent Context] Every subagent spawned from "
+                            "this session has now settled."
+                        ),
+                    }],
+                },
+            },
+            _assistant_event("NO_REPLY", run_id=settle_run),
+        ],
+        child_statuses=("done", "completed"),
+        parent_status="done",
+        parent_last_run_id=settle_run,
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot is not None
+    assert snapshot["done_text"].startswith("DONE")
+    assert snapshot["requester_settle_pending"] is False
+    assert snapshot["parent_terminal"] is True
+    assert snapshot["pending_children"] == 0
+    assert snapshot["post_yield_terminal_reason"] == "explicit_done"
+    assert snapshot["latest_parent_event"] == "post_terminal_settle_no_reply"
+
+    condition = _roadmap_condition_for_state(tmp_path)
+    evidence = condition._durable_invocation_terminal_evidence()
+    assert evidence is not None
+    assert evidence[1] == "normal_completion"
+    assert condition._durable_invocation_snapshot[
+        "terminal_evidence"
+    ] == "explicit_done"
+    monkeypatch.setattr(
+        "agent_bench.benchmarks.roadmap_bench.conditions."
+        "openclaw_agent.time.sleep",
+        lambda _seconds: (_ for _ in ()).throw(
+            AssertionError("explicit DONE must not wait for requester retry")
+        ),
+    )
+    payload, error = condition._await_post_turn_lifecycle(
+        {"result": {"meta": {"livenessState": "working"}}},
+        "stale CLI turn",
+        deadline=time.monotonic() + 10,
+    )
+
+    assert error == ""
+    assert condition._last_completion_status == "normal_completion"
+    assert payload["result"]["meta"]["agentBenchLifecycle"][
+        "terminalEvidence"
+    ] == "explicit_done"
+
+
+def test_roadmap_later_normal_activity_invalidates_pre_settle_done(tmp_path):
+    sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
+    _write_roadmap_session_state(
+        sessions_dir,
+        [
+            _assistant_event("DONE\nInitial work complete.", run_id="parent-run"),
+            {
+                "type": "message",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Continue working"}],
+                },
+            },
+            _assistant_event("I found more work.", run_id="new-parent-run"),
+        ],
+        child_statuses=(),
+        parent_status="done",
+        parent_last_run_id="new-parent-run",
+    )
+
+    snapshot = RoadmapBenchOpenClawCondition._read_yield_snapshot(sessions_dir)
+
+    assert snapshot is not None
+    assert snapshot["done_text"] == ""
+    assert snapshot["post_yield_terminal_reason"] == "assistant_stop"
+
+
 def test_roadmap_no_reply_with_ordinary_run_id_keeps_terminal_behavior(tmp_path):
     sessions_dir = tmp_path / "agents" / "roadmap_bench" / "sessions"
     _write_roadmap_session_state(
