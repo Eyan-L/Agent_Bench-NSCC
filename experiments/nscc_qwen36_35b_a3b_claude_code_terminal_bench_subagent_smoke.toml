@@ -1,0 +1,31 @@
+name = "nscc_qwen36_35b_a3b_claude_code_terminal_bench_subagent_smoke"
+description = "Terminal-Bench 2.1 Claude Code native-subagent smoke through LiteLLM and Qwen3.6-35B-A3B/SGLang on NSCC."
+output_dir = "runs/nscc_qwen36_35b_a3b_claude_code_terminal_bench_subagent_smoke"
+seeds = [42]
+
+[telemetry]
+spans_html = true
+
+[stages]
+rebuild_images = false
+cleanup = true
+
+[benchmark]
+name = "terminal_bench"
+profile = "profiles/benchmarks/terminal_bench/claude_code_multi_source_subagent_smoke.json"
+
+[harness]
+name = "claude_code"
+profile = "profiles/harnesses/claude_code_terminal_bench_subagent_smoke.yaml"
+
+[model]
+profile = "profiles/models/qwen36_35b_a3b.json"
+
+[serving]
+profile = "profiles/serving/sglang/nscc_tp4.yaml"
+
+[deployment]
+profile = "profiles/deployments/nscc_pbs_4gpu.toml"
+
+[limits]
+max_workers = 1

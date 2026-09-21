@@ -1,0 +1,6 @@
+claude_code_version: 2.1.278
+litellm_version: 1.102.0
+upstream_repo: https://github.com/anthropics/claude-code
+notes: |
+  Unmodified Claude Code CLI plus a LiteLLM Anthropic-to-OpenAI adapter.
+  The adapter targets the experiment's existing OpenAI-compatible endpoint.

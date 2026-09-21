@@ -1,0 +1,28 @@
+# Unmodified Claude Code runs inside the Terminal-Bench task instance. LiteLLM
+# supplies the Anthropic-compatible API and forwards to the active SGLang
+# OpenAI-compatible endpoint.
+harness: claude_code
+terminal_bench:
+  agent_assets_dir: agent_bench/benchmarks/terminal_bench/claude_code/agents
+  workspace_asset_files:
+  - CLAUDE.md
+telemetry:
+  spans_html: true
+  otel:
+    enabled: true
+    endpoint: http://localhost:4318
+    protocol: http/json
+    service_name: agent-bench-claude-code
+    traces: true
+    metrics: false
+    logs: false
+claude_code:
+  prompt_policy: roadmap_adapted
+conditions:
+- condition_id: claude_code_agent
+  condition_type: claude_code_agent
+  description: Claude Code with a native Agent-tool delegation capability check
+  agent:
+    max_steps: 200
+    max_time_seconds: 1800
+    retry_limit: 5

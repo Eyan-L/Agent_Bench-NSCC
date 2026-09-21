@@ -96,6 +96,28 @@ def runtime_environment(
 
 
 def _agent_runtime_defaults(harness: str, repo_root: str, scratch: str) -> dict[str, str]:
+    if harness == "claude_code":
+        version_file = Path(repo_root) / "agent_bench/harnesses/claude_code/VERSION"
+        claude_version = _version_from_file(
+            version_file, "claude_code_version", "2.1.278"
+        )
+        litellm_version = _version_from_file(
+            version_file, "litellm_version", "1.102.0"
+        )
+        runtime_sif = (
+            f"{scratch}/sif_images/claude_code_{claude_version}_"
+            f"litellm_{litellm_version}.sif"
+        )
+        return {
+            "AB_AGENT_RUNTIME_VERSION": claude_version,
+            "AB_AGENT_RUNTIME_SIF": runtime_sif,
+            "AB_AGENT_RUNTIME_DOCKER": "agent-bench/claude-code:2.1.278",
+            "AB_AGENT_RUNTIME_BASE_SIF": runtime_sif,
+            "AB_AGENT_RUNTIME_BASE_DOCKER": "",
+            "AB_AGENT_RUNTIME_REBUILD": "0",
+            "AB_AGENT_RUNTIME_OVERLAY": "",
+            "AB_AGENT_RUNTIME_INSIDE_PKG": "/opt/claude-code",
+        }
     if harness == "openhands":
         version = _version_from_file(
             Path(repo_root) / "agent_bench/harnesses/openhands/VERSION",
@@ -338,7 +360,38 @@ def _runtime_image_commands(
         return _openhands_runtime_commands(spec, env, repo_root)
     if harness == "hermes":
         return _hermes_runtime_commands(spec, env, repo_root)
+    if harness == "claude_code":
+        return _claude_code_runtime_commands(spec, env, repo_root)
     return []
+
+
+def _claude_code_runtime_commands(
+    spec: PbsJobSpec,
+    env: Mapping[str, str],
+    repo_root: Path,
+) -> list[StageCommand]:
+    runtime_sif = Path(env["AB_AGENT_RUNTIME_SIF"])
+    if runtime_sif.is_file() and runtime_sif.stat().st_size > 0:
+        return []
+    message = (
+        f"Claude Code runtime SIF missing: {runtime_sif}. "
+        "Build it locally with "
+        f"{repo_root}/agent_bench/harnesses/claude_code/build_sif.sh "
+        "and upload it before submitting this benchmark."
+    )
+    return [
+        StageCommand(
+            label="check uploaded Claude Code runtime SIF",
+            argv=(
+                "bash",
+                "-lc",
+                f"printf '%s\\n' {json.dumps(message)} >&2; exit 2",
+            ),
+            log_path=spec.log_dir / "runtime-claude-code-preflight.log",
+            env=dict(env),
+            required=True,
+        )
+    ]
 
 
 def _openclaw_runtime_commands(spec: PbsJobSpec, env: Mapping[str, str], repo_root: Path) -> list[StageCommand]:

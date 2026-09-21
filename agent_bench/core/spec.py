@@ -10,7 +10,7 @@ from agent_bench.core.profile_io import ProfileLoadError, load_profile
 
 
 BENCHMARKS = {"swebench", "swebench_pro", "terminal_bench", "deepresearch_bench", "longbench", "request_bench", "swe_atlas_qa"}
-HARNESSES = {"openclaw", "openhands", "hermes", "react", "ar"}
+HARNESSES = {"openclaw", "openhands", "hermes", "claude_code", "react", "ar"}
 AB_SERVING_BACKENDS = {"vllm", "sglang", "litellm", "existing_endpoint", "openai_compatible"}
 DEPLOYMENTS = {"client_only", "local_docker", "nscc_pbs", "ccds_cloud"}
 STAGE_NAMES = (

@@ -577,6 +577,27 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 env_info=env_info
             )
 
+        elif condition_type == "claude_code_agent":
+            if instance_data.get("benchmark") != "terminal_bench":
+                raise ValueError(
+                    "claude_code_agent currently supports terminal_bench only"
+                )
+            from agent_bench.benchmarks.terminal_bench.conditions.claude_code_agent import (
+                TerminalBenchClaudeCodeCondition,
+            )
+
+            condition = TerminalBenchClaudeCodeCondition(
+                model_config=run_config.condition.model,
+                agent_config=run_config.condition.agent,
+                container=getattr(harness, "container", None),
+            )
+            result = condition.run(
+                instance_data, run_dir, run_config.seed,
+                workspace_root=env_info["workspace_root"],
+                container_id=container_id,
+                env_info=env_info,
+            )
+
         elif condition_type == "tb_react":
             # Terminal-Bench ReAct loop — app-specific, no OpenClaw.
             from agent_bench.benchmarks.terminal_bench.conditions.react import (
@@ -731,6 +752,10 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                     timed_out=verdict.get("verifier_timed_out"),
                     duration_seconds=(verifier_end_ns - verifier_start_ns) / 1e9,
                 )
+        elif condition_type == "claude_code_agent":
+            # Keep agent execution and verifier outcome orthogonal for the
+            # Claude Code smoke without changing existing Terminal-Bench runs.
+            verdict = _merge_agent_completion_into_verdict(verdict, result)
         
         # Write verdict
         verdict_path = run_dir / "verdict.json"
@@ -976,7 +1001,7 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
     )
 
     # Peek at the harness config to learn which agent runtime this sweep
-    # targets — openclaw (default), openhands, or hermes. Each picks a different
+    # targets — openclaw (default), openhands, hermes, or claude_code. Each picks a different
     # Layer-1 class even though they share the SWE-bench application.
     harness_choice = "openclaw"
     try:
@@ -1170,6 +1195,7 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
     #   openclaw  -> TerminalBenchOpenClawHarness (Docker or Singularity)
     #   openhands -> TerminalBenchOpenHandsHarness (docker)
     #   hermes    -> TerminalBenchHermesHarness (docker)
+    #   claude_code -> TerminalBenchClaudeCodeHarness (Docker or Singularity)
     tb_harness = None
     if needs_tb:
         tb_backend = os.environ.get("AB_DEPLOYMENT_CONTAINER_BACKEND", "docker").lower()
@@ -1207,6 +1233,20 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
                 TerminalBenchHermesHarness as tb_cls,
             )
             tb_harness = tb_cls(benchmark_data_root, container=DockerContainer())
+        elif harness_choice == "claude_code":
+            from agent_bench.benchmarks.terminal_bench.claude_code.app import (
+                TerminalBenchClaudeCodeHarness as tb_cls,
+            )
+            if tb_backend == "docker":
+                tb_container = DockerContainer()
+            elif tb_backend == "singularity":
+                tb_container = SingularityContainer()
+            else:
+                raise ValueError(
+                    f"Unknown AB_DEPLOYMENT_CONTAINER_BACKEND={tb_backend!r} for terminal_bench; "
+                    "expected docker|singularity."
+                )
+            tb_harness = tb_cls(benchmark_data_root, container=tb_container)
         else:
             from agent_bench.benchmarks.terminal_bench.app import (
                 TerminalBenchDockerHarness,
