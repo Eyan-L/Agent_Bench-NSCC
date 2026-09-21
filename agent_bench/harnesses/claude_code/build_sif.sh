@@ -27,7 +27,7 @@ docker build \
     --build-arg "LITELLM_VERSION=$litellm_version" \
     -t "$tag" \
     -f "$here/docker/Dockerfile" \
-    "$repo_root"
+    "$here/docker"
 "$builder" build --force "$temporary" "docker-daemon://$tag"
 bash "$here/audit_sif.sh" "$temporary"
 mv -f "$temporary" "$output"

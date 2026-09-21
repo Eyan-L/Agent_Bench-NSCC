@@ -229,3 +229,13 @@ def test_claude_code_runtime_defaults_require_uploaded_sif(tmp_path):
     assert defaults["AB_AGENT_RUNTIME_SIF"].endswith(
         "/sif_images/claude_code_2.1.278_litellm_1.102.0.sif"
     )
+
+
+def test_claude_code_image_uses_npm_declared_native_entrypoint():
+    dockerfile = (
+        Path(__file__).resolve().parents[1]
+        / "agent_bench/harnesses/claude_code/docker/Dockerfile"
+    ).read_text()
+    assert "pkg.bin.claude" in dockerfile
+    assert 'stat -c %s "$claude_entry"' in dockerfile
+    assert "node_modules/@anthropic-ai/claude-code/cli.js" not in dockerfile
