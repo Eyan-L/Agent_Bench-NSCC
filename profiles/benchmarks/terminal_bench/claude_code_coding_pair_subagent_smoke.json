@@ -1,0 +1,33 @@
+{
+  "_doc": "Terminal-Bench 2.1 Claude Code subagent smoke over two implementation tasks: a Bottle vulnerability fix and a gRPC KV store.",
+  "sweep_name": "terminal_bench_2_1_claude_code_coding_pair_subagent_smoke",
+  "plan_version": "v1.0",
+  "application": "terminal_bench",
+  "source_dataset": "harbor-framework/terminal-bench-2",
+  "source_revision": "7131e4375048",
+  "tasks_root": "$SCRATCH/datasets/terminal-bench-2-1-7131e4375048/tasks",
+  "instances": [
+    "fix-code-vulnerability",
+    "kv-store-grpc"
+  ],
+  "repo_mapping": {
+    "fix-code-vulnerability": {
+      "repo_id": "terminal-bench/fix-code-vulnerability",
+      "base_commit": "7131e4375048"
+    },
+    "kv-store-grpc": {
+      "repo_id": "terminal-bench/kv-store-grpc",
+      "base_commit": "7131e4375048"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 3600,
+  "output_dir": "tb21_claude_code_coding_pair_subagent_smoke",
+  "seeds": [
+    42
+  ],
+  "selection": {
+    "method": "two prepared coding tasks, one existing Python repository fix and one gRPC service implementation",
+    "purpose": "test native Claude Code Agent-tool delegation during bounded implementation work"
+  }
+}

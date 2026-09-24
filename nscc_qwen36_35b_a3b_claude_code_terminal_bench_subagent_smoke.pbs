@@ -3,7 +3,7 @@
 #PBS -N agent-bench-q36-cc-tb-smoke
 #PBS -P personal-n2602695
 #PBS -l select=1:ngpus=4
-#PBS -l walltime=04:00:00
+#PBS -l walltime=02:00:00
 #PBS -q normal
 #PBS -j oe
 
@@ -40,7 +40,7 @@ if [[ -z "${AB_RUN_STAMP:-}" ]]; then
     fi
 fi
 export AB_RUN_STAMP
-export AB_EXPERIMENT_BASE=/home/users/ntu/n2602695/Agent_Bench/runs/nscc_qwen36_35b_a3b_claude_code_terminal_bench_subagent_smoke
+export AB_EXPERIMENT_BASE="$SCRATCH/agent-bench/runs/nscc_qwen36_35b_a3b_claude_code_terminal_bench_subagent_smoke"
 AB_RUN_DIR="${AB_RUN_DIR:-${AB_EXPERIMENT_DIR:-$AB_EXPERIMENT_BASE/$AB_RUN_STAMP}}"
 export AB_RUN_DIR
 export AB_EXPERIMENT_DIR="$AB_RUN_DIR"

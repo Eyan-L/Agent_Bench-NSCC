@@ -114,6 +114,8 @@ def test_claude_code_singularity_harness_uses_task_runtime_and_adapter(
     assert env_info["adapter_container_id"] != env_info["container_id"]
     assert env_info["backend"] == "singularity"
     assert container.specs[0].image == str(task_sif)
+    assert container.specs[0].writable_tmpfs is True
+    assert container.specs[0].fakeroot is True
     assert container.specs[1].image == str(runtime_sif)
     assert container.specs[1].entrypoint == "/opt/litellm/bin/litellm"
     assert env_info["agent_env"]["CLAUDE_CODE_SUBAGENT_MODEL"] == (
@@ -126,6 +128,12 @@ def test_claude_code_singularity_harness_uses_task_runtime_and_adapter(
         mount for mount in container.specs[0].mounts if mount.container == "/tests"
     )
     assert list(Path(tests_mount.host).iterdir()) == []
+    apt_mount = next(
+        mount
+        for mount in container.specs[0].mounts
+        if mount.container == "/etc/apt/apt.conf.d/99agent-bench-singularity"
+    )
+    assert apt_mount.host.read_text() == 'APT::Sandbox::User "root";\n'
     adapter_config = json.loads(
         (Path(env_info["state_dir"]) / "litellm.json").read_text()
     )
@@ -136,6 +144,7 @@ def test_claude_code_singularity_harness_uses_task_runtime_and_adapter(
     claude_prompt = (workspace / "CLAUDE.md").read_text()
     assert "lead engineer responsible" in claude_prompt
     assert "native `Agent` tool" in claude_prompt
+    assert "Use the native `Agent` tool at least once" in claude_prompt
     assert "multi-target software roadmap" not in claude_prompt
 
     harness.cleanup(**env_info)
@@ -221,6 +230,68 @@ def test_claude_code_condition_archives_native_subagent_evidence(
     assert output["total_completion_tokens"] == 20
     assert (run_dir / "conversation" / "claude-code" / "session.jsonl").is_file()
     assert (run_dir / "trajectory.jsonl").stat().st_size > 0
+
+
+def test_claude_code_condition_preserves_timeout_output_bytes(
+    tmp_path, monkeypatch
+):
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    class _TimeoutContainer:
+        backend_id = "singularity"
+
+        def exec(self, _handle, argv, **_kwargs):
+            raise subprocess.TimeoutExpired(
+                argv,
+                _kwargs["timeout"],
+                output=b'{"type":"assistant"}\n',
+                stderr=b"partial stderr",
+            )
+
+    class _Sampler:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(cc_condition, "UtilSampler", _Sampler)
+    monkeypatch.setattr(cc_condition, "otel_trace_offset", lambda: (None, 0))
+    monkeypatch.setattr(cc_condition, "wait_for_otel_flush", lambda: None)
+    monkeypatch.setattr(
+        cc_condition, "snapshot_otel_spans", lambda *_args, **_kwargs: None
+    )
+    condition = cc_condition.TerminalBenchClaudeCodeCondition(
+        SimpleNamespace(name="Qwen/Qwen3.6-35B-A3B"),
+        SimpleNamespace(max_steps=200, max_time_seconds=3600),
+        _TimeoutContainer(),
+    )
+    run_dir = tmp_path / "run"
+    output = condition.run(
+        {"instance_id": "task", "instruction": "do it"},
+        run_dir,
+        42,
+        "/app",
+        "task-runtime",
+        {
+            "container_name": "task-runtime",
+            "task_container_name": "task-runtime",
+            "claude_state_dir": str(state_dir),
+            "agent_env": {},
+        },
+    )
+
+    assert output["agent_execution_outcome"] == "timeout"
+    assert output["exit_code"] == -1
+    assert "partial stderr" in output["agent_completion_error"]
+    assert "timeout after 3600s" in output["agent_completion_error"]
+    assert (run_dir / "claude_code_stdout.jsonl").read_text() == (
+        '{"type":"assistant"}\n'
+    )
 
 
 def test_claude_code_runtime_defaults_require_uploaded_sif(tmp_path):

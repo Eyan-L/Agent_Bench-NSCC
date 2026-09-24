@@ -181,6 +181,42 @@ def test_singularity_env_uses_parent_env_for_commas():
         _set_singularity_env(env, "hm.run_id", "a")
 
 
+def test_singularity_writable_tmpfs_is_opt_in(monkeypatch, tmp_path):
+    import subprocess
+
+    from agent_bench.deployments.containers.base import ContainerSpec
+    from agent_bench.deployments.containers.singularity import SingularityContainer
+
+    image = tmp_path / "task.sif"
+    image.write_bytes(b"sif")
+    commands = []
+
+    def fake_run(argv, **_kwargs):
+        commands.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    container = SingularityContainer(
+        log_dir=tmp_path / "logs",
+        keepalive_dir=tmp_path / "keepalive",
+    )
+    container.start(
+        ContainerSpec(
+            name="writable-task",
+            image=str(image),
+            writable_tmpfs=True,
+            fakeroot=True,
+        )
+    )
+    assert "--writable-tmpfs" in commands[0]
+    assert "--fakeroot" in commands[0]
+
+    commands.clear()
+    container.start(ContainerSpec(name="readonly-task", image=str(image)))
+    assert "--writable-tmpfs" not in commands[0]
+    assert "--fakeroot" not in commands[0]
+
+
 def test_hermes_singularity_exec_runs_from_workspace():
     app = (ROOT / "agent_bench/benchmarks/swebench/hermes/app.py").read_text()
     condition = (ROOT / "agent_bench/benchmarks/swebench/conditions/hermes_agent.py").read_text()

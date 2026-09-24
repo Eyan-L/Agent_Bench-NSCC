@@ -17,12 +17,12 @@ telemetry:
     metrics: false
     logs: false
 claude_code:
-  prompt_policy: roadmap_adapted
+  prompt_policy: terminal_bench_forced_subagent
 conditions:
 - condition_id: claude_code_agent
   condition_type: claude_code_agent
   description: Claude Code with a native Agent-tool delegation capability check
   agent:
     max_steps: 200
-    max_time_seconds: 1800
+    max_time_seconds: 3600
     retry_limit: 5

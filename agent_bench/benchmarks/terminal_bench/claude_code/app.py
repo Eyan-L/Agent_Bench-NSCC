@@ -295,6 +295,12 @@ class TerminalBenchClaudeCodeHarness(TerminalBenchOpenClawHarness):
         adapter_config, model_name = self._write_adapter_config(
             state_dir, adapter_token=adapter_token
         )
+        apt_config = state_dir / "apt-singularity.conf"
+        if self.container.backend_id == "singularity":
+            # Root-mapped namespaces on NSCC cannot switch to Debian's _apt
+            # account. Keep APT in mapped root while writable-tmpfs supplies
+            # an ephemeral package-install layer for agent and verifier use.
+            apt_config.write_text('APT::Sandbox::User "root";\n', encoding="utf-8")
         model_cfg, _serving_cfg = load_active_model_and_serving(
             repo_root=os.environ.get("AB_REPO_ROOT", os.getcwd())
         )
@@ -310,6 +316,13 @@ class TerminalBenchClaudeCodeHarness(TerminalBenchOpenClawHarness):
             ]
             if self.container.backend_id == "singularity":
                 task_mounts.append(Mount(tests_dir, "/tests", "rw"))
+                task_mounts.append(
+                    Mount(
+                        apt_config,
+                        "/etc/apt/apt.conf.d/99agent-bench-singularity",
+                        "ro",
+                    )
+                )
             task_spec = ContainerSpec(
                 name=task_name,
                 image=task_image,
@@ -321,6 +334,8 @@ class TerminalBenchClaudeCodeHarness(TerminalBenchOpenClawHarness):
                 entrypoint="sleep",
                 command=("infinity",),
                 cpus=self.task_container_cpus,
+                writable_tmpfs=self.container.backend_id == "singularity",
+                fakeroot=self.container.backend_id == "singularity",
                 labels={"claude-code.task": "1", "agent-bench.run_id": run_id},
             )
             with self._task_specs_lock:
@@ -377,7 +392,7 @@ class TerminalBenchClaudeCodeHarness(TerminalBenchOpenClawHarness):
                 "ANTHROPIC_DEFAULT_HAIKU_MODEL": model_name,
                 "CLAUDE_CODE_SUBAGENT_MODEL": model_name,
                 "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(model_cfg.max_tokens),
-                "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY": "4",
+                "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY": "16",
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
                 "DISABLE_AUTOUPDATER": "1",
                 "DISABLE_TELEMETRY": "1",

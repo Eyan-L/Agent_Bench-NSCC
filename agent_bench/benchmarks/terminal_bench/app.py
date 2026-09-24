@@ -1751,10 +1751,22 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
         self.container.copy_into(task, tests_host, "/tests")
         host_logs = self.workspace_base / run_id / "logs" / "verifier"
         reward = _clear_reward_file(host_logs)
+        verifier_env = None
+        if self.container.backend_id == "singularity":
+            # Root-mapped Singularity cannot restore arbitrary archive owners.
+            # Several canonical TB verifiers bootstrap uv via tar, so extract
+            # those tools as the current mapped user instead.
+            # Host-only Python packages can shadow the verifier's own uv
+            # environment (notably pandas/numpy built for another Python).
+            verifier_env = {
+                "TAR_OPTIONS": "--no-same-owner",
+                "PYTHONPATH": "",
+            }
         try:
             result = self.container.exec(
                 task, ["bash", (instance_data or {}).get("verifier_entrypoint", "/tests/test.sh")],
                 check=False, timeout=timeout, workdir=task_workspace,
+                env=verifier_env,
             )
             timed_out = False
         except subprocess.TimeoutExpired as exc:

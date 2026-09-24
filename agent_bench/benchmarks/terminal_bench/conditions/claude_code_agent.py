@@ -245,11 +245,12 @@ class TerminalBenchClaudeCodeCondition:
                 timed_out = True
                 rc = -1
                 stdout = exc.stdout or ""
-                stderr = (exc.stderr or "") + f"\n[agent-bench] timeout after {timeout}s"
                 if isinstance(stdout, bytes):
                     stdout = stdout.decode("utf-8", errors="replace")
+                stderr = exc.stderr or ""
                 if isinstance(stderr, bytes):
                     stderr = stderr.decode("utf-8", errors="replace")
+                stderr += f"\n[agent-bench] timeout after {timeout}s"
         finally:
             end_ns = time.time_ns()
             sampler.__exit__(None, None, None)
@@ -274,7 +275,7 @@ class TerminalBenchClaudeCodeCondition:
 
         runtime_observability = {
             "agent_runtime_mode": "claude_code_cli",
-            "prompt_policy": "roadmap_adapted",
+            "prompt_policy": "terminal_bench_forced_subagent",
             "conversation_dir": str(conversation_dir),
             "session_file_count": len(session_files),
             **subagents,

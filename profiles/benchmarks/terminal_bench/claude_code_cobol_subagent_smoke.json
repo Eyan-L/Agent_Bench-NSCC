@@ -1,0 +1,28 @@
+{
+  "_doc": "Terminal-Bench 2.1 Claude Code subagent smoke for COBOL control-flow analysis, DAT record semantics, Python reimplementation, and differential validation.",
+  "sweep_name": "terminal_bench_2_1_claude_code_cobol_subagent_smoke",
+  "plan_version": "v1.0",
+  "application": "terminal_bench",
+  "source_dataset": "harbor-framework/terminal-bench-2",
+  "source_revision": "7131e4375048",
+  "tasks_root": "$SCRATCH/datasets/terminal-bench-2-1-7131e4375048/tasks",
+  "instances": [
+    "cobol-modernization"
+  ],
+  "repo_mapping": {
+    "cobol-modernization": {
+      "repo_id": "terminal-bench/cobol-modernization",
+      "base_commit": "7131e4375048"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 3600,
+  "output_dir": "tb21_claude_code_cobol_subagent_smoke",
+  "seeds": [
+    42
+  ],
+  "selection": {
+    "method": "single bounded task with separable COBOL analysis, DAT-file semantics, implementation, and differential-validation workstreams",
+    "purpose": "verify natural Claude Code Agent-tool delegation on a moderate task without a global optimization loop"
+  }
+}

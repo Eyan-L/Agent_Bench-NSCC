@@ -1,0 +1,28 @@
+{
+  "_doc": "Terminal-Bench 2.1 Claude Code subagent smoke over independently processable JPG and PDF financial documents.",
+  "sweep_name": "terminal_bench_2_1_claude_code_financial_docs_subagent_smoke",
+  "plan_version": "v1.0",
+  "application": "terminal_bench",
+  "source_dataset": "harbor-framework/terminal-bench-2",
+  "source_revision": "7131e4375048",
+  "tasks_root": "$SCRATCH/datasets/terminal-bench-2-1-7131e4375048/tasks",
+  "instances": [
+    "financial-document-processor"
+  ],
+  "repo_mapping": {
+    "financial-document-processor": {
+      "repo_id": "terminal-bench/financial-document-processor",
+      "base_commit": "7131e4375048"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 3600,
+  "output_dir": "tb21_claude_code_financial_docs_subagent_smoke",
+  "seeds": [
+    42
+  ],
+  "selection": {
+    "method": "single medium task with 17 independently inspectable JPG/PDF documents and a bounded integration summary",
+    "purpose": "verify natural Claude Code Agent-tool delegation without the global optimization loop risk of the batching scheduler"
+  }
+}

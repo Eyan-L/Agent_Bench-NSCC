@@ -12,7 +12,7 @@ cleanup = true
 
 [benchmark]
 name = "terminal_bench"
-profile = "profiles/benchmarks/terminal_bench/claude_code_multi_source_subagent_smoke.json"
+profile = "profiles/benchmarks/terminal_bench/claude_code_financial_docs_subagent_smoke.json"
 
 [harness]
 name = "claude_code"
@@ -25,7 +25,7 @@ profile = "profiles/models/qwen36_35b_a3b.json"
 profile = "profiles/serving/sglang/nscc_tp4.yaml"
 
 [deployment]
-profile = "profiles/deployments/nscc_pbs_4gpu.toml"
+profile = "profiles/deployments/nscc_pbs_4gpu_2h.toml"
 
 [limits]
 max_workers = 1

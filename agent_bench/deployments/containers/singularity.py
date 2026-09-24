@@ -195,6 +195,10 @@ class SingularityContainer(Container):
         cmd: list[str] = ["singularity", "instance", "start"]
         if spec.gpu:
             cmd += ["--nv"]
+        if spec.fakeroot:
+            cmd += ["--fakeroot"]
+        if spec.writable_tmpfs:
+            cmd += ["--writable-tmpfs"]
         # NSCC compute nodes disable unprivileged user namespaces — without
         # them, `singularity instance start`'s default `mount -t proc proc /proc`
         # fails with EPERM. `--no-mount proc` skips that mount; then we
@@ -426,7 +430,8 @@ class SingularityContainer(Container):
             )
             consumer = subprocess.Popen(
                 ["singularity", "exec", f"instance://{h.name}",
-                 "sh", "-c", f"mkdir -p '{dst}' && tar -C '{dst}' -xf -"],
+                 "sh", "-c",
+                 f"mkdir -p '{dst}' && tar --no-same-owner -C '{dst}' -xf -"],
                 stdin=producer.stdout, stderr=subprocess.PIPE,
                 env=_subprocess_env(),
             )

@@ -123,9 +123,15 @@ class _FakeDispatcher:
 
 
 class _VerifierContainer:
-    backend_id = "docker"
-
-    def __init__(self, reward_path: Path, *, stdout: str = "", stderr: str = ""):
+    def __init__(
+        self,
+        reward_path: Path,
+        *,
+        stdout: str = "",
+        stderr: str = "",
+        backend_id: str = "docker",
+    ):
+        self.backend_id = backend_id
         self.reward_path = reward_path
         self.stdout = stdout
         self.stderr = stderr
@@ -147,6 +153,38 @@ class _VerifierContainer:
 
     def copy_into(self, _handle, _source, _destination):
         return None
+
+
+def test_singularity_verifier_disables_archive_owner_restoration(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("AB_AGENT_RUNTIME_SIF", str(tmp_path / "openclaw.sif"))
+    workspace_base = tmp_path / "workspaces"
+    reward_path = workspace_base / "run-1" / "logs" / "verifier" / "reward.txt"
+    container = _VerifierContainer(reward_path, backend_id="singularity")
+    harness = tb_app.TerminalBenchOpenClawHarness(
+        container=container, workspace_base=workspace_base
+    )
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+
+    harness.run_tests(
+        None,
+        "task",
+        "/app",
+        60,
+        run_id="run-1",
+        instance_data={
+            "tests_host_path": str(tests_dir),
+            "workspace": "/app",
+        },
+    )
+
+    verifier_call = next(call for call in container.exec_calls if call[0][0] == "bash")
+    assert verifier_call[1]["env"] == {
+        "TAR_OPTIONS": "--no-same-owner",
+        "PYTHONPATH": "",
+    }
 
 
 def test_roadmap_verifier_uses_writable_cargo_paths_and_reports_infra_error(
@@ -3271,6 +3309,7 @@ def test_singularity_copy_into_directory_streams_tar(tmp_path, monkeypatch):
     assert calls[0][:3] == ["tar", "-C", str(source)]
     assert calls[1][:3] == ["singularity", "exec", "instance://task"]
     assert "mkdir -p '/tests'" in calls[1][-1]
+    assert "tar --no-same-owner" in calls[1][-1]
 
 
 def test_roadmap_abnormal_terminal_quiesces_running_children(tmp_path):
