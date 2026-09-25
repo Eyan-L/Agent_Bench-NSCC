@@ -515,7 +515,7 @@ def test_roadmap_profile_uses_only_the_benchmark_execution_deadline():
     assert "archiveAfterMinutes: 0" in subagent_profile
 
 
-def test_roadmap_profiles_enable_builtin_memory_plugin():
+def test_roadmap_profiles_disable_builtin_memory_plugin():
     root = Path(__file__).resolve().parents[1]
 
     for name in (
@@ -523,7 +523,7 @@ def test_roadmap_profiles_enable_builtin_memory_plugin():
         "openclaw_roadmapbench_single_agent.yaml",
     ):
         profile = (root / "profiles" / "harnesses" / name).read_text()
-        assert "memory-core:\n        enabled: true" in profile
+        assert "memory-core:\n        enabled: false" in profile
 
 
 def test_roadmap_profiles_use_builtin_env_secret_provider():
