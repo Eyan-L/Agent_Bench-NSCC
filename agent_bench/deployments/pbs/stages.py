@@ -51,7 +51,13 @@ def runtime_environment(
     singularity_cache = env.get("SINGULARITY_CACHEDIR") or env.get("SINGULARITY_CACHE") or f"{scratch}/.singularity"
     harness = _harness_choice(resolved)
 
-    runtime_defaults = _agent_runtime_defaults(harness, repo_root, scratch)
+    roadmapbench = (
+        resolved.spec.benchmark_name == "terminal_bench"
+        and resolved.benchmark.get("source_dataset") == "UnipatAI/RoadmapBench"
+    )
+    runtime_defaults = _agent_runtime_defaults(
+        harness, repo_root, scratch, roadmapbench=roadmapbench
+    )
 
     out = {
         "AB_REPO_ROOT": repo_root,
@@ -95,7 +101,9 @@ def runtime_environment(
     return out
 
 
-def _agent_runtime_defaults(harness: str, repo_root: str, scratch: str) -> dict[str, str]:
+def _agent_runtime_defaults(
+    harness: str, repo_root: str, scratch: str, *, roadmapbench: bool = False
+) -> dict[str, str]:
     if harness == "claude_code":
         version_file = Path(repo_root) / "agent_bench/harnesses/claude_code/VERSION"
         claude_version = _version_from_file(
@@ -140,6 +148,18 @@ def _agent_runtime_defaults(harness: str, repo_root: str, scratch: str) -> dict[
             "upstream_version",
             "v2026.5.16",
         )
+        if roadmapbench:
+            runtime_sif = f"{scratch}/sif_images/hermes_roadmap_{version}.sif"
+            return {
+                "AB_AGENT_RUNTIME_VERSION": version,
+                "AB_AGENT_RUNTIME_SIF": runtime_sif,
+                "AB_AGENT_RUNTIME_DOCKER": "",
+                "AB_AGENT_RUNTIME_BASE_SIF": runtime_sif,
+                "AB_AGENT_RUNTIME_BASE_DOCKER": "",
+                "AB_AGENT_RUNTIME_REBUILD": "0",
+                "AB_AGENT_RUNTIME_OVERLAY": "",
+                "AB_AGENT_RUNTIME_INSIDE_PKG": "/opt/hermes",
+            }
         return {
             "AB_AGENT_RUNTIME_VERSION": version,
             "AB_AGENT_RUNTIME_SIF": f"{scratch}/sif_images/hermes_runtime.sif",
@@ -359,7 +379,11 @@ def _runtime_image_commands(
     if harness == "openhands":
         return _openhands_runtime_commands(spec, env, repo_root)
     if harness == "hermes":
-        return _hermes_runtime_commands(spec, env, repo_root)
+        roadmapbench = (
+            resolved.spec.benchmark_name == "terminal_bench"
+            and resolved.benchmark.get("source_dataset") == "UnipatAI/RoadmapBench"
+        )
+        return _hermes_runtime_commands(spec, env, repo_root, roadmapbench=roadmapbench)
     if harness == "claude_code":
         return _claude_code_runtime_commands(spec, env, repo_root)
     return []
@@ -466,7 +490,26 @@ def _openhands_runtime_commands(spec: PbsJobSpec, env: Mapping[str, str], repo_r
     return commands
 
 
-def _hermes_runtime_commands(spec: PbsJobSpec, env: Mapping[str, str], repo_root: Path) -> list[StageCommand]:
+def _hermes_runtime_commands(
+    spec: PbsJobSpec, env: Mapping[str, str], repo_root: Path,
+    *, roadmapbench: bool = False,
+) -> list[StageCommand]:
+    if roadmapbench:
+        runtime_sif = Path(env["AB_AGENT_RUNTIME_SIF"])
+        if runtime_sif.is_file() and runtime_sif.stat().st_size > 0:
+            return []
+        message = (
+            f"Roadmap Hermes runtime SIF missing: {runtime_sif}. "
+            "On local Ubuntu, run ~/Agent_Bench/scripts/"
+            "build_roadmap_hermes_sif_local.sh and upload the SIF "
+            "before submitting this experiment."
+        )
+        return [StageCommand(
+            label="check uploaded Roadmap Hermes SIF",
+            argv=("bash", "-c", 'printf "%s\\n" "$1" >&2; exit 2', "bash", message),
+            log_path=spec.log_dir / "runtime-roadmap-hermes-preflight.log",
+            env=dict(env), required=True,
+        )]
     if env.get("AB_AGENT_RUNTIME_DOCKER"):
         return _pull_if_missing(
             label="pull Hermes runtime SIF",

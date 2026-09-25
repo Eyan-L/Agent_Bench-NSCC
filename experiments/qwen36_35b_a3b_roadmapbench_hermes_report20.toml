@@ -1,0 +1,27 @@
+name = "qwen36_35b_a3b_roadmapbench_hermes_report20"
+description = "Hermes arm on the 20 fixed tasks in the final Roadmap OpenClaw paired report, seed 42, Qwen3.6 TP4."
+output_dir = "runs/qwen36_35b_a3b_roadmapbench_hermes_report20"
+seeds = [42]
+
+[telemetry]
+spans_html = true
+
+[benchmark]
+name = "terminal_bench"
+profile = "profiles/benchmarks/roadmap/roadmapbench_report20_hermes.json"
+
+[harness]
+name = "hermes"
+profile = "profiles/harnesses/hermes_roadmapbench.yaml"
+
+[model]
+profile = "profiles/models/qwen36_35b_a3b.json"
+
+[serving]
+profile = "profiles/serving/sglang/nscc_tp4.yaml"
+
+[deployment]
+profile = "profiles/deployments/nscc_pbs_4gpu_24h.toml"
+
+[limits]
+max_workers = 1

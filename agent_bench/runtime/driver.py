@@ -543,9 +543,14 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
         elif condition_type == "hermes_agent":
             benchmark = instance_data.get("benchmark", "swebench")
             if benchmark == "terminal_bench":
-                from agent_bench.benchmarks.terminal_bench.conditions.hermes_agent import (
-                    TerminalBenchHermesCondition as _Cls,
-                )
+                if instance_data.get("benchmark_variant") == "roadmapbench":
+                    from agent_bench.benchmarks.roadmap_bench.conditions.hermes_agent import (
+                        RoadmapBenchHermesCondition as _Cls,
+                    )
+                else:
+                    from agent_bench.benchmarks.terminal_bench.conditions.hermes_agent import (
+                        TerminalBenchHermesCondition as _Cls,
+                    )
             elif benchmark == "deepresearch_bench":
                 from agent_bench.benchmarks.deepresearch_bench.conditions.hermes_agent import (
                     DeepResearchHermesCondition as _Cls,
@@ -1224,15 +1229,35 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
             )
             tb_harness = tb_cls(benchmark_data_root, container=DockerContainer())
         elif harness_choice == "hermes":
-            if tb_backend != "docker":
-                raise ValueError(
-                    "terminal_bench + hermes currently requires "
-                    "AB_DEPLOYMENT_CONTAINER_BACKEND=docker"
-                )
-            from agent_bench.benchmarks.terminal_bench.hermes.app import (
-                TerminalBenchHermesHarness as tb_cls,
+            roadmap_instances = [
+                instances[rc.instance_id] for rc in run_configs
+                if instances[rc.instance_id].get("benchmark") == "terminal_bench"
+            ]
+            is_roadmap = bool(roadmap_instances) and all(
+                item.get("benchmark_variant") == "roadmapbench"
+                for item in roadmap_instances
             )
-            tb_harness = tb_cls(benchmark_data_root, container=DockerContainer())
+            if is_roadmap:
+                from agent_bench.benchmarks.roadmap_bench.hermes.app import (
+                    RoadmapBenchHermesHarness as tb_cls,
+                )
+                tb_container = (
+                    SingularityContainer() if tb_backend == "singularity"
+                    else DockerContainer() if tb_backend == "docker" else None
+                )
+                if tb_container is None:
+                    raise ValueError(f"Unknown Terminal-Bench backend: {tb_backend}")
+                tb_harness = tb_cls(benchmark_data_root, container=tb_container)
+            else:
+                if tb_backend != "docker":
+                    raise ValueError(
+                        "terminal_bench + hermes currently requires "
+                        "AB_DEPLOYMENT_CONTAINER_BACKEND=docker"
+                    )
+                from agent_bench.benchmarks.terminal_bench.hermes.app import (
+                    TerminalBenchHermesHarness as tb_cls,
+                )
+                tb_harness = tb_cls(benchmark_data_root, container=DockerContainer())
         elif harness_choice == "claude_code":
             from agent_bench.benchmarks.terminal_bench.claude_code.app import (
                 TerminalBenchClaudeCodeHarness as tb_cls,

@@ -44,7 +44,7 @@ def install_roadmap_gateway_only_policy() -> None:
     if not getattr(current, "_roadmap_gateway_only_policy", False):
         def wrapped(result: dict) -> Optional[str]:
             runtime_mode = str(result.get("agent_runtime_mode") or "").strip()
-            if runtime_mode and runtime_mode != "gateway":
+            if result.get("harness") != "hermes" and runtime_mode and runtime_mode != "gateway":
                 return (
                     "RoadmapBench requires OpenClaw gateway runtime; "
                     f"observed agent_runtime_mode={runtime_mode}"
