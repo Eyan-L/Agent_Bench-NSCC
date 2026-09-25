@@ -325,6 +325,20 @@ def _terminal_bench_image_commands(
     spec: PbsJobSpec,
     env: Mapping[str, str],
 ) -> list[StageCommand]:
+    if _harness_choice(resolved) == "hermes" and resolved.harness.get("roadmapbench") is True:
+        return [StageCommand(
+            label="check prepared Roadmap task SIFs",
+            argv=(
+                "python3", "-m", "agent_bench.benchmarks.roadmap_bench.hermes.preflight",
+                "--tasks-root", env["AB_BENCHMARK_TASKS_ROOT"],
+                "--sif-dir", env["AB_DEPLOYMENT_TASK_IMAGE_DIR"],
+                *[arg for task_id in resolved.benchmark.get("instances", [])
+                  for arg in ("--task-id", str(task_id))],
+            ),
+            log_path=spec.log_dir / "roadmap-hermes-task-sif-preflight.log",
+            env=dict(env),
+            required=True,
+        )]
     argv = [
         "python3",
         "-m",
@@ -359,6 +373,17 @@ def _runtime_image_commands(
     if harness == "openhands":
         return _openhands_runtime_commands(spec, env, repo_root)
     if harness == "hermes":
+        if resolved.harness.get("roadmapbench") is True:
+            return [StageCommand(
+                label="check uploaded Roadmap Hermes runtime SIF",
+                argv=(
+                    "python3", "-m", "agent_bench.benchmarks.roadmap_bench.hermes.preflight",
+                    "--runtime-sif", env["AB_AGENT_RUNTIME_SIF"],
+                ),
+                log_path=spec.log_dir / "roadmap-hermes-runtime-sif-preflight.log",
+                env=dict(env),
+                required=True,
+            )]
         return _hermes_runtime_commands(spec, env, repo_root)
     if harness == "claude_code":
         return _claude_code_runtime_commands(spec, env, repo_root)
