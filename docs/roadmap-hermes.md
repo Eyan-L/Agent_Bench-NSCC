@@ -32,13 +32,14 @@ The budget patch makes oneshot honor `agent.max_turns`; the original SIF
 silently used Hermes' 90-iteration default. Parent and delegated agents now
 use the Roadmap profile's 600-iteration cap, matching OpenClaw's configured
 `max_steps`; delegated agents share the task's 7200-second wall-clock budget.
-A run counts as normal completion only when oneshot exits 0 and the archived
-final parent assistant turn ends normally, contains an explicit `DONE` line,
-and has no pending tool call or fatal session end reason. This follows
-OpenClaw's final-turn `DONE` marker check. Hermes reads its durable session
-database because oneshot stdout can append runtime warnings after the model's
-final reply. Missing or incomplete final-turn evidence stays outside
-normal-completion comparisons; verifier reward remains a separate measurement.
+A run counts as normal completion only when oneshot exits 0, the archived
+final parent assistant turn has no pending tool call or fatal session end
+reason, and it either explicitly declares `DONE` or ends with a nonempty
+normal `stop`. An empty stop and a `length`-truncated turn without `DONE`
+remain incomplete. This matches OpenClaw's durable terminal handling while
+recording explicit `DONE` separately as `strictDone`. Hermes reads its durable
+session database because oneshot stdout can append runtime warnings after the
+model's final reply. Verifier reward remains a separate measurement.
 
 ## Smoke configuration
 

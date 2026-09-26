@@ -306,7 +306,7 @@ def test_roadmap_hermes_uses_openclaw_task_message():
     assert hermes_message == openclaw_message
 
 
-def test_roadmap_hermes_requires_strict_done_for_normal_completion(tmp_path, monkeypatch):
+def test_roadmap_hermes_classifies_final_parent_terminal(tmp_path, monkeypatch):
     monkeypatch.setattr(
         RoadmapBenchHermesCondition, "_capture_workspace_baseline",
         lambda *_args: {"git_head": "baseline"},
@@ -338,20 +338,26 @@ def test_roadmap_hermes_requires_strict_done_for_normal_completion(tmp_path, mon
         return {"exit_code": 0, "total_prompt_tokens": 0, "total_completion_tokens": 0}
 
     monkeypatch.setattr(HermesAgentCondition, "run", fake_run)
-    for index, (response, final_text, finish_reason, tool_calls, end_reason, expected) in enumerate((
-        ("DONE\n", "DONE\n", "stop", None, None, "normal_completion"),
-        ("Summary of work\nDONE", "Summary of work\nDONE", "stop", None, None, "normal_completion"),
-        ("DONE\nexternal warning", "DONE", "stop", None, None, "normal_completion"),
-        ("DONE", "Still working", "stop", None, None, "blocked_incomplete"),
-        ("DONE", "DONE", "length", None, None, "blocked_incomplete"),
-        ("DONE", "DONE", "stop", '[{"id":"call-1"}]', None, "blocked_incomplete"),
-        ("DONE", "DONE", "stop", None, "error", "runtime_error"),
-        ("DONE", "DONE", "stop", None, "timed_out", "timeout"),
-        ("DONE", "DONE", "stop", None, "context_overflow", "context_overflow"),
-        ("DONE", "I mentioned DONE earlier", "stop", None, None, "blocked_incomplete"),
-        ("DONE", "DONEness", "stop", None, None, "blocked_incomplete"),
-        ("Let me continue <tool_call>", "Let me continue", "stop", None, None, "blocked_incomplete"),
-        ("", "", "stop", None, None, "blocked_incomplete"),
+    for index, (
+        response, final_text, finish_reason, tool_calls, end_reason,
+        expected, expected_strict_done, expected_marker,
+    ) in enumerate((
+        ("DONE\n", "DONE\n", "stop", None, None, "normal_completion", True, True),
+        ("Summary\nDONE", "Summary\nDONE", "stop", None, None, "normal_completion", True, True),
+        ("DONE\nexternal warning", "DONE", "stop", None, None, "normal_completion", True, True),
+        ("DONE", "Still working", "stop", None, None, "normal_completion", False, False),
+        ("DONE", "DONE", "length", None, None, "normal_completion", True, True),
+        ("DONE", "DONE", "stop", '[{"id":"call-1"}]', None, "blocked_incomplete", False, True),
+        ("DONE", "DONE", "stop", None, "error", "runtime_error", False, False),
+        ("DONE", "DONE", "stop", None, "timed_out", "timeout", False, False),
+        ("DONE", "DONE", "stop", None, "context_overflow", "context_overflow", False, False),
+        ("DONE", "I mentioned DONE earlier", "stop", None, None, "normal_completion", False, False),
+        ("DONE", "DONEness", "stop", None, None, "normal_completion", False, False),
+        ("Let me continue", "Let me continue", "stop", None, None, "normal_completion", False, False),
+        ("", "", "stop", None, None, "blocked_incomplete", False, False),
+        ("", "   ", "stop", None, None, "blocked_incomplete", False, False),
+        ("unfinished", "unfinished", "length", None, None, "blocked_incomplete", False, False),
+        ("unfinished", "unfinished", None, None, None, "blocked_incomplete", False, False),
     )):
         run_dir = tmp_path / str(index)
         run_dir.mkdir()
@@ -376,11 +382,7 @@ def test_roadmap_hermes_requires_strict_done_for_normal_completion(tmp_path, mon
         assert result["agent_execution_outcome"] == expected
         assert verdict["agent_execution_outcome"] == expected
         assert verdict["reward"] == 0.25
-        assert result["agent_lifecycle"]["strictDone"] is (expected == "normal_completion")
-        expected_marker = (
-            expected == "normal_completion"
-            or (final_text == "DONE" and end_reason is None)
-        )
+        assert result["agent_lifecycle"]["strictDone"] is expected_strict_done
         assert result["agent_lifecycle"]["done_marker"] is expected_marker
 
 
@@ -397,7 +399,7 @@ def test_roadmap_hermes_done_uses_final_parent_continuation(tmp_path):
             [
                 (1, "parent", "assistant", "DONE", None, "stop"),
                 (2, "child", "assistant", "DONE", None, "stop"),
-                (3, "continuation", "assistant", "Still working", None, "stop"),
+                (3, "continuation", "assistant", "   ", None, "stop"),
             ],
         )
     sessions = [
@@ -416,12 +418,23 @@ def test_roadmap_hermes_done_uses_final_parent_continuation(tmp_path):
     assert evidence["completion_error"]
     with sqlite3.connect(state / "state.db") as db:
         db.execute(
+            "UPDATE messages SET content = 'Still working' WHERE session_id = 'continuation'"
+        )
+    evidence = RoadmapBenchHermesCondition._read_terminal_assistant_evidence(
+        tmp_path, sessions
+    )
+    assert evidence["completion_error"] is None
+    assert evidence["done_marker"] is False
+    assert evidence["terminal_evidence"] == "hermes_state_final_assistant_stop"
+    with sqlite3.connect(state / "state.db") as db:
+        db.execute(
             "UPDATE messages SET content = 'DONE' WHERE session_id = 'continuation'"
         )
     evidence = RoadmapBenchHermesCondition._read_terminal_assistant_evidence(
         tmp_path, sessions
     )
     assert evidence["completion_error"] is None
+    assert evidence["done_marker"] is True
 
 
 def test_roadmap_hermes_events_feed_shared_trajectory_report(tmp_path):

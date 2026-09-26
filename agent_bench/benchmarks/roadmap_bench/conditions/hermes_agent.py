@@ -85,7 +85,8 @@ class RoadmapBenchHermesCondition(HermesAgentCondition):
             self._roadmap_quiescence["parentTerminalObservedNs"] = end_ns
         exit_code = result.get("exit_code")
         terminal = self._read_terminal_assistant_evidence(run_dir, sessions)
-        strict_done = terminal["completion_error"] is None
+        terminal_complete = terminal["completion_error"] is None
+        strict_done = terminal_complete and terminal["done_marker"]
         fatal_reason = terminal.get("fatal_reason")
         if exit_code == -1 or fatal_reason in {"timeout", "timed_out"}:
             outcome = "timeout"
@@ -95,7 +96,7 @@ class RoadmapBenchHermesCondition(HermesAgentCondition):
             outcome = "context_overflow"
         elif exit_code != 0 or fatal_reason:
             outcome = "runtime_error"
-        elif strict_done:
+        elif terminal_complete:
             outcome = "normal_completion"
         else:
             outcome = "blocked_incomplete"
@@ -117,6 +118,7 @@ class RoadmapBenchHermesCondition(HermesAgentCondition):
         self._event(
             trajectory, "agent_result", exit_code=exit_code,
             outcome=outcome, strict_done=strict_done,
+            terminal_evidence=terminal["terminal_evidence"],
         )
         parent_prompt = int(result.get("total_prompt_tokens") or 0)
         parent_completion = int(result.get("total_completion_tokens") or 0)
@@ -272,18 +274,33 @@ class RoadmapBenchHermesCondition(HermesAgentCondition):
             evidence["completion_error"] = (
                 "Hermes final assistant turn still contains tool calls"
             )
-        elif stop_reason not in {"stop", "completed", "complete", "done"}:
+        elif stop_reason not in {"stop", "completed", "complete", "done", "length"}:
             evidence["completion_error"] = (
                 f"Hermes final assistant stop reason is {stop_reason or 'missing'}"
             )
-        elif not done_marker:
+        elif done_marker:
+            evidence["completion_error"] = None
+            evidence["terminal_evidence"] = (
+                "hermes_state_final_assistant_explicit_done"
+            )
+        elif stop_reason == "length":
             evidence["completion_error"] = (
-                "Hermes final assistant turn did not explicitly declare DONE"
+                "Hermes final assistant turn was length-truncated without DONE"
+            )
+            evidence["terminal_evidence"] = (
+                "hermes_state_final_assistant_incomplete_length"
+            )
+        elif not str(content or "").strip():
+            evidence["completion_error"] = (
+                "Hermes final assistant stop was empty without DONE"
+            )
+            evidence["terminal_evidence"] = (
+                "hermes_state_final_assistant_empty_stop"
             )
         else:
             evidence["completion_error"] = None
             evidence["terminal_evidence"] = (
-                "hermes_state_final_assistant_explicit_done"
+                "hermes_state_final_assistant_stop"
             )
         return evidence
 
