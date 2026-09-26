@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from scripts import analyze_roadmap_runs as analyze
 from scripts import compare_roadmap_runs as compare
 
 
@@ -68,6 +69,16 @@ def test_compare_defaults_to_scratch_run_store(tmp_path, monkeypatch):
     monkeypatch.setenv("SCRATCH", str(scratch))
 
     assert Path(compare.default_runs_root()) == runs_root
+
+
+def test_single_arm_analyzer_defaults_to_scratch_run_store(tmp_path, monkeypatch):
+    scratch = tmp_path / "scratch"
+    runs_root = scratch / "agent-bench" / "runs"
+    runs_root.mkdir(parents=True)
+    monkeypatch.delenv("AB_RUNS_ROOT", raising=False)
+    monkeypatch.setenv("SCRATCH", str(scratch))
+
+    assert Path(analyze._parse_args(["12345678.pbs101"]).runs_root) == runs_root
 
 
 def test_compare_reports_job_and_prefers_resolved_run_artifacts(

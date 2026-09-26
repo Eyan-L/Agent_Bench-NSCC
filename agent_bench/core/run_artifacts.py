@@ -41,6 +41,25 @@ MINIMUM_ARTIFACTS = (
     "verdict.json",
 )
 
+HERMES_MINIMUM_ARTIFACTS = (
+    "manifest.json",
+    "steps.jsonl",
+    "spans.jsonl",
+    "spans_timeline.html",
+    "trajectory.jsonl",
+    "runtime_observability.json",
+    "token_accounting.json",
+    "util.jsonl",
+    "hermes_sessions.json",
+    "hermes_events.jsonl",
+    "hermes_state/sessions.jsonl",
+    "hermes_state/sessions",
+    "hermes_state/state.db",
+    "hermes_stdout.log",
+    "candidate.patch",
+    "verdict.json",
+)
+
 _MINIMUM_ARTIFACT_MANIFEST_FIELDS = {
     "steps.jsonl": {"step_trace_path"},
     "spans.jsonl": {"telemetry_path"},
@@ -208,7 +227,21 @@ def prepare_bundle_dir(
 def _artifact_category(relative_path: Path) -> str:
     if relative_path.parts and relative_path.parts[0] == "conversation":
         return BUNDLE_SUBDIRS[0]
+    if relative_path.name == "hermes_sessions.json":
+        return BUNDLE_SUBDIRS[0]
+    if relative_path.parts and relative_path.parts[0] == "hermes_state":
+        if len(relative_path.parts) > 1 and (
+            relative_path.parts[1] == "sessions"
+            or relative_path.parts[1] in {
+                "sessions.jsonl", "state.db", "state.db-shm", "state.db-wal"
+            }
+        ):
+            return BUNDLE_SUBDIRS[0]
+        if relative_path.name == "events.jsonl":
+            return BUNDLE_SUBDIRS[1]
     name = relative_path.name
+    if name == "hermes_events.jsonl":
+        return BUNDLE_SUBDIRS[1]
     if name in _TIMELINE_NAMES:
         return BUNDLE_SUBDIRS[1]
     if name in _FINAL_NAMES or "verifier" in name.lower():
@@ -1075,9 +1108,14 @@ def _append_missing_minimum_entries(
         for item in entries
         for field in item.get("manifest_fields") or []
     }
-    for relative in MINIMUM_ARTIFACTS:
-        if relative == "conversation":
-            if any(path == "conversation" or path.startswith("conversation/") for path in present):
+    is_hermes = any(
+        (run_dir / name).exists()
+        for name in ("hermes_state", "hermes_sessions.json", "hermes_stdout.log")
+    )
+    minimum_artifacts = HERMES_MINIMUM_ARTIFACTS if is_hermes else MINIMUM_ARTIFACTS
+    for relative in minimum_artifacts:
+        if relative in {"conversation", "hermes_state/sessions"}:
+            if any(path == relative or path.startswith(f"{relative}/") for path in present):
                 continue
         elif (
             relative in present
@@ -1255,7 +1293,10 @@ def _render_conversation_index(
     links = []
     for item in entries:
         relative = str(item.get("bundle_path") or "")
-        if item.get("status") != "copied" or "/conversation/" not in f"/{relative}":
+        if (
+            item.get("status") != "copied"
+            or not relative.startswith(f"{BUNDLE_SUBDIRS[0]}/")
+        ):
             continue
         href = _relative_href(index_path.relative_to(bundle_dir), relative)
         links.append(
@@ -1429,6 +1470,9 @@ def export_run_artifacts(
         "execution_log": _copied_artifact_link(
             entries,
             fallback_names=("openclaw_gateway.log",),
+        ) or _copied_artifact_link(
+            entries,
+            fallback_names=("hermes_stdout.log",),
         ),
         "candidate": _copied_artifact_link(
             entries,

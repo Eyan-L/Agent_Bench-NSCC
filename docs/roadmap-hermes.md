@@ -79,9 +79,28 @@ their lifetimes), `trajectory.jsonl`, resource and OTel traces,
 result. It stops the Hermes runtime and bridge, restarts the task container,
 then freezes the candidate before verifier files are introduced.
 
-The existing `scripts/analyze_roadmap_runs.py` can read the resulting Roadmap
-manifest and trajectory. Token totals use the sum of Hermes session counters
-when its state database is available; otherwise `token_accounting.json` marks
-the event fallback as parent only. The pinned event patch instruments the
-parent agent, so child model calls lack individual request latency. The full
-session export and state database are retained in `hermes_state/` for review.
+Use the Hermes Roadmap entry points to create portable reports. A single arm
+accepts one or more PBS IDs without a counterpart:
+
+```bash
+python3 scripts/analyze_roadmap_hermes_runs.py 25560913.pbs101 \
+  --arm subagent --name roadmap-hermes-smoke
+python3 scripts/analyze_roadmap_hermes_runs.py <single-agent-pbs-job...> \
+  --arm single-agent --name roadmap-hermes-single
+python3 scripts/compare_roadmap_hermes_runs.py \
+  --subagent <subagent-pbs-jobs...> \
+  --single-agent <single-agent-pbs-jobs...> \
+  --name roadmap-hermes-paired
+```
+
+Both commands reuse the Roadmap selection and measurement policy. PBS lookup
+defaults to the repository's `runs/` directory, where the Hermes
+smoke and report20 experiments write their output; use `--runs-root` if output
+is stored elsewhere. The bundle stores Hermes session snapshots,
+`sessions.jsonl`, `state.db`, and
+`hermes_sessions.json` under durable session records; model/tool events,
+execution logs, candidate, verifier, and job evidence are indexed separately.
+Token totals use the sum of Hermes session counters when its state database is
+available; otherwise `token_accounting.json` marks the event fallback as parent
+only. The pinned event patch instruments the parent agent, so child model calls
+lack individual request latency.

@@ -37,7 +37,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=("subagent", "single-agent"),
         default="subagent",
     )
-    parser.add_argument("--runs-root", default="runs")
+    parser.add_argument("--runs-root", default=base.default_runs_root())
     parser.add_argument("--output-dir", default="reports/roadmap")
     parser.add_argument("--name")
     parser.add_argument(
@@ -465,9 +465,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         runs_root=runs_root,
     )
     records, duplicates = base.select_best_records(raw_records)
-    rows = _task_rows(records)
-    summary = base.summarize_arm(records)
-    details = _single_arm_details(rows)
     duplicate_count = sum(len(group) - 1 for group in duplicates.values())
 
     basename = base._safe_name(args.name or _default_name(records, args.arm))
@@ -476,6 +473,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         basename,
         source_dirs=base._impl._artifact_source_dirs(records),
     )
+    copied_index, shared_index = base._impl._copy_selected_task_artifacts(
+        records, bundle_dir
+    )
+    rows = _task_rows(records)
+    summary = base.summarize_arm(records)
+    details = _single_arm_details(rows)
     figure_paths: list[Path] = []
     if not args.no_plots:
         figure_paths = generate_single_arm_plots(
@@ -487,9 +490,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     figure_names = [str(path.relative_to(bundle_dir)) for path in figure_paths]
 
-    copied_index, shared_index = base._impl._copy_selected_task_artifacts(
-        records, bundle_dir
-    )
     artifact_index_path = bundle_dir / f"{basename}-artifact-index.json"
 
     report = {

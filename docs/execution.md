@@ -127,6 +127,20 @@ files are not rewritten. If `spans_timeline.html` was not collected but valid
 to create a viewer in the bundle. The report never changes the source run and
 rejects output paths that overlap it.
 
+For a Roadmap PBS job with only one experiment arm, use the single-arm analyzer.
+Either arm accepts one or more PBS job IDs; no paired run is required:
+
+```bash
+python3 scripts/analyze_roadmap_runs.py <subagent-pbs-job...> \
+  --arm subagent --name roadmap-subagent-analysis
+python3 scripts/analyze_roadmap_runs.py <single-agent-pbs-job...> \
+  --arm single-agent --name roadmap-single-agent-analysis
+```
+
+It writes the same five artifact groups, a report, per-task CSV, trajectory
+index, and available single-arm figures below `reports/roadmap/<name>/`.
+`--runs-root` defaults to `$SCRATCH/agent-bench/runs` on NSCC.
+
 Roadmap paired comparison uses the same exporter:
 
 ```bash

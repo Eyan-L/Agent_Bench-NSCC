@@ -9,6 +9,9 @@ import pytest
 
 from agent_bench.core import run_artifacts
 from agent_bench.core.commands import analyze_main
+from scripts import analyze_roadmap_hermes_runs as hermes_analyze
+from scripts import analyze_roadmap_runs as roadmap_analyze
+from scripts import compare_roadmap_hermes_runs as hermes_compare
 from scripts import compare_roadmap_runs as compare
 
 
@@ -534,6 +537,130 @@ def test_analyze_cli_remains_compatible_and_exports_bundle(tmp_path, capsys):
     assert indexed == actual
     assert all(item["size_bytes"] is not None for item in catalog["bundle_files"])
     assert all(item["sha256"] for item in catalog["bundle_files"])
+
+
+@pytest.mark.parametrize("arm", ("subagent", "single-agent"))
+def test_roadmap_single_arm_analysis_links_exported_openclaw_artifacts(
+    tmp_path, capsys, arm
+):
+    run = _make_run(tmp_path, child_count=1 if arm == "subagent" else 0)
+    output = tmp_path / "roadmap-reports"
+
+    assert roadmap_analyze.main(
+        [
+            str(run),
+            "--arm", arm,
+            "--runs-root", str(tmp_path),
+            "--output-dir", str(output),
+            "--name", "one-smoke",
+            "--strict-trajectory",
+            "--no-plots",
+        ]
+    ) == 0
+    capsys.readouterr()
+
+    bundle = output / "one-smoke"
+    report = json.loads((bundle / "one-smoke.json").read_text())
+    index = json.loads((bundle / "one-smoke-artifact-index.json").read_text())
+    links = report["tasks"][0]["artifact_links"]
+    assert report["mode"] == "single-arm"
+    assert report["arm"] == arm
+    assert report["artifact_bundle"]["complete_run_count"] == 1
+    assert links == index["runs"][0]["links"]
+    assert all((bundle / target).is_file() for target in links.values() if target)
+    markdown = (bundle / "one-smoke.md").read_text()
+    assert "view: not collected" not in markdown
+    assert links["conversation"] in markdown
+    assert links["candidate"] in markdown
+
+
+def _make_hermes_run(root: Path, *, child_count: int) -> Path:
+    run = root / ("subagent" if child_count else "single-agent")
+    run.mkdir(parents=True)
+    _write_json(run / "manifest.json", {
+        "instance_id": "hermes-task",
+        "seed": 42,
+        "run_id": run.name,
+        "status": "FAIL",
+        "agent_execution_outcome": "normal_completion",
+        "benchmark_valid": True,
+        "reward": 0.5,
+        "test_pass_rate": 0.5,
+        "agent_execution_seconds": 12.5,
+        "runtime_observability_path": "runtime_observability.json",
+        "trajectory_path": "trajectory.jsonl",
+    })
+    _write_json(run / "runtime_observability.json", {
+        "materialized_child_session_count": child_count,
+        "child_session_count": child_count,
+    })
+    _write_json(run / "verdict.json", {"status": "FAIL", "reward": 0.5})
+    _write_json(run / "hermes_sessions.json", {"sessions": []})
+    _write_json(run / "token_accounting.json", {"prompt_tokens": 10})
+    for name, content in {
+        "steps.jsonl": b'{"step_type":"agent"}\n',
+        "spans.jsonl": b'{"name":"hermes.model.call"}\n',
+        "spans_timeline.html": b"<html>timeline</html>\n",
+        "trajectory.jsonl": b'{"event_type":"tool_call"}\n',
+        "util.jsonl": b'{"_meta":true}\n',
+        "hermes_events.jsonl": b'{"type":"tool.call"}\n',
+        "hermes_stdout.log": b"DONE\n",
+        "hermes_state/sessions.jsonl": b'{"id":"parent"}\n',
+        "hermes_state/sessions/session_parent.json": b'{"messages":[]}\n',
+        "hermes_state/state.db": b"durable-state",
+        "hermes_state/events.jsonl": b'{"type":"model.usage"}\n',
+        "hermes_state/exec-bridge.log": b"bridge\n",
+        "candidate.patch": b"diff --git a/a b/a\n",
+    }.items():
+        path = run / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    return run
+
+
+def test_hermes_single_arm_and_paired_reports_export_durable_sessions(
+    tmp_path, capsys
+):
+    subagent = _make_hermes_run(tmp_path, child_count=1)
+    single_agent = _make_hermes_run(tmp_path, child_count=0)
+    output = tmp_path / "reports"
+
+    assert hermes_analyze.main([
+        str(subagent), "--output-dir", str(output), "--name", "hermes-one",
+        "--no-plots", "--strict-trajectory",
+    ]) == 0
+    capsys.readouterr()
+    bundle = output / "hermes-one"
+    report = json.loads((bundle / "hermes-one.json").read_text())
+    index = json.loads((bundle / "hermes-one-artifact-index.json").read_text())
+    links = report["tasks"][0]["artifact_links"]
+    assert report["artifact_bundle"]["complete_run_count"] == 1
+    assert links == index["runs"][0]["links"]
+    assert links["execution_log"].endswith("hermes_stdout.log")
+    assert (bundle / links["conversation"]).is_file()
+    durable = bundle / "01_durable_session_records" / "subagent" / "hermes-task__seed42"
+    assert (durable / "hermes_state/state.db").read_bytes() == b"durable-state"
+    assert (durable / "hermes_state/sessions/session_parent.json").is_file()
+    assert (durable / "hermes_sessions.json").is_file()
+    conversation_index = (bundle / links["conversation"]).read_text()
+    assert "session_parent.json" in conversation_index
+    assert "state.db" in conversation_index
+    assert not any(
+        item["status"] == "not_collected" and "openclaw" in item["source_path"]
+        for item in index["runs"][0]["artifacts"]
+    )
+
+    assert hermes_compare.main([
+        "--subagent", str(subagent),
+        "--single-agent", str(single_agent),
+        "--output-dir", str(output), "--name", "hermes-paired",
+        "--no-plots", "--bootstrap-samples", "100",
+    ]) == 0
+    capsys.readouterr()
+    paired = json.loads((output / "hermes-paired/hermes-paired.json").read_text())
+    assert paired["mode"] == "comparison"
+    assert paired["paired"]["paired_task_count"] == 1
+    assert paired["artifact_bundle"]["complete_run_count"] == 2
 
 
 def test_output_overlap_is_rejected_before_source_changes(tmp_path):
