@@ -1,0 +1,21 @@
+--- a/hermes_cli/oneshot.py
++++ b/hermes_cli/oneshot.py
+@@ -687,3 +687,10 @@
++    # AB_HARNESS_HERMES_PATCH_ONESHOT_BUDGET_BEGIN
++    # -z bypasses the interactive CLI, so pass its configured turn budget
++    # directly to AIAgent instead of accepting AIAgent's default of 90.
++    max_iterations = int((cfg.get("agent") or {}).get("max_turns") or 90)
++    if max_iterations <= 0:
++        raise ValueError("agent.max_turns must be positive")
++    # AB_HARNESS_HERMES_PATCH_ONESHOT_BUDGET_END
+     agent = AIAgent(
+         api_key=runtime.get("api_key"),
+         base_url=runtime.get("base_url"),
+@@ -690,6 +697,7 @@
+         provider=runtime.get("provider"),
+         api_mode=runtime.get("api_mode"),
+         model=effective_model,
++        max_iterations=max_iterations,
+         enabled_toolsets=toolsets_list,
+         quiet_mode=True,
+         platform="cli",

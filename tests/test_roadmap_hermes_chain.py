@@ -13,6 +13,7 @@ from agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent import (
     RoadmapBenchOpenClawCondition,
 )
 from agent_bench.benchmarks.roadmap_bench.hermes.app import RoadmapBenchHermesHarness
+from agent_bench.benchmarks.swebench.conditions.hermes_agent import HermesAgentCondition
 from agent_bench.benchmarks.terminal_bench.app import _seed_workspace_helpers
 from agent_bench.deployments.containers.base import ContainerHandle, ContainerSpec
 from agent_bench.deployments.pbs.stages import (
@@ -20,6 +21,7 @@ from agent_bench.deployments.pbs.stages import (
     _hermes_runtime_commands,
 )
 from scripts.compare_roadmap_runs_impl import inspect_trajectory
+from agent_bench.runtime.driver import _merge_agent_completion_into_verdict
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -279,6 +281,8 @@ def test_roadmap_hermes_renders_local_model_config(tmp_path, monkeypatch):
     assert 'base_url: "http://127.0.0.1:30000/v1"' in config
     assert 'cwd: "/app"' in config
     assert "max_turns: 600" in config
+    assert "max_iterations: 600" in config
+    assert "child_timeout_seconds: 7200" in config
     assert "max_concurrent_children: 4" in config
     assert "    - delegation" in config
     assert RoadmapBenchHermesCondition.toolsets.endswith(",delegation")
@@ -288,6 +292,55 @@ def test_roadmap_hermes_renders_local_model_config(tmp_path, monkeypatch):
     _seed_workspace_helpers(workspace, {"instruction": "build roadmap"}, "/app")
     assert "delegate_task" in (workspace / "AGENTS.md").read_text()
     assert "roadmap" in (workspace / "BOOTSTRAP.md").read_text().lower()
+
+
+def test_roadmap_hermes_requires_strict_done_for_normal_completion(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        RoadmapBenchHermesCondition, "_capture_workspace_baseline",
+        lambda *_args: {"git_head": "baseline"},
+    )
+    monkeypatch.setattr(
+        RoadmapBenchHermesCondition, "_read_session_ledger",
+        staticmethod(lambda _run_dir: []),
+    )
+    monkeypatch.setattr(
+        RoadmapBenchHermesCondition, "_write_runtime_observability",
+        staticmethod(lambda _run_dir, _sessions: None),
+    )
+    monkeypatch.setattr(
+        RoadmapBenchHermesCondition, "_append_hermes_timeline",
+        staticmethod(lambda _run_dir, _trajectory, _sessions: None),
+    )
+    response = ""
+
+    def fake_run(_self, _instance, run_dir, *_args):
+        (run_dir / "steps.jsonl").write_text(json.dumps({
+            "start_ts": 1_000_000_000, "end_ts": 2_000_000_000,
+        }) + "\n")
+        if response:
+            (run_dir / "hermes_stdout.log").write_text(response)
+        return {"exit_code": 0, "total_prompt_tokens": 0, "total_completion_tokens": 0}
+
+    monkeypatch.setattr(HermesAgentCondition, "run", fake_run)
+    for index, (response, expected) in enumerate((
+        ("DONE\n", "normal_completion"),
+        ("Summary of work\nDONE", "blocked_incomplete"),
+        ("Let me continue <tool_call>", "blocked_incomplete"),
+        ("", "blocked_incomplete"),
+    )):
+        run_dir = tmp_path / str(index)
+        run_dir.mkdir()
+        condition = RoadmapBenchHermesCondition.__new__(RoadmapBenchHermesCondition)
+        result = condition.run(
+            {"instance_id": "task"}, run_dir, 42, "/app", "agent", {}
+        )
+        verdict = _merge_agent_completion_into_verdict(
+            {"status": "FAIL", "reward": 0.25}, result
+        )
+        assert result["agent_execution_outcome"] == expected
+        assert verdict["agent_execution_outcome"] == expected
+        assert verdict["reward"] == 0.25
+        assert result["agent_lifecycle"]["strictDone"] is (expected == "normal_completion")
 
 
 def test_roadmap_hermes_events_feed_shared_trajectory_report(tmp_path):

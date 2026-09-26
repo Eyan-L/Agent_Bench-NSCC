@@ -53,6 +53,10 @@ class RoadmapBenchHermesHarness(TerminalBenchOpenClawHarness):
             raise ValueError("Roadmap Hermes requires a Hermes harness profile")
         model, _serving = load_active_model_and_serving(repo_root=str(repo_root))
         hm = profile.get("hermes") or {}
+        agent_limits = ((profile.get("conditions") or [{}])[0].get("agent") or {})
+        max_turns = int((hm.get("run") or {}).get("max_turns", 600))
+        if max_turns != int(agent_limits.get("max_steps", max_turns)):
+            raise ValueError("Hermes max_turns must match Roadmap agent max_steps")
         state = self.state_base / run_id
         if state.exists():
             _force_rmtree(state)
@@ -71,7 +75,8 @@ class RoadmapBenchHermesHarness(TerminalBenchOpenClawHarness):
             "TEMPERATURE": str(model.temperature),
             "AB_MODEL_MAX_OUTPUT_TOKENS": str(model.max_tokens),
             "CONTEXT_LENGTH": str(model.context_window),
-            "MAX_TURNS": str((hm.get("run") or {}).get("max_turns", 600)),
+            "MAX_TURNS": str(max_turns),
+            "MAX_TIME_SECONDS": str(agent_limits.get("max_time_seconds", 7200)),
             "TERMINAL_TIMEOUT": str((hm.get("run") or {}).get("terminal_timeout", 180)),
             "TERMINAL_CWD": task_workspace,
             "SANDBOX_IMAGE": docker_image,

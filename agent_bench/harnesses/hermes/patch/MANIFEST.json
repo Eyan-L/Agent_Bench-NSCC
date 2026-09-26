@@ -27,6 +27,14 @@
       ],
       "idempotent_marker": "AB_HARNESS_HERMES_PATCH_TELEMETRY_BEGIN",
       "summary": "emit Agent_Bench model usage/tool-call events from Hermes oneshot and coerce JSON-stringified compound tool args"
+    },
+    {
+      "file": "hermes-oneshot-budget.patch",
+      "target_paths": [
+        "hermes_cli/oneshot.py"
+      ],
+      "idempotent_marker": "AB_HARNESS_HERMES_PATCH_ONESHOT_BUDGET_BEGIN",
+      "summary": "pass agent.max_turns to the Hermes oneshot AIAgent instead of falling back to 90"
     }
   ]
 }

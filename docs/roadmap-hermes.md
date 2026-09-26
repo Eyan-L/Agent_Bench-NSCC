@@ -18,12 +18,22 @@ telemetry patches, converts the image to a SIF, and checks patch status.
 cd ~/Agent_Bench
 bash scripts/build_roadmap_hermes_sif_local.sh
 scp dist/hermes_roadmap_v2026.5.16.sif \
-  nscc:/scratch/users/ntu/n2602695/sif_images/
+  nscc:/scratch/users/ntu/n2602695/sif_images/hermes_roadmap_v2026.5.16.sif.incoming
+ssh nscc 'module load singularity/4.3.1 && bash /home/users/ntu/n2602695/Agent_Bench/scripts/install_roadmap_hermes_sif_nscc.sh'
 ```
 
 The PBS image preparation stage checks the uploaded file before launching the
 agent. It does not pull or rebuild the Roadmap Hermes SIF on NSCC. The expected
 path is `/scratch/users/ntu/n2602695/sif_images/hermes_roadmap_v2026.5.16.sif`.
+The install script verifies the incoming SIF, preserves the old SIF under a
+`.back` name, then atomically renames the new SIF to the unchanged path.
+The budget patch makes oneshot honor `agent.max_turns`; the original SIF
+silently used Hermes' 90-iteration default. Parent and delegated agents now
+use the Roadmap profile's 600-iteration cap, matching OpenClaw's configured
+`max_steps`; delegated agents share the task's 7200-second wall-clock budget.
+A run counts as normal completion only when oneshot exits 0 and
+its entire final response is `DONE`; other exit-0 responses remain scored
+diagnostically but are excluded from normal-completion comparisons.
 
 ## Smoke configuration
 

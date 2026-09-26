@@ -82,11 +82,34 @@ class RoadmapBenchHermesCondition(HermesAgentCondition):
         if isinstance(end_ns, int) and isinstance(getattr(self, "_roadmap_quiescence", None), dict):
             self._roadmap_quiescence["parentTerminalObservedNs"] = end_ns
         exit_code = result.get("exit_code")
+        final_response_path = run_dir / "hermes_stdout.log"
+        final_response = (
+            final_response_path.read_text(errors="replace")
+            if final_response_path.is_file() else ""
+        )
+        strict_done = final_response.strip() == "DONE"
         outcome = (
-            "normal_completion" if exit_code == 0 else
+            "normal_completion" if exit_code == 0 and strict_done else
+            "blocked_incomplete" if exit_code == 0 else
             "timeout" if exit_code == -1 else "runtime_error"
         )
-        self._event(trajectory, "agent_result", exit_code=exit_code, outcome=outcome)
+        completion_error = (
+            None if outcome == "normal_completion" else
+            "Hermes exited 0 without strict DONE final response"
+            if exit_code == 0 else f"Hermes exited with code {exit_code}"
+        )
+        lifecycle = dict(getattr(self, "_roadmap_quiescence", {}))
+        lifecycle.update({
+            "strictDone": strict_done,
+            "terminalEvidence": (
+                "hermes_oneshot_stdout_strict_done" if strict_done
+                else "hermes_oneshot_stdout_without_strict_done"
+            ),
+        })
+        self._event(
+            trajectory, "agent_result", exit_code=exit_code,
+            outcome=outcome, strict_done=strict_done,
+        )
         parent_prompt = int(result.get("total_prompt_tokens") or 0)
         parent_completion = int(result.get("total_completion_tokens") or 0)
         session_prompt = sum(int(s["input_tokens"] or 0) for s in sessions)
@@ -108,8 +131,9 @@ class RoadmapBenchHermesCondition(HermesAgentCondition):
             "harness": "hermes",
             "agent_runtime_mode": "hermes",
             "agent_execution_outcome": outcome,
-            "agent_completion_error": None if exit_code == 0 else f"Hermes exited with code {exit_code}",
-            "agent_lifecycle": getattr(self, "_roadmap_quiescence", {}),
+            "agent_completion_status": outcome,
+            "agent_completion_error": completion_error,
+            "agent_lifecycle": lifecycle,
             "agent_execution_seconds": (
                 (quiesced_ns - start_ns) / 1e9
                 if isinstance(start_ns, int) and isinstance(quiesced_ns, int) else None
