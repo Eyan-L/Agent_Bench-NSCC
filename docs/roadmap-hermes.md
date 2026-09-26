@@ -4,8 +4,9 @@ This harness uses the existing Roadmap task dataset, Git baseline, task SIF,
 SGLang TP4 service, isolated verifier, and Roadmap result schema. Hermes runs
 in a separate patched SIF and reaches the task container through the existing
 exec bridge. The existing OpenClaw experiment results are unchanged.
-The Roadmap profile enables Hermes' pinned `delegation` toolset with up to four
-parallel children; the parent must integrate their results before completion.
+The Roadmap profile enables Hermes' pinned `delegation` toolset with up to
+sixteen parallel children; the parent must integrate their results before
+completion.
 
 ## Build and upload the runtime
 
@@ -31,9 +32,13 @@ The budget patch makes oneshot honor `agent.max_turns`; the original SIF
 silently used Hermes' 90-iteration default. Parent and delegated agents now
 use the Roadmap profile's 600-iteration cap, matching OpenClaw's configured
 `max_steps`; delegated agents share the task's 7200-second wall-clock budget.
-A run counts as normal completion only when oneshot exits 0 and
-its entire final response is `DONE`; other exit-0 responses remain scored
-diagnostically but are excluded from normal-completion comparisons.
+A run counts as normal completion only when oneshot exits 0 and the archived
+final parent assistant turn ends normally, contains an explicit `DONE` line,
+and has no pending tool call or fatal session end reason. This follows
+OpenClaw's final-turn `DONE` marker check. Hermes reads its durable session
+database because oneshot stdout can append runtime warnings after the model's
+final reply. Missing or incomplete final-turn evidence stays outside
+normal-completion comparisons; verifier reward remains a separate measurement.
 
 ## Smoke configuration
 

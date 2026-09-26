@@ -4,6 +4,8 @@ terminal_bench:
   agent_assets_dir: agent_bench/benchmarks/roadmap_bench/hermes/agents
   workspace_asset_files:
   - AGENTS.md
+  - IDENTITY.md
+  - TOOLS.md
   - BOOTSTRAP.md
 telemetry:
   otel:

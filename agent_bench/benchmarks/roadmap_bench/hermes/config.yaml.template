@@ -20,7 +20,7 @@ agent:
 delegation:
   max_iterations: $MAX_TURNS
   child_timeout_seconds: $MAX_TIME_SECONDS
-  max_concurrent_children: 4
+  max_concurrent_children: 16
   max_spawn_depth: 1
   subagent_auto_approve: true
 

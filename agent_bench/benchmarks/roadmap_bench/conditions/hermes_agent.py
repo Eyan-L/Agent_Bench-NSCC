@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import sqlite3
 import time
@@ -28,11 +29,12 @@ class RoadmapBenchHermesCondition(HermesAgentCondition):
 
     def _build_message(self, instance_data: Dict) -> str:
         return (
-            "Implement the complete multi-target roadmap in the current repository. "
-            "Read the repository and requirements, plan the dependent work, and "
-            "delegate bounded parallel tasks when independent workstreams exist. "
-            "Review and integrate each child result, then validate every target. "
-            "Reply DONE only after the implementation is complete.\n\n"
+            "Lead the implementation of this multi-target software roadmap in "
+            "the current repository. Inspect the codebase, identify target "
+            "workstreams and dependencies, coordinate parallel work where "
+            "appropriate, integrate the complete implementation, and validate "
+            "all roadmap requirements. Declare DONE only when the integrated "
+            "roadmap is complete.\n\n"
             f"Roadmap:\n{instance_data['instruction']}"
         )
 
@@ -82,29 +84,35 @@ class RoadmapBenchHermesCondition(HermesAgentCondition):
         if isinstance(end_ns, int) and isinstance(getattr(self, "_roadmap_quiescence", None), dict):
             self._roadmap_quiescence["parentTerminalObservedNs"] = end_ns
         exit_code = result.get("exit_code")
-        final_response_path = run_dir / "hermes_stdout.log"
-        final_response = (
-            final_response_path.read_text(errors="replace")
-            if final_response_path.is_file() else ""
-        )
-        strict_done = final_response.strip() == "DONE"
-        outcome = (
-            "normal_completion" if exit_code == 0 and strict_done else
-            "blocked_incomplete" if exit_code == 0 else
-            "timeout" if exit_code == -1 else "runtime_error"
-        )
-        completion_error = (
-            None if outcome == "normal_completion" else
-            "Hermes exited 0 without strict DONE final response"
-            if exit_code == 0 else f"Hermes exited with code {exit_code}"
-        )
+        terminal = self._read_terminal_assistant_evidence(run_dir, sessions)
+        strict_done = terminal["completion_error"] is None
+        fatal_reason = terminal.get("fatal_reason")
+        if exit_code == -1 or fatal_reason in {"timeout", "timed_out"}:
+            outcome = "timeout"
+        elif fatal_reason and RoadmapBenchOpenClawCondition._is_context_overflow_text(
+            fatal_reason
+        ):
+            outcome = "context_overflow"
+        elif exit_code != 0 or fatal_reason:
+            outcome = "runtime_error"
+        elif strict_done:
+            outcome = "normal_completion"
+        else:
+            outcome = "blocked_incomplete"
+        if outcome == "normal_completion":
+            completion_error = None
+        elif exit_code != 0:
+            completion_error = f"Hermes exited with code {exit_code}"
+        else:
+            completion_error = terminal["completion_error"]
         lifecycle = dict(getattr(self, "_roadmap_quiescence", {}))
         lifecycle.update({
             "strictDone": strict_done,
-            "terminalEvidence": (
-                "hermes_oneshot_stdout_strict_done" if strict_done
-                else "hermes_oneshot_stdout_without_strict_done"
-            ),
+            "done_marker": terminal["done_marker"],
+            "terminalEvidence": terminal["terminal_evidence"],
+            "finalAssistantSessionId": terminal.get("session_id"),
+            "finalAssistantMessageId": terminal.get("message_id"),
+            "finalAssistantStopReason": terminal.get("stop_reason"),
         })
         self._event(
             trajectory, "agent_result", exit_code=exit_code,
@@ -161,6 +169,123 @@ class RoadmapBenchHermesCondition(HermesAgentCondition):
             "total_completion_tokens": tokens["completion_tokens"],
         })
         return result
+
+    @staticmethod
+    def _read_terminal_assistant_evidence(
+        run_dir: Path, sessions: list[Dict],
+    ) -> Dict:
+        """Judge the final parent turn, as OpenClaw does, not decorated CLI stdout."""
+        evidence = {
+            "done_marker": False,
+            "terminal_evidence": "hermes_state_unavailable",
+            "completion_error": "Hermes final parent assistant turn is unavailable",
+        }
+        roots = [
+            item for item in sessions
+            if item.get("source") == "cli" and not item.get("parent_session_id")
+        ]
+        if len(roots) != 1:
+            evidence["completion_error"] = (
+                "Hermes has no unique root CLI session for final DONE validation"
+            )
+            return evidence
+
+        tip = roots[0]
+        seen = {str(tip["id"])}
+        while tip.get("end_reason") in {"compression", "branched"}:
+            ended = tip.get("ended_at")
+            continuations = [
+                item for item in sessions
+                if item.get("parent_session_id") == tip["id"]
+                and isinstance(ended, (int, float))
+                and isinstance(item.get("started_at"), (int, float))
+                and item["started_at"] >= ended
+            ]
+            if len(continuations) != 1:
+                evidence["completion_error"] = (
+                    "Hermes parent session has no unique final continuation"
+                )
+                return evidence
+            tip = continuations[0]
+            if str(tip["id"]) in seen:
+                evidence["completion_error"] = (
+                    "Hermes parent session continuation cycle"
+                )
+                return evidence
+            seen.add(str(tip["id"]))
+
+        evidence["session_id"] = str(tip["id"])
+        end_reason = str(tip.get("end_reason") or "").strip().lower()
+        if end_reason in {
+            "error", "failed", "timeout", "timed_out", "aborted",
+            "cancelled", "canceled", "killed",
+        } or RoadmapBenchOpenClawCondition._is_context_overflow_text(end_reason):
+            evidence["fatal_reason"] = end_reason
+            evidence["terminal_evidence"] = "hermes_state_parent_failure"
+            evidence["completion_error"] = (
+                f"Hermes parent session ended with {end_reason}"
+            )
+            return evidence
+
+        db_path = run_dir / "hermes_state" / "state.db"
+        if not db_path.is_file():
+            return evidence
+        uri = f"file:{quote(str(db_path), safe='/')}?mode=ro"
+        try:
+            with closing(sqlite3.connect(uri, uri=True, timeout=10)) as db:
+                row = db.execute(
+                    "SELECT id, role, content, tool_calls, finish_reason "
+                    "FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+                    (tip["id"],),
+                ).fetchone()
+        except sqlite3.Error:
+            logger.exception("Could not read Hermes final assistant turn from %s", db_path)
+            evidence["completion_error"] = (
+                "Hermes final parent assistant turn could not be read"
+            )
+            return evidence
+        if row is None:
+            evidence["completion_error"] = (
+                "Hermes final parent session contains no messages"
+            )
+            return evidence
+
+        message_id, role, content, tool_calls, finish_reason = row
+        stop_reason = str(finish_reason or "").strip().lower()
+        done_marker = bool(re.search(
+            r"(?im)^\s*DONE(?:\s*$|\b)", str(content or "")
+        )) if role == "assistant" else False
+        has_tool_calls = bool(tool_calls and str(tool_calls).strip() not in {
+            "[]", "null",
+        })
+        evidence.update({
+            "message_id": message_id,
+            "stop_reason": stop_reason,
+            "done_marker": done_marker,
+            "terminal_evidence": "hermes_state_final_parent_turn",
+        })
+        if role != "assistant":
+            evidence["completion_error"] = (
+                f"Hermes final parent turn is {role}, not assistant"
+            )
+        elif has_tool_calls:
+            evidence["completion_error"] = (
+                "Hermes final assistant turn still contains tool calls"
+            )
+        elif stop_reason not in {"stop", "completed", "complete", "done"}:
+            evidence["completion_error"] = (
+                f"Hermes final assistant stop reason is {stop_reason or 'missing'}"
+            )
+        elif not done_marker:
+            evidence["completion_error"] = (
+                "Hermes final assistant turn did not explicitly declare DONE"
+            )
+        else:
+            evidence["completion_error"] = None
+            evidence["terminal_evidence"] = (
+                "hermes_state_final_assistant_explicit_done"
+            )
+        return evidence
 
     def _capture_workspace_baseline(
         self, env_info: Dict, workspace_root: str

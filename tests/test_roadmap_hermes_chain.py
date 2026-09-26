@@ -283,7 +283,7 @@ def test_roadmap_hermes_renders_local_model_config(tmp_path, monkeypatch):
     assert "max_turns: 600" in config
     assert "max_iterations: 600" in config
     assert "child_timeout_seconds: 7200" in config
-    assert "max_concurrent_children: 4" in config
+    assert "max_concurrent_children: 16" in config
     assert "    - delegation" in config
     assert RoadmapBenchHermesCondition.toolsets.endswith(",delegation")
     assert RoadmapBenchHermesCondition.ignore_rules is False
@@ -292,16 +292,24 @@ def test_roadmap_hermes_renders_local_model_config(tmp_path, monkeypatch):
     _seed_workspace_helpers(workspace, {"instruction": "build roadmap"}, "/app")
     assert "delegate_task" in (workspace / "AGENTS.md").read_text()
     assert "roadmap" in (workspace / "BOOTSTRAP.md").read_text().lower()
+    for name in ("IDENTITY.md", "TOOLS.md"):
+        expected = (
+            root / "agent_bench/benchmarks/roadmap_bench/openclaw/agents" / name
+        ).read_text()
+        assert (workspace / name).read_text() == expected
+
+
+def test_roadmap_hermes_uses_openclaw_task_message():
+    instance = {"instruction": "Implement the roadmap"}
+    hermes_message = RoadmapBenchHermesCondition._build_message(None, instance)
+    openclaw_message = RoadmapBenchOpenClawCondition._build_message(None, instance)
+    assert hermes_message == openclaw_message
 
 
 def test_roadmap_hermes_requires_strict_done_for_normal_completion(tmp_path, monkeypatch):
     monkeypatch.setattr(
         RoadmapBenchHermesCondition, "_capture_workspace_baseline",
         lambda *_args: {"git_head": "baseline"},
-    )
-    monkeypatch.setattr(
-        RoadmapBenchHermesCondition, "_read_session_ledger",
-        staticmethod(lambda _run_dir: []),
     )
     monkeypatch.setattr(
         RoadmapBenchHermesCondition, "_write_runtime_observability",
@@ -312,6 +320,14 @@ def test_roadmap_hermes_requires_strict_done_for_normal_completion(tmp_path, mon
         staticmethod(lambda _run_dir, _trajectory, _sessions: None),
     )
     response = ""
+    end_reason = None
+    monkeypatch.setattr(
+        RoadmapBenchHermesCondition, "_read_session_ledger",
+        staticmethod(lambda _run_dir: [{
+            "id": "parent", "source": "cli", "parent_session_id": None,
+            "end_reason": end_reason, "input_tokens": 0, "output_tokens": 0,
+        }]),
+    )
 
     def fake_run(_self, _instance, run_dir, *_args):
         (run_dir / "steps.jsonl").write_text(json.dumps({
@@ -322,14 +338,34 @@ def test_roadmap_hermes_requires_strict_done_for_normal_completion(tmp_path, mon
         return {"exit_code": 0, "total_prompt_tokens": 0, "total_completion_tokens": 0}
 
     monkeypatch.setattr(HermesAgentCondition, "run", fake_run)
-    for index, (response, expected) in enumerate((
-        ("DONE\n", "normal_completion"),
-        ("Summary of work\nDONE", "blocked_incomplete"),
-        ("Let me continue <tool_call>", "blocked_incomplete"),
-        ("", "blocked_incomplete"),
+    for index, (response, final_text, finish_reason, tool_calls, end_reason, expected) in enumerate((
+        ("DONE\n", "DONE\n", "stop", None, None, "normal_completion"),
+        ("Summary of work\nDONE", "Summary of work\nDONE", "stop", None, None, "normal_completion"),
+        ("DONE\nexternal warning", "DONE", "stop", None, None, "normal_completion"),
+        ("DONE", "Still working", "stop", None, None, "blocked_incomplete"),
+        ("DONE", "DONE", "length", None, None, "blocked_incomplete"),
+        ("DONE", "DONE", "stop", '[{"id":"call-1"}]', None, "blocked_incomplete"),
+        ("DONE", "DONE", "stop", None, "error", "runtime_error"),
+        ("DONE", "DONE", "stop", None, "timed_out", "timeout"),
+        ("DONE", "DONE", "stop", None, "context_overflow", "context_overflow"),
+        ("DONE", "I mentioned DONE earlier", "stop", None, None, "blocked_incomplete"),
+        ("DONE", "DONEness", "stop", None, None, "blocked_incomplete"),
+        ("Let me continue <tool_call>", "Let me continue", "stop", None, None, "blocked_incomplete"),
+        ("", "", "stop", None, None, "blocked_incomplete"),
     )):
         run_dir = tmp_path / str(index)
         run_dir.mkdir()
+        state = run_dir / "hermes_state"
+        state.mkdir()
+        with sqlite3.connect(state / "state.db") as db:
+            db.execute(
+                "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, "
+                "role TEXT, content TEXT, tool_calls TEXT, finish_reason TEXT)"
+            )
+            db.execute(
+                "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)",
+                (1, "parent", "assistant", final_text, tool_calls, finish_reason),
+            )
         condition = RoadmapBenchHermesCondition.__new__(RoadmapBenchHermesCondition)
         result = condition.run(
             {"instance_id": "task"}, run_dir, 42, "/app", "agent", {}
@@ -341,6 +377,51 @@ def test_roadmap_hermes_requires_strict_done_for_normal_completion(tmp_path, mon
         assert verdict["agent_execution_outcome"] == expected
         assert verdict["reward"] == 0.25
         assert result["agent_lifecycle"]["strictDone"] is (expected == "normal_completion")
+        expected_marker = (
+            expected == "normal_completion"
+            or (final_text == "DONE" and end_reason is None)
+        )
+        assert result["agent_lifecycle"]["done_marker"] is expected_marker
+
+
+def test_roadmap_hermes_done_uses_final_parent_continuation(tmp_path):
+    state = tmp_path / "hermes_state"
+    state.mkdir()
+    with sqlite3.connect(state / "state.db") as db:
+        db.execute(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, "
+            "role TEXT, content TEXT, tool_calls TEXT, finish_reason TEXT)"
+        )
+        db.executemany(
+            "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (1, "parent", "assistant", "DONE", None, "stop"),
+                (2, "child", "assistant", "DONE", None, "stop"),
+                (3, "continuation", "assistant", "Still working", None, "stop"),
+            ],
+        )
+    sessions = [
+        {"id": "parent", "source": "cli", "parent_session_id": None,
+         "started_at": 1.0, "ended_at": 2.0, "end_reason": "compression"},
+        {"id": "child", "source": "delegation", "parent_session_id": "parent",
+         "started_at": 1.2, "ended_at": 1.9, "end_reason": "done"},
+        {"id": "continuation", "source": "cli", "parent_session_id": "parent",
+         "started_at": 2.1, "ended_at": None, "end_reason": None},
+    ]
+    evidence = RoadmapBenchHermesCondition._read_terminal_assistant_evidence(
+        tmp_path, sessions
+    )
+    assert evidence["session_id"] == "continuation"
+    assert evidence["done_marker"] is False
+    assert evidence["completion_error"]
+    with sqlite3.connect(state / "state.db") as db:
+        db.execute(
+            "UPDATE messages SET content = 'DONE' WHERE session_id = 'continuation'"
+        )
+    evidence = RoadmapBenchHermesCondition._read_terminal_assistant_evidence(
+        tmp_path, sessions
+    )
+    assert evidence["completion_error"] is None
 
 
 def test_roadmap_hermes_events_feed_shared_trajectory_report(tmp_path):
