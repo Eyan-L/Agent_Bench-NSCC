@@ -122,6 +122,10 @@ def test_pbs_render_job_uses_short_python_worker() -> None:
     assert "#PBS -N agent-bench-nscc_vllm" in script
     assert "#PBS -l select=1:ngpus=1" in script
     assert 'cd "${PBS_O_WORKDIR:-$PWD}"' in script
+    assert "module load singularity/4.3.1" in script
+    assert script.index("module load singularity/4.3.1") < script.index("python3 run.py")
+    assert 'export HF_HOME="${HF_HOME:-$SCRATCH/hf}"' in script
+    assert 'export SINGULARITYENV_HF_HOME="$HF_HOME"' in script
     assert 'AB_RUN_STAMP="$(TZ=Asia/Singapore date +%Y-%m-%d_%H-%M-%S)"' in script
     assert 'AB_JOB_SUFFIX="${PBS_JOBID//[^A-Za-z0-9._-]/_}"' in script
     assert 'AB_RUN_DIR="${AB_RUN_DIR:-${AB_EXPERIMENT_DIR:-$AB_EXPERIMENT_BASE/$AB_RUN_STAMP}}"' in script

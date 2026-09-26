@@ -15,6 +15,7 @@ from agent_bench.benchmarks.swebench.conditions.hermes_agent import HermesAgentC
 from agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent import (
     RoadmapBenchOpenClawCondition,
 )
+from agent_bench.deployments.containers.base import ContainerHandle
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +42,7 @@ class RoadmapBenchHermesCondition(HermesAgentCondition):
         env_info: Optional[Dict] = None,
     ) -> Dict:
         runtime_env = env_info if env_info is not None else {}
-        workspace = Path(str(runtime_env.get("workspace_host_path") or ""))
-        baseline = RoadmapBenchOpenClawCondition._capture_host_workspace_baseline(workspace)
+        baseline = self._capture_workspace_baseline(runtime_env, workspace_root)
         if not baseline or not baseline.get("git_head"):
             raise RuntimeError("Roadmap Hermes task Git baseline was not captured")
         runtime_env["roadmap_workspace_baseline"] = baseline
@@ -137,6 +137,21 @@ class RoadmapBenchHermesCondition(HermesAgentCondition):
             "total_completion_tokens": tokens["completion_tokens"],
         })
         return result
+
+    def _capture_workspace_baseline(
+        self, env_info: Dict, workspace_root: str
+    ) -> Optional[Dict]:
+        # Use the same task-runtime Git path as OpenClaw. NSCC compute nodes
+        # need not have host Git installed, while the task SIF already has it.
+        harness = env_info.get("_harness")
+        self.container = getattr(harness, "container", None)
+        baseline = RoadmapBenchOpenClawCondition._capture_task_workspace_baseline(
+            self, env_info, workspace_root
+        )
+        if baseline:
+            return baseline
+        workspace = Path(str(env_info.get("workspace_host_path") or ""))
+        return RoadmapBenchOpenClawCondition._capture_host_workspace_baseline(workspace)
 
     @staticmethod
     def _event(path: Path, event: str, **fields) -> None:
@@ -367,9 +382,29 @@ class RoadmapBenchHermesCondition(HermesAgentCondition):
         self._roadmap_quiesced_ns = time.time_ns()
         quiescence["workspaceQuiescedNs"] = self._roadmap_quiesced_ns
         self._roadmap_quiescence = quiescence
-        patch = RoadmapBenchOpenClawCondition._collect_workspace_patch(
-            workspace, str(self._roadmap_baseline["git_head"])
-        )
+        baseline_head = str(self._roadmap_baseline["git_head"])
+        self.container = getattr(harness, "container", None)
+        task_id = str(env_info.get("task_container_id") or "")
+        patch = None
+        if self.container is not None and task_id:
+            task_handle = ContainerHandle(
+                id=task_id,
+                name=str(env_info.get("task_container_name") or task_id),
+                backend=str(env_info.get("backend") or self.container.backend_id),
+            )
+            try:
+                patch = RoadmapBenchOpenClawCondition._collect_container_workspace_patch(
+                    self, task_handle, workspace_root, baseline_head
+                )
+            except Exception:  # noqa: BLE001 - preserve the OpenClaw host fallback
+                logger.exception(
+                    "Roadmap task-runtime patch extraction failed; "
+                    "trying host workspace"
+                )
+        if patch is None:
+            patch = RoadmapBenchOpenClawCondition._collect_workspace_patch(
+                workspace, baseline_head
+            )
         candidate = run_dir / "candidate_workspace"
         if candidate.exists():
             shutil.rmtree(candidate)

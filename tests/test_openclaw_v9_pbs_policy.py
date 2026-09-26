@@ -5,10 +5,29 @@ import pytest
 from agent_bench.core.spec import ConfigError
 from agent_bench.deployments.pbs.openclaw_v9_policy import (
     OPENCLAW_VERSION,
+    install_openclaw_v9_pbs_policy,
     openclaw_v9_runtime_defaults,
     preflight_openclaw_v9_candidate_for_harness,
     require_prebuilt_openclaw_v9_candidate,
 )
+
+
+def test_openclaw_v9_policy_preserves_roadmap_hermes_runtime(tmp_path: Path):
+    from agent_bench.deployments.pbs import stages
+
+    original_defaults = stages._agent_runtime_defaults
+    original_commands = stages._openclaw_runtime_commands
+    try:
+        install_openclaw_v9_pbs_policy()
+        defaults = stages._agent_runtime_defaults(
+            "hermes", str(Path.cwd()), str(tmp_path), roadmapbench=True
+        )
+        assert defaults["AB_AGENT_RUNTIME_SIF"].endswith(
+            "/hermes_roadmap_v2026.5.16.sif"
+        )
+    finally:
+        stages._agent_runtime_defaults = original_defaults
+        stages._openclaw_runtime_commands = original_commands
 
 
 def test_openclaw_v9_runtime_defaults_use_sealed_candidate_names(tmp_path: Path):

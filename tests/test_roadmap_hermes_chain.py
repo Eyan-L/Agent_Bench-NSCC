@@ -73,6 +73,74 @@ def test_roadmap_hermes_freezes_candidate_and_keeps_sessions(tmp_path):
     assert json.loads((run_dir / "candidate_metadata.json").read_text())["baseline"]["git_head"] == baseline["git_head"]
 
 
+def test_roadmap_hermes_uses_task_runtime_git_without_host_git(tmp_path, monkeypatch):
+    workspace = tmp_path / "app"
+    workspace.mkdir()
+    _git(workspace, "init", "-q")
+    _git(workspace, "config", "user.name", "Test")
+    _git(workspace, "config", "user.email", "test@example.invalid")
+    (workspace / "tracked.py").write_text("old\n")
+    _git(workspace, "add", "tracked.py")
+    _git(workspace, "commit", "-qm", "baseline")
+
+    class Container:
+        backend_id = "singularity"
+
+        def exec(self, handle, argv, **kwargs):
+            assert handle.name == "task"
+            return subprocess.run(
+                argv, cwd=kwargs.get("workdir"), capture_output=True, text=True,
+                check=False,
+            )
+
+    class Harness:
+        container = Container()
+
+        def exec_in_container(self, *_args, **_kwargs):
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        def quiesce_orphan_children(self, env):
+            env["roadmap_workspace_quiesced"] = True
+            return {"workspaceQuiesced": True, "taskRuntimeRestarted": True}
+
+    def host_git_unavailable(*_args):
+        raise AssertionError("host Git should not be needed")
+
+    monkeypatch.setattr(
+        RoadmapBenchOpenClawCondition,
+        "_capture_host_workspace_baseline",
+        staticmethod(host_git_unavailable),
+    )
+    monkeypatch.setattr(
+        RoadmapBenchOpenClawCondition,
+        "_collect_workspace_patch",
+        staticmethod(host_git_unavailable),
+    )
+    state = tmp_path / "state"
+    state.mkdir()
+    env = {
+        "_harness": Harness(),
+        "task_container_id": "task",
+        "task_container_name": "task",
+        "backend": "singularity",
+        "workspace_host_path": str(workspace),
+        "state_dir": str(state),
+    }
+    condition = RoadmapBenchHermesCondition.__new__(RoadmapBenchHermesCondition)
+    baseline = condition._capture_workspace_baseline(env, str(workspace))
+    assert baseline and baseline["git_head"] == _git(workspace, "rev-parse", "HEAD")
+    (workspace / "tracked.py").write_text("new\n")
+    (workspace / "created.py").write_text("created\n")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    condition._roadmap_run_dir = run_dir
+    condition._roadmap_baseline = baseline
+    patch = condition._collect_artifacts(env, "agent", str(workspace))
+    assert "+new" in patch and "created.py" in patch
+    assert (run_dir / "candidate_workspace" / "created.py").read_text() == "created\n"
+    assert json.loads((run_dir / "candidate_metadata.json").read_text())["baseline"]["git_head"] == baseline["git_head"]
+
+
 def test_roadmap_hermes_quiesces_agent_and_restarts_task():
     class Container:
         backend_id = "singularity"

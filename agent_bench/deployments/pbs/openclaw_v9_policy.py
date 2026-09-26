@@ -133,10 +133,14 @@ def install_openclaw_v9_pbs_policy() -> None:
 
     current_defaults = stages._agent_runtime_defaults
     if not getattr(current_defaults, "_openclaw_v9_default_policy", False):
-        def runtime_defaults(harness: str, repo_root: str, scratch: str):
+        def runtime_defaults(
+            harness: str, repo_root: str, scratch: str, *, roadmapbench: bool = False
+        ):
             if harness == "openclaw":
                 return openclaw_v9_runtime_defaults(repo_root, scratch)
-            return current_defaults(harness, repo_root, scratch)
+            return current_defaults(
+                harness, repo_root, scratch, roadmapbench=roadmapbench
+            )
 
         setattr(runtime_defaults, "_openclaw_v9_default_policy", True)
         stages._agent_runtime_defaults = runtime_defaults

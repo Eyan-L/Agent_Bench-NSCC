@@ -68,11 +68,28 @@ class PbsJobSpec:
         if self.resources.join_output:
             lines.append("#PBS -j oe")
         experiment_base = self.run_dir.parent
+        if self.site.upper() == "NSCC" and self.container_runtime == "singularity":
+            runtime_setup = [
+                "if ! command -v singularity >/dev/null 2>&1; then",
+                "    if ! type module >/dev/null 2>&1; then",
+                "        source /opt/cray/pe/modules/default/init/bash",
+                "    fi",
+                "    module load singularity/4.3.1",
+                "fi",
+                "command -v singularity >/dev/null 2>&1 || { echo 'singularity not on PATH' >&2; exit 1; }",
+                'export SCRATCH="${SCRATCH:-/scratch/users/ntu/${USER:?USER must be set}}"',
+                'export HF_HOME="${HF_HOME:-$SCRATCH/hf}"',
+                'export SINGULARITY_BINDPATH="${SINGULARITY_BINDPATH:-$SCRATCH:$SCRATCH}"',
+                'export SINGULARITYENV_HF_HOME="$HF_HOME"',
+            ]
+        else:
+            runtime_setup = []
         lines.extend(
             [
                 "",
                 "set -euo pipefail",
                 'cd "${PBS_O_WORKDIR:-$PWD}"',
+                *runtime_setup,
                 f"export AB_PBS_SITE={shlex.quote(self.site)}",
                 'if [[ -z "${AB_RUN_STAMP:-}" ]]; then',
                 '    AB_RUN_STAMP="$(TZ=Asia/Singapore date +%Y-%m-%d_%H-%M-%S)"',
