@@ -1,12 +1,9 @@
 # RoadmapBench with Hermes on NSCC
 
-This harness uses the existing Roadmap task dataset, Git baseline, task SIF,
-SGLang TP4 service, isolated verifier, and Roadmap result schema. Hermes runs
-in a separate patched SIF and reaches the task container through the existing
-exec bridge. The existing OpenClaw experiment results are unchanged.
-The Roadmap profile enables Hermes' pinned `delegation` toolset with up to
-sixteen parallel children; the parent must integrate their results before
-completion.
+Hermes uses the fixed RoadmapBench tasks and Git baselines, the existing task
+SIF and isolated verifier, and Qwen3.6-35B-A3B served by SGLang TP4. Its
+patched SIF reaches the task container through the exec bridge. The Roadmap
+profile allows up to 16 parallel delegated agents.
 
 ## Build and upload the runtime
 
@@ -23,84 +20,52 @@ scp dist/hermes_roadmap_v2026.5.16.sif \
 ssh nscc 'module load singularity/4.3.1 && bash /home/users/ntu/n2602695/Agent_Bench/scripts/install_roadmap_hermes_sif_nscc.sh'
 ```
 
-The PBS image preparation stage checks the uploaded file before launching the
-agent. It does not pull or rebuild the Roadmap Hermes SIF on NSCC. The expected
-path is `/scratch/users/ntu/n2602695/sif_images/hermes_roadmap_v2026.5.16.sif`.
-The install script verifies the incoming SIF, preserves the old SIF under a
-`.back` name, then atomically renames the new SIF to the unchanged path.
-The budget patch makes oneshot honor `agent.max_turns`; the original SIF
-silently used Hermes' 90-iteration default. Parent and delegated agents now
-use the Roadmap profile's 600-iteration cap, matching OpenClaw's configured
-`max_steps`; delegated agents share the task's 7200-second wall-clock budget.
-A run counts as normal completion only when oneshot exits 0, the archived
-final parent assistant turn has no pending tool call or fatal session end
-reason, and it either explicitly declares `DONE` or ends with a nonempty
-normal `stop`. An empty stop and a `length`-truncated turn without `DONE`
-remain incomplete. This matches OpenClaw's durable terminal handling while
-recording explicit `DONE` separately as `strictDone`. Hermes reads its durable
-session database because oneshot stdout can append runtime warnings after the
-model's final reply. Verifier reward remains a separate measurement.
+PBS uses `/scratch/users/ntu/n2602695/sif_images/hermes_roadmap_v2026.5.16.sif`.
+The install script verifies the incoming SIF, keeps the old image as `.back`,
+and atomically replaces the unchanged path. The SIF patch makes oneshot honor
+`agent.max_turns`. The current Roadmap harness profile sets `max_turns` and
+`max_steps` to 2000, with a 7200-second task wall limit. Earlier Hermes runs
+used 600 iterations; retain that distinction when analyzing results.
 
-## Smoke configuration
+## Run and analyze
 
-The smoke uses `fyn-2.5.0-roadmap`, seed 42, Qwen3.6-35B-A3B, and SGLang
-TP4. This is the task retained in the final OpenClaw paired report after
-`fal-2.0.0-roadmap` was replaced. On NSCC, inspect the plan first:
+For new experiments, set an absolute `output_dir` below
+`$SCRATCH/agent-bench/runs` in the experiment TOML. On NSCC:
 
 ```bash
 cd /home/users/ntu/n2602695/Agent_Bench
-python3 run.py --config \
-  experiments/qwen36_35b_a3b_roadmapbench_hermes_fyn_2_5_0_smoke.toml \
-  --dry-run
+python3 validate.py --config <experiment.toml>
+python3 run.py --config <experiment.toml> --dry-run
+python3 run.py --config <experiment.toml> --render-job > /tmp/roadmap-hermes.pbs
+mkdir -p "$SCRATCH/agent-bench/pbs-logs/roadmap-hermes"
+qsub -o "$SCRATCH/agent-bench/pbs-logs/roadmap-hermes" \
+  -e "$SCRATCH/agent-bench/pbs-logs/roadmap-hermes" \
+  /tmp/roadmap-hermes.pbs
 ```
 
-After the SIF is uploaded, render and submit the PBS job from the NSCC
-repository:
+The harness freezes `candidate.patch` and `candidate_workspace/` before
+running the isolated verifier. It retains Hermes sessions and model/tool
+events, execution and resource logs, `trajectory.jsonl`, and the verdict.
+Normal completion requires oneshot exit 0 and a final durable assistant turn
+with either explicit `DONE` or a nonempty normal `stop`, without a pending tool
+call or fatal end reason. An empty stop or truncated turn without `DONE` is
+incomplete. Verifier reward is recorded separately.
+
+The Hermes analyzer accepts one or more PBS IDs for one arm; the comparator
+requires both paired arms:
 
 ```bash
-python3 run.py --config \
-  experiments/qwen36_35b_a3b_roadmapbench_hermes_fyn_2_5_0_smoke.toml \
-  --render-job > /tmp/roadmap-hermes-smoke.pbs
-qsub /tmp/roadmap-hermes-smoke.pbs
-```
-
-The fixed 20-task Hermes arm uses the task IDs and seed 42 from the final
-OpenClaw paired report. Its experiment file is
-`experiments/qwen36_35b_a3b_roadmapbench_hermes_report20.toml` and its task
-profile is `profiles/benchmarks/roadmap/roadmapbench_report20_hermes.json`.
-Run the smoke first, then render this experiment with the same `--render-job`
-command when the SIF and serving path have been checked on NSCC.
-
-The harness preserves `hermes_events.jsonl`, exported
-conversation state, `hermes_sessions.json` (session lineage and cumulative
-token counters), `runtime_observability.json` (materialized child sessions and
-their lifetimes), `trajectory.jsonl`, resource and OTel traces,
-`candidate.patch`, `candidate_workspace/`, the Git baseline, and verifier
-result. It stops the Hermes runtime and bridge, restarts the task container,
-then freezes the candidate before verifier files are introduced.
-
-Use the Hermes Roadmap entry points to create portable reports. A single arm
-accepts one or more PBS IDs without a counterpart:
-
-```bash
-python3 scripts/analyze_roadmap_hermes_runs.py 25560913.pbs101 \
-  --arm subagent --name roadmap-hermes-smoke
-python3 scripts/analyze_roadmap_hermes_runs.py <single-agent-pbs-job...> \
-  --arm single-agent --name roadmap-hermes-single
+python3 scripts/analyze_roadmap_hermes_runs.py <subagent-pbs-jobs...> \
+  --arm subagent --output-dir "$SCRATCH/agent-bench/reports/roadmap"
 python3 scripts/compare_roadmap_hermes_runs.py \
   --subagent <subagent-pbs-jobs...> \
   --single-agent <single-agent-pbs-jobs...> \
-  --name roadmap-hermes-paired
+  --output-dir "$SCRATCH/agent-bench/reports/roadmap"
 ```
 
-Both commands reuse the Roadmap selection and measurement policy. PBS lookup
-defaults to the repository's `runs/` directory, where the Hermes
-smoke and report20 experiments write their output; use `--runs-root` if output
-is stored elsewhere. The bundle stores Hermes session snapshots,
-`sessions.jsonl`, `state.db`, and
-`hermes_sessions.json` under durable session records; model/tool events,
-execution logs, candidate, verifier, and job evidence are indexed separately.
-Token totals use the sum of Hermes session counters when its state database is
-available; otherwise `token_accounting.json` marks the event fallback as parent
-only. The pinned event patch instruments the parent agent, so child model calls
-lack individual request latency.
+PBS IDs resolve under `AB_RUNS_ROOT` when set, otherwise under
+`$SCRATCH/agent-bench/runs` when it exists; use `--runs-root` for another
+location. Both tools use materialized child sessions for subagent usage and
+`agent_execution_seconds` for latency. Their portable bundles include durable
+sessions, timelines and traces, execution evidence, final candidate and score,
+and figures.

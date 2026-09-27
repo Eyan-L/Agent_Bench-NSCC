@@ -1,0 +1,57 @@
+{
+  "_doc": "Six RoadmapBench subset10b tasks without a valid score in Hermes PBS job 25567784.pbs101, plus subset10a ktx-0.6.0 for an actual-subagent-use retry. MikroORM runs last to contain any recurrent quota failure.",
+  "sweep_name": "roadmapbench_subset10ab_hermes_repair7",
+  "plan_version": "roadmapbench-59184e779909-subset10ab-hermes-repair7",
+  "application": "terminal_bench",
+  "source_dataset": "UnipatAI/RoadmapBench",
+  "source_commit": "59184e779909300a5a0150b06b945d39da81a099",
+  "source_dataset_task_count": 115,
+  "tasks_root": "$SCRATCH/datasets/roadmapbench-59184e779909-subagent-subset30",
+  "instances": [
+    "fbr-2.43.0-roadmap",
+    "glz-6.1.0-roadmap",
+    "opt-3.0.0-roadmap",
+    "dsl-2.2.0-roadmap",
+    "opt-4.0.0-roadmap",
+    "ktx-0.6.0-roadmap",
+    "mko-6.4.0-roadmap"
+  ],
+  "repo_mapping": {
+    "fbr-2.43.0-roadmap": {
+      "repo_id": "roadmapbench/fbr-2.43.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "glz-6.1.0-roadmap": {
+      "repo_id": "roadmapbench/glz-6.1.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "opt-3.0.0-roadmap": {
+      "repo_id": "roadmapbench/opt-3.0.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "dsl-2.2.0-roadmap": {
+      "repo_id": "roadmapbench/dsl-2.2.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "opt-4.0.0-roadmap": {
+      "repo_id": "roadmapbench/opt-4.0.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "ktx-0.6.0-roadmap": {
+      "repo_id": "roadmapbench/ktx-0.6.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "mko-6.4.0-roadmap": {
+      "repo_id": "roadmapbench/mko-6.4.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 7200,
+  "output_dir": "roadmapbench_subset10ab_hermes_repair7",
+  "seeds": [42],
+  "selection": {
+    "method": "fixed invalid-attempt repair plus actual-delegation retry",
+    "rationale": "Six subset10b tasks lacked a valid score after PBS job 25567784.pbs101. The valid subset10a ktx-0.6.0 attempt had zero materialized subagents, so it is rerun separately for actual-delegation analysis; keep its original result. No selection by reward."
+  }
+}

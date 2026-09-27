@@ -8,7 +8,6 @@ are exported into the same portable five-part bundle.
 
 from __future__ import annotations
 
-import sys
 from typing import Sequence
 
 try:
@@ -18,10 +17,7 @@ except ImportError:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
-    if not any(arg == "--runs-root" or arg.startswith("--runs-root=") for arg in args):
-        args.extend(("--runs-root", "runs"))
-    return _comparison.main(args)
+    return _comparison.main(argv)
 
 
 if __name__ == "__main__":
