@@ -1,0 +1,27 @@
+name = "qwen36_35b_a3b_roadmapbench_hermes_subset10b_repair6"
+description = "Repair six invalid Hermes subset10b tasks on NSCC scratch, seed 42, Qwen3.6 TP4."
+output_dir = "/scratch/users/ntu/n2602695/agent-bench/runs/qwen36_35b_a3b_roadmapbench_hermes_subset10b_repair6"
+seeds = [42]
+
+[telemetry]
+spans_html = true
+
+[benchmark]
+name = "terminal_bench"
+profile = "profiles/benchmarks/roadmap/roadmapbench_subset10b_hermes_repair6.json"
+
+[harness]
+name = "hermes"
+profile = "profiles/harnesses/hermes_roadmapbench.yaml"
+
+[model]
+profile = "profiles/models/qwen36_35b_a3b.json"
+
+[serving]
+profile = "profiles/serving/sglang/nscc_tp4.yaml"
+
+[deployment]
+profile = "profiles/deployments/nscc_pbs_4gpu_24h.toml"
+
+[limits]
+max_workers = 1

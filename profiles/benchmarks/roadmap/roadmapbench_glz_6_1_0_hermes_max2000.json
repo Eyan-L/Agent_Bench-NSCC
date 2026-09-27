@@ -1,0 +1,25 @@
+{
+  "_doc": "Focused retry of glz-6.1.0 after Hermes exhausted 600 tool iterations in PBS job 25570330.pbs101. The 7200-second task wall limit is unchanged.",
+  "sweep_name": "roadmapbench_glz_6_1_0_hermes_max2000",
+  "plan_version": "roadmapbench-59184e779909-glz-6.1.0-hermes-max2000",
+  "application": "terminal_bench",
+  "source_dataset": "UnipatAI/RoadmapBench",
+  "source_commit": "59184e779909300a5a0150b06b945d39da81a099",
+  "source_dataset_task_count": 115,
+  "tasks_root": "$SCRATCH/datasets/roadmapbench-59184e779909-subagent-subset30",
+  "instances": ["glz-6.1.0-roadmap"],
+  "repo_mapping": {
+    "glz-6.1.0-roadmap": {
+      "repo_id": "roadmapbench/glz-6.1.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 7200,
+  "output_dir": "roadmapbench_glz_6_1_0_hermes_max2000",
+  "seeds": [42],
+  "selection": {
+    "method": "focused iteration-cap retry",
+    "rationale": "The standard 600-iteration glz attempt was benchmark-valid but blocked_incomplete with a pending tool call. This retry changes only the Hermes iteration cap to 2000."
+  }
+}

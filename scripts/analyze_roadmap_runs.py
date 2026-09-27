@@ -453,7 +453,11 @@ def _render_markdown(
     return "\n".join(lines)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    omit_candidate_workspace: bool = False,
+) -> int:
     args = _parse_args(argv)
     runs_root = Path(args.runs_root).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser()
@@ -474,7 +478,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         source_dirs=base._impl._artifact_source_dirs(records),
     )
     copied_index, shared_index = base._impl._copy_selected_task_artifacts(
-        records, bundle_dir
+        records, bundle_dir,
+        omit_candidate_workspace=omit_candidate_workspace,
     )
     rows = _task_rows(records)
     summary = base.summarize_arm(records)
@@ -499,7 +504,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "input_specs": list(args.runs),
         "jobs": base._jobs(records),
         "latency_policy": "agent_execution_seconds_only",
-        "subagent_count_policy": "materialized_child_sessions",
+        "subagent_count_policy": details.get(
+            "subagent_count_policy", "materialized_child_sessions"
+        ),
         "summary": summary,
         "activity": details,
         "tasks": rows,

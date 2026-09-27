@@ -805,10 +805,37 @@ def _copy_run_tree(
     *,
     arm: str,
     task_dir: str,
+    omit_candidate_workspace: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[Path, dict[str, Any]]]:
     entries: list[dict[str, Any]] = []
     copied_by_source: dict[Path, dict[str, Any]] = {}
-    for source in sorted(run_dir.rglob("*")):
+
+    if omit_candidate_workspace:
+        candidate = run_dir / "candidate_workspace"
+        if candidate.exists() or candidate.is_symlink():
+            entries.append(_entry(
+                source=candidate,
+                bundle_path=None,
+                status="excluded",
+                source_kind="run_tree",
+                error="candidate_workspace_omitted_from_agent_report",
+            ))
+
+    def sources():
+        if not omit_candidate_workspace:
+            yield from sorted(run_dir.rglob("*"))
+            return
+        # Prune the entire workspace before traversal. Filtering after rglob
+        # would still walk thousands of repository and build-output files.
+        for top in sorted(run_dir.iterdir()):
+            if top.name == "candidate_workspace":
+                continue
+            if top.is_dir() and not top.is_symlink():
+                yield from sorted(top.rglob("*"))
+            else:
+                yield top
+
+    for source in sources():
         if source.is_dir():
             continue
         relative = source.relative_to(run_dir)
@@ -1382,6 +1409,7 @@ def export_run_artifacts(
     seed: object | None = None,
     job_id: object | None = None,
     related_links: Mapping[str, str] | None = None,
+    omit_candidate_workspace: bool = False,
 ) -> dict[str, Any]:
     run_dir = run_dir.expanduser().resolve()
     bundle_dir = bundle_dir.expanduser().resolve()
@@ -1397,6 +1425,7 @@ def export_run_artifacts(
         bundle_dir,
         arm=arm,
         task_dir=task_dir,
+        omit_candidate_workspace=omit_candidate_workspace,
     )
     _copy_manifest_references(
         manifest,

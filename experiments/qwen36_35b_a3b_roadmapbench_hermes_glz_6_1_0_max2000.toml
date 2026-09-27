@@ -1,0 +1,27 @@
+name = "qwen36_35b_a3b_roadmapbench_hermes_glz_6_1_0_max2000"
+description = "Focused glz-6.1.0 Hermes retry with 2000 iterations and unchanged 7200-second task limit, seed 42, Qwen3.6 TP4."
+output_dir = "/scratch/users/ntu/n2602695/agent-bench/runs/qwen36_35b_a3b_roadmapbench_hermes_glz_6_1_0_max2000"
+seeds = [42]
+
+[telemetry]
+spans_html = true
+
+[benchmark]
+name = "terminal_bench"
+profile = "profiles/benchmarks/roadmap/roadmapbench_glz_6_1_0_hermes_max2000.json"
+
+[harness]
+name = "hermes"
+profile = "profiles/harnesses/hermes_roadmapbench_max2000.yaml"
+
+[model]
+profile = "profiles/models/qwen36_35b_a3b.json"
+
+[serving]
+profile = "profiles/serving/sglang/nscc_tp4.yaml"
+
+[deployment]
+profile = "profiles/deployments/nscc_pbs_4gpu_24h.toml"
+
+[limits]
+max_workers = 1
