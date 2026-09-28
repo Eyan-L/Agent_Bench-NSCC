@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from agent_bench.harnesses.codex.messages import DONE_TURN_INSTRUCTIONS
+
 PAYLOAD_PATH = "/opt/agent-bench-codex"
 STATE_PATH = "/opt/agent-bench-codex-state"
 
@@ -21,6 +23,13 @@ def write_config(state: Path, *, model: str, base_url: str, context_window: int,
         f"model_auto_compact_token_limit = {int(context_window * 0.8)}",
         'web_search = "disabled"',
         "allow_login_shell = false", 'project_doc_max_bytes = 65536',
+    ]
+    instructions = settings.get("developer_instructions") or ""
+    if settings.get("require_done_marker"):
+        instructions = "\n\n".join(filter(None, (instructions, DONE_TURN_INSTRUCTIONS)))
+    if instructions:
+        lines.append(f"developer_instructions = {quote(instructions)}")
+    lines += [
         "[analytics]", "enabled = false", "[feedback]", "enabled = false",
         "[features]", f"multi_agent = {str(multi_agent).lower()}",
         "multi_agent_v2 = false", "apps = false", "browser_use = false",
@@ -41,17 +50,12 @@ def write_config(state: Path, *, model: str, base_url: str, context_window: int,
     return path
 
 
-def command(workspace: str, session_id: str | None = None) -> list[str]:
+def command(workspace: str) -> list[str]:
     cli = [f"{PAYLOAD_PATH}/bin/codex", "exec", "--color", "never", "--cd", workspace]
-    if session_id:
-        cli.append("resume")
     cli += ["--json",
             "--strict-config", "--skip-git-repo-check", "--ignore-rules",
             "--output-last-message", f"{STATE_PATH}/final.txt"]
-    if session_id:
-        cli.append(session_id)
     cli.append("-")
     # Container.popen_exec deliberately disconnects host stdin. Read the prompt
     # through the per-run state bind without changing other harnesses' exec API.
-    prompt_file = "continuation.txt" if session_id else "prompt.txt"
-    return ["sh", "-c", f'exec "$@" < {STATE_PATH}/{prompt_file}', "codex-entry", *cli]
+    return ["sh", "-c", f'exec "$@" < {STATE_PATH}/prompt.txt', "codex-entry", *cli]

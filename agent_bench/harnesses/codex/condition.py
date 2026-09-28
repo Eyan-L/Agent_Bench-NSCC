@@ -11,7 +11,6 @@ from agent_bench.deployments.containers import ContainerHandle
 from agent_bench.harnesses.codex.runtime import command
 from agent_bench.harnesses.codex.telemetry import jsonl, summarize
 from agent_bench.harnesses.codex.completion import parent_completion
-from agent_bench.harnesses.codex.rollouts import read_rollout
 
 
 def archive_state(source: Path, destination: Path):
@@ -36,28 +35,6 @@ class CodexAgentCondition:
     def _build_message(self, instance_data):
         return instance_data["instruction"]
 
-    def _continuation_message(self):
-        return (
-            "Your previous reply was a working progress update. Continue the "
-            "original task in this same session using the available tools. "
-            "Finish and validate the requested implementation, including any "
-            "unfinished delegated work. Return a final answer only when the "
-            "task is complete or you have a concrete blocker."
-        )
-
-    def _live_completion(self, env_info, run_dir):
-        events = list(jsonl(run_dir / "codex_stdout.jsonl"))
-        thread = next((e.get("thread_id") for e in reversed(events) if e.get("type") == "thread.started"), None)
-        if not thread:
-            return {"continuation_eligible": False}
-        state = Path(env_info["codex_state_dir"])
-        sessions = []
-        for path in sorted((state / "sessions").rglob(f"rollout-*{thread}.jsonl")):
-            session = read_rollout(list(jsonl(path)), path, state, [], [], set(), [])
-            if session:
-                sessions.append(session)
-        return parent_completion(sessions, events, jsonl(Path(env_info["state_dir"]) / "codex_api.jsonl"))
-
     def _finalize_runtime(self, env_info, run_dir, workspace_root):
         harness = env_info.get("_harness")
         if harness is None or not hasattr(harness, "quiesce_agent_writers"):
@@ -75,13 +52,12 @@ class CodexAgentCondition:
         Path(env_info["codex_state_dir"]).joinpath("prompt.txt").write_text(self._build_message(instance_data))
         start, timed_out, errors = time.time_ns(), False, []
         deadline = time.monotonic() + self.agent_config.max_time_seconds
-        invocations, continuation_count, session_id, readers, proc = [], 0, None, [], None
+        invocations, readers, proc = [], [], None
         with UtilSampler(run_dir, client_container=task.name, tools_container=task.name):
-            def capture(pipe, filename, invocation, structured=False):
+            def capture(pipe, filename, structured=False):
                 try:
-                    mode = "a" if invocation else "w"
-                    with (run_dir / filename).open(mode) as raw:
-                        events = (run_dir / "codex_events.jsonl").open(mode) if structured else None
+                    with (run_dir / filename).open("w") as raw:
+                        events = (run_dir / "codex_events.jsonl").open("w") if structured else None
                         try:
                             for line in iter(pipe.readline, ""):
                                 raw.write(line)
@@ -91,26 +67,21 @@ class CodexAgentCondition:
                                         event = json.loads(line)
                                     except ValueError:
                                         continue
-                                    events.write(json.dumps({"timestamp_ns": time.time_ns(), "invocation": invocation, "event": event}) + "\n")
+                                    events.write(json.dumps({"timestamp_ns": time.time_ns(), "invocation": 0, "event": event}) + "\n")
                                     events.flush()
                         finally:
                             if events:
                                 events.close()
                 except Exception as exc:
                     errors.append(str(exc))
-            while True:
-                if invocations and time.monotonic() >= deadline:
-                    timed_out = True
-                    break
-                invocation_start = time.time_ns()
-                try:
-                    proc = self.container.popen_exec(task, command(workspace_root, session_id), workdir=workspace_root, env=env_info["agent_env"])
-                except Exception as exc:
-                    errors.append(f"Codex invocation launch: {exc}")
-                    break
-                invocation = len(invocations)
-                readers = [threading.Thread(target=capture, args=(proc.stdout, "codex_stdout.jsonl", invocation, True), daemon=True),
-                           threading.Thread(target=capture, args=(proc.stderr, "codex_stderr.log", invocation), daemon=True)]
+            invocation_start = time.time_ns()
+            try:
+                proc = self.container.popen_exec(task, command(workspace_root), workdir=workspace_root, env=env_info["agent_env"])
+            except Exception as exc:
+                errors.append(f"Codex invocation launch: {exc}")
+            if proc is not None:
+                readers = [threading.Thread(target=capture, args=(proc.stdout, "codex_stdout.jsonl", True), daemon=True),
+                           threading.Thread(target=capture, args=(proc.stderr, "codex_stderr.log"), daemon=True)]
                 for reader in readers:
                     reader.start()
                 try:
@@ -124,37 +95,13 @@ class CodexAgentCondition:
                         proc.kill()
                         proc.wait(timeout=5)
                 invocation_end = time.time_ns()
-                invocations.append({"step": invocation, "tool_name": "codex.exec.resume" if session_id else "codex.exec",
+                invocations.append({"step": 0, "tool_name": "codex.exec",
                     "start_ts": invocation_start, "end_ts": invocation_end, "exit_code": proc.returncode,
-                    "duration_ms": (invocation_end - invocation_start) / 1e6, "session_id": session_id})
+                    "duration_ms": (invocation_end - invocation_start) / 1e6})
                 for reader in readers:
                     reader.join(timeout=10)
                 if any(reader.is_alive() for reader in readers):
                     errors.append("Codex output stream remained open after its invocation")
-                if timed_out or proc.returncode != 0 or errors:
-                    break
-                try:
-                    evidence = self._live_completion(env_info, run_dir)
-                except Exception as exc:
-                    errors.append(f"Codex continuation evidence: {exc}")
-                    break
-                if not evidence.get("continuation_eligible"):
-                    break
-                if time.monotonic() >= deadline:
-                    timed_out = True
-                    break
-                session_id = evidence["parent_thread_id"]
-                try:
-                    continuation_prompt = self._continuation_message()
-                    Path(env_info["codex_state_dir"]).joinpath("continuation.txt").write_text(continuation_prompt)
-                    with (run_dir / "codex_events.jsonl").open("a") as stream:
-                        stream.write(json.dumps({"timestamp_ns": time.time_ns(), "invocation": invocation,
-                            "event": {"type": "agent_bench.continuation", "session_id": session_id,
-                                      "completion_evidence": evidence, "prompt": continuation_prompt}}) + "\n")
-                except Exception as exc:
-                    errors.append(f"Codex continuation preparation: {exc}")
-                    break
-                continuation_count += 1
         parent_end = time.time_ns()
         exit_code = proc.returncode if proc is not None else 1
         artifact_errors = []
@@ -214,7 +161,7 @@ class CodexAgentCondition:
                          totalChildren=obs.get("child_session_count", 0), completedChildren=obs.get("child_execution_complete_count", 0),
                          unfinishedChildren=unfinished, childStatesAtFence=obs.get("child_lifecycle_by_session", {}),
                          childTimingUnknownCount=obs.get("child_runtime_unknown_count"),
-                         continuationCount=continuation_count, cliInvocationCount=len(invocations),
+                         continuationCount=0, cliInvocationCount=len(invocations),
                          runtimeVersion=env_info.get("runtime_version"), parentTerminalObservedNs=parent_end)
         prompt = sum(int(s["usage"].get("input_tokens") or 0) for s in sessions)
         output = sum(int(s["usage"].get("output_tokens") or 0) for s in sessions)

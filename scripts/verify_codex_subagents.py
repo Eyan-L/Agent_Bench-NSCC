@@ -52,11 +52,20 @@ class ScriptedModel(BaseHTTPRequestHandler):
         outputs = {m["tool_call_id"]: m["content"] for m in messages if m["role"] == "tool"}
         selected = arguments = call_id = None
         answer = "DONE"
+        preamble = "Starting the independent child check." if not root else "Coordinating parallel work."
+        preamble_seen = any(m["role"] == "assistant" and m.get("content") == preamble for m in messages)
+        emit_preamble = self.server.require_done_marker and not preamble_seen
         if not root:
-            self.server.child_started.set()
-            if "probe_child_work" not in outputs:
+            if emit_preamble:
+                answer = preamble
+            elif "probe_child_work" not in outputs:
+                self.server.child_started.set()
                 selected, arguments = shell_call(tools, "sleep 4 && date +%s%N > child-work.marker")
                 call_id = "probe_child_work"
+            else:
+                answer = "Independent check completed and validated.\nDONE"
+        elif emit_preamble:
+            answer = preamble
         elif "probe_spawn" not in outputs:
             selected = next(t["function"]["name"] for t in tools if t["function"]["name"].endswith("__spawn_agent"))
             arguments = {"message": "CODEX_ASYNC_CHILD: Run your independent check.", "fork_context": False}
@@ -91,6 +100,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-sif", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--require-done-marker", action="store_true", help="Verify the Roadmap native-turn completion contract")
     args = parser.parse_args()
     root = Path(args.output_dir).resolve()
     root.mkdir(parents=True, exist_ok=False)
@@ -98,13 +108,15 @@ def main():
     workspace.mkdir()
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), ScriptedModel)
     upstream.child_started = threading.Event()
+    upstream.require_done_marker = args.require_done_marker
     config = {"base_url": f"http://127.0.0.1:{upstream.server_port}/v1", "token": "probe-only",
-              "model": "Qwen/Qwen3.6-35B-A3B", "upstream_api": "chat_completions", "max_tokens": 4096}
+              "model": "Qwen/Qwen3.6-35B-A3B", "upstream_api": "chat_completions", "max_tokens": 4096,
+              "require_done_marker": args.require_done_marker}
     adapter = AdapterServer(("127.0.0.1", 0), config, root)
     for server in (upstream, adapter):
         threading.Thread(target=server.serve_forever, daemon=True).start()
     write_config(home, model=config["model"], base_url=f"http://127.0.0.1:{adapter.server_port}/v1",
-                 context_window=262144, settings={"max_subagents": 16})
+                 context_window=262144, settings={"max_subagents": 16, "require_done_marker": args.require_done_marker})
     env = dict(os.environ, SINGULARITYENV_CODEX_HOME="/opt/probe/codex_state", SINGULARITYENV_AB_CODEX_API_KEY="probe-only")
     command = ["singularity", "exec", "--bind", f"{root}:/opt/probe", args.runtime_sif,
                "/opt/codex/bin/codex", "exec", "--strict-config", "--skip-git-repo-check", "--ignore-rules",
@@ -126,8 +138,12 @@ def main():
     assert len(sessions) == 2 and obs["child_runtime_unknown_count"] == 0, obs
     assert parent_marker < child_marker, "Parent waited for the child before executing its own command"
     assert obs["parent_overlapping_tool_calls"] > 0, obs
+    assert all(len(session["turns"]) == 1 for session in sessions), sessions
+    assert all(session["final_assistant"].strip().endswith("DONE") for session in sessions), sessions
     summary = {"cli_version": sessions[0]["cli_version"], "model": "scripted scheduling test",
-               "nonblocking_spawn_verified": True, "parent_work_before_child_finish_seconds": (child_marker-parent_marker)/1e9,
+               "nonblocking_spawn_verified": True, "require_done_marker": args.require_done_marker,
+               "single_native_turn_per_agent": True,
+               "parent_work_before_child_finish_seconds": (child_marker-parent_marker)/1e9,
                "observability": obs}
     (root / "probe_result.json").write_text(json.dumps(summary, indent=2))
     print(json.dumps(summary, indent=2))

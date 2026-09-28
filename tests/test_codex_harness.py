@@ -15,7 +15,8 @@ from agent_bench.harnesses.codex.condition import CodexAgentCondition, archive_s
 from agent_bench.harnesses.codex.responses_adapter import from_chat, to_chat
 from agent_bench.harnesses.codex.telemetry import api_response, summarize
 from agent_bench.harnesses.codex.completion import parent_completion
-from agent_bench.harnesses.codex.messages import assistant_phase, continuation_preamble
+from agent_bench.harnesses.codex.messages import assistant_phase, DONE_TURN_INSTRUCTIONS
+from agent_bench.harnesses.codex.runtime import write_config
 from scripts import compare_roadmap_runs
 from scripts.roadmap_codex_telemetry import install_comparison
 from agent_bench.benchmarks.roadmap_bench.conditions.runtime_policy import install_roadmap_gateway_only_policy
@@ -59,6 +60,26 @@ def test_qwen_receives_one_initial_system_block_with_developer_priority():
     ]}, {})
     assert chat["messages"][0] == {"role": "system", "content": "base\n\nenvironment instructions\n\nlater constraints"}
     assert [m["role"] for m in chat["messages"]] == ["system", "user", "assistant"]
+
+
+def test_preamble_and_native_tool_calls_share_one_chat_assistant_message():
+    chat, _ = to_chat({"model": "qwen", "input": [
+        {"role": "assistant", "phase": "commentary", "content": "Inspecting the repository."},
+        {"type": "function_call", "name": "exec_command", "call_id": "read", "arguments": '{"cmd":"ls"}'},
+        {"type": "function_call_output", "call_id": "read", "output": "src tests"},
+    ]}, {})
+    assert [m["role"] for m in chat["messages"]] == ["assistant", "tool"]
+    assert chat["messages"][0]["content"] == "Inspecting the repository."
+    assert chat["messages"][0]["tool_calls"][0]["id"] == "read"
+
+
+def test_done_contract_is_in_initial_native_configuration(tmp_path):
+    path = write_config(tmp_path, model="qwen", base_url="http://model/v1", context_window=262144,
+                        settings={"require_done_marker": True, "developer_instructions": "Existing constraint."})
+    line = next(line for line in path.read_text().splitlines() if line.startswith("developer_instructions = "))
+    instructions = json.loads(line.split(" = ", 1)[1])
+    assert instructions == "Existing constraint.\n\n" + DONE_TURN_INSTRUCTIONS
+    assert "standalone DONE" in instructions and "subagent" in instructions
 
 
 def test_roadmap_accepts_native_codex_and_still_rejects_openclaw_embedded(monkeypatch):
@@ -317,14 +338,23 @@ def test_done_marker_matches_roadmap_durable_policy(tmp_path, final, marker):
     "I'll implement the remaining targets next.",
     "Next, we need to run the tests.",
     "Implementation complete.\n\nI still need to integrate the child's changes.",
+    "Now add the undo/redo shortcut types to shortcut.go:",
+    "The next step is ready.", "接下来检查并修改代码。",
+    "Implementation complete. Tests pass.",
 ])
-def test_explicit_working_preamble_is_not_final_completion(tmp_path, final):
-    assert continuation_preamble(final)
-    assert assistant_phase({"content": final}) == "commentary"
+def test_done_contract_uses_native_end_turn_without_recognizing_wording(tmp_path, final):
+    response = from_chat({"choices": [{"finish_reason": "stop", "message": {"content": final}}]},
+                         {}, "qwen", require_done_marker=True)
+    assert response["status"] == "completed" and response["end_turn"] is False
+    assert response["output"][0]["phase"] == "commentary"
     stdout = completion_case(tmp_path, complete_turn(final), final=final)
+    path = tmp_path / "codex_api.jsonl"
+    row = json.loads(path.read_text())
+    row["response"]["end_turn"] = False
+    path.write_text(json.dumps(row) + "\n")
     evidence = evidence_for(tmp_path, stdout)[2]
     assert not evidence["complete"]
-    assert evidence["terminal_evidence"] == "final_parent_message_continues_work"
+    assert evidence["terminal_evidence"] == "final_parent_response_keeps_turn_open"
 
 
 @pytest.mark.parametrize("final", [
@@ -334,7 +364,6 @@ def test_explicit_working_preamble_is_not_final_completion(tmp_path, final):
     "DONE: validated", "DONE", "The task is complete.",
 ])
 def test_completed_closeout_remains_valid_without_mandatory_done(tmp_path, final):
-    assert not continuation_preamble(final)
     assert assistant_phase({"content": final}) == "final_answer"
     stdout = completion_case(tmp_path, complete_turn(final), final=final)
     assert evidence_for(tmp_path, stdout)[2]["complete"]
@@ -343,9 +372,34 @@ def test_completed_closeout_remains_valid_without_mandatory_done(tmp_path, final
 def test_chat_upstream_explicit_phase_is_preserved():
     reply = {"choices": [{"finish_reason": "stop", "message": {"content": "progress", "phase": "commentary"}}]}
     assert from_chat(reply, {}, "qwen")["output"][0]["phase"] == "commentary"
+    assert from_chat(reply, {}, "qwen")["end_turn"] is False
 
 
-def test_preamble_recovery_shares_original_deadline(tmp_path, monkeypatch):
+@pytest.mark.parametrize("final", ["DONE", "Implemented and validated.\nDONE", "done: validated", "Blocked: missing dependency"])
+def test_explicit_terminal_marker_closes_native_chat_turn(final):
+    response = from_chat({"choices": [{"finish_reason": "stop", "message": {"content": final}}]},
+                         {}, "qwen", require_done_marker=True)
+    assert response["end_turn"] is True
+    assert response["output"][0]["phase"] == "final_answer"
+
+
+def test_done_attached_to_tool_call_cannot_end_native_turn():
+    reply = {"choices": [{"finish_reason": "tool_calls", "message": {"content": "DONE", "tool_calls": [
+        {"id": "pending", "type": "function", "function": {"name": "exec_command", "arguments": "{}"}}]}}]}
+    response = from_chat(reply, {"exec_command": {"name": "exec_command", "namespace": None, "custom": False}},
+                         "qwen", require_done_marker=True)
+    assert response["end_turn"] is False
+
+
+def test_explicit_blocker_is_not_normal_completion(tmp_path):
+    stdout = completion_case(tmp_path, complete_turn("Missing required dependency.\nBLOCKED"),
+                             final="Missing required dependency.\nBLOCKED")
+    evidence = evidence_for(tmp_path, stdout)[2]
+    assert evidence["terminal_evidence"] == "explicit_parent_blocked"
+    assert not evidence["complete"] and not evidence["done_marker"]
+
+
+def test_one_native_invocation_has_original_deadline(tmp_path):
     state = tmp_path / "state"
     state.mkdir()
     invocation = []
@@ -355,8 +409,7 @@ def test_preamble_recovery_shares_original_deadline(tmp_path, monkeypatch):
 
         def popen_exec(self, _handle, argv, **_kwargs):
             invocation.append(argv)
-            pause = 0.15 if len(invocation) == 1 else 2
-            return subprocess.Popen([sys.executable, "-c", f"import time; time.sleep({pause})"],
+            return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(2)"],
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     class Harness:
@@ -364,15 +417,15 @@ def test_preamble_recovery_shares_original_deadline(tmp_path, monkeypatch):
             return {"workspaceQuiesced": True, "workspaceQuiescedNs": time.time_ns()}
 
     condition = CodexAgentCondition(None, SimpleNamespace(max_time_seconds=0.4), Container())
-    monkeypatch.setattr(condition, "_live_completion", lambda *_args: {"continuation_eligible": True, "parent_thread_id": "same-parent"})
     result = condition.run({"instruction": "original task"}, tmp_path / "run", 42, "/app", "task", {
         "agent_env": {}, "state_dir": str(state), "codex_state_dir": str(state), "_harness": Harness()})
     assert result["agent_execution_outcome"] == "timeout"
-    assert len(invocation) == 2 and "resume" in invocation[1] and "same-parent" in invocation[1]
-    assert result["agent_lifecycle"]["continuationCount"] == 1
+    assert len(invocation) == 1 and "resume" not in invocation[0]
+    assert result["agent_lifecycle"]["continuationCount"] == 0
+    assert result["agent_lifecycle"]["cliInvocationCount"] == 1
     assert result["phase_timing"]["parent_execution_seconds"] < 0.65
     assert (state / "prompt.txt").read_text() == "original task"
-    assert "original task" in (state / "continuation.txt").read_text()
+    assert not (state / "continuation.txt").exists()
 
 
 def collab_call(name, identity, args, result, start):

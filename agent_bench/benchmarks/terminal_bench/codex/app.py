@@ -101,6 +101,7 @@ class TerminalBenchCodexHarness(TerminalBenchOpenClawHarness):
                               "upstream_api": settings.get("upstream_api", "responses")}
             if settings.get("chat_template_kwargs") is not None:
                 adapter_config["chat_template_kwargs"] = settings["chat_template_kwargs"]
+            adapter_config["require_done_marker"] = bool(settings.get("require_done_marker", False))
             (state / "adapter.json").write_text(json.dumps(adapter_config))
             (state / "adapter.json").chmod(0o600)
             host = adapter_name if self.container.backend_id == "docker" else "127.0.0.1"

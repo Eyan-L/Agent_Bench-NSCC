@@ -32,8 +32,14 @@ when unsupported. Truncation emits `response.incomplete`, never
 `response.completed`; the unmodified CLI may retry or fail on this event.
 Both Roadmap arms explicitly send `chat_template_kwargs.enable_thinking=false`
 on every Qwen request, in addition to the SGLang profile's no-think default.
-For Chat replies without native phase metadata, tool preambles and explicit
-statements of further work map to `commentary`, rather than `final_answer`.
+Both Roadmap profiles enable `require_done_marker`. Initial native developer
+instructions require implementation and validation in the active turn, actual
+tool calls for remaining work, and a final `DONE`. The adapter sends
+`response.end_turn=false` on completed Chat responses before that marker, so
+Codex continues its own tools-enabled sampling loop within the same turn.
+This field is supported by the pinned 0.157.1 CLI; `phase` alone does not keep
+its loop open. Text and its accompanying tool calls share one Chat assistant
+message. No English phrase classifier is used.
 This path supports text software tasks; images and other
 unsupported input types fail explicitly.
 
@@ -45,12 +51,17 @@ when a dependency requires their results. The configuration allows sixteen
 children and one level of delegation. The Roadmap prompt follows OpenClaw's
 delegation policy, with only native-tool substitutions.
 
+`codex_roadmapbench_subagent_smoke.yaml` adds an explicit early two-workstream
+delegation instruction for smoke validation. It is a separate exercise profile
+from the subagent and single-agent comparison profiles.
+
 Verify scheduling against the real CLI with a scripted model:
 
 ```bash
 module load singularity/4.3.1
 python3 scripts/verify_codex_subagents.py \
   --runtime-sif "$SCRATCH/sif_images/codex_0.157.1.sif" \
+  --require-done-marker \
   --output-dir "$SCRATCH/agent-bench/probes/codex-async-$(date +%s)"
 ```
 
@@ -69,14 +80,22 @@ marker follows the OpenClaw/Hermes Roadmap durable-transcript rule (a line
 starting with the standalone word `DONE`, case insensitive). Exit zero alone
 is insufficient. The verifier reward is recorded separately.
 
-Codex 0.157.1 can exit after a commentary-only response. When consistent
-CLI, rollout and API evidence identifies such a working preamble, the harness
-continues the exact parent thread with native `codex exec resume`. All turns,
-continuation prompts and CLI invocations are retained; `continuationCount`
-records recovery. Invocations share the original 7200-second deadline and
-their time is included in agent latency. Truncation, errors, open turns and
-pending calls do not trigger this recovery. Genuine non-DONE closeouts remain
-eligible for normal completion; an explicit promise of further work does not.
+Each run starts one `codex exec`; no automatic `exec resume` or extra user
+prompt is injected. Model response completion is distinct from parent turn
+completion. Roadmap Chat responses close the native turn only after a final
+`DONE`, or an explained blocker ending in `BLOCKED`. A tool call accompanying
+`DONE` keeps the turn open. A child reports its completed bounded scope and
+validation, then ends its report with `DONE`; only the parent declares the
+whole roadmap complete. `BLOCKED` terminates without normal completion.
+All model calls remain subject to the original execution deadline.
+
+The DONE marker uses OpenClaw's durable-transcript rule. OpenClaw also accepts
+stable nonempty native terminal stops without DONE; the generic Codex harness
+retains that option. Roadmap's Chat bridge uses the explicit marker because
+Chat `finish_reason=stop` does not distinguish a progress update from the
+end of the assigned task. Length still emits `response.incomplete` and is
+never converted into a successful terminal response. Native turns, API calls,
+tool results and phases remain available for auditing.
 
 Child execution state and timing quality are independent. Native completed
 status can establish completion even when timestamps or a rollout are missing;

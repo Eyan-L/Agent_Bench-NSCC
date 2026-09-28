@@ -9,6 +9,7 @@ terminal_bench:
   - BOOTSTRAP.md
 codex:
   upstream_api: chat_completions
+  require_done_marker: true
   chat_template_kwargs:
     enable_thinking: false
   multi_agent: true

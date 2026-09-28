@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from agent_bench.harnesses.codex.telemetry import api_response
-from agent_bench.harnesses.codex.messages import continuation_preamble, done_marker
+from agent_bench.harnesses.codex.messages import blocked_marker, done_marker
 
 
 def api_turn_id(row: dict) -> str | None:
@@ -27,7 +27,7 @@ def belongs_to_turn(row: dict, session: dict) -> bool:
 
 def parent_completion(sessions: list[dict], events: Iterable[dict], api_rows: Iterable[dict]) -> dict:
     roots = [s for s in sessions if not s["parent_thread_id"]]
-    evidence = {"complete": False, "done_marker": False, "continuation_eligible": False, "terminal_evidence": "missing_parent_turn",
+    evidence = {"complete": False, "done_marker": False, "terminal_evidence": "missing_parent_turn",
                 "completion_error": "Codex has no unique final parent turn"}
     if len(roots) != 1 or not roots[0].get("latest_turn"):
         return evidence
@@ -92,11 +92,11 @@ def parent_completion(sessions: list[dict], events: Iterable[dict], api_rows: It
         return blocked("final_parent_response_item_mismatch")
     marker = done_marker(final)
     evidence["done_marker"] = marker
-    if continuation_preamble(final):
-        evidence["continuation_eligible"] = response["status"] == "completed"
-        return blocked("final_parent_message_continues_work")
+    if response.get("end_turn") is False:
+        return blocked("final_parent_response_keeps_turn_open")
+    if blocked_marker(final):
+        return blocked("explicit_parent_blocked")
     if final_output.get("phase") == "commentary" or turn.get("last_assistant_phase") == "commentary":
-        evidence["continuation_eligible"] = response["status"] == "completed"
         return blocked("nonfinal_parent_commentary")
     if response["status"] == "incomplete" and not marker:
         return blocked("incomplete_final_parent_response")

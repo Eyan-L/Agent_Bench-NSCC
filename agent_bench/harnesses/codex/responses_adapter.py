@@ -13,9 +13,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 if __package__:
-    from .messages import assistant_phase
+    from .messages import assistant_phase, blocked_marker, done_marker
 else:
-    from messages import assistant_phase
+    from messages import assistant_phase, blocked_marker, done_marker
 
 
 def text(content):
@@ -89,8 +89,8 @@ def to_chat(request, config):
             name = (item.get("namespace") + "__" if item.get("namespace") else "") + item["name"]
             args = item.get("arguments", "{}") if kind == "function_call" else json.dumps({"input": item["input"]})
             call = {"id": item["call_id"], "type": "function", "function": {"name": name, "arguments": args}}
-            if messages and messages[-1]["role"] == "assistant" and messages[-1].get("tool_calls"):
-                messages[-1]["tool_calls"].append(call)
+            if messages and messages[-1]["role"] == "assistant":
+                messages[-1].setdefault("tool_calls", []).append(call)
             else:
                 messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
         elif kind in {"function_call_output", "custom_tool_call_output"}:
@@ -121,16 +121,17 @@ def to_chat(request, config):
     return chat, identities
 
 
-def from_chat(chat, identities, model):
+def from_chat(chat, identities, model, *, require_done_marker=False):
     choice = chat["choices"][0]
     if choice.get("finish_reason") not in {"stop", "tool_calls", "length"}:
         raise ValueError(f"Unsupported finish reason: {choice.get('finish_reason')}")
     message, output = choice["message"], []
     truncated = choice.get("finish_reason") == "length"
     item_status = "incomplete" if truncated else "completed"
+    phase = assistant_phase(message, require_done_marker=require_done_marker)
     if message.get("content"):
         output.append({"type": "message", "id": "msg_" + uuid.uuid4().hex, "role": "assistant", "status": item_status,
-                       "phase": assistant_phase(message),
+                       "phase": phase,
                        "content": [{"type": "output_text", "text": message["content"], "annotations": []}]})
     for call in message.get("tool_calls") or []:
         function = call["function"]
@@ -146,10 +147,19 @@ def from_chat(chat, identities, model):
         output.append(item)
     usage = chat.get("usage") or {}
     prompt, completion = int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0)
-    return {"id": "resp_" + uuid.uuid4().hex, "object": "response", "created_at": int(time.time()), "model": model,
+    response = {"id": "resp_" + uuid.uuid4().hex, "object": "response", "created_at": int(time.time()), "model": model,
             "status": "incomplete" if truncated else "completed", "incomplete_details": {"reason": "max_output_tokens"} if truncated else None,
             "error": None, "output": output, "usage": {"input_tokens": prompt, "output_tokens": completion, "total_tokens": prompt + completion,
             "input_tokens_details": {"cached_tokens": (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)}, "output_tokens_details": {"reasoning_tokens": 0}}}
+    if not truncated and (require_done_marker or phase == "commentary"):
+        # Codex 0.157.1 consumes this field in response.completed and keeps
+        # sampling within the active turn when it is false. Phase alone does
+        # not keep its native tool loop open.
+        response["end_turn"] = bool(
+            not message.get("tool_calls") and phase != "commentary"
+            and (done_marker(message.get("content")) or blocked_marker(message.get("content")))
+        )
+    return response
 
 
 def response_events(response):
@@ -158,6 +168,7 @@ def response_events(response):
     if status not in {"completed", "incomplete", "failed"}:
         raise ValueError(f"Unsupported terminal response status: {status}")
     initial = dict(response, status="in_progress", output=[], usage=None, error=None, incomplete_details=None)
+    initial.pop("end_turn", None)
     yield {"type": "response.created", "response": initial}
     yield {"type": "response.in_progress", "response": initial}
     for index, item in enumerate(response["output"]):
@@ -259,7 +270,8 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 upstream_reply = json.load(reply)
             row["upstream_response"] = upstream_reply
-            response = from_chat(upstream_reply, identities, request["model"]) if mode == "chat_completions" else upstream_reply
+            response = from_chat(upstream_reply, identities, request["model"],
+                require_done_marker=config.get("require_done_marker", False)) if mode == "chat_completions" else upstream_reply
             row["response"] = response
             if request.get("stream"):
                 self.send_response(200)

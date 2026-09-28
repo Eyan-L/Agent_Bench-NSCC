@@ -20,6 +20,7 @@ from agent_bench.harnesses.codex.telemetry import api_response, jsonl, summarize
 from agent_bench.harnesses.codex.completion import parent_completion
 from agent_bench.harnesses.codex.condition import CodexAgentCondition
 from agent_bench.harnesses.codex.runtime import PAYLOAD_PATH, STATE_PATH
+from agent_bench.harnesses.codex.messages import DONE_TURN_INSTRUCTIONS
 
 
 @contextmanager
@@ -141,13 +142,16 @@ def test_failed_terminal_event_is_not_completed():
     assert events[-1]["type"] == "response.failed"
 
 
-def test_http_working_preamble_retains_commentary_and_no_think(tmp_path):
+def test_http_native_end_turn_and_no_think(tmp_path):
     preamble = "Now I have a comprehensive understanding of the codebase. Let me check the existing tests and the `fyne.Locale` type:"
-    with adapter_with_reply(tmp_path, {"content": preamble}, config={"chat_template_kwargs": {"enable_thinking": False}}) as (adapter, requests):
+    with adapter_with_reply(tmp_path, {"content": preamble}, config={
+        "require_done_marker": True, "chat_template_kwargs": {"enable_thinking": False}}) as (adapter, requests):
         events = request_stream(adapter)
     assert events[-1]["type"] == "response.completed"
     assert events[-2]["item"]["phase"] == "commentary"
     assert events[-2]["item"]["content"][0]["text"] == preamble
+    assert events[-1]["response"]["end_turn"] is False
+    assert "end_turn" not in events[0]["response"]
     assert requests[0]["chat_template_kwargs"] == {"enable_thinking": False}
 
 
@@ -168,11 +172,12 @@ def run_public_cli(tmp_path, adapter, prompt):
 
 
 @pytest.mark.skipif(not os.environ.get("AB_CODEX_PROTOCOL_PROBE_SIF"), reason="requires explicitly selected NSCC SIF")
-def test_public_cli_resumes_working_preamble_in_same_native_session(tmp_path):
+def test_public_cli_completes_one_native_turn_without_resume(tmp_path):
     sequence = [
         ({"content": "Let me check the repository before implementing the task:"}, "stop"),
         ({"content": None, "tool_calls": [{"id": "write-marker", "type": "function", "function": {
-            "name": "exec_command", "arguments": json.dumps({"cmd": "echo implementation > continuation-marker"})}}]}, "tool_calls"),
+            "name": "exec_command", "arguments": json.dumps({"cmd": "echo implementation > native-turn-marker"})}}]}, "tool_calls"),
+        ({"content": "Now add the undo/redo shortcut types to shortcut.go:"}, "stop"),
         ({"content": "DONE"}, "stop"),
     ]
     workspace, home, run = tmp_path / "work", tmp_path / "codex_state", tmp_path / "run"
@@ -194,9 +199,9 @@ def test_public_cli_resumes_working_preamble_in_same_native_session(tmp_path):
             return {"workspaceQuiesced": True, "workspaceQuiescedNs": time.time_ns()}
 
     with adapter_with_reply(tmp_path, None, sequence=sequence,
-                            config={"chat_template_kwargs": {"enable_thinking": False}}) as (adapter, requests):
+                            config={"require_done_marker": True, "chat_template_kwargs": {"enable_thinking": False}}) as (adapter, requests):
         write_config(home, model="qwen", base_url=f"http://127.0.0.1:{adapter.server_port}/v1",
-                     context_window=262144, settings={"multi_agent": False})
+                     context_window=262144, settings={"multi_agent": False, "require_done_marker": True})
         condition = CodexAgentCondition(None, SimpleNamespace(max_time_seconds=180), Container())
         result = condition.run({"instruction": "Implement the task and declare DONE."}, run, 42,
             "/opt/protocol-probe/work", "probe", {
@@ -204,18 +209,24 @@ def test_public_cli_resumes_working_preamble_in_same_native_session(tmp_path):
                 "agent_env": {"CODEX_HOME": "/opt/protocol-probe/codex_state", "AB_CODEX_API_KEY": "test-only"}})
     stdout = (run / "codex_stdout.jsonl").read_text()
     assert result["agent_execution_outcome"] == "normal_completion", result
-    assert result["agent_lifecycle"]["continuationCount"] == 1
+    assert result["agent_lifecycle"]["continuationCount"] == 0
+    assert result["agent_lifecycle"]["cliInvocationCount"] == 1
     assert result["agent_lifecycle"]["strictDone"] is True
-    assert len(requests) == 3, stdout
-    assert (tmp_path / "work/continuation-marker").read_text().strip() == "implementation"
+    assert len(requests) == 4, stdout
+    assert (tmp_path / "work/native-turn-marker").read_text().strip() == "implementation"
     assert all(r["chat_template_kwargs"] == {"enable_thinking": False} for r in requests)
+    assert DONE_TURN_INSTRUCTIONS in requests[0]["messages"][0]["content"]
     sessions, _ = summarize(run)
     evidence = parent_completion(sessions, jsonl(run / "codex_stdout.jsonl"), jsonl(run / "codex_api.jsonl"))
     assert evidence["complete"] and evidence["done_marker"], evidence
-    assert len(sessions) == 1 and len(sessions[0]["turns"]) == 2
-    assert sessions[0]["turns"][0]["last_assistant_phase"] == "commentary"
-    assert [r["tool_name"] for r in jsonl(run / "steps.jsonl")] == ["codex.exec", "codex.exec.resume"]
-    assert stdout.count('"type":"turn.completed"') == 2
+    assert len(sessions) == 1 and len(sessions[0]["turns"]) == 1
+    assert [r["tool_name"] for r in jsonl(run / "steps.jsonl")] == ["codex.exec"]
+    assert stdout.count('"type":"turn.started"') == stdout.count('"type":"turn.completed"') == 1
+    assert not (home / "continuation.txt").exists()
+    assert not any(r["event"]["type"] == "agent_bench.continuation" for r in jsonl(run / "codex_events.jsonl"))
+    api = [r for r in jsonl(run / "codex_api.jsonl") if "end_ns" in r]
+    assert len({r["turn_id"] for r in api}) == 1
+    assert [r["response"]["end_turn"] for r in api] == [False, False, False, True]
 
 
 @pytest.mark.skipif(not os.environ.get("AB_CODEX_PROTOCOL_PROBE_SIF"), reason="requires explicitly selected NSCC SIF")

@@ -26,15 +26,6 @@ class RoadmapBenchCodexCondition(CodexAgentCondition):
             f"Roadmap:\n{instance_data['instruction']}"
         )
 
-    def _continuation_message(self):
-        return (
-            "Your previous reply was a working progress update. Continue the "
-            "original roadmap in this same session using the available tools. "
-            "Finish the implementation, complete and integrate any unfinished "
-            "delegated work, and validate all requirements. Declare DONE only "
-            "when the integrated roadmap is complete."
-        )
-
     def run(self, instance_data, run_dir, seed, workspace_root, container_id, env_info=None):
         env_info = env_info if env_info is not None else {}
         baseline = self._capture_task_workspace_baseline(env_info, workspace_root)

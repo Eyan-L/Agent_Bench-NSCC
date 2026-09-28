@@ -140,31 +140,15 @@ def test_fence_failure_preserves_evidence_and_refuses_candidate(roadmapped_run):
     assert not (run / "candidate_workspace").exists() and not (run / "candidate.patch").exists()
 
 
-@pytest.mark.parametrize("failure", ["resume_launch", "continuation_prompt"])
-def test_continuation_failure_preserves_evidence_without_normal_completion(roadmapped_run, monkeypatch, failure):
+def test_launch_failure_preserves_independent_evidence_without_normal_completion(roadmapped_run, monkeypatch):
     condition, _env, run, _workspace = roadmapped_run
-    monkeypatch.setattr(condition, "_live_completion", lambda *_args: {
-        "continuation_eligible": True, "parent_thread_id": "parent"})
-    if failure == "resume_launch":
-        original = condition.container.popen_exec
+    def launch(*_args, **_kwargs):
+        raise OSError("injected launch failure")
 
-        def launch(handle, argv, **kwargs):
-            if "resume" in argv:
-                raise OSError("injected resume launch failure")
-            return original(handle, argv, **kwargs)
-
-        monkeypatch.setattr(condition.container, "popen_exec", launch)
-    else:
-        original_write = Path.write_text
-
-        def write(path, *args, **kwargs):
-            if path.name == "continuation.txt":
-                raise OSError("injected continuation prompt failure")
-            return original_write(path, *args, **kwargs)
-
-        monkeypatch.setattr(Path, "write_text", write)
+    monkeypatch.setattr(condition.container, "popen_exec", launch)
     result = execute(roadmapped_run)
     assert result["agent_execution_outcome"] == "runtime_error"
     assert "injected" in result["agent_completion_error"]
+    assert result["agent_lifecycle"]["cliInvocationCount"] == 0
     for name in ["phase_timing.json", "codex_api.jsonl", "codex_sessions.json", "candidate.patch", "steps.jsonl"]:
         assert (run / name).is_file()
