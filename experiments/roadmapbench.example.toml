@@ -1,0 +1,30 @@
+# Run from the repository root. See agent_bench/benchmarks/roadmap_bench/README.md.
+# Set ROADMAP_TASKS_ROOT to downloaded task definitions and AB_SERVING_BASE_URL
+# to an existing Chat Completions endpoint reachable from the task containers.
+name = "roadmapbench_example"
+description = "One pinned RoadmapBench task with Codex and an existing model endpoint."
+output_dir = "runs/roadmapbench_example"
+seeds = [42]
+
+[benchmark]
+name = "roadmap_bench"
+profile = "profiles/benchmarks/roadmap/example.json"
+
+[harness]
+name = "codex"
+profile = "profiles/harnesses/codex_roadmapbench.yaml"
+
+[model]
+# Replace this profile with the model served by your endpoint.
+profile = "profiles/models/qwen36_35b_a3b.json"
+
+[serving]
+# AB_SERVING_BASE_URL overrides the profile's default localhost:8000/v1 URL.
+profile = "profiles/serving/vllm/existing_endpoint.yaml"
+
+[deployment]
+# Use local task containers without launching a GPU model server.
+profile = "profiles/deployments/client_only.toml"
+
+[limits]
+max_workers = 1

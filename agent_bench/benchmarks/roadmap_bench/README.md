@@ -13,16 +13,38 @@ profiles:
 - `profiles/harnesses/codex_roadmapbench.yaml`
 - `profiles/harnesses/codex_roadmapbench_single_agent.yaml`
 
-Download pinned task definitions with:
+## Minimal example
+
+[experiments/roadmapbench.example.toml](../../../experiments/roadmapbench.example.toml)
+and [profiles/benchmarks/roadmap/example.json](../../../profiles/benchmarks/roadmap/example.json)
+select one task, `fyn-2.5.0-roadmap`, from a fixed dataset revision. The example
+uses Codex, local Docker task containers, and an existing Chat Completions
+endpoint. Run these commands from the repository root:
 
 ```bash
-python scripts/download_roadmapbench_tasks.py \
-  --output-root /path/to/roadmapbench-tasks \
-  <task-id> [<task-id> ...]
+export ROADMAP_TASKS_ROOT="$PWD/data/roadmapbench/tasks"
+export AB_SERVING_BASE_URL="http://127.0.0.1:8000/v1"
+python3 scripts/download_roadmapbench_tasks.py \
+  --output-root "$ROADMAP_TASKS_ROOT" \
+  --revision 59184e779909300a5a0150b06b945d39da81a099 \
+  fyn-2.5.0-roadmap
+bash agent_bench/harnesses/codex/docker/build.sh
+python3 validate.py --config experiments/roadmapbench.example.toml
+python3 run.py --config experiments/roadmapbench.example.toml
 ```
 
-Set `tasks_root` in the benchmark profile to that directory. Legacy profiles
-that use `benchmark.name = "terminal_bench"` and identify
+Point `AB_SERVING_BASE_URL` at your server and replace `[model].profile` with
+the matching model profile. For an authenticated Codex endpoint, set
+`AB_SERVING_API_KEY`. A local model server must listen on an address reachable
+from Docker containers, such as `0.0.0.0`; container callers resolve localhost
+through the host gateway. The example does not launch the model server.
+
+`tasks_root` expands `ROADMAP_TASKS_ROOT` when tasks are materialized. Validation
+and `run.py --dry-run` can resolve the example before downloading tasks or
+starting Docker. To use Hermes or OpenClaw, change both `[harness].name` and
+`[harness].profile` to the matching Roadmap profile above and build that runtime.
+
+Legacy profiles that use `benchmark.name = "terminal_bench"` and identify
 `UnipatAI/RoadmapBench` as their source are still materialized as RoadmapBench
 instances.
 

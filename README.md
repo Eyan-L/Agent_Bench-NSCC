@@ -71,7 +71,8 @@ fallback, and output locations.
 
 RoadmapBench has a dedicated [benchmark adapter](agent_bench/benchmarks/roadmap_bench/README.md)
 with OpenClaw, [Hermes](docs/roadmap-hermes.md), and [Codex CLI](docs/roadmap-codex.md)
-profiles. [Claude Code](agent_bench/harnesses/claude_code/README.md) and Codex CLI
+profiles and a [minimal experiment](experiments/roadmapbench.example.toml).
+[Claude Code](agent_bench/harnesses/claude_code/README.md) and Codex CLI
 also have reusable Terminal-Bench harness profiles.
 
 - [docs/quickstart.md](docs/quickstart.md): shortest path to run OpenClaw-based examples.

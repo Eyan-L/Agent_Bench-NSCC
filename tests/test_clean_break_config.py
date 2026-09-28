@@ -64,6 +64,7 @@ def _write_client_only_experiment(tmp_path: Path, *, stage_lines: list[str]) -> 
         ("nscc_terminal_bench", "nscc_pbs", "vllm", "nscc_pbs.toml"),
         ("nscc_litellm", "nscc_pbs", "litellm", "nscc_pbs_cpu.toml"),
         ("ccds_vllm", "ccds_cloud", "vllm", "ccds_cloud.toml"),
+        ("roadmapbench.example", "client_only", "existing_endpoint", "client_only.toml"),
     ],
 )
 def test_example_experiments_resolve(
@@ -79,6 +80,56 @@ def test_example_experiments_resolve(
     assert resolved.serving["backend"] == backend
     assert resolved.profile_paths["model"].is_absolute()
     assert resolved.to_dict()["profiles"]["deployment"].endswith(deployment_profile)
+
+
+def test_roadmap_example_materializes_environment_root_and_uses_external_endpoint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from agent_bench.core.config import runtime_endpoint_for_container
+    from scripts.download_roadmapbench_tasks import DEFAULT_REVISION
+
+    monkeypatch.chdir(tmp_path)
+    task_id = "fyn-2.5.0-roadmap"
+    task_root = tmp_path / "roadmap-tasks"
+    task = task_root / task_id
+    (task / "tests").mkdir(parents=True)
+    (task / "instruction.md").write_text("Implement the example roadmap.\n")
+    (task / "task.toml").write_text(
+        '[environment]\ndocker_image = "example/roadmap:latest"\nworkdir = "/app"\n'
+    )
+    monkeypatch.setenv("ROADMAP_TASKS_ROOT", str(task_root))
+    monkeypatch.setenv("AB_SERVING_BASE_URL", "http://model.example:8123/v1")
+    monkeypatch.delenv("AB_BENCHMARK_INSTANCE_DATA", raising=False)
+    resolved = load_resolved_experiment(
+        ROOT / "experiments/roadmapbench.example.toml", root=ROOT
+    )
+
+    assert resolved.spec.benchmark_name == "roadmap_bench"
+    assert resolved.benchmark["application"] == "roadmap_bench"
+    assert resolved.benchmark["instances"] == [task_id]
+    assert resolved.benchmark["source_commit"] == DEFAULT_REVISION
+    assert resolved.benchmark["repo_mapping"][task_id]["base_commit"] == DEFAULT_REVISION
+    assert resolved.harness["harness"] == "codex"
+    assert resolved.model["name"] == "Qwen/Qwen3.6-35B-A3B"
+    assert resolved.profile_paths["benchmark"] == (
+        ROOT / "profiles/benchmarks/roadmap/example.json"
+    )
+    env = {"AB_REPO_ROOT": str(ROOT), "AB_RUN_DIR": str(tmp_path / "run")}
+    plan = build_execution_plan(resolved, env=env)
+    assert not plan.stage_enabled("start_serving")
+    assert plan.serving_plan is None
+    assert runtime_endpoint_for_container(
+        "http://127.0.0.1:8000/v1", "vllm-host"
+    ) == "http://model.example:8123/v1"
+
+    materialized = execution.materialize_benchmark_data(resolved, env=env)
+    rows = json.loads(materialized.read_text())
+    assert len(rows) == 1
+    assert rows[0]["instance_id"] == task_id
+    assert rows[0]["benchmark"] == "roadmap_bench"
+    assert rows[0]["benchmark_variant"] == "roadmapbench"
+    assert rows[0]["docker_image"] == "example/roadmap:latest"
+    assert env["AB_BENCHMARK_TASKS_ROOT"] == str(task_root)
 
 
 def test_wrapped_configs_are_expanded() -> None:

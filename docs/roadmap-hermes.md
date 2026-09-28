@@ -45,12 +45,14 @@ separately from execution state; unavailable timestamps remain unknown.
 
 ## Run and report
 
-Choose the Roadmap harness profile in your experiment, then use the shared
-entrypoints:
+Start from the [minimal Roadmap example](../agent_bench/benchmarks/roadmap_bench/README.md#minimal-example)
+and set its `[harness]` section to `name = "hermes"` and
+`profile = "profiles/harnesses/hermes_roadmapbench.yaml"`. Build the Hermes
+runtime above, then use the shared entrypoints:
 
 ```bash
-python3 validate.py --config /path/to/experiment.toml
-python3 run.py --config /path/to/experiment.toml
+python3 validate.py --config experiments/roadmapbench.example.toml
+python3 run.py --config experiments/roadmapbench.example.toml
 python3 scripts/analyze_roadmap_hermes_runs.py /path/to/run --arm subagent
 python3 scripts/compare_roadmap_hermes_runs.py \
   --subagent /path/to/subagent-run --single-agent /path/to/single-agent-run

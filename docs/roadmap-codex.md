@@ -73,11 +73,12 @@ fencing and excludes copying and verification. Reward is recorded separately.
 
 ## Run and report
 
-Choose the Codex harness profile in your experiment:
+The [minimal Roadmap example](../agent_bench/benchmarks/roadmap_bench/README.md#minimal-example)
+provides a pinned task, model profile, and existing-endpoint configuration:
 
 ```bash
-python3 validate.py --config /path/to/experiment.toml
-python3 run.py --config /path/to/experiment.toml
+python3 validate.py --config experiments/roadmapbench.example.toml
+python3 run.py --config experiments/roadmapbench.example.toml
 python3 scripts/analyze_roadmap_codex_runs.py /path/to/run --arm subagent
 python3 scripts/compare_roadmap_codex_runs.py \
   --subagent /path/to/subagent-run --single-agent /path/to/single-agent-run

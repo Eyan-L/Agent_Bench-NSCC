@@ -1,0 +1,22 @@
+{
+  "_doc": "One task from a pinned RoadmapBench revision. Set ROADMAP_TASKS_ROOT to the directory populated by scripts/download_roadmapbench_tasks.py. The loader obtains the actual task image and verifier from task.toml.",
+  "sweep_name": "roadmapbench_example",
+  "plan_version": "roadmapbench-example-v1",
+  "application": "roadmap_bench",
+  "source_dataset": "UnipatAI/RoadmapBench",
+  "source_commit": "59184e779909300a5a0150b06b945d39da81a099",
+  "tasks_root": "$ROADMAP_TASKS_ROOT",
+  "instances": [
+    "fyn-2.5.0-roadmap"
+  ],
+  "repo_mapping": {
+    "fyn-2.5.0-roadmap": {
+      "repo_id": "roadmapbench/fyn-2.5.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 7200,
+  "output_dir": "roadmapbench_example",
+  "seeds": [42]
+}
