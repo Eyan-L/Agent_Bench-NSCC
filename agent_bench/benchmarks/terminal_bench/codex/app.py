@@ -99,6 +99,8 @@ class TerminalBenchCodexHarness(TerminalBenchOpenClawHarness):
             adapter_config = {"token": token, "base_url": upstream, "api_key": os.environ.get("AB_SERVING_API_KEY") or model.api_key or "EMPTY",
                               "model": model_name, "temperature": model.temperature, "max_tokens": model.max_tokens,
                               "upstream_api": settings.get("upstream_api", "responses")}
+            if settings.get("chat_template_kwargs") is not None:
+                adapter_config["chat_template_kwargs"] = settings["chat_template_kwargs"]
             (state / "adapter.json").write_text(json.dumps(adapter_config))
             (state / "adapter.json").chmod(0o600)
             host = adapter_name if self.container.backend_id == "docker" else "127.0.0.1"

@@ -41,10 +41,17 @@ def write_config(state: Path, *, model: str, base_url: str, context_window: int,
     return path
 
 
-def command(workspace: str) -> list[str]:
-    cli = [f"{PAYLOAD_PATH}/bin/codex", "exec", "--json", "--color", "never",
+def command(workspace: str, session_id: str | None = None) -> list[str]:
+    cli = [f"{PAYLOAD_PATH}/bin/codex", "exec", "--color", "never", "--cd", workspace]
+    if session_id:
+        cli.append("resume")
+    cli += ["--json",
             "--strict-config", "--skip-git-repo-check", "--ignore-rules",
-            "--cd", workspace, "--output-last-message", f"{STATE_PATH}/final.txt", "-"]
+            "--output-last-message", f"{STATE_PATH}/final.txt"]
+    if session_id:
+        cli.append(session_id)
+    cli.append("-")
     # Container.popen_exec deliberately disconnects host stdin. Read the prompt
     # through the per-run state bind without changing other harnesses' exec API.
-    return ["sh", "-c", f'exec "$@" < {STATE_PATH}/prompt.txt', "codex-entry", *cli]
+    prompt_file = "continuation.txt" if session_id else "prompt.txt"
+    return ["sh", "-c", f'exec "$@" < {STATE_PATH}/{prompt_file}', "codex-entry", *cli]

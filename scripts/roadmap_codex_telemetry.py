@@ -30,10 +30,17 @@ def install_comparison(comparison):
         row = original_record(record)
         obs, _ = comparison._runtime_observability(record)
         if obs.get("source") == "codex_native_rollouts":
+            lifecycle = record.manifest.get("agent_lifecycle") or {}
+            row["continuation_count"] = lifecycle.get("continuationCount", 0)
+            row["cli_invocation_count"] = lifecycle.get("cliInvocationCount")
             for name in (
                 "spawned_child_count", "missing_child_session_ids",
+                "child_execution_complete_count", "child_lifecycle_unknown_count",
+                "unfinished_child_session_ids", "child_lifecycle_by_session",
                 "parent_activity_during_child_execution", "parent_overlapping_model_calls",
                 "parent_overlapping_tool_calls", "parent_overlapping_coordination_calls",
+                "parent_overlap_metrics_quality", "parent_overlapping_model_calls_lower_bound",
+                "parent_overlapping_tool_calls_lower_bound", "parent_overlapping_coordination_calls_lower_bound",
             ):
                 row[name] = obs.get(name)
         return row

@@ -26,6 +26,15 @@ class RoadmapBenchCodexCondition(CodexAgentCondition):
             f"Roadmap:\n{instance_data['instruction']}"
         )
 
+    def _continuation_message(self):
+        return (
+            "Your previous reply was a working progress update. Continue the "
+            "original roadmap in this same session using the available tools. "
+            "Finish the implementation, complete and integrate any unfinished "
+            "delegated work, and validate all requirements. Declare DONE only "
+            "when the integrated roadmap is complete."
+        )
+
     def run(self, instance_data, run_dir, seed, workspace_root, container_id, env_info=None):
         env_info = env_info if env_info is not None else {}
         baseline = self._capture_task_workspace_baseline(env_info, workspace_root)
@@ -37,19 +46,29 @@ class RoadmapBenchCodexCondition(CodexAgentCondition):
         env_info["roadmap_workspace_quiesced"] = False
         return super().run(instance_data, run_dir, seed, workspace_root, container_id, env_info)
 
-    def _finalize_runtime(self, env_info, run_dir, workspace_root):
-        lifecycle, _ = super()._finalize_runtime(env_info, run_dir, workspace_root)
+    def _freeze_candidate(self, env_info, run_dir, workspace_root, lifecycle, patch):
+        if not lifecycle.get("workspaceQuiesced"):
+            raise RuntimeError("Roadmap Codex freeze requires fenced writers")
         baseline = env_info["roadmap_workspace_baseline"]
         patch = self._collect_container_workspace_patch(
             ContainerHandle(env_info["task_container_id"], env_info["task_container_name"], self.container.backend_id),
             workspace_root, baseline_head=baseline["git_head"],
         )
+        # Patch evidence is independent of snapshot copying and survives its
+        # failure. Preserve links, including dangling/container-absolute links.
+        (run_dir / "candidate.patch").write_text(patch)
         candidate = run_dir / "candidate_workspace"
-        shutil.copytree(env_info["workspace_host_path"], candidate,
-                        ignore=shutil.ignore_patterns(".git"), dirs_exist_ok=True)
-        (run_dir / "candidate_metadata.json").write_text(json.dumps({
+        metadata = {
             "baseline": baseline, "workspace_quiesced": True,
             "quiescence": lifecycle, "candidate_workspace": str(candidate),
-            "patch_bytes": len(patch.encode()),
-        }, indent=2))
-        return lifecycle, patch
+            "patch_bytes": len(patch.encode()), "candidate_snapshot_complete": False,
+        }
+        try:
+            shutil.copytree(env_info["workspace_host_path"], candidate, symlinks=True,
+                            ignore=shutil.ignore_patterns(".git"), dirs_exist_ok=True)
+            metadata["candidate_snapshot_complete"] = True
+        except Exception as exc:
+            metadata["candidate_snapshot_error"] = str(exc)
+            raise
+        finally:
+            (run_dir / "candidate_metadata.json").write_text(json.dumps(metadata, indent=2))

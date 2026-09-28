@@ -12,6 +12,11 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+if __package__:
+    from .messages import assistant_phase
+else:
+    from messages import assistant_phase
+
 
 def text(content):
     if isinstance(content, str):
@@ -47,6 +52,23 @@ def flatten_tools(tools):
     for tool in tools:
         add(tool)
     return flat, identities
+
+
+def chat_tool_choice(choice: str | dict | None, identities: dict) -> str | dict:
+    """Translate explicit choices; never silently loosen a tool restriction."""
+    if choice is None:
+        return "auto"
+    if isinstance(choice, str) and choice in {"auto", "none", "required"}:
+        if choice == "required" and not identities:
+            raise ValueError("tool_choice=required needs tools")
+        return choice
+    if isinstance(choice, dict) and choice.get("type") in {"function", "custom"}:
+        name = (choice.get("namespace") + "__" if choice.get("namespace") else "") + choice["name"]
+        identity = identities.get(name)
+        if identity is None or identity["custom"] != (choice["type"] == "custom"):
+            raise ValueError(f"Unknown tool_choice: {choice}")
+        return {"type": "function", "function": {"name": name}}
+    raise ValueError(f"Unsupported tool_choice: {choice}")
 
 
 def to_chat(request, config):
@@ -87,8 +109,15 @@ def to_chat(request, config):
         messages.insert(0, {"role": "system", "content": "\n\n".join(system)})
     chat = {"model": config.get("model") or request["model"], "messages": messages, "stream": False,
             "temperature": config.get("temperature", 0.0), "max_tokens": config.get("max_tokens", 16384)}
+    if config.get("chat_template_kwargs") is not None:
+        chat["chat_template_kwargs"] = dict(config["chat_template_kwargs"])
+    choice = chat_tool_choice(request.get("tool_choice"), identities)
     if tools:
-        chat.update(tools=tools, tool_choice="auto")
+        chat.update(tools=tools, tool_choice=choice)
+        if "parallel_tool_calls" in request:
+            chat["parallel_tool_calls"] = request["parallel_tool_calls"]
+    elif choice == "none":
+        chat["tool_choice"] = choice
     return chat, identities
 
 
@@ -97,16 +126,18 @@ def from_chat(chat, identities, model):
     if choice.get("finish_reason") not in {"stop", "tool_calls", "length"}:
         raise ValueError(f"Unsupported finish reason: {choice.get('finish_reason')}")
     message, output = choice["message"], []
+    truncated = choice.get("finish_reason") == "length"
+    item_status = "incomplete" if truncated else "completed"
     if message.get("content"):
-        output.append({"type": "message", "id": "msg_" + uuid.uuid4().hex, "role": "assistant", "status": "completed",
-                       "phase": "commentary" if message.get("tool_calls") else "final_answer",
+        output.append({"type": "message", "id": "msg_" + uuid.uuid4().hex, "role": "assistant", "status": item_status,
+                       "phase": assistant_phase(message),
                        "content": [{"type": "output_text", "text": message["content"], "annotations": []}]})
     for call in message.get("tool_calls") or []:
         function = call["function"]
         if function["name"] not in identities:
             raise ValueError(f"Unknown returned tool: {function['name']}")
         identity = identities[function["name"]]
-        item = {"type": "function_call", "id": "fc_" + uuid.uuid4().hex, "call_id": call["id"], "name": identity["name"], "arguments": function["arguments"], "status": "completed"}
+        item = {"type": "function_call", "id": "fc_" + uuid.uuid4().hex, "call_id": call["id"], "name": identity["name"], "arguments": function["arguments"], "status": item_status}
         if identity["namespace"]:
             item["namespace"] = identity["namespace"]
         if identity["custom"]:
@@ -115,7 +146,6 @@ def from_chat(chat, identities, model):
         output.append(item)
     usage = chat.get("usage") or {}
     prompt, completion = int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0)
-    truncated = choice.get("finish_reason") == "length"
     return {"id": "resp_" + uuid.uuid4().hex, "object": "response", "created_at": int(time.time()), "model": model,
             "status": "incomplete" if truncated else "completed", "incomplete_details": {"reason": "max_output_tokens"} if truncated else None,
             "error": None, "output": output, "usage": {"input_tokens": prompt, "output_tokens": completion, "total_tokens": prompt + completion,
@@ -123,11 +153,37 @@ def from_chat(chat, identities, model):
 
 
 def response_events(response):
-    yield {"type": "response.created", "response": dict(response, status="in_progress", output=[], usage=None)}
+    """Emit a Responses sequence with a terminal type matching its status."""
+    status = response["status"]
+    if status not in {"completed", "incomplete", "failed"}:
+        raise ValueError(f"Unsupported terminal response status: {status}")
+    initial = dict(response, status="in_progress", output=[], usage=None, error=None, incomplete_details=None)
+    yield {"type": "response.created", "response": initial}
+    yield {"type": "response.in_progress", "response": initial}
     for index, item in enumerate(response["output"]):
-        yield {"type": "response.output_item.added", "output_index": index, "item": item}
+        added = dict(item, status="in_progress")
+        if item["type"] == "message":
+            added["content"] = []
+        elif item["type"] == "function_call":
+            added["arguments"] = ""
+        elif item["type"] == "custom_tool_call":
+            added["input"] = ""
+        yield {"type": "response.output_item.added", "output_index": index, "item": added}
+        identity = {"item_id": item["id"], "output_index": index}
+        if item["type"] == "message":
+            for content_index, part in enumerate(item["content"]):
+                location = dict(identity, content_index=content_index)
+                yield {"type": "response.content_part.added", **location, "part": dict(part, text="")}
+                yield {"type": "response.output_text.delta", **location, "delta": part["text"]}
+                yield {"type": "response.output_text.done", **location, "text": part["text"]}
+                yield {"type": "response.content_part.done", **location, "part": part}
+        elif item["type"] in {"function_call", "custom_tool_call"}:
+            field = "arguments" if item["type"] == "function_call" else "input"
+            prefix = "response.function_call_arguments" if field == "arguments" else "response.custom_tool_call_input"
+            yield {"type": prefix + ".delta", **identity, "delta": item[field]}
+            yield {"type": prefix + ".done", **identity, field: item[field]}
         yield {"type": "response.output_item.done", "output_index": index, "item": item}
-    yield {"type": "response.completed", "response": response}
+    yield {"type": "response." + status, "response": response}
 
 
 class AdapterServer(ThreadingHTTPServer):
@@ -173,6 +229,9 @@ class Handler(BaseHTTPRequestHandler):
                 raw = gzip.decompress(raw)
             request = json.loads(raw)
             row["request"] = request
+            metadata = request.get("client_metadata") or {}
+            row["turn_id"] = metadata.get("turn_id")
+            row["thread_id"] = row["thread_id"] or metadata.get("thread_id")
             self.server.record(dict(row, event="request_start"))
             mode = config.get("upstream_api", "chat_completions")
             if mode == "responses":

@@ -27,7 +27,14 @@ Codex speaks the Responses API. The generic harness can forward Responses
 directly; Roadmap uses a concurrent Responses/Chat Completions adapter for the
 existing Qwen endpoint. The adapter preserves tool call IDs, native namespaces,
 freeform tool input, text, usage, and truncation status. It does not implement
-agent scheduling. This path supports text software tasks; images and other
+agent scheduling. Explicit `tool_choice` restrictions are preserved or rejected
+when unsupported. Truncation emits `response.incomplete`, never
+`response.completed`; the unmodified CLI may retry or fail on this event.
+Both Roadmap arms explicitly send `chat_template_kwargs.enable_thinking=false`
+on every Qwen request, in addition to the SGLang profile's no-think default.
+For Chat replies without native phase metadata, tool preambles and explicit
+statements of further work map to `commentary`, rather than `final_answer`.
+This path supports text software tasks; images and other
 unsupported input types fail explicitly.
 
 ## Subagents and completion
@@ -54,14 +61,37 @@ serial execution.
 
 Roadmap uses a 7200-second execution deadline. Codex has no configured native
 tool-call iteration cap in this harness. Normal completion requires exit zero,
-a native completed parent turn, a nonempty final assistant message without
-incomplete truncation (or explicit `DONE`), and available child timing evidence.
-Exit zero alone is insufficient. The verifier reward is recorded separately.
+a completed final parent turn with matching CLI, rollout and API evidence,
+a nonempty final assistant message without incomplete truncation (or explicit
+`DONE`), no pending calls, and no unfinished delegated work. Older completed
+turns and older `DONE` messages cannot supply final-turn evidence. The DONE
+marker follows the OpenClaw/Hermes Roadmap durable-transcript rule (a line
+starting with the standalone word `DONE`, case insensitive). Exit zero alone
+is insufficient. The verifier reward is recorded separately.
+
+Codex 0.157.1 can exit after a commentary-only response. When consistent
+CLI, rollout and API evidence identifies such a working preamble, the harness
+continues the exact parent thread with native `codex exec resume`. All turns,
+continuation prompts and CLI invocations are retained; `continuationCount`
+records recovery. Invocations share the original 7200-second deadline and
+their time is included in agent latency. Truncation, errors, open turns and
+pending calls do not trigger this recovery. Genuine non-DONE closeouts remain
+eligible for normal completion; an explicit promise of further work does not.
+
+Child execution state and timing quality are independent. Native completed
+status can establish completion even when timestamps or a rollout are missing;
+those child timing metrics remain unknown. Running, queued, interrupted,
+failed or unknown child work prevents normal completion. A completed child
+that receives new work needs new completion evidence.
 
 All Codex task writers and the API recorder are stopped before candidate
 freezing. The task runtime is restarted for the existing isolated Roadmap
 verifier. Agent latency ends at writer fencing and excludes candidate copying
 and verification.
+Candidate snapshots preserve symbolic links, including dangling links. Session,
+API, timing and tool evidence are archived before snapshot copying; the patch
+is written first. Snapshot errors retain this evidence and invalidate the run
+without replacing a known agent execution outcome with an artifact error.
 
 ## Run and inspect
 
@@ -85,3 +115,5 @@ copying full candidate workspace trees.
 parent work during child execution. Resumed child idle time is excluded from
 active-runtime metrics. Spawn/wait coordination calls are not counted as
 independent parent work. Missing child rollouts are reported as unknown.
+Incomplete timing leaves total overlap metrics unknown and retains measured
+lower bounds; it cannot establish that the parent did no concurrent work.

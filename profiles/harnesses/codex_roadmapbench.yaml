@@ -9,6 +9,8 @@ terminal_bench:
   - BOOTSTRAP.md
 codex:
   upstream_api: chat_completions
+  chat_template_kwargs:
+    enable_thinking: false
   multi_agent: true
   max_subagents: 16
   max_spawn_depth: 1
