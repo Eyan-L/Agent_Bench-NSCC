@@ -51,10 +51,6 @@ when a dependency requires their results. The configuration allows sixteen
 children and one level of delegation. The Roadmap prompt follows OpenClaw's
 delegation policy, with only native-tool substitutions.
 
-`codex_roadmapbench_subagent_smoke.yaml` adds an explicit early two-workstream
-delegation instruction for smoke validation. It is a separate exercise profile
-from the subagent and single-agent comparison profiles.
-
 Verify scheduling against the real CLI with a scripted model:
 
 ```bash
