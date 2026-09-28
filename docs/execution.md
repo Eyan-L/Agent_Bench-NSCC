@@ -127,6 +127,20 @@ files are not rewritten. If `spans_timeline.html` was not collected but valid
 to create a viewer in the bundle. The report never changes the source run and
 rejects output paths that overlap it.
 
+Roadmap analysis accepts one or more runs for either experiment arm without a
+paired run:
+
+```bash
+python3 scripts/analyze_roadmap_runs.py /path/to/subagent-run --arm subagent
+python3 scripts/analyze_roadmap_runs.py /path/to/single-agent-run --arm single-agent
+```
+
+It writes the same five artifact groups, report, per-task CSV, trajectory
+index, and available figures. Inputs may also be PBS IDs; use `--runs-root`
+or `AB_RUNS_ROOT` to locate the run collection.
+Hermes and Codex have corresponding `analyze_roadmap_<harness>_runs.py` and
+`compare_roadmap_<harness>_runs.py` entrypoints.
+
 Roadmap paired comparison uses the same exporter:
 
 ```bash

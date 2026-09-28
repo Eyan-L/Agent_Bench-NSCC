@@ -1,0 +1,15 @@
+# Generic official Codex CLI against a Responses-compatible model endpoint.
+harness: codex
+terminal_bench:
+  agent_assets_dir: agent_bench/benchmarks/terminal_bench/codex/agents
+codex:
+  upstream_api: responses
+  multi_agent: true
+  max_subagents: 16
+  max_spawn_depth: 1
+conditions:
+- condition_id: codex_agent
+  condition_type: codex_agent
+  description: Official Codex CLI in the task runtime
+  agent:
+    max_time_seconds: 7200

@@ -67,6 +67,9 @@ def _resolve_provider(model_config: Any = None) -> str:
 class HermesAgentCondition:
     """Run Hermes Agent against a prepared SWE-bench task container."""
 
+    toolsets = "terminal,file,code_execution"
+    ignore_rules = True
+
     def __init__(self, model_config, agent_config):
         self.model_config = model_config
         self.agent_config = agent_config
@@ -91,15 +94,16 @@ class HermesAgentCondition:
         model_name = getattr(self.model_config, "name", None) or "Qwen/Qwen3.6-27B"
         provider = _resolve_provider(self.model_config)
         timeout = getattr(self.agent_config, "max_time_seconds", 1800)
-        argv = [
-            "hermes",
-            "--ignore-rules",
+        argv = ["hermes"]
+        if self.ignore_rules:
+            argv.append("--ignore-rules")
+        argv.extend([
             "--yolo",
             "--model", model_name,
             "--provider", provider,
-            "--toolsets", "terminal,file,code_execution",
+            "--toolsets", self.toolsets,
             "-z", message,
-        ]
+        ])
         harness = env_info.get("_harness")
 
         otel_trace_file, pre_offset = otel_trace_offset()
@@ -185,7 +189,10 @@ class HermesAgentCondition:
             "step_type": "LLM_INFER",
             "step_subtype": "LLM_INFER_HERMES_AGENTIC_COARSE",
             "tool_name": "hermes.agent",
-            "command": "hermes --ignore-rules --yolo --toolsets terminal,file,code_execution -z ...",
+            "command": (
+                "hermes " + ("--ignore-rules " if self.ignore_rules else "")
+                + f"--yolo --toolsets {self.toolsets} -z ..."
+            ),
             "file_path": None,
             "start_ts": start_ns,
             "end_ts": end_ns,

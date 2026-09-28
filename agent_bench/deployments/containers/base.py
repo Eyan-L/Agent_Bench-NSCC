@@ -47,6 +47,8 @@ class ContainerSpec:
     gpu: bool = False                             # docker --gpus / singularity --nv
     pull_timeout_s: float = 600.0
     cpus: Optional[float] = None                  # docker --cpus (singularity: no-op)
+    writable_tmpfs: bool = False                  # singularity writable in-memory root overlay
+    fakeroot: bool = False                        # singularity root-mapped user namespace
 
 
 @dataclass

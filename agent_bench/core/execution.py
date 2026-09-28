@@ -685,6 +685,8 @@ def _prepare_images(ctx: ExecutionContext) -> None:
 
 
 _LOCAL_HARNESS_IMAGE_BUILDERS = {
+    "codex": Path("agent_bench/harnesses/codex/docker/build.sh"),
+    "claude_code": Path("agent_bench/harnesses/claude_code/docker/build.sh"),
     "openclaw": Path("agent_bench/harnesses/openclaw/docker/build.sh"),
     "openhands": Path("agent_bench/harnesses/openhands/docker/build.sh"),
     "hermes": Path("agent_bench/harnesses/hermes/docker/build.sh"),
@@ -695,6 +697,11 @@ def _rebuild_local_harness_image(ctx: ExecutionContext) -> None:
     ctx.env["AB_AGENT_RUNTIME_REBUILD"] = "1"
     harness = _harness_choice(ctx.resolved)
     rel_script = _LOCAL_HARNESS_IMAGE_BUILDERS.get(harness)
+    if harness == "hermes" and (
+        ctx.resolved.spec.benchmark_name == "roadmap_bench"
+        or ctx.resolved.benchmark.get("source_dataset") == "UnipatAI/RoadmapBench"
+    ):
+        rel_script = Path("agent_bench/harnesses/hermes/roadmap/build.sh")
     if rel_script is None:
         _note("prepare_images", f"no local image builder for harness {harness!r}")
         return
@@ -1036,7 +1043,7 @@ def _run_benchmark(ctx: ExecutionContext) -> None:
     ctx.env["AB_INSTANCE_DATA"] = str(instance_data.resolve())
     ctx.env["AB_EXPERIMENT_CONFIG"] = str(resolved.spec.config_path.resolve())
 
-    run_sweep(
+    completed, failed = run_sweep(
         benchmark_path=benchmark_path,
         harness_path=harness_path,
         model_path=model_path,
@@ -1047,6 +1054,11 @@ def _run_benchmark(ctx: ExecutionContext) -> None:
         max_workers=ctx.max_workers,
     )
     _write_run_summary_log(ctx)
+    if failed > 0:
+        raise ConfigError(
+            "benchmark sweep contained infrastructure errors: "
+            f"{completed} completed, {failed} error(s)"
+        )
 
 
 def _write_run_summary_log(ctx: ExecutionContext) -> Path:

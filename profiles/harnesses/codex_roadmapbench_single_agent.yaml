@@ -1,0 +1,22 @@
+harness: codex
+terminal_bench:
+  agent_assets_dir: agent_bench/benchmarks/roadmap_bench/openclaw/agents_single_agent
+  workspace_asset_files:
+  - AGENTS.md
+  - IDENTITY.md
+  - TOOLS.md
+  - BOOTSTRAP.md
+codex:
+  upstream_api: chat_completions
+  require_done_marker: true
+  chat_template_kwargs:
+    enable_thinking: false
+  multi_agent: false
+  max_subagents: 16
+  max_spawn_depth: 1
+conditions:
+- condition_id: codex_agent
+  condition_type: codex_agent
+  description: RoadmapBench Codex single-agent control
+  agent:
+    max_time_seconds: 7200

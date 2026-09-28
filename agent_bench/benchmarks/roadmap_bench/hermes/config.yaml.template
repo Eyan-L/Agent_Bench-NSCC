@@ -1,0 +1,48 @@
+model:
+  default: "$AB_MODEL_NAME"
+  provider: "$PROVIDER"
+  base_url: "$BASE_URL"
+  api_key: "$API_KEY"
+  api_mode: "chat_completions"
+  temperature: $TEMPERATURE
+  max_tokens: $AB_MODEL_MAX_OUTPUT_TOKENS
+  context_length: $CONTEXT_LENGTH
+
+terminal:
+  backend: "docker"
+  cwd: "$TERMINAL_CWD"
+  timeout: $TERMINAL_TIMEOUT
+  docker_image: "$SANDBOX_IMAGE"
+
+agent:
+  max_turns: $MAX_TURNS
+
+delegation:
+  max_iterations: $MAX_TURNS
+  child_timeout_seconds: $MAX_TIME_SECONDS
+  max_concurrent_children: 16
+  max_spawn_depth: 1
+  subagent_auto_approve: true
+
+display:
+  streaming: false
+  compact: true
+
+platform_toolsets:
+  cli:
+    - terminal
+    - file
+    - code_execution
+    - delegation
+
+telemetry:
+  otel:
+    enabled: $OTEL_ENABLED
+    endpoint: "$OTEL_ENDPOINT"
+    protocol: "$OTEL_PROTOCOL"
+    service_name: "$OTEL_SERVICE_NAME"
+    run_id: "$AB_RUN_ID"
+    resource_attributes: "$OTEL_RESOURCE_ATTRIBUTES"
+    traces: true
+    metrics: false
+    logs: false

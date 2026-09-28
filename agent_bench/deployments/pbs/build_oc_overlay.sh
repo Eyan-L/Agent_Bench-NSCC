@@ -55,8 +55,10 @@ command -v singularity >/dev/null 2>&1 || { echo "ERROR: singularity not on PATH
 
 PATCH_DIR="$AB_REPO_ROOT/agent_bench/harnesses/openclaw/patch"
 APPLY_SCRIPT="$AB_REPO_ROOT/agent_bench/harnesses/openclaw/apply_patch.py"
+RUNTIME_COMPAT_SCRIPT="$AB_REPO_ROOT/agent_bench/harnesses/openclaw/runtime_compat_patch.py"
 [[ -d "$PATCH_DIR"   ]] || { echo "ERROR: patch dir missing: $PATCH_DIR" >&2; exit 1; }
 [[ -f "$APPLY_SCRIPT" ]] || { echo "ERROR: apply_patch.py missing: $APPLY_SCRIPT" >&2; exit 1; }
+[[ -f "$RUNTIME_COMPAT_SCRIPT" ]] || { echo "ERROR: runtime compat patch missing: $RUNTIME_COMPAT_SCRIPT" >&2; exit 1; }
 
 if [[ -f "$OVERLAY" && "$FORCE" -ne 1 ]]; then
     echo "[build-oc-overlay] overlay already exists at $OVERLAY (use --force to rebuild)"
@@ -78,13 +80,16 @@ echo "  sif         : $SIF"
 echo "  inside-pkg  : $INSIDE_PKG"
 echo "  patch dir   : $PATCH_DIR"
 
-# Run the patcher inside the container, against the sif's openclaw install,
+# Run the patchers inside the container, against the sif's OpenClaw install,
 # with the overlay mounted rw so changes persist into the overlay file.
 #
-# apply_patch.py resolves MANIFEST.json via its own SCRIPT_DIR (../patch/),
-# so bind the whole agent_bench/harnesses/openclaw/ tree as one. Keeps the layout the
-# .py expects; no hard-coded inside paths to keep in sync.
+# apply_patch.py handles the normal Agent_Bench OpenClaw patch set. The runtime
+# compatibility pass then patches two pinned-v2026.4.22 behaviours that are not
+# exposed as configuration: the 10s sessions.patch deadline used by
+# sessions_spawn and public model-pricing catalogue URLs. Both passes fail
+# closed when their expected runtime anchors are missing.
 OPENCLAW_HARNESS_DIR="$(dirname "$APPLY_SCRIPT")"
+SUBAGENT_PATCH_TIMEOUT_MS="${AB_OPENCLAW_SUBAGENT_SESSION_PATCH_TIMEOUT_MS:-45000}"
 singularity exec \
     --overlay "$TMP_OVERLAY:rw" \
     --bind "$OPENCLAW_HARNESS_DIR:/oc-harness:ro" \
@@ -95,6 +100,10 @@ singularity exec \
         export AB_HARNESS_OPENCLAW_PATCH_MODE=runtime
         python3 /oc-harness/apply_patch.py apply
         python3 /oc-harness/apply_patch.py status
+        python3 /oc-harness/runtime_compat_patch.py \
+            --root '$INSIDE_PKG' \
+            --session-patch-timeout-ms '$SUBAGENT_PATCH_TIMEOUT_MS' \
+            --status-out '$INSIDE_PKG/.agent-bench-runtime-compat.json'
     "
 
 mv -f "$TMP_OVERLAY" "$OVERLAY"

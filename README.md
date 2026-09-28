@@ -33,7 +33,7 @@ as not collected rather than being represented as zero.
 Experiments compose reusable profiles from `profiles/`:
 
 - benchmark: SWE-bench, Terminal-Bench, RoadmapBench, DeepResearch-Bench, or LongBench
-- harness: OpenClaw, OpenHands, Hermes, ReAct, or AR
+- harness: OpenClaw, OpenHands, Hermes, Claude Code, Codex CLI, ReAct, or AR
 - model: model alias, context window, and token limits
 - serving: vLLM, SGLang, LiteLLM, or an existing OpenAI-compatible endpoint
 - deployment: client-only, local Docker, NSCC PBS, or CCDS cloud
@@ -68,6 +68,11 @@ See [docs/quickstart.md](docs/quickstart.md) for prerequisites, provider/API
 fallback, and output locations.
 
 ## Documentation
+
+RoadmapBench has a dedicated [benchmark adapter](agent_bench/benchmarks/roadmap_bench/README.md)
+with OpenClaw, [Hermes](docs/roadmap-hermes.md), and [Codex CLI](docs/roadmap-codex.md)
+profiles. [Claude Code](agent_bench/harnesses/claude_code/README.md) and Codex CLI
+also have reusable Terminal-Bench harness profiles.
 
 - [docs/quickstart.md](docs/quickstart.md): shortest path to run OpenClaw-based examples.
 - [docs/deployments.md](docs/deployments.md): deployment adapter behavior and examples.

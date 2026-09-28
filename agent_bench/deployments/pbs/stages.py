@@ -51,7 +51,16 @@ def runtime_environment(
     singularity_cache = env.get("SINGULARITY_CACHEDIR") or env.get("SINGULARITY_CACHE") or f"{scratch}/.singularity"
     harness = _harness_choice(resolved)
 
-    runtime_defaults = _agent_runtime_defaults(harness, repo_root, scratch)
+    roadmapbench = (
+        resolved.spec.benchmark_name == "roadmap_bench"
+        or (
+            resolved.spec.benchmark_name == "terminal_bench"
+            and resolved.benchmark.get("source_dataset") == "UnipatAI/RoadmapBench"
+        )
+    )
+    runtime_defaults = _agent_runtime_defaults(
+        harness, repo_root, scratch, roadmapbench=roadmapbench
+    )
 
     out = {
         "AB_REPO_ROOT": repo_root,
@@ -76,6 +85,17 @@ def runtime_environment(
         "AB_TELEMETRY_DOCKER": env.get("AB_TELEMETRY_DOCKER", "docker://otel/opentelemetry-collector-contrib:latest"),
     }
     out.update(runtime_defaults)
+    if resolved.spec.benchmark_name in {"terminal_bench", "roadmap_bench"}:
+        configured_root = resolved.benchmark.get("tasks_root")
+        if configured_root:
+            tasks_root = Path(
+                os.path.expandvars(os.path.expanduser(str(configured_root)))
+            ).resolve()
+            if not tasks_root.is_dir():
+                raise ConfigError(
+                    f"Terminal-Bench tasks_root does not exist: {tasks_root}"
+                )
+            out["AB_BENCHMARK_TASKS_ROOT"] = str(tasks_root)
     for key in tuple(runtime_defaults):
         if key in env and env[key]:
             out[key] = env[key]
@@ -84,7 +104,47 @@ def runtime_environment(
     return out
 
 
-def _agent_runtime_defaults(harness: str, repo_root: str, scratch: str) -> dict[str, str]:
+def _agent_runtime_defaults(
+    harness: str, repo_root: str, scratch: str, *, roadmapbench: bool = False
+) -> dict[str, str]:
+    if harness == "codex":
+        version = _version_from_file(
+            Path(repo_root) / "agent_bench/harnesses/codex/VERSION",
+            "codex_version", "0.157.1",
+        )
+        runtime_sif = f"{scratch}/sif_images/codex_{version}.sif"
+        return {
+            "AB_AGENT_RUNTIME_VERSION": version,
+            "AB_AGENT_RUNTIME_SIF": runtime_sif,
+            "AB_AGENT_RUNTIME_DOCKER": f"agent-bench/codex:{version}",
+            "AB_AGENT_RUNTIME_BASE_SIF": runtime_sif,
+            "AB_AGENT_RUNTIME_BASE_DOCKER": "",
+            "AB_AGENT_RUNTIME_REBUILD": "0",
+            "AB_AGENT_RUNTIME_OVERLAY": "",
+            "AB_AGENT_RUNTIME_INSIDE_PKG": "/opt/codex",
+        }
+    if harness == "claude_code":
+        version_file = Path(repo_root) / "agent_bench/harnesses/claude_code/VERSION"
+        claude_version = _version_from_file(
+            version_file, "claude_code_version", "2.1.278"
+        )
+        litellm_version = _version_from_file(
+            version_file, "litellm_version", "1.102.0"
+        )
+        runtime_sif = (
+            f"{scratch}/sif_images/claude_code_{claude_version}_"
+            f"litellm_{litellm_version}.sif"
+        )
+        return {
+            "AB_AGENT_RUNTIME_VERSION": claude_version,
+            "AB_AGENT_RUNTIME_SIF": runtime_sif,
+            "AB_AGENT_RUNTIME_DOCKER": f"agent-bench/claude-code:{claude_version}",
+            "AB_AGENT_RUNTIME_BASE_SIF": runtime_sif,
+            "AB_AGENT_RUNTIME_BASE_DOCKER": "",
+            "AB_AGENT_RUNTIME_REBUILD": "0",
+            "AB_AGENT_RUNTIME_OVERLAY": "",
+            "AB_AGENT_RUNTIME_INSIDE_PKG": "/opt/claude-code",
+        }
     if harness == "openhands":
         version = _version_from_file(
             Path(repo_root) / "agent_bench/harnesses/openhands/VERSION",
@@ -107,6 +167,18 @@ def _agent_runtime_defaults(harness: str, repo_root: str, scratch: str) -> dict[
             "upstream_version",
             "v2026.5.16",
         )
+        if roadmapbench:
+            runtime_sif = f"{scratch}/sif_images/hermes_roadmap_{version}.sif"
+            return {
+                "AB_AGENT_RUNTIME_VERSION": version,
+                "AB_AGENT_RUNTIME_SIF": runtime_sif,
+                "AB_AGENT_RUNTIME_DOCKER": f"agent-bench/hermes-roadmap:{version}",
+                "AB_AGENT_RUNTIME_BASE_SIF": runtime_sif,
+                "AB_AGENT_RUNTIME_BASE_DOCKER": "",
+                "AB_AGENT_RUNTIME_REBUILD": "0",
+                "AB_AGENT_RUNTIME_OVERLAY": "",
+                "AB_AGENT_RUNTIME_INSIDE_PKG": "/opt/hermes",
+            }
         return {
             "AB_AGENT_RUNTIME_VERSION": version,
             "AB_AGENT_RUNTIME_SIF": f"{scratch}/sif_images/hermes_runtime.sif",
@@ -260,7 +332,7 @@ def _benchmark_image_commands(
     env: Mapping[str, str],
     repo_root: Path,
 ) -> list[StageCommand]:
-    if resolved.spec.benchmark_name == "terminal_bench":
+    if resolved.spec.benchmark_name in {"terminal_bench", "roadmap_bench"}:
         return _terminal_bench_image_commands(resolved, spec, env)
     if resolved.spec.benchmark_name != "swebench":
         return []
@@ -326,11 +398,72 @@ def _runtime_image_commands(
     if harness == "openhands":
         return _openhands_runtime_commands(spec, env, repo_root)
     if harness == "hermes":
-        return _hermes_runtime_commands(spec, env, repo_root)
+        roadmapbench = (
+            resolved.spec.benchmark_name == "roadmap_bench"
+            or (
+                resolved.spec.benchmark_name == "terminal_bench"
+                and resolved.benchmark.get("source_dataset") == "UnipatAI/RoadmapBench"
+            )
+        )
+        return _hermes_runtime_commands(spec, env, repo_root, roadmapbench=roadmapbench)
+    if harness == "claude_code":
+        return _claude_code_runtime_commands(spec, env, repo_root)
+    if harness == "codex":
+        runtime_sif = Path(env["AB_AGENT_RUNTIME_SIF"])
+        if not runtime_sif.is_file() or runtime_sif.stat().st_size == 0:
+            raise FileNotFoundError(
+                f"Codex runtime SIF missing: {runtime_sif}. Build it on local "
+                "Ubuntu with scripts/build_codex_sif_local.sh and upload it."
+            )
+        return [StageCommand(
+            label="check uploaded Codex CLI runtime",
+            argv=("singularity", "exec", str(runtime_sif), "/opt/codex/bin/codex", "--version"),
+            log_path=spec.log_dir / "runtime-codex-preflight.log",
+            env=dict(env), required=True,
+        )]
     return []
 
 
+def _claude_code_runtime_commands(
+    spec: PbsJobSpec,
+    env: Mapping[str, str],
+    repo_root: Path,
+) -> list[StageCommand]:
+    runtime_sif = Path(env["AB_AGENT_RUNTIME_SIF"])
+    if runtime_sif.is_file() and runtime_sif.stat().st_size > 0:
+        return []
+    message = (
+        f"Claude Code runtime SIF missing: {runtime_sif}. "
+        "Build it locally with "
+        f"{repo_root}/agent_bench/harnesses/claude_code/build_sif.sh "
+        "and upload it before submitting this benchmark."
+    )
+    return [
+        StageCommand(
+            label="check uploaded Claude Code runtime SIF",
+            argv=(
+                "bash",
+                "-lc",
+                f"printf '%s\\n' {json.dumps(message)} >&2; exit 2",
+            ),
+            log_path=spec.log_dir / "runtime-claude-code-preflight.log",
+            env=dict(env),
+            required=True,
+        )
+    ]
+
+
 def _openclaw_runtime_commands(spec: PbsJobSpec, env: Mapping[str, str], repo_root: Path) -> list[StageCommand]:
+    if str(env.get("AB_AGENT_RUNTIME_VERSION") or "").lstrip("v") == "2026.9.2":
+        candidate = Path(env["AB_AGENT_RUNTIME_SIF"])
+        if env.get("AB_AGENT_RUNTIME_REBUILD") == "1":
+            raise ConfigError(
+                "OpenClaw v2026.9.2 requires a prebuilt audited runtime; "
+                "prepare it with agent_bench/deployments/pbs/build_oc_v2026_9_2_sif.sh."
+            )
+        if not candidate.is_file() or candidate.stat().st_size == 0:
+            raise ConfigError(f"missing prebuilt OpenClaw v2026.9.2 runtime SIF: {candidate}")
+        return []
     commands = _pull_if_missing(
         label="pull OpenClaw base runtime SIF",
         sif=env["AB_AGENT_RUNTIME_BASE_SIF"],
@@ -402,7 +535,26 @@ def _openhands_runtime_commands(spec: PbsJobSpec, env: Mapping[str, str], repo_r
     return commands
 
 
-def _hermes_runtime_commands(spec: PbsJobSpec, env: Mapping[str, str], repo_root: Path) -> list[StageCommand]:
+def _hermes_runtime_commands(
+    spec: PbsJobSpec, env: Mapping[str, str], repo_root: Path,
+    *, roadmapbench: bool = False,
+) -> list[StageCommand]:
+    if roadmapbench:
+        runtime_sif = Path(env["AB_AGENT_RUNTIME_SIF"])
+        if runtime_sif.is_file() and runtime_sif.stat().st_size > 0:
+            return []
+        message = (
+            f"Roadmap Hermes runtime SIF missing: {runtime_sif}. "
+            "Run scripts/"
+            "build_roadmap_hermes_sif_local.sh and upload the SIF "
+            "before submitting this experiment."
+        )
+        return [StageCommand(
+            label="check uploaded Roadmap Hermes SIF",
+            argv=("bash", "-c", 'printf "%s\\n" "$1" >&2; exit 2', "bash", message),
+            log_path=spec.log_dir / "runtime-roadmap-hermes-preflight.log",
+            env=dict(env), required=True,
+        )]
     if env.get("AB_AGENT_RUNTIME_DOCKER"):
         return _pull_if_missing(
             label="pull Hermes runtime SIF",
@@ -549,7 +701,12 @@ def _version_from_file(path: Path, key: str, default: str) -> str:
 
 
 class _FakeResolved:
-    spec = type("_Spec", (), {"harness_name": ""})()
+    spec = type(
+        "_Spec",
+        (),
+        {"harness_name": "", "benchmark_name": ""},
+    )()
     harness: dict[str, Any] = {}
+    benchmark: dict[str, Any] = {}
     model: dict[str, Any] = {}
     profile_paths: dict[str, Path] = {}

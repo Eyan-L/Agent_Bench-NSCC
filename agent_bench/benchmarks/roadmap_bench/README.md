@@ -1,7 +1,7 @@
 # RoadmapBench
 
 RoadmapBench uses Terminal-Bench task definitions and verifier isolation while
-providing its own OpenClaw condition, lifecycle policy, prompts, and
+providing its own harness conditions, lifecycle policy, prompts, and
 measurement artifacts.
 
 Use `benchmark.name = "roadmap_bench"` with one of the Roadmap harness
@@ -9,6 +9,9 @@ profiles:
 
 - `profiles/harnesses/openclaw_roadmapbench.yaml`
 - `profiles/harnesses/openclaw_roadmapbench_single_agent.yaml`
+- `profiles/harnesses/hermes_roadmapbench.yaml`
+- `profiles/harnesses/codex_roadmapbench.yaml`
+- `profiles/harnesses/codex_roadmapbench_single_agent.yaml`
 
 Download pinned task definitions with:
 

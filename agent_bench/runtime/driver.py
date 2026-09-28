@@ -279,7 +279,13 @@ def _roadmap_lifecycle_verifier_error(result: dict) -> Optional[str]:
 def _roadmap_benchmark_invalid_reason(result: dict) -> Optional[str]:
     """Return why a scored Roadmap sample is ineligible for formal metrics."""
     runtime_mode = str(result.get("agent_runtime_mode") or "").strip()
-    if runtime_mode and runtime_mode != "gateway":
+    native_codex = result.get("harness") == "codex" and runtime_mode == "codex_cli"
+    if (
+        result.get("harness") != "hermes"
+        and not native_codex
+        and runtime_mode
+        and runtime_mode != "gateway"
+    ):
         return (
             "RoadmapBench requires OpenClaw gateway runtime; "
             f"observed agent_runtime_mode={runtime_mode}"
@@ -555,7 +561,11 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
 
         elif condition_type == "hermes_agent":
             benchmark = instance_data.get("benchmark", "swebench")
-            if benchmark == "terminal_bench":
+            if _is_roadmap_instance(instance_data):
+                from agent_bench.benchmarks.roadmap_bench.conditions.hermes_agent import (
+                    RoadmapBenchHermesCondition as _Cls,
+                )
+            elif benchmark == "terminal_bench":
                 from agent_bench.benchmarks.terminal_bench.conditions.hermes_agent import (
                     TerminalBenchHermesCondition as _Cls,
                 )
@@ -588,6 +598,45 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 workspace_root=env_info["workspace_root"],
                 container_id=container_id,
                 env_info=env_info
+            )
+
+        elif condition_type == "codex_agent":
+            if instance_data.get("benchmark") not in {"terminal_bench", "roadmap_bench"}:
+                raise ValueError("codex_agent currently supports Terminal-Bench and RoadmapBench")
+            if _is_roadmap_instance(instance_data):
+                from agent_bench.benchmarks.roadmap_bench.conditions.codex_agent import (
+                    RoadmapBenchCodexCondition as _Cls,
+                )
+            else:
+                from agent_bench.benchmarks.terminal_bench.conditions.codex_agent import (
+                    TerminalBenchCodexCondition as _Cls,
+                )
+            condition = _Cls(
+                model_config=run_config.condition.model,
+                agent_config=run_config.condition.agent,
+                container=getattr(harness, "container", None),
+            )
+            result = condition.run(
+                instance_data, run_dir, run_config.seed,
+                workspace_root=env_info["workspace_root"],
+                container_id=container_id, env_info=env_info,
+            )
+
+        elif condition_type == "claude_code_agent":
+            if instance_data.get("benchmark") != "terminal_bench":
+                raise ValueError("claude_code_agent currently supports terminal_bench only")
+            from agent_bench.benchmarks.terminal_bench.conditions.claude_code_agent import (
+                TerminalBenchClaudeCodeCondition,
+            )
+            condition = TerminalBenchClaudeCodeCondition(
+                model_config=run_config.condition.model,
+                agent_config=run_config.condition.agent,
+                container=getattr(harness, "container", None),
+            )
+            result = condition.run(
+                instance_data, run_dir, run_config.seed,
+                workspace_root=env_info["workspace_root"],
+                container_id=container_id, env_info=env_info,
             )
 
         elif condition_type == "tb_react":
@@ -745,6 +794,9 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                     duration_seconds=(verifier_end_ns - verifier_start_ns) / 1e9,
                 )
         
+        if not is_roadmapbench and condition_type in {"claude_code_agent", "codex_agent"}:
+            verdict = _merge_agent_completion_into_verdict(verdict, result)
+
         # Write verdict
         verdict_path = run_dir / "verdict.json"
         import json
@@ -1218,6 +1270,22 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
                 TerminalBenchOpenHandsHarness as tb_cls,
             )
             tb_harness = tb_cls(benchmark_data_root, container=DockerContainer())
+        elif harness_choice in {"codex", "claude_code"}:
+            if harness_choice == "codex":
+                from agent_bench.benchmarks.terminal_bench.codex.app import (
+                    TerminalBenchCodexHarness as tb_cls,
+                )
+            else:
+                from agent_bench.benchmarks.terminal_bench.claude_code.app import (
+                    TerminalBenchClaudeCodeHarness as tb_cls,
+                )
+            if tb_backend == "docker":
+                tb_container = DockerContainer()
+            elif tb_backend == "singularity":
+                tb_container = SingularityContainer()
+            else:
+                raise ValueError(f"Unknown Terminal-Bench backend: {tb_backend}")
+            tb_harness = tb_cls(benchmark_data_root, container=tb_container)
         elif harness_choice == "hermes":
             if tb_backend != "docker":
                 raise ValueError(
@@ -1257,9 +1325,9 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
         roadmap_backend = os.environ.get(
             "AB_DEPLOYMENT_CONTAINER_BACKEND", "docker"
         ).lower()
-        if harness_choice != "openclaw":
+        if harness_choice not in {"openclaw", "hermes", "codex"}:
             raise ValueError(
-                "roadmap_bench currently requires harness=openclaw "
+                "roadmap_bench requires harness=openclaw|hermes|codex "
                 f"(got {harness_choice!r})"
             )
         if roadmap_backend == "docker":
@@ -1272,16 +1340,25 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
                 "AB_DEPLOYMENT_CONTAINER_BACKEND=docker|singularity "
                 f"(got {roadmap_backend!r})"
             )
-        from agent_bench.benchmarks.roadmap_bench.app import (
-            RoadmapBenchOpenClawHarness,
-        )
-
-        roadmap_harness = RoadmapBenchOpenClawHarness(
+        if harness_choice == "openclaw":
+            from agent_bench.benchmarks.roadmap_bench.app import (
+                RoadmapBenchOpenClawHarness as roadmap_cls,
+            )
+        elif harness_choice == "hermes":
+            from agent_bench.benchmarks.roadmap_bench.hermes.app import (
+                RoadmapBenchHermesHarness as roadmap_cls,
+            )
+        else:
+            from agent_bench.benchmarks.roadmap_bench.codex.app import (
+                RoadmapBenchCodexHarness as roadmap_cls,
+            )
+        roadmap_harness = roadmap_cls(
             benchmark_data_root,
             container=roadmap_container,
         )
         logger.info(
-            "Constructing RoadmapBenchOpenClawHarness with %s.",
+            "Constructing %s with %s.",
+            type(roadmap_harness).__name__,
             type(roadmap_container).__name__,
         )
 

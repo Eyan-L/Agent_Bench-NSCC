@@ -11,14 +11,14 @@ Examples
 Summarize one or more existing subagent PBS jobs::
 
     python scripts/compare_roadmap_runs.py \
-      runs/subagent-a runs/subagent-b
+      16056107.pbs101 16056108.pbs101
 
 Compare the formal paired arms (focused retries/smokes may be added; the best
 record for each instance_id + seed is selected automatically)::
 
     python scripts/compare_roadmap_runs.py \
-      --subagent <subagent-job-or-run> [<subagent-job-or-run> ...] \
-      --single-agent <single-job-or-run> [<single-job-or-run> ...] \
+      --subagent 16056107.pbs101 16056108.pbs101 1609XXXX.pbs101 \
+      --single-agent 1610AAAA.pbs101 1610BBBB.pbs101 \
       --strict-trajectory
 
 Outputs are written below reports/roadmap by default:
@@ -300,7 +300,7 @@ def default_runs_root() -> str:
 
 
 def resolve_pbs_run(spec: str, runs_root: Path) -> Path:
-    """Resolve a scheduler job identifier or an explicit run directory."""
+    """Resolve a PBS job id such as 16056107.pbs101 or an explicit path."""
     explicit = Path(spec).expanduser()
     if explicit.is_dir():
         return explicit.resolve()
@@ -1651,6 +1651,8 @@ def _prepare_bundle_dir(
 def _copy_selected_task_artifacts(
     records: Sequence[RunRecord],
     bundle_dir: Path,
+    *,
+    omit_candidate_workspace: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Export complete, source-preserving artifacts for selected records."""
     shared_by_key: dict[tuple[str, str], dict[str, Any]] = {}
@@ -1677,6 +1679,7 @@ def _copy_selected_task_artifacts(
             seed=record.seed,
             job_id=record.job_id,
             related_links=(shared or {}).get("links") or {},
+            omit_candidate_workspace=omit_candidate_workspace,
         )
         record.__dict__["_roadmap_artifact_bundle_links"] = dict(
             run_index.get("links") or {}
@@ -1695,7 +1698,11 @@ def _artifact_source_dirs(records: Sequence[RunRecord]) -> list[Path]:
     return sorted(sources)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    omit_candidate_workspace: bool = False,
+) -> int:
     args = _parse_args(argv)
     runs_root = Path(args.runs_root).expanduser().resolve()
     print(f"Roadmap runs root: {runs_root}")
@@ -1813,7 +1820,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     artifact_index_path = bundle_dir / f"{basename}-artifact-index.json"
 
     copied_index, shared_index = _copy_selected_task_artifacts(
-        selected, bundle_dir
+        selected, bundle_dir,
+        omit_candidate_workspace=omit_candidate_workspace,
     )
     if comparison:
         subagent_by_key = {record.key: record for record in subagent}

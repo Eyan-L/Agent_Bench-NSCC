@@ -1377,6 +1377,10 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
         host_logs: Path,
         instance_data: Optional[Dict],
     ) -> Optional[Dict[str, str]]:
+        if self.container.backend_id == "singularity":
+            # Root-mapped extraction cannot restore arbitrary archive owners;
+            # keep host Python packages out of the verifier environment.
+            return {"TAR_OPTIONS": "--no-same-owner", "PYTHONPATH": ""}
         return None
 
     def _verifier_infrastructure_error(

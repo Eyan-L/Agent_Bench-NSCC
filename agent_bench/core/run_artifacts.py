@@ -41,6 +41,33 @@ MINIMUM_ARTIFACTS = (
     "verdict.json",
 )
 
+HERMES_MINIMUM_ARTIFACTS = (
+    "manifest.json",
+    "steps.jsonl",
+    "spans.jsonl",
+    "spans_timeline.html",
+    "trajectory.jsonl",
+    "runtime_observability.json",
+    "token_accounting.json",
+    "util.jsonl",
+    "hermes_sessions.json",
+    "hermes_events.jsonl",
+    "hermes_state/sessions.jsonl",
+    "hermes_state/sessions",
+    "hermes_state/state.db",
+    "hermes_stdout.log",
+    "candidate.patch",
+    "verdict.json",
+)
+
+CODEX_MINIMUM_ARTIFACTS = (
+    "manifest.json", "steps.jsonl", "spans.jsonl", "spans_timeline.html",
+    "trajectory.jsonl", "runtime_observability.json", "token_accounting.json",
+    "util.jsonl", "codex_sessions.json", "codex_state/sessions",
+    "codex_api.jsonl", "codex_events.jsonl", "codex_stdout.jsonl",
+    "codex_stderr.log", "candidate.patch", "verdict.json",
+)
+
 _MINIMUM_ARTIFACT_MANIFEST_FIELDS = {
     "steps.jsonl": {"step_trace_path"},
     "spans.jsonl": {"telemetry_path"},
@@ -206,9 +233,29 @@ def prepare_bundle_dir(
 
 
 def _artifact_category(relative_path: Path) -> str:
+    if relative_path.name == "codex_sessions.json" or (
+        relative_path.parts and relative_path.parts[0] == "codex_state"
+    ):
+        return BUNDLE_SUBDIRS[0]
+    if relative_path.name in {"codex_api.jsonl", "codex_events.jsonl", "codex_stdout.jsonl"}:
+        return BUNDLE_SUBDIRS[1]
     if relative_path.parts and relative_path.parts[0] == "conversation":
         return BUNDLE_SUBDIRS[0]
+    if relative_path.name == "hermes_sessions.json":
+        return BUNDLE_SUBDIRS[0]
+    if relative_path.parts and relative_path.parts[0] == "hermes_state":
+        if len(relative_path.parts) > 1 and (
+            relative_path.parts[1] == "sessions"
+            or relative_path.parts[1] in {
+                "sessions.jsonl", "state.db", "state.db-shm", "state.db-wal"
+            }
+        ):
+            return BUNDLE_SUBDIRS[0]
+        if relative_path.name == "events.jsonl":
+            return BUNDLE_SUBDIRS[1]
     name = relative_path.name
+    if name == "hermes_events.jsonl":
+        return BUNDLE_SUBDIRS[1]
     if name in _TIMELINE_NAMES:
         return BUNDLE_SUBDIRS[1]
     if name in _FINAL_NAMES or "verifier" in name.lower():
@@ -772,10 +819,37 @@ def _copy_run_tree(
     *,
     arm: str,
     task_dir: str,
+    omit_candidate_workspace: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[Path, dict[str, Any]]]:
     entries: list[dict[str, Any]] = []
     copied_by_source: dict[Path, dict[str, Any]] = {}
-    for source in sorted(run_dir.rglob("*")):
+
+    if omit_candidate_workspace:
+        candidate = run_dir / "candidate_workspace"
+        if candidate.exists() or candidate.is_symlink():
+            entries.append(_entry(
+                source=candidate,
+                bundle_path=None,
+                status="excluded",
+                source_kind="run_tree",
+                error="candidate_workspace_omitted_from_agent_report",
+            ))
+
+    def sources():
+        if not omit_candidate_workspace:
+            yield from sorted(run_dir.rglob("*"))
+            return
+        # Prune the entire workspace before traversal. Filtering after rglob
+        # would still walk thousands of repository and build-output files.
+        for top in sorted(run_dir.iterdir()):
+            if top.name == "candidate_workspace":
+                continue
+            if top.is_dir() and not top.is_symlink():
+                yield from sorted(top.rglob("*"))
+            else:
+                yield top
+
+    for source in sources():
         if source.is_dir():
             continue
         relative = source.relative_to(run_dir)
@@ -1075,9 +1149,15 @@ def _append_missing_minimum_entries(
         for item in entries
         for field in item.get("manifest_fields") or []
     }
-    for relative in MINIMUM_ARTIFACTS:
-        if relative == "conversation":
-            if any(path == "conversation" or path.startswith("conversation/") for path in present):
+    is_hermes = any(
+        (run_dir / name).exists()
+        for name in ("hermes_state", "hermes_sessions.json", "hermes_stdout.log")
+    )
+    is_codex = any((run_dir / name).exists() for name in ("codex_state", "codex_sessions.json", "codex_stdout.jsonl"))
+    minimum_artifacts = CODEX_MINIMUM_ARTIFACTS if is_codex else HERMES_MINIMUM_ARTIFACTS if is_hermes else MINIMUM_ARTIFACTS
+    for relative in minimum_artifacts:
+        if relative in {"conversation", "hermes_state/sessions", "codex_state/sessions"}:
+            if any(path == relative or path.startswith(f"{relative}/") for path in present):
                 continue
         elif (
             relative in present
@@ -1255,7 +1335,10 @@ def _render_conversation_index(
     links = []
     for item in entries:
         relative = str(item.get("bundle_path") or "")
-        if item.get("status") != "copied" or "/conversation/" not in f"/{relative}":
+        if (
+            item.get("status") != "copied"
+            or not relative.startswith(f"{BUNDLE_SUBDIRS[0]}/")
+        ):
             continue
         href = _relative_href(index_path.relative_to(bundle_dir), relative)
         links.append(
@@ -1341,6 +1424,7 @@ def export_run_artifacts(
     seed: object | None = None,
     job_id: object | None = None,
     related_links: Mapping[str, str] | None = None,
+    omit_candidate_workspace: bool = False,
 ) -> dict[str, Any]:
     run_dir = run_dir.expanduser().resolve()
     bundle_dir = bundle_dir.expanduser().resolve()
@@ -1356,6 +1440,7 @@ def export_run_artifacts(
         bundle_dir,
         arm=arm,
         task_dir=task_dir,
+        omit_candidate_workspace=omit_candidate_workspace,
     )
     _copy_manifest_references(
         manifest,
@@ -1429,6 +1514,12 @@ def export_run_artifacts(
         "execution_log": _copied_artifact_link(
             entries,
             fallback_names=("openclaw_gateway.log",),
+        ) or _copied_artifact_link(
+            entries,
+            fallback_names=("hermes_stdout.log",),
+        ) or _copied_artifact_link(
+            entries,
+            fallback_names=("codex_stdout.jsonl",),
         ),
         "candidate": _copied_artifact_link(
             entries,

@@ -49,6 +49,14 @@ _GATEWAY_PORT_LOCK = threading.Lock()
 _GATEWAY_PORTS_INUSE: Set[int] = set()
 
 
+def _configure_firewalled_singularity_env() -> None:
+    """Keep model-cost metadata local in firewalled Singularity deployments."""
+    if os.environ.get("AB_DEPLOYMENT_CONTAINER_BACKEND", "").lower() != "singularity":
+        return
+    os.environ.setdefault("SINGULARITYENV_OPENCLAW_DISABLE_PRICING_FETCH", "1")
+    os.environ.setdefault("SINGULARITYENV_LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
+
 def pick_free_gateway_port(attempts: int = 25) -> int:
     """Reserve a free port in [GATEWAY_PORT_MIN, GATEWAY_PORT_MAX].
 
@@ -56,6 +64,7 @@ def pick_free_gateway_port(attempts: int = 25) -> int:
     plugin control surface). Reservation is process-global so concurrent
     callers don't collide.
     """
+    _configure_firewalled_singularity_env()
     import random
     candidates = list(range(GATEWAY_PORT_MIN, GATEWAY_PORT_MAX + 1, GATEWAY_PORT_STRIDE))
     random.shuffle(candidates)
@@ -181,6 +190,8 @@ def wrap_singularity_argv(
         overlay_args = ["--overlay", f"{overlay}:ro"]
 
     new_env = dict(env)
+    new_env.setdefault("OPENCLAW_DISABLE_PRICING_FETCH", "1")
+    new_env.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
     inner_argv = (
         _gateway_guarded_argv(argv, new_env)
