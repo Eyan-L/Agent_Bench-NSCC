@@ -1,6 +1,6 @@
 """RoadmapBench runtime-validity and terminal-evidence policy.
 
-Formal Roadmap experiments compare gateway-mediated parent/subagent execution.
+OpenClaw Roadmap experiments compare gateway-mediated parent/subagent execution.
 OpenClaw's CLI can automatically continue in embedded mode after a Gateway
 failure, which is a different runtime and therefore an infrastructure-invalid
 sample even if it later produces a candidate patch and verifier reward.
@@ -44,7 +44,8 @@ def install_roadmap_gateway_only_policy() -> None:
     if not getattr(current, "_roadmap_gateway_only_policy", False):
         def wrapped(result: dict) -> Optional[str]:
             runtime_mode = str(result.get("agent_runtime_mode") or "").strip()
-            if result.get("harness") != "hermes" and runtime_mode and runtime_mode != "gateway":
+            native_codex = result.get("harness") == "codex" and runtime_mode == "codex_cli"
+            if result.get("harness") != "hermes" and not native_codex and runtime_mode and runtime_mode != "gateway":
                 return (
                     "RoadmapBench requires OpenClaw gateway runtime; "
                     f"observed agent_runtime_mode={runtime_mode}"

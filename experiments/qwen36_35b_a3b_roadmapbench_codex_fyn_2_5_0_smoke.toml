@@ -1,0 +1,27 @@
+name = "qwen36_35b_a3b_roadmapbench_codex_fyn_2_5_0_smoke"
+description = "Official Codex CLI smoke on the retained Fyne 2.5.0 Roadmap task with Qwen3.6-35B-A3B TP4."
+output_dir = "/scratch/users/ntu/n2602695/agent-bench/runs/qwen36_35b_a3b_roadmapbench_codex_fyn_2_5_0_smoke"
+seeds = [42]
+
+[telemetry]
+spans_html = true
+
+[benchmark]
+name = "terminal_bench"
+profile = "profiles/benchmarks/roadmap/roadmapbench_fyn_2_5_0_paired_smoke.json"
+
+[harness]
+name = "codex"
+profile = "profiles/harnesses/codex_roadmapbench.yaml"
+
+[model]
+profile = "profiles/models/qwen36_35b_a3b.json"
+
+[serving]
+profile = "profiles/serving/sglang/nscc_tp4.yaml"
+
+[deployment]
+profile = "profiles/deployments/nscc_pbs_4gpu.toml"
+
+[limits]
+max_workers = 1

@@ -104,6 +104,22 @@ def runtime_environment(
 def _agent_runtime_defaults(
     harness: str, repo_root: str, scratch: str, *, roadmapbench: bool = False
 ) -> dict[str, str]:
+    if harness == "codex":
+        version = _version_from_file(
+            Path(repo_root) / "agent_bench/harnesses/codex/VERSION",
+            "codex_version", "0.157.1",
+        )
+        runtime_sif = f"{scratch}/sif_images/codex_{version}.sif"
+        return {
+            "AB_AGENT_RUNTIME_VERSION": version,
+            "AB_AGENT_RUNTIME_SIF": runtime_sif,
+            "AB_AGENT_RUNTIME_DOCKER": f"agent-bench/codex:{version}",
+            "AB_AGENT_RUNTIME_BASE_SIF": runtime_sif,
+            "AB_AGENT_RUNTIME_BASE_DOCKER": "",
+            "AB_AGENT_RUNTIME_REBUILD": "0",
+            "AB_AGENT_RUNTIME_OVERLAY": "",
+            "AB_AGENT_RUNTIME_INSIDE_PKG": "/opt/codex",
+        }
     if harness == "claude_code":
         version_file = Path(repo_root) / "agent_bench/harnesses/claude_code/VERSION"
         claude_version = _version_from_file(
@@ -386,6 +402,19 @@ def _runtime_image_commands(
         return _hermes_runtime_commands(spec, env, repo_root, roadmapbench=roadmapbench)
     if harness == "claude_code":
         return _claude_code_runtime_commands(spec, env, repo_root)
+    if harness == "codex":
+        runtime_sif = Path(env["AB_AGENT_RUNTIME_SIF"])
+        if not runtime_sif.is_file() or runtime_sif.stat().st_size == 0:
+            raise FileNotFoundError(
+                f"Codex runtime SIF missing: {runtime_sif}. Build it on local "
+                "Ubuntu with scripts/build_codex_sif_local.sh and upload it."
+            )
+        return [StageCommand(
+            label="check uploaded Codex CLI runtime",
+            argv=("singularity", "exec", str(runtime_sif), "/opt/codex/bin/codex", "--version"),
+            log_path=spec.log_dir / "runtime-codex-preflight.log",
+            env=dict(env), required=True,
+        )]
     return []
 
 

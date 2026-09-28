@@ -60,6 +60,14 @@ HERMES_MINIMUM_ARTIFACTS = (
     "verdict.json",
 )
 
+CODEX_MINIMUM_ARTIFACTS = (
+    "manifest.json", "steps.jsonl", "spans.jsonl", "spans_timeline.html",
+    "trajectory.jsonl", "runtime_observability.json", "token_accounting.json",
+    "util.jsonl", "codex_sessions.json", "codex_state/sessions",
+    "codex_api.jsonl", "codex_events.jsonl", "codex_stdout.jsonl",
+    "codex_stderr.log", "candidate.patch", "verdict.json",
+)
+
 _MINIMUM_ARTIFACT_MANIFEST_FIELDS = {
     "steps.jsonl": {"step_trace_path"},
     "spans.jsonl": {"telemetry_path"},
@@ -225,6 +233,12 @@ def prepare_bundle_dir(
 
 
 def _artifact_category(relative_path: Path) -> str:
+    if relative_path.name == "codex_sessions.json" or (
+        relative_path.parts and relative_path.parts[0] == "codex_state"
+    ):
+        return BUNDLE_SUBDIRS[0]
+    if relative_path.name in {"codex_api.jsonl", "codex_events.jsonl", "codex_stdout.jsonl"}:
+        return BUNDLE_SUBDIRS[1]
     if relative_path.parts and relative_path.parts[0] == "conversation":
         return BUNDLE_SUBDIRS[0]
     if relative_path.name == "hermes_sessions.json":
@@ -1139,9 +1153,10 @@ def _append_missing_minimum_entries(
         (run_dir / name).exists()
         for name in ("hermes_state", "hermes_sessions.json", "hermes_stdout.log")
     )
-    minimum_artifacts = HERMES_MINIMUM_ARTIFACTS if is_hermes else MINIMUM_ARTIFACTS
+    is_codex = any((run_dir / name).exists() for name in ("codex_state", "codex_sessions.json", "codex_stdout.jsonl"))
+    minimum_artifacts = CODEX_MINIMUM_ARTIFACTS if is_codex else HERMES_MINIMUM_ARTIFACTS if is_hermes else MINIMUM_ARTIFACTS
     for relative in minimum_artifacts:
-        if relative in {"conversation", "hermes_state/sessions"}:
+        if relative in {"conversation", "hermes_state/sessions", "codex_state/sessions"}:
             if any(path == relative or path.startswith(f"{relative}/") for path in present):
                 continue
         elif (
@@ -1502,6 +1517,9 @@ def export_run_artifacts(
         ) or _copied_artifact_link(
             entries,
             fallback_names=("hermes_stdout.log",),
+        ) or _copied_artifact_link(
+            entries,
+            fallback_names=("codex_stdout.jsonl",),
         ),
         "candidate": _copied_artifact_link(
             entries,

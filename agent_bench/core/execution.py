@@ -672,6 +672,7 @@ def _prepare_images(ctx: ExecutionContext) -> None:
 
 
 _LOCAL_HARNESS_IMAGE_BUILDERS = {
+    "codex": Path("agent_bench/harnesses/codex/docker/build.sh"),
     "openclaw": Path("agent_bench/harnesses/openclaw/docker/build.sh"),
     "openhands": Path("agent_bench/harnesses/openhands/docker/build.sh"),
     "hermes": Path("agent_bench/harnesses/hermes/docker/build.sh"),

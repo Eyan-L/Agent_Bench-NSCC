@@ -582,6 +582,28 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                 env_info=env_info
             )
 
+        elif condition_type == "codex_agent":
+            if instance_data.get("benchmark") != "terminal_bench":
+                raise ValueError("codex_agent currently supports Terminal-Bench and RoadmapBench")
+            if instance_data.get("benchmark_variant") == "roadmapbench":
+                from agent_bench.benchmarks.roadmap_bench.conditions.codex_agent import (
+                    RoadmapBenchCodexCondition as _Cls,
+                )
+            else:
+                from agent_bench.benchmarks.terminal_bench.conditions.codex_agent import (
+                    TerminalBenchCodexCondition as _Cls,
+                )
+            condition = _Cls(
+                model_config=run_config.condition.model,
+                agent_config=run_config.condition.agent,
+                container=getattr(harness, "container", None),
+            )
+            result = condition.run(
+                instance_data, run_dir, run_config.seed,
+                workspace_root=env_info["workspace_root"],
+                container_id=container_id, env_info=env_info,
+            )
+
         elif condition_type == "claude_code_agent":
             if instance_data.get("benchmark") != "terminal_bench":
                 raise ValueError(
@@ -757,9 +779,9 @@ def execute_run(run_config: RunConfig, harness: SWEBenchHarness,
                     timed_out=verdict.get("verifier_timed_out"),
                     duration_seconds=(verifier_end_ns - verifier_start_ns) / 1e9,
                 )
-        elif condition_type == "claude_code_agent":
+        elif condition_type in {"claude_code_agent", "codex_agent"}:
             # Keep agent execution and verifier outcome orthogonal for the
-            # Claude Code smoke without changing existing Terminal-Bench runs.
+            # native CLI harnesses without changing existing Terminal-Bench runs.
             verdict = _merge_agent_completion_into_verdict(verdict, result)
         
         # Write verdict
@@ -1258,6 +1280,26 @@ def run_sweep(benchmark_path: Path, harness_path: Path, model_path: Path, servin
                     TerminalBenchHermesHarness as tb_cls,
                 )
                 tb_harness = tb_cls(benchmark_data_root, container=DockerContainer())
+        elif harness_choice == "codex":
+            roadmap_instances = [
+                instances[rc.instance_id] for rc in run_configs
+                if instances[rc.instance_id].get("benchmark") == "terminal_bench"
+            ]
+            if all(item.get("benchmark_variant") == "roadmapbench" for item in roadmap_instances):
+                from agent_bench.benchmarks.roadmap_bench.codex.app import (
+                    RoadmapBenchCodexHarness as tb_cls,
+                )
+            else:
+                from agent_bench.benchmarks.terminal_bench.codex.app import (
+                    TerminalBenchCodexHarness as tb_cls,
+                )
+            if tb_backend == "docker":
+                tb_container = DockerContainer()
+            elif tb_backend == "singularity":
+                tb_container = SingularityContainer()
+            else:
+                raise ValueError(f"Unknown Terminal-Bench backend: {tb_backend}")
+            tb_harness = tb_cls(benchmark_data_root, container=tb_container)
         elif harness_choice == "claude_code":
             from agent_bench.benchmarks.terminal_bench.claude_code.app import (
                 TerminalBenchClaudeCodeHarness as tb_cls,
