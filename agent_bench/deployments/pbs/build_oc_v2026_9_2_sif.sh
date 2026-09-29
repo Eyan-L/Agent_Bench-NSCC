@@ -9,14 +9,16 @@
 set -euo pipefail
 
 AB_REPO_ROOT="${AB_REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
-BASE_SIF="${HOME}/agent-bench-sif-build/openclaw_2026.9.2_base.sif"
-OUT_SIF="${HOME}/agent-bench-sif-build/openclaw_2026.9.2_agentbench.sif"
+OPENCLAW_BUILD_VERSION=2026.9.2
+BASE_SIF=""
+OUT_SIF=""
 SANDBOX_DIR=""
 KEEP_SANDBOX=0
 ALLOW_NSCC=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --version) OPENCLAW_BUILD_VERSION="$2"; shift 2 ;;
         --base) BASE_SIF="$2"; shift 2 ;;
         --out) OUT_SIF="$2"; shift 2 ;;
         --sandbox-dir) SANDBOX_DIR="$2"; shift 2 ;;
@@ -30,6 +32,13 @@ while [[ $# -gt 0 ]]; do
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
+
+case "$OPENCLAW_BUILD_VERSION" in
+    2026.9.2|2026.9.6) ;;
+    *) echo "ERROR: unsupported OpenClaw version: $OPENCLAW_BUILD_VERSION" >&2; exit 2 ;;
+esac
+BASE_SIF="${BASE_SIF:-${HOME}/agent-bench-sif-build/openclaw_${OPENCLAW_BUILD_VERSION}_base.sif}"
+OUT_SIF="${OUT_SIF:-${HOME}/agent-bench-sif-build/openclaw_${OPENCLAW_BUILD_VERSION}_agentbench.sif}"
 
 HOST="$(hostname 2>/dev/null || true)"
 if [[ "$ALLOW_NSCC" -ne 1 && "$HOST" == asp2* ]]; then
@@ -76,8 +85,8 @@ ROOT="$SANDBOX_DIR/app"
 [[ -d "$ROOT" ]] || { echo "ERROR: extracted SIF has no /app" >&2; exit 1; }
 
 STATUS="$ROOT/.agent-bench-v2026.9.2.json"
-python3 "$PATCHER" --root "$ROOT" --status-out "$STATUS"
-python3 "$PATCHER" --root "$ROOT" --verify-only
+python3 "$PATCHER" --root "$ROOT" --expected-version "$OPENCLAW_BUILD_VERSION" --status-out "$STATUS"
+python3 "$PATCHER" --root "$ROOT" --expected-version "$OPENCLAW_BUILD_VERSION" --verify-only
 
 # Never seal legacy patches into the v2026.9.2 runtime.
 if grep -R -q -E \
@@ -94,8 +103,8 @@ rm -f "$OUT_NEW"
 # Verify the sealed image itself, not merely the writable sandbox.  Use Node,
 # which is part of OpenClaw's runtime contract; do not require Python in-image.
 VERSION="$($RUNTIME exec --cleanenv --no-home "$OUT_NEW" node -p 'require("/app/package.json").version')"
-[[ "$VERSION" == "2026.9.2" ]] || {
-    echo "ERROR: sealed candidate version is $VERSION, expected 2026.9.2" >&2
+[[ "$VERSION" == "$OPENCLAW_BUILD_VERSION" ]] || {
+    echo "ERROR: sealed candidate version is $VERSION, expected $OPENCLAW_BUILD_VERSION" >&2
     exit 1
 }
 
@@ -104,7 +113,7 @@ const fs = require("node:fs");
 const p = "/app/.agent-bench-v2026.9.2.json";
 if (!fs.existsSync(p)) throw new Error("missing " + p);
 const s = JSON.parse(fs.readFileSync(p, "utf8"));
-if (s.upstream_version !== "2026.9.2") throw new Error("unexpected upstream_version");
+if (s.upstream_version !== require("/app/package.json").version) throw new Error("unexpected upstream_version");
 const verification = s.verification || {};
 if (!verification.verified) throw new Error("semantic patch verification did not pass");
 const markers = verification.markers || {};
@@ -121,12 +130,15 @@ PATCHED_RUNTIME_FILES="$($RUNTIME exec --cleanenv --no-home "$OUT_NEW" node -e '
 const fs = require("node:fs");
 const s = JSON.parse(fs.readFileSync("/app/.agent-bench-v2026.9.2.json", "utf8"));
 const files = new Set([
+  ...Object.values((s.verification || {}).markers || {}).flat(),
+  ...(s.files_changed || []),
   ...(s.exec_bridge_files_changed || []),
   ...(s.sandbox_bypass_files_changed || []),
   ...(s.shared_workspace_spawn_files_changed || []),
   ...((s.settled_tool_continuation || {}).files_changed || []),
   ...(s.sessions_yield_no_pending_loop_files_changed || []),
   ...(s.loop_veto_recovery_probe_files_changed || []),
+  ...(s.context_pressure_terminal_recovery_files_changed || []),
   ...(s.fs_bridge_files_changed || []),
 ]);
 for (const file of files) process.stdout.write(file + "\n");
@@ -141,11 +153,12 @@ while IFS= read -r rel; do
     "$RUNTIME" exec --cleanenv --no-home "$OUT_NEW" node --check "/app/$rel"
 done <<< "$PATCHED_RUNTIME_FILES"
 
-bash "$AUDIT" "$OUT_NEW"
+bash "$AUDIT" "$OUT_NEW" "$OPENCLAW_BUILD_VERSION"
 
 if [[ -f "$OUT_SIF" ]]; then
-    rm -f "${OUT_SIF}.bak"
-    mv "$OUT_SIF" "${OUT_SIF}.bak"
+    # Keep the current image available until the validated candidate is renamed.
+    BACKUP_SIF="${OUT_SIF}.back.$(date -u +%Y%m%dT%H%M%SZ)"
+    ln "$OUT_SIF" "$BACKUP_SIF"
 fi
 mv "$OUT_NEW" "$OUT_SIF"
 
@@ -155,4 +168,5 @@ sha256sum "$OUT_SIF"
 printf '[build-oc-9.2] status marker:\n'
 "$RUNTIME" exec --cleanenv --no-home "$OUT_SIF" \
     cat /app/.agent-bench-v2026.9.2.json | sed 's/^/    /'
-printf '[build-oc-9.2] next: copy %s to NSCC $SCRATCH/sif_images/openclaw_2026.9.2_agentbench.sif\n' "$OUT_SIF"
+printf '[build-oc] candidate version: %s\n' "$OPENCLAW_BUILD_VERSION"
+printf '[build-oc] next: upload %s to NSCC $SCRATCH/sif_images/openclaw_%s_agentbench.sif\n' "$OUT_SIF" "$OPENCLAW_BUILD_VERSION"

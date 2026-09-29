@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Agent_Bench semantic patches for the pinned OpenClaw v2026.9.2 runtime.
+"""Agent_Bench semantic bridge transforms for pinned OpenClaw v9 runtimes.
 
 Unlike the legacy v2026.4.22 MANIFEST patches, this patcher targets stable
 runtime semantics rather than content-hashed bundle filenames.  It intentionally
@@ -28,6 +28,7 @@ from typing import Any, Iterable
 
 
 EXPECTED_VERSION = "2026.9.2"
+SUPPORTED_VERSIONS = ("2026.9.2", "2026.9.6")
 
 EXEC_MARKER = "AB_HARNESS_OPENCLAW_V2026_9_2_EXEC_BRIDGE_BEGIN"
 SANDBOX_MARKER = "AB_HARNESS_OPENCLAW_V2026_9_2_SANDBOX_BYPASS_BEGIN"
@@ -206,6 +207,14 @@ def _js_files(root: Path) -> Iterable[Path]:
         yield from root.rglob(suffix)
 
 
+def _bundle_paths(root: Path, pattern: str) -> list[Path]:
+    """Match v9.2 JS and v9.6 ESM bundles using the same semantic anchors."""
+    patterns = [pattern]
+    if pattern.endswith(".js"):
+        patterns.extend(pattern[:-3] + suffix for suffix in (".mjs", ".cjs"))
+    return sorted({path for glob in patterns for path in root.glob(glob) if path.is_file()})
+
+
 def _has_js_lexical_binding(text: str, name: str) -> bool:
     escaped = re.escape(name)
     if re.search(rf"function\s+{escaped}\s*\(", text):
@@ -242,7 +251,7 @@ _SETTLED_CONTINUATION_RESOLVER_BINDINGS = (
 
 def _patch_exec_bridge(root: Path) -> list[str]:
     changed: list[str] = []
-    candidates = sorted((root / "dist").glob("bash-tools.exec-runtime-*.js"))
+    candidates = _bundle_paths(root, "dist/bash-tools.exec-runtime-*.js")
     targets = [
         path
         for path in candidates
@@ -289,7 +298,7 @@ def _patch_exec_bridge(root: Path) -> list[str]:
 
 def _patch_sandbox_bypass(root: Path) -> list[str]:
     changed: list[str] = []
-    candidates = sorted((root / "dist").glob("docker-*.js"))
+    candidates = _bundle_paths(root, "dist/docker-*.js")
     targets = [
         path
         for path in candidates
@@ -326,9 +335,14 @@ def _patch_sandbox_bypass(root: Path) -> list[str]:
 def _patch_shared_workspace_spawns(root: Path) -> list[str]:
     """Keep visible Roadmap children in the harness-owned shared workspace."""
     changed: list[str] = []
-    candidates = sorted((root / "dist").glob("sessions-spawn-tool-*.js"))
+    candidates = _bundle_paths(root, "dist/sessions-spawn-tool-*.js")
     anchor = re.compile(
         r"(?P<indent>[ \t]*)const worktree = params\.raw\.worktree === true;\n"
+        r"(?P<placement>"
+        r"(?P=indent)const requestedPlacement = params\.raw\.placement;\n"
+        r"(?P=indent)if \([^\n]*SessionsSpawnPlacementSchema[^\n]*\n"
+        r"(?P=indent)const placement = requestedPlacement\?\.kind[^\n]*\n"
+        r")?"
         r"(?P=indent)const worktreeName = readToolStringParam\(params\.raw, [\"']worktreeName[\"']\);\n"
         r"(?P=indent)const worktreeBaseRef = readToolStringParam\(params\.raw, [\"']worktreeBaseRef[\"']\);"
     )
@@ -346,6 +360,7 @@ def _patch_shared_workspace_spawns(root: Path) -> list[str]:
             f'{indent}const sharedWorkspaceSpawn = process.env.OPENCLAW_AGENT_BENCH_SHARED_WORKSPACE === "1";\n'
             f'{indent}if (sharedWorkspaceSpawn && params.raw.worktree === true) console.error("[agent-bench] ignoring sessions_spawn worktree=true; children share the benchmark workspace");\n'
             f"{indent}const worktree = params.raw.worktree === true && !sharedWorkspaceSpawn;\n"
+            f'{match.group("placement") or ""}'
             f'{indent}const worktreeName = sharedWorkspaceSpawn ? void 0 : readToolStringParam(params.raw, "worktreeName");\n'
             f'{indent}const worktreeBaseRef = sharedWorkspaceSpawn ? void 0 : readToolStringParam(params.raw, "worktreeBaseRef");\n'
             f"{indent}/* AB_HARNESS_OPENCLAW_V2026_9_2_SHARED_WORKSPACE_SPAWN_END */"
@@ -447,11 +462,18 @@ def _patch_settled_tool_continuation(root: Path) -> dict[str, list[str]]:
     path remains eligible; ordinary length retries use an independent semantic
     no-progress budget, while context-pressure length stops use native recovery.
     """
+    is_v96 = _runtime_version(root) == "2026.9.6"
+    resolver_bindings = tuple(
+        "hasCommittedMessagingToolDeliveryEvidence"
+        if is_v96 and name == "hasCompletedMessagingToolDeliveryEvidence" else name
+        for name in _SETTLED_CONTINUATION_RESOLVER_BINDINGS
+    ) + (("hasCompletionMessageSessionSpawn",) if is_v96 else ())
     changed: set[Path] = set()
     dist_files = sorted(_js_files(root / "dist"))
 
     policy_anchor = re.compile(
-        r"(function\s+resolveSettledTurnFinalizationRequest\(input\)\s*\{\s*)"
+        r"(function\s+resolveSettledTurnFinalizationRequest\("
+        + (r"[A-Za-z_$][\w$]*" if is_v96 else "input") + r"\)\s*\{\s*)"
     )
     policy_targets = [
         path for path in dist_files
@@ -485,9 +507,10 @@ def _patch_settled_tool_continuation(root: Path) -> dict[str, list[str]]:
             changed.add(path)
 
     instruction_anchor = re.compile(
-        r'const\s+EMPTY_RESPONSE_RETRY_INSTRUCTION\s*=\s*'
-        + re.escape(json.dumps(_UPSTREAM_EMPTY_RESPONSE_RETRY_INSTRUCTION))
-        + r";"
+        (r'\bEMPTY_RESPONSE_RETRY_INSTRUCTION\s*=\s*' if is_v96
+         else r'const\s+EMPTY_RESPONSE_RETRY_INSTRUCTION\s*=\s*')
+        + (r'["`]' + re.escape(_UPSTREAM_EMPTY_RESPONSE_RETRY_INSTRUCTION) + r'["`]'
+           if is_v96 else re.escape(json.dumps(_UPSTREAM_EMPTY_RESPONSE_RETRY_INSTRUCTION)) + r";")
     )
     instruction_targets = [
         path for path in dist_files
@@ -502,6 +525,16 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
 \t? {json.dumps(ROADMAP_CONTINUATION_INSTRUCTION)}
 \t: {json.dumps(_UPSTREAM_EMPTY_RESPONSE_RETRY_INSTRUCTION)};
 /* AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_INSTRUCTION_END */'''
+    if is_v96:
+        # Worker bundles share a comma-separated const declaration. Replace
+        # just this initializer and preserve its enclosing declaration.
+        instruction_replacement = (
+            f"/* {SETTLED_CONTINUATION_INSTRUCTION_MARKER} */ "
+            f'EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} === "continue" '
+            f"? {json.dumps(ROADMAP_CONTINUATION_INSTRUCTION)} "
+            f": {json.dumps(_UPSTREAM_EMPTY_RESPONSE_RETRY_INSTRUCTION)} "
+            "/* AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_INSTRUCTION_END */"
+        )
     for path in instruction_targets:
         text = _read(path)
         if SETTLED_CONTINUATION_INSTRUCTION_MARKER not in text:
@@ -540,7 +573,7 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
         text = _read(path)
         missing = [
             name
-            for name in _SETTLED_CONTINUATION_RESOLVER_BINDINGS
+            for name in resolver_bindings
             if not _has_js_lexical_binding(text, name)
         ]
         if missing:
@@ -565,7 +598,7 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
 
     def retry_eligibility_replacement(match: re.Match[str]) -> str:
         param = match.group("param")
-        return match.group(1) + f'''/* {SETTLED_CONTINUATION_RETRY_MARKER} */
+        replacement = match.group(1) + f'''/* {SETTLED_CONTINUATION_RETRY_MARKER} */
 	/* {SETTLED_CONTINUATION_LENGTH_MARKER} */
 	/* {NONEMPTY_LENGTH_ELIGIBILITY_MARKER} */
 	const __abAssistantState = classifyAssistantTurn({param});
@@ -715,6 +748,18 @@ const EMPTY_RESPONSE_RETRY_INSTRUCTION = process.env.{SETTLED_TOOL_POLICY_ENV} =
 	}}
 	/* AB_HARNESS_OPENCLAW_V2026_9_2_SETTLED_CONTINUATION_RETRY_END */
 	'''
+        if is_v96:
+            # v9.6 transfers children after terminal retries. Respect its native
+            # completion ownership here instead of stamping the old handoff flag.
+            replacement = replacement.replace(
+                "hasCompletedMessagingToolDeliveryEvidence",
+                "hasCommittedMessagingToolDeliveryEvidence",
+            ).replace(
+                f"{param}.attempt?.runtimeContinuationStarted === true;",
+                f"{param}.attempt?.runtimeContinuationStarted === true\n"
+                f"\t\t|| hasCompletionMessageSessionSpawn({param}.attempt.acceptedSessionSpawns);",
+            )
+        return replacement
 
     stale_retry_targets = [
         path for path in retry_eligibility_targets
@@ -2260,7 +2305,7 @@ const __abFsBridgeRun = (params) => {{
 
 def _patch_fs_bridge(root: Path) -> list[str]:
     changed: list[str] = []
-    candidates = sorted((root / "dist").glob("fs-bridge-*.js"))
+    candidates = _bundle_paths(root, "dist/fs-bridge-*.js")
     targets = [
         path
         for path in candidates
@@ -2278,7 +2323,7 @@ def _patch_fs_bridge(root: Path) -> list[str]:
         r"this\.ensureWriteAccess\(target,\s*[\"']write files[\"']\);\s*)"
     )
     read_pattern = re.compile(
-        r"(async\s+readPinnedFile\(target,\s*maxBytes\)\s*\{\s*)"
+        r"(async\s+readPinnedFile\(target,\s*maxBytes(?P<signal>,\s*signal)?\)\s*\{\s*)"
     )
     checked_pattern = re.compile(r"(async\s+runCheckedCommand\(plan\)\s*\{\s*)")
 
@@ -2351,7 +2396,12 @@ def _patch_fs_bridge(root: Path) -> list[str]:
     }}
     /* AB_HARNESS_OPENCLAW_V2026_9_2_FS_BRIDGE_READ_END */
     '''
-            text, count = read_pattern.subn(lambda m: m.group(1) + insert, text, count=1)
+            text, count = read_pattern.subn(
+                lambda m: m.group(1) + (
+                    insert.replace("args: [target.containerPath]", "args: [target.containerPath], signal")
+                    if m.group("signal") else insert
+                ), text, count=1,
+            )
             if count != 1:
                 raise RuntimeError(f"fs readPinnedFile anchor missing/ambiguous in {path}")
 
@@ -2425,11 +2475,17 @@ def _patch_pricing(root: Path) -> dict[str, Any]:
     }
 
 
-def patch_runtime_tree(root: Path) -> dict[str, Any]:
+def patch_runtime_tree(root: Path, *, expected_version: str = EXPECTED_VERSION) -> dict[str, Any]:
     root = Path(root)
     version = _runtime_version(root)
-    if version != EXPECTED_VERSION:
-        raise RuntimeError(f"expected OpenClaw {EXPECTED_VERSION}, found {version or 'unknown'}")
+    if expected_version not in SUPPORTED_VERSIONS or version != expected_version:
+        raise RuntimeError(f"expected OpenClaw {expected_version}, found {version or 'unknown'}")
+    if version == "2026.9.6":
+        if __package__:
+            from .v2026_9_6_patch import patch_runtime_tree as patch_v96
+        else:
+            from v2026_9_6_patch import patch_runtime_tree as patch_v96
+        return patch_v96(root)
 
     exec_files = _patch_exec_bridge(root)
     sandbox_files = _patch_sandbox_bypass(root)
@@ -2450,7 +2506,7 @@ def patch_runtime_tree(root: Path) -> dict[str, Any]:
 
     status = {
         "upstream_version": version,
-        "patch_strategy": "v2026.9.2 semantic dist transforms",
+        "patch_strategy": f"v{version} semantic dist transforms",
         "native_loop_detection": True,
         "native_otel": True,
         "legacy_post_compaction_backport_applied": False,
@@ -2480,11 +2536,17 @@ def patch_runtime_tree(root: Path) -> dict[str, Any]:
     return status
 
 
-def verify_runtime_tree(root: Path) -> dict[str, Any]:
+def verify_runtime_tree(root: Path, *, expected_version: str = EXPECTED_VERSION) -> dict[str, Any]:
     root = Path(root)
     version = _runtime_version(root)
-    if version != EXPECTED_VERSION:
-        raise RuntimeError(f"expected OpenClaw {EXPECTED_VERSION}, found {version or 'unknown'}")
+    if expected_version not in SUPPORTED_VERSIONS or version != expected_version:
+        raise RuntimeError(f"expected OpenClaw {expected_version}, found {version or 'unknown'}")
+    if version == "2026.9.6":
+        if __package__:
+            from .v2026_9_6_patch import verify_runtime_tree as verify_v96
+        else:
+            from v2026_9_6_patch import verify_runtime_tree as verify_v96
+        return verify_v96(root)
 
     checks = {
         "exec_bridge": ("dist/bash-tools.exec-runtime-*.js", EXEC_MARKER),
@@ -2574,7 +2636,7 @@ def verify_runtime_tree(root: Path) -> dict[str, Any]:
     found: dict[str, list[str]] = {}
     for name, (glob, marker) in checks.items():
         paths = []
-        for path in root.glob(glob):
+        for path in _bundle_paths(root, glob):
             try:
                 if marker in _read(path):
                     paths.append(str(path.relative_to(root)))
@@ -2902,12 +2964,17 @@ def main() -> int:
     parser.add_argument("--root", default="/app")
     parser.add_argument("--status-out", default="")
     parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument("--expected-version", choices=SUPPORTED_VERSIONS, default=EXPECTED_VERSION)
     args = parser.parse_args()
 
     root = Path(args.root)
-    status = verify_runtime_tree(root) if args.verify_only else patch_runtime_tree(root)
+    status = (
+        verify_runtime_tree(root, expected_version=args.expected_version)
+        if args.verify_only
+        else patch_runtime_tree(root, expected_version=args.expected_version)
+    )
     if not args.verify_only:
-        status["verification"] = verify_runtime_tree(root)
+        status["verification"] = verify_runtime_tree(root, expected_version=args.expected_version)
     rendered = json.dumps(status, indent=2, sort_keys=True)
     if args.status_out:
         out = Path(args.status_out)

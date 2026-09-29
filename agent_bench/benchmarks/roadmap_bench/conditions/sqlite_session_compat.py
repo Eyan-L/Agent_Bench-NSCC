@@ -1,4 +1,4 @@
-"""OpenClaw v2026.9.2 SQLite session-store compatibility for RoadmapBench.
+"""OpenClaw v9 SQLite session-store compatibility for RoadmapBench.
 
 The v9 runtime persists session metadata and transcript events in the per-agent
 ``openclaw-agent.sqlite`` database.  RoadmapBench historically watched/exported
@@ -22,7 +22,7 @@ from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
-_OPENCLAW_V9 = "2026.9.2"
+_OPENCLAW_V9 = "2026.9.2"  # Historical archive fallback; active runs supply their version.
 _TERMINAL_CHILD_STATES = frozenset(
     {"done", "completed", "failed", "error", "timeout", "timed_out", "cancelled", "canceled", "killed"}
 )

@@ -3,7 +3,21 @@
 Patches to OpenClaw JS package + helper scripts to spin up its gateway and
 parse its OTel output.
 
-**Pinned upstream:** OpenClaw `2026.4.22` (commit `00bd2cf`,
+**Current NSCC Roadmap runtime:** OpenClaw `2026.9.6`, pinned in
+`patch/VERSION.v2026.9.6`. Build locally with
+`agent_bench/deployments/pbs/prepare_oc_v2026_9_6_base.sh` and
+`agent_bench/deployments/pbs/build_oc_v2026_9_6_sif.sh`; audit the resulting SIF
+with `audit_oc_v2026_9_2.sh <sif> 2026.9.6`. `--base` and `--out` accept local
+paths. NSCC consumes a prebuilt SIF; it does not rebuild it in PBS jobs.
+
+The active NSCC image is `openclaw_2026.9.6_agentbench.sif`; its filename,
+runtime defaults and package/status metadata match the pinned release.
+Roadmap uses native `delegationMode: prefer` with
+neutral prompt assets and 16-child limits. Native child settlement, loop
+detection and OTel are retained; bridge and uncovered Roadmap continuation
+compatibility are checked against all three runtime bundle copies.
+
+**Legacy pinned upstream:** OpenClaw `2026.4.22` (commit `00bd2cf`,
 [github.com/openclaw/openclaw](https://github.com/openclaw/openclaw)). Full
 pin in `patch/VERSION`.
 

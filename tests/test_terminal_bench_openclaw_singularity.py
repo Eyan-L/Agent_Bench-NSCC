@@ -5,6 +5,7 @@ import subprocess
 import json
 from pathlib import Path
 import time
+import pytest
 
 from agent_bench.benchmarks.terminal_bench import app as tb_app
 from agent_bench.benchmarks.terminal_bench import loader as tb_loader
@@ -424,11 +425,12 @@ def test_openclaw_condition_sources_harness_gateway_env_path():
     assert "/tmp/oc_gateway_env" not in inner
 
 
-def test_roadmap_v9_starts_runtime_sqlite_session_exporter(tmp_path, monkeypatch):
+@pytest.mark.parametrize("version", ["2026.9.2", "2026.9.6"])
+def test_roadmap_v9_starts_runtime_sqlite_session_exporter(tmp_path, monkeypatch, version):
     runtime_sif = tmp_path / "openclaw.sif"
     runtime_sif.touch()
     monkeypatch.setenv("AB_AGENT_RUNTIME_SIF", str(runtime_sif))
-    monkeypatch.setenv("AB_AGENT_RUNTIME_VERSION", "2026.9.2")
+    monkeypatch.setenv("AB_AGENT_RUNTIME_VERSION", version)
     container = _FakeContainer()
     harness = tb_app.TerminalBenchOpenClawHarness(
         container=container, workspace_base=tmp_path / "workspaces"
@@ -457,10 +459,11 @@ def test_roadmap_v9_starts_runtime_sqlite_session_exporter(tmp_path, monkeypatch
     assert "openclaw-agent.sqlite" in str(exporter_calls[0])
 
 
+@pytest.mark.parametrize("version", ["2026.9.2", "2026.9.6"])
 def test_roadmap_v9_enables_tools_capable_empty_turn_continuation(
-    monkeypatch,
+    monkeypatch, version,
 ):
-    monkeypatch.setenv("AB_AGENT_RUNTIME_VERSION", "2026.9.2")
+    monkeypatch.setenv("AB_AGENT_RUNTIME_VERSION", version)
 
     assert tb_app._roadmap_v9_continuation_env("roadmap_bench") == {
         "OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY": "continue",

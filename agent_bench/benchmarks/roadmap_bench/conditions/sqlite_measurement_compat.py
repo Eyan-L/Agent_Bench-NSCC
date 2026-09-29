@@ -1,6 +1,6 @@
 """Final Roadmap measurement normalization for SQLite-backed OpenClaw sessions.
 
-The v2026.9.2 SQLite adapter teaches the legacy token aggregator that an
+The v9 SQLite adapter teaches the legacy token aggregator that an
 ``agent:<id>:explicit:<run-id>`` root is the parent.  The aggregate token
 buckets are therefore correct, but the accompanying ``model_usage`` events
 are produced before that bucket repair and can still carry ``role=child``.
@@ -56,7 +56,7 @@ def install_roadmap_sqlite_measurement_compat() -> None:
                 execution_start_ns=execution_start_ns,
                 execution_end_ns=execution_end_ns,
             )
-            if agent_id != "roadmap_bench" or _runtime_version() != "v2026.9.2":
+            if agent_id != "roadmap_bench" or _runtime_version() not in {"v2026.9.2", "v2026.9.6"}:
                 return result
             attribution = result.get("announce_attribution")
             if isinstance(attribution, dict):

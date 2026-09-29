@@ -35,8 +35,3 @@ that repository.
 
 When all roadmap targets have been implemented and validated, reply with a
 single line: `DONE`.
-
-## Subagents
-
-You are encouraged to use subagents when they would help with implementation,
-analysis, or validation of the roadmap.

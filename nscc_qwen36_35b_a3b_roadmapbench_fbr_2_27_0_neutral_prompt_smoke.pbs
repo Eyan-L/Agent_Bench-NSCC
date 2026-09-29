@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+#PBS -N ab-q36-fbr227-neutral
+#PBS -P personal-n2602695
+#PBS -l select=1:ngpus=4
+#PBS -l walltime=04:00:00
+#PBS -q normal
+#PBS -j oe
+
+set -euo pipefail
+
+module load python/3.10.9
+module load apptainer/1.5.0
+
+export SCRATCH=/scratch/users/ntu/$USER
+export HF_HOME=$SCRATCH/hf
+export HF_ENDPOINT=https://huggingface.co
+export PYTHONPATH="$SCRATCH/pylib:${PYTHONPATH:-}"
+
+export SINGULARITY_CACHEDIR=$SCRATCH/.sing_cache
+export SINGULARITY_TMPDIR=$SCRATCH/.sing_tmp
+export SINGULARITY_BINDPATH="$SCRATCH:$SCRATCH"
+export SINGULARITYENV_HF_HOME="$HF_HOME"
+
+cd "${PBS_O_WORKDIR:-$PWD}"
+
+export AB_SERVING_BASE_URL=http://127.0.0.1:30000/v1
+export AB_SERVING_API_KEY=EMPTY
+export SERVE_READY_TIMEOUT=1800
+unset AB_TB_FORCE_ONE_SUBAGENT
+export AB_AGENT_RUNTIME_VERSION=2026.9.6
+export AB_AGENT_RUNTIME_SIF="$SCRATCH/sif_images/openclaw_2026.9.6_agentbench.sif"
+export AB_AGENT_RUNTIME_BASE_SIF="$AB_AGENT_RUNTIME_SIF"
+export AB_AGENT_RUNTIME_REBUILD=0
+export AB_PBS_SITE=NSCC
+export AB_LOG_TASK_COMPLETION=1
+
+if [[ -z "${AB_RUN_STAMP:-}" ]]; then
+    AB_RUN_STAMP="$(TZ=Asia/Singapore date +%Y-%m-%d_%H-%M-%S)"
+    if [[ -n "${PBS_JOBID:-}" ]]; then
+        AB_JOB_SUFFIX="${PBS_JOBID//[^A-Za-z0-9._-]/_}"
+        AB_RUN_STAMP="${AB_RUN_STAMP}_${AB_JOB_SUFFIX}"
+    fi
+fi
+export AB_RUN_STAMP
+export AB_EXPERIMENT_BASE="$SCRATCH/agent-bench/runs/nscc_qwen36_35b_a3b_roadmapbench_fbr_2_27_0_neutral_prompt_smoke"
+AB_RUN_DIR="${AB_RUN_DIR:-${AB_EXPERIMENT_DIR:-$AB_EXPERIMENT_BASE/$AB_RUN_STAMP}}"
+export AB_RUN_DIR
+export AB_EXPERIMENT_DIR="$AB_RUN_DIR"
+export AB_LOG_DIR="${AB_LOG_DIR:-$AB_RUN_DIR/logs}"
+export AB_STAGE_SUMMARY=prepare_environment=1,materialize_benchmark=1,prepare_images=1,start_serving=1,start_otel=1,run_benchmark=1,cleanup=1
+
+python3 run.py \
+    --config experiments/qwen36_35b_a3b_roadmapbench_fbr_2_27_0_neutral_prompt_smoke.toml \
+    --skip-cadvisor-setup

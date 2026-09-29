@@ -1,6 +1,6 @@
 """RoadmapBench OpenClaw session-key compatibility.
 
-OpenClaw v2026.9.2 maps an explicit CLI ``--session-id`` to
+OpenClaw v9 maps an explicit CLI ``--session-id`` to
 ``agent:<agent-id>:explicit:<session-id>``.  RoadmapBench state directories are
 per-run and named by the benchmark run/session id, so formal runs can resolve
 the durable requester exactly instead of guessing from ``updatedAt`` or
@@ -29,7 +29,7 @@ def select_roadmap_parent_session(
 
     Resolution order is deliberately fail-closed:
 
-    1. exact v2026.9.2 explicit key derived from the per-run state directory;
+    1. exact v9 explicit key derived from the per-run state directory;
     2. legacy ``:main`` only when its stored session id matches the run id;
     3. compatibility fallback only when the store has exactly one unambiguous
        root requester (needed by older fixtures/runtimes that do not expose the

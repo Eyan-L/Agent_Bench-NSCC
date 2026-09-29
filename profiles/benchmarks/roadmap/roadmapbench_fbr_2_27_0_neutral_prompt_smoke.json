@@ -1,0 +1,27 @@
+{
+  "_doc": "RoadmapBench Fiber 2.27.0 OpenClaw smoke using the neutral Roadmap prompt assets.",
+  "sweep_name": "roadmapbench_fbr_2_27_0_neutral_prompt_smoke",
+  "plan_version": "roadmapbench-59184e779909-fbr-2.27.0-neutral-prompt-smoke",
+  "application": "terminal_bench",
+  "source_dataset": "UnipatAI/RoadmapBench",
+  "source_commit": "59184e779909300a5a0150b06b945d39da81a099",
+  "source_dataset_task_count": 115,
+  "tasks_root": "$SCRATCH/datasets/roadmapbench-59184e779909-subagent-subset30",
+  "instances": [
+    "fbr-2.27.0-roadmap"
+  ],
+  "repo_mapping": {
+    "fbr-2.27.0-roadmap": {
+      "repo_id": "roadmapbench/fbr-2.27.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 7200,
+  "output_dir": "roadmapbench_fbr_2_27_0_neutral_prompt_smoke",
+  "seeds": [42],
+  "selection": {
+    "method": "single-task smoke selected by historical agent latency",
+    "rationale": "Historical OpenClaw subagent execution took approximately 783 seconds, near the 20-task median, with normal completion and three child agents."
+  }
+}
