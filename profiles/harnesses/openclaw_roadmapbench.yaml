@@ -8,6 +8,8 @@ terminal_bench:
   workspace_asset_files:
   - AGENTS.md
   - IDENTITY.md
+  - SOUL.md
+  - USER.md
   - TOOLS.md
   - BOOTSTRAP.md
 openclaw:
