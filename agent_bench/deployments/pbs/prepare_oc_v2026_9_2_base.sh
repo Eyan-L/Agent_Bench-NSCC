@@ -12,16 +12,14 @@
 
 set -euo pipefail
 
-OPENCLAW_PREPARE_VERSION=2026.9.2
-IMAGE=""
-OUT=""
+IMAGE="docker://ghcr.io/openclaw/openclaw:2026.9.2"
+OUT="${HOME}/agent-bench-sif-build/openclaw_2026.9.2_base.sif"
 FORCE=0
 ALLOW_NSCC_PULL=0
 AB_REPO_ROOT="${AB_REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --version) OPENCLAW_PREPARE_VERSION="$2"; shift 2 ;;
         --image) IMAGE="$2"; shift 2 ;;
         --out) OUT="$2"; shift 2 ;;
         --repo-root) AB_REPO_ROOT="$2"; shift 2 ;;
@@ -34,13 +32,6 @@ while [[ $# -gt 0 ]]; do
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
-
-case "$OPENCLAW_PREPARE_VERSION" in
-    2026.9.2|2026.9.6) ;;
-    *) echo "ERROR: unsupported OpenClaw version: $OPENCLAW_PREPARE_VERSION" >&2; exit 2 ;;
-esac
-IMAGE="${IMAGE:-docker://ghcr.io/openclaw/openclaw:${OPENCLAW_PREPARE_VERSION}}"
-OUT="${OUT:-${HOME}/agent-bench-sif-build/openclaw_${OPENCLAW_PREPARE_VERSION}_base.sif}"
 
 HOST_FQDN="$(hostname -f 2>/dev/null || hostname 2>/dev/null || true)"
 HOST_SHORT="$(hostname 2>/dev/null || true)"
@@ -102,7 +93,7 @@ ls -lh "$OUT"
 sha256sum "$OUT"
 
 echo "[prepare-oc-9.2] running local migration audit"
-bash "$AUDIT" "$OUT" "$OPENCLAW_PREPARE_VERSION"
+bash "$AUDIT" "$OUT"
 
 echo "[prepare-oc-9.2] PASS"
-echo "[prepare-oc] version: $OPENCLAW_PREPARE_VERSION; build the Agent_Bench candidate locally before uploading."
+echo "[prepare-oc-9.2] next: copy $OUT to NSCC \$SCRATCH/sif_images/openclaw_2026.9.2_base.sif"

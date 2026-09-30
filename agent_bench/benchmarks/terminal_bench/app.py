@@ -189,9 +189,9 @@ def _terminal_bench_agent_assets_dir(
 
 
 def _roadmap_v9_continuation_env(agent_id: str) -> Dict[str, str]:
-    """Enable bounded tools-capable continuation for supported Roadmap v9 runtimes."""
+    """Enable bounded tools-capable continuation for Roadmap on v9.2."""
     version = str(os.environ.get("AB_AGENT_RUNTIME_VERSION") or "").lstrip("v")
-    if agent_id != "roadmap_bench" or version not in {"2026.9.2", "2026.9.6"}:
+    if agent_id != "roadmap_bench" or version != "2026.9.2":
         return {}
     return {
         "OPENCLAW_AGENT_BENCH_SETTLED_TOOL_POLICY": "continue",
@@ -1613,7 +1613,7 @@ class TerminalBenchOpenClawHarness(TerminalBenchDockerHarness):
     ) -> Optional[int]:
         """Project OpenClaw v9's STRICT SQLite store for host-side watchers."""
         version = str(os.environ.get("AB_AGENT_RUNTIME_VERSION") or "").lstrip("v")
-        if agent_id != "roadmap_bench" or version not in {"2026.9.2", "2026.9.6"}:
+        if agent_id != "roadmap_bench" or version != "2026.9.2":
             return None
 
         source = (

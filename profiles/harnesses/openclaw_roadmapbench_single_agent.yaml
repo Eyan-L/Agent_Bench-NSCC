@@ -37,6 +37,9 @@ openclaw:
       flushIntervalMs: 20
     cacheTrace:
       enabled: true
+      includeMessages: true
+      includePrompt: true
+      includeSystem: true
   tools:
     exec:
       host: gateway

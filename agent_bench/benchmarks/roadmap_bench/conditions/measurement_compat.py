@@ -625,7 +625,7 @@ def _rewrite_accounting_artifacts(
     serving_source = str(result.get("serving_measurement_source") or "")
     if serving_source == "native_model_call_otel":
         sources["serving_tokens"] = (
-            "native OpenClaw per-request model-call OTel spans"
+            "OpenClaw v2026.9.2 native per-request model-call OTel spans"
         )
     elif serving_source == "raw_response_log":
         sources["serving_tokens"] = "raw OpenAI-compatible HTTP responses"

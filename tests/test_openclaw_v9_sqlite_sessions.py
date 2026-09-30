@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 import sqlite3
 import subprocess
-import pytest
 
 from agent_bench.benchmarks.conditions import openclaw_measurement
 from agent_bench.benchmarks.roadmap_bench.conditions.openclaw_agent import (
@@ -752,10 +751,9 @@ def test_archived_child_is_restored_from_durable_cache_trace(tmp_path: Path):
     )
 
 
-@pytest.mark.parametrize("version", ["2026.9.2", "2026.9.6"])
-def test_runtime_observability_version_uses_active_runtime(monkeypatch, version):
-    monkeypatch.setenv("AB_AGENT_RUNTIME_VERSION", version)
-    assert _runtime_version() == f"v{version}"
+def test_runtime_observability_version_uses_active_runtime(monkeypatch):
+    monkeypatch.setenv("AB_AGENT_RUNTIME_VERSION", "2026.9.2")
+    assert _runtime_version() == "v2026.9.2"
 
 
 def test_v9_watcher_prefers_runtime_projection_when_host_sqlite_is_unreadable(
@@ -887,17 +885,16 @@ def test_explicit_sqlite_parent_model_usage_event_is_parent(tmp_path: Path):
     assert all(event["role"] == "parent" for event in parent_usage)
 
 
-@pytest.mark.parametrize("version", ["2026.9.2", "2026.9.6"])
 def test_v9_runtime_metadata_does_not_claim_legacy_announce_limit(
     tmp_path: Path,
-    monkeypatch, version,
+    monkeypatch,
 ):
-    monkeypatch.setenv("AB_AGENT_RUNTIME_VERSION", version)
+    monkeypatch.setenv("AB_AGENT_RUNTIME_VERSION", "2026.9.2")
     result = openclaw_measurement._runtime_observability(
         tmp_path, [], "roadmap_bench"
     )
 
-    assert result["runtime_version"] == f"v{version}"
+    assert result["runtime_version"] == "v2026.9.2"
     limitation = result["announce_attribution"]["limitation"]
     assert "v2026.4.22" not in limitation
     assert "does not infer identity from timing" in limitation

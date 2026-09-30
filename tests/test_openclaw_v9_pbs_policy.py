@@ -35,17 +35,17 @@ def test_openclaw_v9_runtime_defaults_use_sealed_candidate_names(tmp_path: Path)
 
     assert defaults["AB_AGENT_RUNTIME_VERSION"] == OPENCLAW_VERSION
     assert defaults["AB_AGENT_RUNTIME_BASE_SIF"].endswith(
-        f"/openclaw_{OPENCLAW_VERSION}_agentbench.sif"
+        "/openclaw_2026.9.2_base.sif"
     )
     assert defaults["AB_AGENT_RUNTIME_SIF"].endswith(
-        f"/openclaw_{OPENCLAW_VERSION}_agentbench.sif"
+        "/openclaw_2026.9.2_agentbench.sif"
     )
-    assert defaults["AB_AGENT_RUNTIME_DOCKER"].endswith(f":{OPENCLAW_VERSION}")
+    assert defaults["AB_AGENT_RUNTIME_DOCKER"].endswith(":2026.9.2")
     assert defaults["AB_AGENT_RUNTIME_REBUILD"] == "0"
 
 
 def test_openclaw_v9_candidate_missing_fails_closed(tmp_path: Path):
-    missing = tmp_path / f"openclaw_{OPENCLAW_VERSION}_agentbench.sif"
+    missing = tmp_path / "openclaw_2026.9.2_agentbench.sif"
 
     with pytest.raises(ConfigError, match="Refusing legacy pull/build fallback"):
         require_prebuilt_openclaw_v9_candidate(
@@ -57,7 +57,7 @@ def test_openclaw_v9_candidate_missing_fails_closed(tmp_path: Path):
 
 
 def test_openclaw_v9_candidate_exists_needs_no_build_command(tmp_path: Path):
-    candidate = tmp_path / f"openclaw_{OPENCLAW_VERSION}_agentbench.sif"
+    candidate = tmp_path / "openclaw_2026.9.2_agentbench.sif"
     candidate.write_bytes(b"sealed-candidate")
 
     assert require_prebuilt_openclaw_v9_candidate(
@@ -69,7 +69,7 @@ def test_openclaw_v9_candidate_exists_needs_no_build_command(tmp_path: Path):
 
 
 def test_openclaw_v9_rebuild_is_rejected_even_with_candidate(tmp_path: Path):
-    candidate = tmp_path / f"openclaw_{OPENCLAW_VERSION}_agentbench.sif"
+    candidate = tmp_path / "openclaw_2026.9.2_agentbench.sif"
     candidate.write_bytes(b"sealed-candidate")
 
     with pytest.raises(ConfigError, match="AB_AGENT_RUNTIME_REBUILD=1"):
@@ -94,7 +94,7 @@ def test_openclaw_v9_pbs_preflight_fails_before_stages_when_candidate_missing(
 def test_openclaw_v9_pbs_preflight_accepts_existing_candidate(tmp_path: Path):
     sif_dir = tmp_path / "sif_images"
     sif_dir.mkdir()
-    (sif_dir / f"openclaw_{OPENCLAW_VERSION}_agentbench.sif").write_bytes(
+    (sif_dir / "openclaw_2026.9.2_agentbench.sif").write_bytes(
         b"sealed-candidate"
     )
 

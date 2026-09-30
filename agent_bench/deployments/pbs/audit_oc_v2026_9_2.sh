@@ -13,11 +13,6 @@
 set -euo pipefail
 
 SIF="${1:-}"
-EXPECTED_VERSION="${2:-2026.9.2}"
-case "$EXPECTED_VERSION" in
-    2026.9.2|2026.9.6) ;;
-    *) echo "ERROR: unsupported OpenClaw audit version: $EXPECTED_VERSION" >&2; exit 2 ;;
-esac
 if [[ -z "$SIF" ]]; then
     echo "usage: $0 /path/to/openclaw_2026.9.2.sif" >&2
     exit 2
@@ -33,14 +28,6 @@ else
         exit 2
     }
     OC_RUNTIME=singularity
-fi
-
-if [[ "$EXPECTED_VERSION" == "2026.9.6" ]]; then
-    OC_AUDIT_DIR="$(cd "$(dirname "$0")" && pwd)"
-    "$OC_RUNTIME" exec --cleanenv --no-home \
-        --bind "$OC_AUDIT_DIR/audit_oc_v2026_9_6.mjs:/opt/agent-bench-audit.mjs:ro" \
-        "$SIF" node /opt/agent-bench-audit.mjs
-    exit $?
 fi
 
 run() {
@@ -144,8 +131,8 @@ fi
 
 printf '\n== migration gate ==\n'
 FAIL=0
-if [[ "$PACKAGE_VERSION" != "$EXPECTED_VERSION" ]]; then
-    echo "FAIL image_version package.json=${PACKAGE_VERSION:-MISSING} expected=$EXPECTED_VERSION"
+if [[ "$PACKAGE_VERSION" != "2026.9.2" ]]; then
+    echo "FAIL image_version package.json=${PACKAGE_VERSION:-MISSING} expected=2026.9.2"
     FAIL=1
 else
     echo 'PASS image_version'

@@ -36,6 +36,9 @@ openclaw:
       flushIntervalMs: 20
     cacheTrace:
       enabled: true
+      includeMessages: true
+      includePrompt: true
+      includeSystem: true
   tools:
     exec:
       host: gateway
@@ -72,7 +75,6 @@ openclaw:
       # Agent_Bench's 7200s condition deadline is the parent execution fence.
       timeoutSeconds: 0
       subagents:
-        # Use OpenClaw's native delegation guidance for benchmark sessions.
         delegationMode: prefer
         maxConcurrent: 16
         maxChildrenPerAgent: 16
