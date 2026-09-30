@@ -1,0 +1,32 @@
+{
+  "_doc": "Two fixed RoadmapBench tasks with historically variable subagent use.",
+  "sweep_name": "roadmapbench_fyn25_ktx06_delegation_smoke2",
+  "plan_version": "roadmapbench-59184e779909-fyn25-ktx06-delegation-smoke2",
+  "application": "terminal_bench",
+  "source_dataset": "UnipatAI/RoadmapBench",
+  "source_commit": "59184e779909300a5a0150b06b945d39da81a099",
+  "source_dataset_task_count": 115,
+  "tasks_root": "$SCRATCH/datasets/roadmapbench-59184e779909-subagent-subset30",
+  "instances": [
+    "fyn-2.5.0-roadmap",
+    "ktx-0.6.0-roadmap"
+  ],
+  "repo_mapping": {
+    "fyn-2.5.0-roadmap": {
+      "repo_id": "roadmapbench/fyn-2.5.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    },
+    "ktx-0.6.0-roadmap": {
+      "repo_id": "roadmapbench/ktx-0.6.0-roadmap",
+      "base_commit": "59184e779909300a5a0150b06b945d39da81a099"
+    }
+  },
+  "container_image": "UNUSED",
+  "wall_clock_budget_seconds": 7200,
+  "output_dir": "roadmapbench_fyn25_ktx06_delegation_smoke2",
+  "seeds": [42],
+  "selection": {
+    "method": "two-task sequential smoke",
+    "rationale": "Fyne 2.5.0 and KTX 0.6.0 have both produced runs with and without subagents, with relatively short observed agent time."
+  }
+}

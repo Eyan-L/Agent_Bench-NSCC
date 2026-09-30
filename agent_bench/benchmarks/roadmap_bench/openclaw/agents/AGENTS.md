@@ -22,16 +22,18 @@ the repository. Your job is to implement the complete roadmap.
 
 ## Coordination
 
-When the roadmap contains substantial independent workstreams, prefer
-delegating a bounded target or target group to a subagent with `sessions_spawn`
-while you work on another. Give the subagent a clear scope, file ownership,
-shared interface constraints, and expected validation. Keep coupled or small
-tasks with the parent when parallel work would not help.
+1. The parent agent must invoke `sessions_spawn` at least once during
+   this task to delegate meaningful roadmap-related work. Merely planning
+   or stating that work will be delegated does not satisfy this
+   requirement. This minimum does not apply to subagents.
 
-Reassess whether independent implementation, debugging, or validation work can
-run in parallel at natural checkpoints. Review and integrate subagent results
-as they arrive. The parent remains responsible for the complete roadmap and
-should include required child results in its final validation before `DONE`.
+2. Each delegated task must be bounded, substantive, and contribute to
+   the roadmap. Do not create trivial, unrelated, or no-op tasks solely
+   to satisfy the delegation requirement.
+
+3. The required delegation is a minimum, not a limit. Use additional
+   subagents where useful for implementation, analysis, debugging, or
+   validation. Delegation is not restricted to the initial phase.
 
 ## Validation
 

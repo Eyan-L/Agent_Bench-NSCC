@@ -1,0 +1,27 @@
+name = "qwen36_35b_a3b_roadmapbench_fyn25_ktx06_delegation_smoke2"
+description = "Two-task RoadmapBench OpenClaw subagent smoke for required meaningful delegation."
+output_dir = "runs/qwen36_35b_a3b_roadmapbench_fyn25_ktx06_delegation_smoke2"
+seeds = [42]
+
+[telemetry]
+spans_html = true
+
+[benchmark]
+name = "terminal_bench"
+profile = "profiles/benchmarks/roadmap/roadmapbench_fyn25_ktx06_delegation_smoke2.json"
+
+[harness]
+name = "openclaw"
+profile = "profiles/harnesses/openclaw_roadmapbench.yaml"
+
+[model]
+profile = "profiles/models/qwen36_35b_a3b.json"
+
+[serving]
+profile = "profiles/serving/sglang/nscc_tp4.yaml"
+
+[deployment]
+profile = "profiles/deployments/nscc_pbs_4gpu.toml"
+
+[limits]
+max_workers = 1
