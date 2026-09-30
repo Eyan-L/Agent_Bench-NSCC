@@ -522,11 +522,10 @@ def test_roadmapbench_uses_own_assets_and_condition(tmp_path, monkeypatch):
     )
     assert assets.name == "agents"
     assert (assets / "AGENTS.md").is_file()
-    assert "lead engineer" in (assets / "AGENTS.md").read_text()
+    assert "software engineer" in (assets / "AGENTS.md").read_text()
     assert "Terminal-Bench" not in (assets / "AGENTS.md").read_text()
     assert skills is not None
-    assert (skills / "verify" / "SKILL.md").is_file()
-    assert "SWE-bench" not in (skills / "verify" / "SKILL.md").read_text()
+    assert not list(skills.rglob("SKILL.md"))
 
     condition = object.__new__(RoadmapBenchOpenClawCondition)
     message = condition._build_message({"instruction": "Implement targets."})
