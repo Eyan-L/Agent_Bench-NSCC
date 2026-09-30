@@ -19,10 +19,9 @@ class RoadmapBenchCodexCondition(CodexAgentCondition):
         return (
             "Lead the implementation of this multi-target software roadmap in "
             "the current repository. Inspect the codebase, identify target "
-            "workstreams and dependencies, coordinate parallel work where "
-            "appropriate, integrate the complete implementation, and validate "
-            "all roadmap requirements. Declare DONE only when the integrated "
-            "roadmap is complete.\n\n"
+            "workstreams and dependencies, integrate the complete "
+            "implementation, and validate all roadmap requirements. "
+            "Declare DONE only when the integrated roadmap is complete.\n\n"
             f"Roadmap:\n{instance_data['instruction']}"
         )
 
