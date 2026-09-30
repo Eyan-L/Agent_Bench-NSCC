@@ -20,6 +20,19 @@ the repository. Your job is to implement the complete roadmap.
 5. Ensure the combined changes work together and preserve existing public
    behavior unless the roadmap explicitly requires changing it.
 
+## Coordination
+
+When the roadmap contains substantial independent workstreams, prefer
+delegating a bounded target or target group to a subagent with `sessions_spawn`
+while you work on another. Give the subagent a clear scope, file ownership,
+shared interface constraints, and expected validation. Keep coupled or small
+tasks with the parent when parallel work would not help.
+
+Reassess whether independent implementation, debugging, or validation work can
+run in parallel at natural checkpoints. Review and integrate subagent results
+as they arrive. The parent remains responsible for the complete roadmap and
+should include required child results in its final validation before `DONE`.
+
 ## Validation
 
 Use relevant repository tests and project-native checks to validate each target
