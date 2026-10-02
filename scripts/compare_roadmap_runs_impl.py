@@ -1702,6 +1702,7 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     omit_candidate_workspace: bool = False,
+    result_timing_exporter: Callable[..., tuple[dict[str, Any], str] | None] | None = None,
 ) -> int:
     args = _parse_args(argv)
     runs_root = Path(args.runs_root).expanduser().resolve()
@@ -1823,6 +1824,17 @@ def main(
         selected, bundle_dir,
         omit_candidate_workspace=omit_candidate_workspace,
     )
+    timing_markdown = ""
+    if result_timing_exporter is not None:
+        timing_output = result_timing_exporter(
+            selected, bundle_dir, basename,
+            plots=not args.no_plots, dpi=args.plot_dpi,
+        )
+        if timing_output is not None:
+            result_export, timing_markdown = timing_output
+            figure_paths.extend(result_export.pop("figure_paths"))
+            report["result_timing"] = result_export
+            report["figures"] = [str(path.relative_to(bundle_dir)) for path in figure_paths]
     if comparison:
         subagent_by_key = {record.key: record for record in subagent}
         single_agent_by_key = {record.key: record for record in single_agent}
@@ -1865,7 +1877,7 @@ def main(
             paired_summary=paired_summary,
             paired_rows=paired_rows,
             duplicate_count=duplicate_count,
-            figure_names=figure_names,
+            figure_names=report["figures"],
             selection_diagnostics=selection_diagnostics,
         )
     else:
@@ -1877,6 +1889,7 @@ def main(
         )
 
     json_path.write_text(json.dumps(report, indent=2) + "\n")
+    markdown += timing_markdown
     md_path.write_text(markdown)
     _write_csv(tasks_csv, [record_to_dict(record) for record in selected])
     trajectories_json.write_text(

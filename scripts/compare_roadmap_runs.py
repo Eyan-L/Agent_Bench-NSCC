@@ -20,8 +20,10 @@ from typing import Any, Sequence
 
 try:
     from . import compare_roadmap_runs_impl as _impl
+    from . import roadmap_result_timing as result_timing
 except ImportError:
     import compare_roadmap_runs_impl as _impl  # type: ignore
+    import roadmap_result_timing as result_timing  # type: ignore
 
 
 for _name in dir(_impl):
@@ -990,7 +992,28 @@ globals().update(
     }
 )
 
-main = _impl.main
+def _export_result_timing(records, bundle_dir, basename, *, plots, dpi):
+    if records and all(
+        record.manifest.get("agent_runtime_mode") in {"hermes", "codex"}
+        for record in records
+    ):
+        return None
+    tasks = result_timing.analyze_records(records, _runtime_observability)
+    export = result_timing.export_analysis(
+        tasks, bundle_dir, basename, plots=plots, dpi=dpi
+    )
+    return export, result_timing.render_markdown(export)
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    omit_candidate_workspace: bool = False,
+) -> int:
+    return _impl.main(
+        argv, omit_candidate_workspace=omit_candidate_workspace,
+        result_timing_exporter=_export_result_timing,
+    )
 
 
 if __name__ == "__main__":

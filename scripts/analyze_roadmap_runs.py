@@ -16,8 +16,10 @@ from typing import Any, Sequence
 
 try:
     from . import compare_roadmap_runs as base
+    from . import roadmap_result_timing as result_timing
 except ImportError:
     import compare_roadmap_runs as base  # type: ignore
+    import roadmap_result_timing as result_timing  # type: ignore
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -470,6 +472,7 @@ def main(
     )
     records, duplicates = base.select_best_records(raw_records)
     duplicate_count = sum(len(group) - 1 for group in duplicates.values())
+    result_tasks = result_timing.analyze_records(records, base._runtime_observability)
 
     basename = base._safe_name(args.name or _default_name(records, args.arm))
     bundle_dir = base._impl._prepare_bundle_dir(
@@ -493,6 +496,10 @@ def main(
             arm=args.arm,
             dpi=args.plot_dpi,
         )
+    result_export = result_timing.export_analysis(
+        result_tasks, bundle_dir, basename, plots=not args.no_plots, dpi=args.plot_dpi
+    )
+    figure_paths.extend(result_export.pop("figure_paths"))
     figure_names = [str(path.relative_to(bundle_dir)) for path in figure_paths]
 
     artifact_index_path = bundle_dir / f"{basename}-artifact-index.json"
@@ -509,6 +516,7 @@ def main(
         ),
         "summary": summary,
         "activity": details,
+        "result_timing": result_export,
         "tasks": rows,
         "duplicates": base._duplicates_json(duplicates),
         "figures": figure_names,
@@ -539,6 +547,8 @@ def main(
         duplicate_count=duplicate_count,
         figure_names=figure_names,
     )
+
+    markdown += result_timing.render_markdown(result_export)
 
     json_path = bundle_dir / f"{basename}.json"
     md_path = bundle_dir / f"{basename}.md"

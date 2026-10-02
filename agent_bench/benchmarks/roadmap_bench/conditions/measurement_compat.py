@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any, Callable
@@ -554,6 +555,29 @@ def _rewrite_accounting_artifacts(
 ) -> None:
     runtime = dict(result.get("runtime_observability") or {})
     runtime.update(_infer_announce_observability(run_dir, runtime))
+    recorded = str(runtime.get("runtime_version") or "").strip()
+    configured = str(os.environ.get("AB_AGENT_RUNTIME_VERSION") or "").strip()
+    version = recorded or configured
+    known = bool(version and version.lower() not in {"unknown", "none", "null"})
+    runtime["runtime_version"] = "v" + version.removeprefix("v") if known else None
+    runtime["runtime_version_source"] = (
+        runtime.get("runtime_version_source") or "runtime_observability"
+        if recorded else "AB_AGENT_RUNTIME_VERSION" if configured else "unknown"
+    )
+    policy = runtime.get("stuck_diagnostic_policy")
+    if isinstance(policy, dict):
+        runtime["stuck_diagnostic_policy"] = {
+            **policy, "runtime_version": runtime["runtime_version"]
+        }
+    attribution = runtime.get("announce_attribution")
+    if isinstance(attribution, dict):
+        runtime["announce_attribution"] = {
+            **attribution,
+            "limitation": (
+                "events without explicit child/session identity remain "
+                "unattributed; Agent_Bench does not infer identity from timing"
+            ),
+        }
     source_files = _recovery_source_filenames(run_dir)
     runtime.update(
         {

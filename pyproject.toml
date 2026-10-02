@@ -15,7 +15,8 @@ ccds = ["requests>=2.31.0"]
 openclaw = ["requests>=2.31.0"]
 openhands = ["requests>=2.31.0"]
 hermes = ["requests>=2.31.0"]
-analysis = ["pyarrow>=14.0.0", "pandas>=2.0.0", "numpy>=1.24.0", "scipy>=1.11.0"]
+roadmap = ["requests>=2.31.0", "matplotlib>=3.7.0"]
+analysis = ["pyarrow>=14.0.0", "pandas>=2.0.0", "numpy>=1.24.0", "scipy>=1.11.0", "matplotlib>=3.7.0"]
 legacy = [
     "anthropic>=0.18.0",
     "numpy>=1.24.0",

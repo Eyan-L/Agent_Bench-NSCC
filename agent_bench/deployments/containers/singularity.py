@@ -43,6 +43,11 @@ from agent_bench.deployments.containers.base import (
     Mount,
 )
 
+from .singularity_liveness import (
+    _wait_log_pattern_with_main_liveness,
+    poll_tracked_main_process,
+)
+
 logger = logging.getLogger(__name__)
 
 # The startscript shim. Runs as the instance's main process; the instance
@@ -679,6 +684,9 @@ class SingularityContainer(Container):
             return ""
         return h.log_path.read_text(errors="replace")
 
+    def _poll_tracked_main_process(self, name: str):
+        return poll_tracked_main_process(self, name)
+
     def wait_log_pattern(
         self,
         h: ContainerHandle,
@@ -687,22 +695,8 @@ class SingularityContainer(Container):
         *,
         poll_s: float = 2.0,
     ) -> None:
-        deadline = time.time() + timeout_s
-        last_tail = ""
-        while time.time() < deadline:
-            log_text = self.logs(h)
-            if pattern.search(log_text):
-                return
-            last_tail = log_text[-1500:]
-            if not self.is_running(h):
-                raise RuntimeError(
-                    f"singularity instance {h.name} exited before log pattern matched. "
-                    f"last log:\n{last_tail}"
-                )
-            time.sleep(poll_s)
-        raise RuntimeError(
-            f"singularity instance {h.name} did not match log pattern within "
-            f"{timeout_s}s. last log:\n{last_tail}"
+        _wait_log_pattern_with_main_liveness(
+            self, h, pattern, timeout_s, poll_s=poll_s
         )
 
 
